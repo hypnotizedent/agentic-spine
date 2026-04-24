@@ -151,7 +151,7 @@ _verify_preflight() {
   local DRIFT_CERTIFIER="$REPO_ROOT/ops/plugins/core/verify/bin/drift-gates-certify"
 
   if [[ "$REPO_GIT_OK" -eq 1 ]]; then
-    # Remote authority: origin on Gitea must resolve; GitHub mirror drift is warn-only.
+    # Remote authority: origin on Gitea must resolve; GitHub publication status is advisory only.
     local D62="$REPO_ROOT/surfaces/verify/d62-git-remote-parity-lock.sh"
     local out
     if [[ -x "$D62" ]]; then
@@ -210,7 +210,7 @@ BANNER
     if [[ -n "${current_branch:-}" ]]; then
       echo "Git:"
       echo "  branch: $current_branch"
-      echo "  remote authority (D62): $parity_status"
+      echo "  remote authority (D62 publication advisory): $parity_status"
       if [[ -n "${parity_detail:-}" ]]; then
         echo "    ${parity_detail}" | sed 's/^/    /'
       fi
@@ -280,7 +280,7 @@ BANNER
 ╚═══════════════════════════════════════════════════════════╝
 STOP
     if [[ "$preflight_fail" -eq 1 ]]; then
-      echo "  - Remote authority (origin reachable; mirror drift warns)"
+      echo "  - Remote authority (origin must resolve; GitHub publication status is advisory)"
       echo "  - Worktree/session isolation policy (D140)"
     fi
     if [[ "$gate_domain_fail" -eq 1 ]]; then

@@ -46,11 +46,11 @@ if git remote get-url github >/dev/null 2>&1; then
   g_ref="github/${DEFAULT_BRANCH}"
   g_sha="$(git rev-parse --verify --quiet "$g_ref" 2>/dev/null || true)"
   if [[ -z "${g_sha:-}" ]]; then
-    status "PUBLICATION: github mirror ref missing: $g_ref (review only during explicit publication or repository-admin mirror maintenance)"
+    status "PUBLICATION ADVISORY: github publication ref unavailable: $g_ref. No operational action required; review only during explicit publication review or repository-admin mirror maintenance."
   elif [[ "$o_sha" != "$g_sha" ]]; then
-    status "PUBLICATION ADVISORY: github/main stale relative to origin/main (${o_ref}=${o_sha}; ${g_ref}=${g_sha}). Canonical operational truth remains origin; repair only during explicit publication review or repository-admin mirror maintenance."
+    status "PUBLICATION ADVISORY: github/main differs from origin/main (${o_ref}=${o_sha}; ${g_ref}=${g_sha}). Canonical operational truth remains origin; no operational action is required. Review or update github/main only during explicit publication review or repository-admin mirror maintenance."
   else
-    status "PUBLICATION: github/main aligned with origin/main (${g_ref}=${g_sha})"
+    status "PUBLICATION: github/main matches origin/main (${g_ref}=${g_sha})"
   fi
 else
   status "PUBLICATION: github remote not configured; origin remains the only operational authority"

@@ -109,7 +109,7 @@ All must PASS for core to be healthy.
 | D59 | Cross-registry completeness lock (bidirectional host coverage) |
 | D60 | Deprecation sweeper (known deprecated terms blocked from governance docs) |
 | D61 | Session-loop traceability lock (agent.session.closeout freshness + loop TTL) |
-| D62 | Git remote authority lock (origin canonical; github mirror drift warns) |
+| D62 | Git remote authority advisory (origin canonical; GitHub publication status advisory) |
 | D63 | Capabilities metadata lock (registry completeness + dependency typos + executable checks) |
 | D64 | Git remote authority WARN (GitHub merges/PRs) |
 | D65 | Agent briefing sync lock (AGENTS.md + CLAUDE.md match canonical governance brief) |
