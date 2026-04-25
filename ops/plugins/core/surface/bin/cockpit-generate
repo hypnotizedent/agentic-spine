@@ -32,7 +32,7 @@ build_payload = _mod.build_payload
 
 RUNTIME_STATE = Path(os.environ.get("SPINE_STATE", Path.home() / "code" / ".runtime" / "spine" / "state"))
 OUTPUT = RUNTIME_STATE / "domain-state" / "SPINE_COCKPIT.html"
-OPERATOR_SURFACE_ROOT = os.environ.get("SPINE_OPERATOR_SURFACE_ROOT", "https://spine.ronny.works").rstrip("/")
+_FILE_FALLBACK_ROOT = "http://127.0.0.1:8900"  # JS rewrites relative hrefs when opened as file://
 
 
 def _h(s: str) -> str:
@@ -192,12 +192,11 @@ def board_section(payload: dict) -> str:
             hero_html += f'<div style="font-size:.5rem;color:var(--t);margin-top:.35rem">+ {remaining} more</div>'
         now_css = "zone-now"
     else:
-        submit_href = f"{OPERATOR_SURFACE_ROOT}/submit"
         hero_html = (
             '<div class="hero-loop">'
             '<div class="hero-loop-none">No live work</div>'
             '<div class="hero-loop-cta-wrap">'
-            f'<a class="hero-loop-cta" href="{_h(submit_href)}">Submit a note</a>'
+            '<a class="hero-loop-cta" data-surface-link="/submit">Submit a note</a>'
             '<span class="hero-loop-cta-sub">park raw operator ingress</span>'
             '</div>'
             '</div>'
@@ -1038,7 +1037,14 @@ details[open] summary::after{transform:rotate(90deg)}
 }
 """
 
-JS = r"""
+JS = """
+(function() {
+  var root = (location.protocol === 'file:') ? '""" + _FILE_FALLBACK_ROOT + """' : '';
+  document.querySelectorAll('[data-surface-link]').forEach(function(el) {
+    el.href = root + el.getAttribute('data-surface-link');
+  });
+})();
+""" + r"""
 function filterCaps(e, domain) {
   var rows = document.querySelectorAll('.cap[data-domain]');
   var btns = document.querySelectorAll('.cap-f');
@@ -1442,9 +1448,6 @@ def generate() -> str:
         beacon_css, beacon_text = "red", "Degraded"
     else:
         beacon_css, beacon_text = "ylw", "Mixed"
-    submit_href = f"{OPERATOR_SURFACE_ROOT}/submit"
-    ingress_href = f"{OPERATOR_SURFACE_ROOT}/ingress"
-
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1462,8 +1465,8 @@ def generate() -> str:
     </div>
     <div class="surface-nav" aria-label="Operator surface tabs">
       <span class="surface-tab active">Board <span class="surface-tab-hint">you are here</span></span>
-      <a class="surface-tab" href="{_h(submit_href)}">Submit <span class="surface-tab-hint">operator ingress</span></a>
-      <a class="surface-tab" href="{_h(ingress_href)}">Submissions <span class="surface-tab-hint">readback</span></a>
+      <a class="surface-tab" data-surface-link="/submit">Submit <span class="surface-tab-hint">operator ingress</span></a>
+      <a class="surface-tab" data-surface-link="/ingress">Submissions <span class="surface-tab-hint">readback</span></a>
     </div>
     <div class="beacon">
       <div class="beacon-dot {beacon_css}"></div>
