@@ -438,6 +438,138 @@ PY
   echo "$tmp"
 }
 
+# ── Contention-aware backoff ──────────────────────────────────────────────
+# Reads thresholds from rag.embedding.capacity.yaml and probes Ollama
+# embedding latency to determine contention level. Used by sync loop
+# to pause/slow/halt when the shared GPU is under pressure.
+
+CAPACITY_BINDING="${SPINE_REPO}/ops/bindings/domains/rag/rag.embedding.capacity.yaml"
+BACKEND_BINDING="${SPINE_REPO}/ops/bindings/domains/rag/rag.embedding.backend.yaml"
+
+# Contention contract defaults (overridden from binding below)
+CT_CLEAR_CEILING=5000
+CT_ELEVATED_CEILING=10000
+CT_BACKOFF_PAUSE=30
+CT_MAX_CONSECUTIVE_SATURATED=3
+CT_PROBE_PROMPT="test"
+CT_EMBED_MODEL="${RAG_EMBED_MODEL:-mxbai-embed-large:latest}"
+
+# Runtime contention state
+CT_CONSECUTIVE_SATURATED=0
+CT_CURRENT_LEVEL="unknown"
+
+resolve_contention_config() {
+  # Load contention thresholds from capacity binding
+  if [[ ! -f "$CAPACITY_BINDING" ]] || ! command -v yq >/dev/null 2>&1; then
+    return 0  # use defaults
+  fi
+  local val
+  val="$(yq -r '.contention_detection.levels.clear.latency_ceiling_ms' "$CAPACITY_BINDING")"
+  [[ -n "$val" && "$val" != "null" ]] && CT_CLEAR_CEILING="$val"
+  val="$(yq -r '.contention_detection.levels.elevated.latency_ceiling_ms' "$CAPACITY_BINDING")"
+  [[ -n "$val" && "$val" != "null" ]] && CT_ELEVATED_CEILING="$val"
+  val="$(yq -r '.contention_detection.backoff_pause_sec' "$CAPACITY_BINDING")"
+  [[ -n "$val" && "$val" != "null" ]] && CT_BACKOFF_PAUSE="$val"
+  val="$(yq -r '.contention_detection.max_consecutive_saturated' "$CAPACITY_BINDING")"
+  [[ -n "$val" && "$val" != "null" ]] && CT_MAX_CONSECUTIVE_SATURATED="$val"
+  # Read probe prompt from backend binding if available
+  if [[ -f "$BACKEND_BINDING" ]]; then
+    val="$(yq -r '.probe.test_prompt' "$BACKEND_BINDING")"
+    [[ -n "$val" && "$val" != "null" ]] && CT_PROBE_PROMPT="$val"
+    val="$(yq -r '.active.model' "$BACKEND_BINDING")"
+    [[ -n "$val" && "$val" != "null" ]] && CT_EMBED_MODEL="$val"
+  fi
+}
+
+probe_contention_level() {
+  # Probe Ollama embedding latency and set CT_CURRENT_LEVEL.
+  # Returns: 0=clear, 1=elevated, 2=saturated, 3=unreachable
+  derive_ollama_url
+  require_tool curl
+  require_tool jq
+
+  local start_ms end_ms latency probe_file probe_http
+  start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+
+  probe_file="$(mktemp)"
+  probe_http="$(curl -sS --max-time 30 \
+    -o "$probe_file" -w "%{http_code}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -cn --arg model "$CT_EMBED_MODEL" --arg prompt "$CT_PROBE_PROMPT" '{model:$model,prompt:$prompt}')" \
+    "${OLLAMA_URL}/api/embeddings" 2>/dev/null || echo "000")"
+  rm -f "$probe_file"
+
+  end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  latency=$((end_ms - start_ms))
+
+  if [[ "$probe_http" != "200" ]]; then
+    CT_CURRENT_LEVEL="saturated"
+    return 2
+  elif [[ "$latency" -le "$CT_CLEAR_CEILING" ]]; then
+    CT_CURRENT_LEVEL="clear"
+    return 0
+  elif [[ "$latency" -le "$CT_ELEVATED_CEILING" ]]; then
+    CT_CURRENT_LEVEL="elevated"
+    return 1
+  else
+    CT_CURRENT_LEVEL="saturated"
+    return 2
+  fi
+}
+
+contention_gate() {
+  # Check contention and apply backoff policy.
+  # Args: $1 = "preflight" (hard gate) or "loop" (adaptive pacing)
+  # Sets LS_INTER_DOC_PACE_EFFECTIVE based on contention level.
+  local context="${1:-loop}"
+
+  probe_contention_level || true
+  local level="$CT_CURRENT_LEVEL"
+
+  case "$level" in
+    clear)
+      # Reset state if recovering from previous contention
+      if [[ "$CT_CONSECUTIVE_SATURATED" -gt 0 ]]; then
+        log "contention: clear (recovered) -- resetting pace to ${LS_INTER_DOC_PACE}s"
+        CT_CONSECUTIVE_SATURATED=0
+      fi
+      LS_INTER_DOC_PACE_EFFECTIVE="$LS_INTER_DOC_PACE"
+      ;;
+    elevated)
+      CT_CONSECUTIVE_SATURATED=0
+      LS_INTER_DOC_PACE_EFFECTIVE=$((LS_INTER_DOC_PACE * 2))
+      log "contention: elevated -- doubling pace to ${LS_INTER_DOC_PACE_EFFECTIVE}s"
+      if [[ "$context" == "preflight" ]]; then
+        log "WARNING: embedding contention elevated at sync start, proceeding with slower pace"
+      fi
+      ;;
+    saturated)
+      CT_CONSECUTIVE_SATURATED=$((CT_CONSECUTIVE_SATURATED + 1))
+      if [[ "$context" == "preflight" ]]; then
+        log_err "STOP: embedding contention is saturated -- refusing to start sync"
+        log_err "hint: check GPU load with: ./bin/ops cap run rag.capacity.status"
+        return 1
+      fi
+      if [[ "$CT_CONSECUTIVE_SATURATED" -ge "$CT_MAX_CONSECUTIVE_SATURATED" ]]; then
+        log_err "HALT: ${CT_CONSECUTIVE_SATURATED} consecutive saturated probes (limit: ${CT_MAX_CONSECUTIVE_SATURATED})"
+        log_err "Embedding GPU is overloaded. Halting sync to protect inference availability."
+        log_err "hint: check GPU load with: ./bin/ops cap run rag.capacity.status"
+        return 1
+      fi
+      log "contention: saturated (${CT_CONSECUTIVE_SATURATED}/${CT_MAX_CONSECUTIVE_SATURATED}) -- pausing ${CT_BACKOFF_PAUSE}s"
+      sleep "$CT_BACKOFF_PAUSE"
+      LS_INTER_DOC_PACE_EFFECTIVE=$((LS_INTER_DOC_PACE * 2))
+      ;;
+    *)
+      # Unknown/unreachable -- treat as elevated for safety
+      LS_INTER_DOC_PACE_EFFECTIVE=$((LS_INTER_DOC_PACE * 2))
+      log "contention: unknown -- using cautious pace ${LS_INTER_DOC_PACE_EFFECTIVE}s"
+      ;;
+  esac
+  return 0
+}
+
+# ── Load-shaping ─────────────────────────────────────────────────────────
 # Load-shaping knob defaults (overridden by binding in sync path)
 LS_TIMEOUT="${RAG_UPLOAD_TIMEOUT:-180}"
 LS_MAX_RETRIES="${RAG_MAX_RETRIES:-2}"
@@ -795,9 +927,20 @@ PY
 
     # Resolve load-shaping knobs from binding
     resolve_load_shaping
+    LS_INTER_DOC_PACE_EFFECTIVE="$LS_INTER_DOC_PACE"
+
+    # Resolve contention detection config from capacity binding
+    resolve_contention_config
 
     # Preflight: verify workspace exists before building manifest
     check_workspace_exists "$WORKSPACE_SLUG" || exit 1
+
+    # Preflight: check embedding contention before starting sync
+    derive_ollama_url
+    log "Checking embedding contention (preflight)..."
+    if ! contention_gate "preflight"; then
+      exit 1
+    fi
 
     CHECKPOINT_DIR="${SPINE_CODE}/mailroom/state/rag-sync"
     CHECKPOINT_FILE="${CHECKPOINT_DIR}/checkpoint.txt"
@@ -832,6 +975,8 @@ PY
     uploaded=0
     failed=0
     skipped=0
+    docs_since_contention_check=0
+    CONTENTION_CHECK_INTERVAL=5
     while IFS= read -r rel; do
       [[ -z "$rel" ]] && continue
       # Skip files already in checkpoint
@@ -839,16 +984,33 @@ PY
         skipped=$((skipped + 1))
         continue
       fi
+
+      # Periodic contention check inside the sync loop
+      if [[ "$docs_since_contention_check" -ge "$CONTENTION_CHECK_INTERVAL" ]]; then
+        if ! contention_gate "loop"; then
+          log_err "Sync halted due to sustained embedding contention after $uploaded uploads."
+          echo ""
+          echo "uploaded: $uploaded"
+          echo "skipped_checkpoint: $skipped"
+          echo "failed: $failed"
+          echo "halted: contention"
+          echo "checkpoint: ${CHECKPOINT_FILE} (use --resume to continue)"
+          exit 1
+        fi
+        docs_since_contention_check=0
+      fi
+
       if upload_file "$rel"; then
         uploaded=$((uploaded + 1))
+        docs_since_contention_check=$((docs_since_contention_check + 1))
         # Append to checkpoint on success
         echo "$rel" >> "$CHECKPOINT_FILE"
       else
         failed=$((failed + 1))
       fi
-      # Inter-document pacing to prevent embedding overload
-      if [[ "$LS_INTER_DOC_PACE" -gt 0 ]]; then
-        sleep "$LS_INTER_DOC_PACE"
+      # Inter-document pacing to prevent embedding overload (contention-aware)
+      if [[ "$LS_INTER_DOC_PACE_EFFECTIVE" -gt 0 ]]; then
+        sleep "$LS_INTER_DOC_PACE_EFFECTIVE"
       fi
     done <<<"$manifest"
 

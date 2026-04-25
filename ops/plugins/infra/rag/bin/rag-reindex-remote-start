@@ -175,6 +175,58 @@ if [[ "$session_running" -eq 1 ]]; then
   fail "tmux session '$TMUX_SESSION' is already running on remote host"
 fi
 
+# ── Contention preflight: probe Ollama before starting remote reindex ──
+CAPACITY_BINDING="$SP/ops/bindings/domains/rag/rag.embedding.capacity.yaml"
+BACKEND_BINDING_FILE="$SP/ops/bindings/domains/rag/rag.embedding.backend.yaml"
+
+_ct_clear_ceiling=5000
+_ct_elevated_ceiling=10000
+_ct_embed_model="mxbai-embed-large:latest"
+_ct_probe_prompt="test"
+
+if [[ -f "$CAPACITY_BINDING" ]] && command -v yq >/dev/null 2>&1; then
+  _v="$(yq -r '.contention_detection.levels.clear.latency_ceiling_ms' "$CAPACITY_BINDING")"
+  [[ -n "$_v" && "$_v" != "null" ]] && _ct_clear_ceiling="$_v"
+  _v="$(yq -r '.contention_detection.levels.elevated.latency_ceiling_ms' "$CAPACITY_BINDING")"
+  [[ -n "$_v" && "$_v" != "null" ]] && _ct_elevated_ceiling="$_v"
+fi
+if [[ -f "$BACKEND_BINDING_FILE" ]] && command -v yq >/dev/null 2>&1; then
+  _v="$(yq -r '.active.model' "$BACKEND_BINDING_FILE")"
+  [[ -n "$_v" && "$_v" != "null" ]] && _ct_embed_model="$_v"
+  _v="$(yq -r '.probe.test_prompt' "$BACKEND_BINDING_FILE")"
+  [[ -n "$_v" && "$_v" != "null" ]] && _ct_probe_prompt="$_v"
+fi
+
+log "Checking embedding contention (preflight)..."
+_probe_start="$(python3 -c 'import time; print(int(time.time()*1000))')"
+_probe_tmp="$(mktemp)"
+_probe_http="$(curl -sS --max-time 30 \
+  -o "$_probe_tmp" -w "%{http_code}" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -cn --arg model "$_ct_embed_model" --arg prompt "$_ct_probe_prompt" '{model:$model,prompt:$prompt}')" \
+  "${OLLAMA_URL}/api/embeddings" 2>/dev/null || echo "000")"
+rm -f "$_probe_tmp"
+_probe_end="$(python3 -c 'import time; print(int(time.time()*1000))')"
+_probe_latency=$((_probe_end - _probe_start))
+
+if [[ "$_probe_http" != "200" ]]; then
+  _ct_level="saturated"
+elif [[ "$_probe_latency" -le "$_ct_clear_ceiling" ]]; then
+  _ct_level="clear"
+elif [[ "$_probe_latency" -le "$_ct_elevated_ceiling" ]]; then
+  _ct_level="elevated"
+else
+  _ct_level="saturated"
+fi
+
+log "contention: ${_ct_level} (latency=${_probe_latency}ms, http=${_probe_http})"
+
+if [[ "$_ct_level" == "saturated" ]]; then
+  fail "Embedding contention is saturated -- refusing to start remote reindex. Check GPU load with: ./bin/ops cap run rag.capacity.status"
+elif [[ "$_ct_level" == "elevated" ]]; then
+  log "WARNING: embedding contention is elevated -- proceeding but sync may be slower"
+fi
+
 log "Syncing repo snapshot to remote..."
 rsync -az "${RSYNC_EXCLUDE_ARGS[@]}" -e "$RSYNC_SSH" "$SP/" "$TARGET:$REMOTE_REPO/"
 
