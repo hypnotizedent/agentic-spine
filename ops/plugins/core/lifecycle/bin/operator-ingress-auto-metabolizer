@@ -17,6 +17,43 @@ sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 import operator_ingress as oi
 
 
+def _cumulative_stats_path(state_root: str) -> Path:
+    return Path(state_root) / "inputs" / "operator-ingress" / ".auto-metabolizer-cumulative.json"
+
+
+def _load_cumulative_stats(state_root: str) -> dict:
+    path = _cumulative_stats_path(state_root)
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {
+        "started_at": "",
+        "total_cycles": 0,
+        "total_items_processed": 0,
+        "total_items_skipped": 0,
+        "last_cycle_at": "",
+        "last_cycle_processed": 0,
+        "last_cycle_pending": 0,
+    }
+
+
+def _save_cumulative_stats(state_root: str, stats: dict) -> None:
+    path = _cumulative_stats_path(state_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(stats, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
 def _regenerate_surfaces() -> None:
     subprocess.run(
         [
@@ -37,6 +74,7 @@ def _run_once(
     batch_limit: int,
     regenerate_surfaces: bool,
     mode: str,
+    cumulative_stats: dict | None = None,
 ) -> dict:
     result = oi.process_pending_operator_ingress(
         state_root=state_root,
@@ -50,6 +88,17 @@ def _run_once(
         batch_limit=batch_limit,
         last_result=result,
     )
+    # Update and persist cumulative stats
+    if cumulative_stats is not None:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cumulative_stats["total_cycles"] += 1
+        cumulative_stats["total_items_processed"] += int(result.get("processed_count", 0) or 0)
+        cumulative_stats["total_items_skipped"] += int(result.get("skipped_count", 0) or 0)
+        cumulative_stats["last_cycle_at"] = now
+        cumulative_stats["last_cycle_processed"] = int(result.get("processed_count", 0) or 0)
+        cumulative_stats["last_cycle_pending"] = int(result.get("pending_count", 0) or 0)
+        _save_cumulative_stats(state_root, cumulative_stats)
     if regenerate_surfaces and int(result.get("processed_count", 0) or 0) > 0:
         _regenerate_surfaces()
     return result
@@ -130,6 +179,12 @@ def main() -> int:
     run_foreground = bool(args.foreground)
     run_once = bool(args.once or not run_foreground)
 
+    # Initialize cumulative stats tracking
+    from datetime import datetime, timezone
+    cumulative_stats = _load_cumulative_stats(state_root)
+    if not cumulative_stats.get("started_at"):
+        cumulative_stats["started_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     try:
         if run_foreground:
             while True:
@@ -140,6 +195,7 @@ def main() -> int:
                     batch_limit=args.batch_limit,
                     regenerate_surfaces=regenerate_surfaces,
                     mode="foreground",
+                    cumulative_stats=cumulative_stats,
                 )
                 time.sleep(max(args.poll_seconds, 1))
         if run_once:
@@ -150,6 +206,7 @@ def main() -> int:
                 batch_limit=args.batch_limit,
                 regenerate_surfaces=regenerate_surfaces,
                 mode="once",
+                cumulative_stats=cumulative_stats,
             )
     except KeyboardInterrupt:
         oi.clear_operator_ingress_auto_metabolizer_runtime(state_root)

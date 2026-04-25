@@ -15,6 +15,47 @@ sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 import operator_ingress as oi
 
 
+def _load_cumulative_stats(state_root: str) -> dict:
+    path = Path(state_root) / "inputs" / "operator-ingress" / ".auto-metabolizer-cumulative.json"
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _format_uptime(seconds: int | None) -> str:
+    if seconds is None or seconds < 0:
+        return "n/a"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    return f"{hours}h {minutes}m"
+
+
+def _health_label(status: str, worker: dict, heartbeat_age: int | None) -> str:
+    """Return a clear human-readable health label."""
+    if status == "running":
+        if heartbeat_age is not None and heartbeat_age < 300:
+            return "HEALTHY (running)"
+        return "RUNNING (heartbeat delayed)"
+    if status == "recent":
+        return "IDLE (recent activity)"
+    if status == "stale":
+        return "STALE (no heartbeat for >{}s)".format(
+            worker.get("heartbeat_stale_threshold_seconds", "?")
+        )
+    if status == "idle":
+        if not worker.get("heartbeat_at"):
+            return "NEVER RUN"
+        return "DEAD (process not found)"
+    return status.upper()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="operator-ingress-auto-metabolizer-status",
@@ -63,18 +104,76 @@ def main() -> int:
             print(f"operator.ingress.auto_metabolize.status FAIL: {exc}", file=sys.stderr)
         return 1
 
+    cumulative = _load_cumulative_stats(state_root)
+
     if args.json_output:
+        result["cumulative"] = cumulative
         print(json.dumps(result, indent=2))
     else:
-        print(result["oneliner"])
         worker = result["worker"]
-        print(f"  pid_alive: {worker['pid_alive']}")
-        print(f"  heartbeat_at: {worker['heartbeat_at']}")
+        queue = result["queue"]
         age = worker.get("heartbeat_age_seconds")
-        print(f"  heartbeat_age_seconds: {age if age is not None else 'n/a'}")
-        stale = worker.get("heartbeat_stale", False)
-        threshold = worker.get("heartbeat_stale_threshold_seconds", "?")
-        print(f"  heartbeat_stale: {stale} (threshold: {threshold}s)")
+        health = _health_label(result["status"], worker, age)
+
+        # Header
+        print(f"Auto-Metabolizer: {health}")
+        print()
+
+        # Worker details
+        print("Worker:")
+        if worker.get("pid") and worker["pid_alive"]:
+            print(f"  PID:           {worker['pid']} (alive)")
+        elif worker.get("pid"):
+            print(f"  PID:           {worker['pid']} (dead)")
+        else:
+            print("  PID:           none")
+        print(f"  Mode:          {worker.get('mode') or 'n/a'}")
+        print(f"  Poll interval: {worker.get('poll_seconds', 'n/a')}s")
+        print(f"  Heartbeat:     {worker['heartbeat_at'] or 'never'}", end="")
+        if age is not None:
+            print(f" ({_format_uptime(age)} ago)")
+        else:
+            print()
+
+        # Cumulative stats
+        if cumulative:
+            print()
+            print("Activity:")
+            started = cumulative.get("started_at", "")
+            if started:
+                # Compute uptime from started_at
+                try:
+                    from datetime import datetime, timezone
+                    parsed = datetime.fromisoformat(started.replace("Z", "+00:00"))
+                    uptime_s = int((datetime.now(timezone.utc) - parsed).total_seconds())
+                    print(f"  Started:             {started} (uptime {_format_uptime(uptime_s)})")
+                except ValueError:
+                    print(f"  Started:             {started}")
+            print(f"  Total cycles:        {cumulative.get('total_cycles', 0)}")
+            print(f"  Total processed:     {cumulative.get('total_items_processed', 0)}")
+            print(f"  Total skipped:       {cumulative.get('total_items_skipped', 0)}")
+            last_cycle = cumulative.get("last_cycle_at", "")
+            if last_cycle:
+                print(f"  Last cycle:          {last_cycle}")
+                print(f"    processed:         {cumulative.get('last_cycle_processed', 0)}")
+                print(f"    pending at cycle:  {cumulative.get('last_cycle_pending', 0)}")
+
+        # Queue state
+        print()
+        print("Queue:")
+        print(f"  Pending:     {queue['pending']}")
+        print(f"  Classified:  {queue['classified']}")
+        print(f"  Routed:      {queue['routed']}")
+        print(f"  Total:       {queue['total']}")
+
+        # Recent items
+        last_ids = worker.get("last_ingress_ids", [])
+        if last_ids:
+            print()
+            print("Last processed:")
+            for iid in last_ids:
+                print(f"  - {iid}")
+
     return 0
 
 
