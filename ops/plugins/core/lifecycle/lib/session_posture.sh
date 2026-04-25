@@ -4,18 +4,18 @@
 # SPINE_NODE_TYPE at interactive attach time for the operator console path,
 # then emits posture-derived policy env as `export` lines on stdout.
 #
-# IMPORTANT: SPINE_SESSION_POSTURE is NEW runtime truth introduced for the
-# node-posture contract (LOOP-SPINE-NODE-POSTURE-CONTRACT-20260410). It is
-# a SEPARATE contract from SPINE_EXECUTION_POSTURE and MUST NOT be aliased,
-# mirrored, or conflated with it here. Execution posture lives elsewhere
-# and is owned by the execution plane.
+# IDENTITY UNIFICATION (2026-04-25):
+# SPINE_RUNTIME_ROLE is the canonical execution identity. Session posture
+# is a DERIVED PROJECTION — it must not disagree with runtime role.
+# When a terminal has a by_terminal_id runtime role override, posture
+# derives from that role, not from terminal type alone.
 #
 # This library is sourced (not executed). It must not set -euo pipefail at
 # file top, must be idempotent, and must be macOS bash 3.2 compatible
 # (no associative arrays). It performs no disk writes and keeps no state.
 #
 # Public functions:
-#   session_posture_resolve TERMINAL_NAME REQUESTED_POSTURE
+#   session_posture_resolve TERMINAL_NAME REQUESTED_POSTURE [RUNTIME_ROLE]
 #   session_posture_emit_env
 
 __SP_CONTRACT_PATH="/Users/ronnyworks/code/agentic-spine/ops/bindings/terminal.role.contract.yaml"
@@ -55,6 +55,7 @@ __sp_resolve_terminal_type() {
 session_posture_resolve() {
     local terminal_name="${1:-}"
     local requested_posture="${2:-}"
+    local runtime_role="${3:-}"
 
     # 1. Node type
     if [ -n "${SPINE_LOCAL_ROLE:-}" ]; then
@@ -67,21 +68,43 @@ session_posture_resolve() {
     local terminal_type
     terminal_type="$(__sp_resolve_terminal_type "$terminal_name")"
 
-    # 3. Default posture by terminal type
+    # 3. Default posture — runtime role is canonical, terminal type is fallback.
+    #    When runtime_role is provided (from terminal.sh after contract resolution),
+    #    posture derives from role to prevent split identity.
     local default_posture default_source
-    case "$terminal_type" in
-        control-plane)   default_posture="controller" ;;
-        observation)     default_posture="membrane" ;;
-        domain-runtime)  default_posture="membrane" ;;
-        "")              default_posture="membrane" ;;
-        *)               default_posture="membrane" ;;
-    esac
-    if [ -n "$terminal_type" ]; then
-        default_source="default:terminal-type:${terminal_type}"
-    elif [ -z "$terminal_name" ]; then
-        default_source="default:ad-hoc"
+    if [ -n "$runtime_role" ]; then
+        # Runtime role is canonical — derive posture from it
+        case "$runtime_role" in
+            worker)          default_posture="worker" ;;
+            qc)              default_posture="membrane" ;;
+            close|librarian) default_posture="controller" ;;
+            researcher)
+                # Researcher posture still depends on terminal type for
+                # controller vs membrane distinction
+                case "$terminal_type" in
+                    control-plane) default_posture="controller" ;;
+                    *)             default_posture="membrane" ;;
+                esac
+                ;;
+            *)               default_posture="membrane" ;;
+        esac
+        default_source="derived:runtime-role:${runtime_role}"
     else
-        default_source="default:ad-hoc"
+        # Legacy/fallback: terminal type only (no runtime role provided)
+        case "$terminal_type" in
+            control-plane)   default_posture="controller" ;;
+            observation)     default_posture="membrane" ;;
+            domain-runtime)  default_posture="membrane" ;;
+            "")              default_posture="membrane" ;;
+            *)               default_posture="membrane" ;;
+        esac
+        if [ -n "$terminal_type" ]; then
+            default_source="default:terminal-type:${terminal_type}"
+        elif [ -z "$terminal_name" ]; then
+            default_source="default:ad-hoc"
+        else
+            default_source="default:ad-hoc"
+        fi
     fi
 
     # 4. Explicit request override
@@ -91,14 +114,23 @@ session_posture_resolve() {
                 "$requested_posture" >&2
             return 2
         fi
+        # Operator-console guard: forbid worker/translator unless contract-driven
         case "$__SP_NODE_TYPE" in
             operator_console)
                 case "$requested_posture" in
-                    worker|translator)
+                    worker)
+                        # Allow if runtime_role=worker (contract-driven)
+                        if [ "$runtime_role" != "worker" ]; then
+                            printf "session_posture: posture '%s' is forbidden for node type '%s' without contract worker role\n" \
+                                "$requested_posture" "$__SP_NODE_TYPE" >&2
+                            printf "session_posture:   allowed for operator_console: controller membrane (or worker with contract role)\n" >&2
+                            return 3
+                        fi
+                        ;;
+                    translator)
                         printf "session_posture: posture '%s' is forbidden for node type '%s'\n" \
                             "$requested_posture" "$__SP_NODE_TYPE" >&2
                         printf "session_posture:   allowed for operator_console: controller membrane\n" >&2
-                        printf "session_posture:   see LOOP-SPINE-NODE-POSTURE-CONTRACT-20260410\n" >&2
                         return 3
                         ;;
                 esac

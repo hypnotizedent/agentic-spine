@@ -135,9 +135,11 @@ resolve_runtime_role() {
 
 RUNTIME_ROLE="$(resolve_runtime_role "$TERMINAL_NAME")"
 
-# ── Resolve session posture (node type + posture + source) ───────────────
+# ── Resolve session posture (node type + posture + source) ─────────��─────
+# Pass RUNTIME_ROLE so posture derives from canonical execution identity.
+# This prevents split-identity (e.g. worker role with controller posture).
 if command -v session_posture_resolve >/dev/null 2>&1; then
-    if ! session_posture_resolve "$TERMINAL_NAME" "$SESSION_POSTURE"; then
+    if ! session_posture_resolve "$TERMINAL_NAME" "$SESSION_POSTURE" "$RUNTIME_ROLE"; then
         fail "session posture resolution failed (see message above)"
     fi
 fi

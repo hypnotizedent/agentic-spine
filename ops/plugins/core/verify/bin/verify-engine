@@ -18,6 +18,7 @@
 #   E9  live launchd plist ProgramArguments resolve on disk (fail)
 #   E10 launchd required_labels truth (fail): every required_label loaded in live launchctl state
 #   E11 retired snapshot residue class absent (fail): network.inventory.snapshot / -build
+#   E12 execution identity parity: by_terminal_id role overrides must produce matching posture
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -531,6 +532,72 @@ for p in sorted(candidates):
 if hits:
     for h in hits:
         print(h)
+    raise SystemExit(1)
+PY
+'
+
+check E12 "execution identity parity (no split role/posture)" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+import subprocess, sys, os
+
+root = sys.argv[1]
+contract = os.path.join(root, "ops/bindings/terminal.role.contract.yaml")
+posture_lib = os.path.join(root, "ops/plugins/core/lifecycle/lib/session_posture.sh")
+
+if not os.path.isfile(contract) or not os.path.isfile(posture_lib):
+    print("SKIP: contract or posture lib missing")
+    raise SystemExit(0)
+
+# Read terminal IDs and their by_terminal_id role overrides
+import json
+try:
+    ids_raw = subprocess.check_output(
+        ["yq", "-r", ".runtime_role_defaults.by_terminal_id | to_entries[] | .key + \"=\" + .value", contract],
+        text=True, stderr=subprocess.DEVNULL
+    ).strip()
+except Exception:
+    ids_raw = ""
+
+if not ids_raw:
+    raise SystemExit(0)
+
+# For each terminal with an explicit role override, verify posture agrees
+role_to_expected_posture = {
+    "worker": "worker",
+    "qc": "membrane",
+    "close": "controller",
+    "librarian": "controller",
+}
+
+failures = []
+for line in ids_raw.splitlines():
+    if "=" not in line:
+        continue
+    terminal_id, role = line.split("=", 1)
+    expected = role_to_expected_posture.get(role)
+    if not expected:
+        continue
+
+    # Run session_posture_resolve via bash and capture result
+    test_script = f"""
+        source "{posture_lib}"
+        session_posture_resolve "{terminal_id}" "" "{role}" 2>/dev/null
+        printf "%s" "$__SP_POSTURE"
+    """
+    try:
+        actual = subprocess.check_output(
+            ["bash", "-c", test_script], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        actual = "error"
+
+    if actual != expected:
+        failures.append(f"{terminal_id}: role={role} posture={actual} expected_posture={expected}")
+
+if failures:
+    print("Split identity detected:")
+    for f in failures:
+        print(f"  {f}")
     raise SystemExit(1)
 PY
 '
