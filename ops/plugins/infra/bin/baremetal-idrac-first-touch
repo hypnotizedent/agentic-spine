@@ -1,0 +1,614 @@
+#!/usr/bin/env python3
+"""Bounded Dell iDRAC first-touch boot-control rail.
+
+Resolves target truth via discovery, verifies installer artifact custody,
+and executes boot-prep controls via SSH+racadm on iDRAC7 targets.
+
+Controls:
+  1. Virtual media attach (NFS remoteimage)
+  2. One-time boot set to virtual CD
+  3. Optional power cycle
+
+Scope boundary: this rail does NOT perform post-boot claim, admit,
+host-role mutation, or any Redfish-based boot control.
+
+Design authority: operator briefing 2026-04-25
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+DISCOVER_SCRIPT = ROOT / "ops" / "plugins" / "infra" / "observability" / "bin" / "baremetal-idrac-discover"
+SHELF_CONTRACT = ROOT / "ops" / "bindings" / "operator.hardware.bootstrap.artifact.shelf.yaml"
+SSH_BINDING = ROOT / "ops" / "bindings" / "ssh.targets.yaml"
+INFISICAL_AGENT = ROOT / "ops" / "plugins" / "providers" / "bin" / "infisical-agent.sh"
+
+
+def stop(message: str) -> None:
+    print(f"STOP (2): {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        stop(f"missing binding: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        stop(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        stop(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def run(cmd: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, text=True, capture_output=True, check=check)
+
+
+def normalize_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+# ── Discovery ─────────────────────────────────────────────────────
+
+
+def discover(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    if not DISCOVER_SCRIPT.is_file():
+        stop(f"missing discovery script: {DISCOVER_SCRIPT}")
+    cmd = [str(DISCOVER_SCRIPT)]
+    if args.target_id:
+        cmd.extend(["--target-id", args.target_id])
+    else:
+        cmd.extend(["--target-ip", args.target_ip])
+    if args.probe_via:
+        cmd.extend(["--probe-via", args.probe_via])
+    if args.username:
+        cmd.extend(["--username", args.username])
+    if args.password:
+        cmd.extend(["--password", args.password])
+    cmd.extend(["--timeout", str(args.timeout), "--json"])
+    proc = run(cmd)
+    if proc.returncode not in (0, 1):
+        stderr = (proc.stderr or "").strip()
+        stop(f"discover prerequisite failed: {stderr or proc.returncode}")
+    try:
+        payload = json.loads(proc.stdout)
+    except Exception as exc:
+        stop(f"unable to parse discovery output: {exc}")
+    if not isinstance(payload, dict):
+        stop("unexpected discovery output shape")
+    return payload, proc.returncode
+
+
+# ── Artifact resolution ───────────────────────────────────────────
+
+
+def resolve_artifact_ref(raw_ref: str | None, iso_library_ref: str | None) -> dict[str, Any]:
+    artifact_ref = normalize_text(raw_ref)
+    if not artifact_ref:
+        return {
+            "requested_ref": None,
+            "resolved_ref": None,
+            "selection_mode": "unselected",
+        }
+    if artifact_ref.startswith("/"):
+        resolved = artifact_ref
+        mode = "absolute"
+    elif iso_library_ref:
+        resolved = f"{iso_library_ref.rstrip('/')}/{artifact_ref}"
+        mode = "library_relative"
+    else:
+        resolved = artifact_ref
+        mode = "opaque"
+    return {
+        "requested_ref": artifact_ref,
+        "resolved_ref": resolved,
+        "selection_mode": mode,
+    }
+
+
+# ── Credential resolution ────────────────────────────────────────
+
+
+def resolve_target_credentials(
+    target_entry: dict[str, Any] | None,
+    cli_username: str,
+    cli_password: str,
+) -> tuple[str, str | None, str]:
+    """Resolve credentials for the target BMC.
+
+    Priority: CLI args > target-specific secret_keys > generic infra keys.
+    """
+    user = normalize_text(cli_username)
+    password = normalize_text(cli_password)
+    if user and password:
+        return user, password, "cli"
+
+    secret_keys = (target_entry or {}).get("secret_keys") if isinstance((target_entry or {}).get("secret_keys"), dict) else None
+    if secret_keys and INFISICAL_AGENT.is_file() and os.access(INFISICAL_AGENT, os.X_OK):
+        user_key = normalize_text(secret_keys.get("user"))
+        pass_key = normalize_text(secret_keys.get("password"))
+        if user_key and pass_key:
+            inf_user = run([str(INFISICAL_AGENT), "get", "infrastructure", "prod", user_key])
+            inf_pass = run([str(INFISICAL_AGENT), "get", "infrastructure", "prod", pass_key])
+            resolved_user = normalize_text(inf_user.stdout)
+            resolved_pass = normalize_text(inf_pass.stdout)
+            if resolved_pass:
+                return resolved_user or "root", resolved_pass, f"infisical:{user_key}"
+
+    # Fall back to generic infra keys
+    if INFISICAL_AGENT.is_file() and os.access(INFISICAL_AGENT, os.X_OK):
+        inf_user = run([str(INFISICAL_AGENT), "get", "infrastructure", "prod", "IDRAC_ADMIN_USER"])
+        inf_pass = run([str(INFISICAL_AGENT), "get", "infrastructure", "prod", "IDRAC_ADMIN_PASSWORD"])
+        resolved_user = normalize_text(inf_user.stdout)
+        resolved_pass = normalize_text(inf_pass.stdout)
+        if resolved_pass:
+            return resolved_user or "root", resolved_pass, "infisical:generic"
+
+    return user or "root", None, "none"
+
+
+# ── SSH+racadm execution ─────────────────────────────────────────
+
+
+def racadm_via_jump(
+    target_host: str,
+    jump_host: str,
+    bmc_user: str,
+    bmc_password: str,
+    racadm_cmd: str,
+    timeout: int = 10,
+) -> subprocess.CompletedProcess[str]:
+    """Execute a racadm command on iDRAC via SSH through a jump host."""
+    inner_ssh = (
+        f"sshpass -p {shlex.quote(bmc_password)} "
+        f"ssh -o ConnectTimeout={timeout} -o StrictHostKeyChecking=no "
+        f"-o LogLevel=ERROR {shlex.quote(bmc_user)}@{shlex.quote(target_host)} "
+        f"{shlex.quote(racadm_cmd)}"
+    )
+    outer_cmd = [
+        "ssh",
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        "-o", "LogLevel=ERROR",
+        f"root@{jump_host}",
+        inner_ssh,
+    ]
+    return run(outer_cmd)
+
+
+def resolve_jump_host(probe_via: str | None) -> str | None:
+    """Resolve jump host IP from ssh.targets binding (prefers Tailscale for SSH)."""
+    if not probe_via:
+        return None
+    binding = load_yaml(SSH_BINDING)
+    ssh_root = binding.get("ssh")
+    if not isinstance(ssh_root, dict):
+        return None
+    targets_list = ssh_root.get("targets") if isinstance(ssh_root.get("targets"), list) else []
+    for item in targets_list:
+        if isinstance(item, dict) and str(item.get("id")) == probe_via:
+            return normalize_text(item.get("tailscale_ip")) or normalize_text(item.get("host"))
+    return None
+
+
+def resolve_nfs_server_for_bmc(
+    jump_host: str,
+    target_host: str,
+) -> str | None:
+    """Resolve the NFS server IP that the BMC can reach.
+
+    iDRAC BMCs are on LAN and cannot reach Tailscale IPs. Query the
+    jump/custody host for its LAN IP on the same subnet as the BMC.
+    """
+    if not jump_host or not target_host:
+        return None
+    # Extract subnet prefix from BMC IP (e.g., "192.168.1" from "192.168.1.125")
+    parts = target_host.split(".")
+    if len(parts) != 4:
+        return None
+    subnet_prefix = ".".join(parts[:3])
+    # Query jump host for its IP on the same subnet
+    proc = run([
+        "ssh",
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        "-o", "LogLevel=ERROR",
+        f"root@{jump_host}",
+        f"ip -4 addr show | grep -oP '{subnet_prefix}\\.\\d+' | head -1",
+    ])
+    return normalize_text(proc.stdout)
+
+
+def verify_iso_on_host(
+    iso_path: str,
+    jump_host: str,
+) -> bool:
+    """Verify ISO file exists on the custody host via jump."""
+    proc = run([
+        "ssh",
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        "-o", "LogLevel=ERROR",
+        f"root@{jump_host}",
+        f"test -f {shlex.quote(iso_path)} && echo EXISTS || echo MISSING",
+    ])
+    return "EXISTS" in (proc.stdout or "")
+
+
+def check_nfs_export(
+    jump_host: str,
+    iso_dir: str,
+) -> bool:
+    """Check if the ISO directory is NFS-exported on the custody host."""
+    proc = run([
+        "ssh",
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        "-o", "LogLevel=ERROR",
+        f"root@{jump_host}",
+        f"grep -q {shlex.quote(iso_dir)} /etc/exports 2>/dev/null && echo EXPORTED || echo NOT_EXPORTED",
+    ])
+    return "EXPORTED" in (proc.stdout or "")
+
+
+def setup_nfs_export(
+    jump_host: str,
+    iso_dir: str,
+    target_host: str,
+) -> bool:
+    """Set up a temporary NFS export for the ISO directory, scoped to the target BMC."""
+    export_line = f"{iso_dir} {target_host}(ro,sync,no_subtree_check,no_root_squash)"
+    cmds = (
+        f"grep -q {shlex.quote(iso_dir)} /etc/exports 2>/dev/null || "
+        f"echo {shlex.quote(export_line)} >> /etc/exports && "
+        f"exportfs -ra"
+    )
+    proc = run([
+        "ssh",
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        "-o", "LogLevel=ERROR",
+        f"root@{jump_host}",
+        cmds,
+    ])
+    return proc.returncode == 0
+
+
+# ── Execute boot-prep ─────────────────────────────────────────────
+
+
+def execute_first_touch(
+    target_host: str,
+    jump_host: str,
+    bmc_user: str,
+    bmc_password: str,
+    nfs_server: str,
+    iso_path: str,
+    power_cycle: bool,
+) -> dict[str, Any]:
+    """Execute the three-step boot-prep sequence via racadm."""
+    controls_executed: list[str] = []
+    errors: list[str] = []
+
+    iso_dir = str(Path(iso_path).parent)
+    iso_filename = Path(iso_path).name
+    nfs_image_location = f"{nfs_server}:{iso_dir}/{iso_filename}"
+
+    # Step 1: Disconnect any existing remote image
+    proc = racadm_via_jump(
+        target_host, jump_host, bmc_user, bmc_password,
+        "racadm remoteimage -d",
+    )
+    # Ignore errors on disconnect — may not have been connected
+
+    # Step 2: Attach virtual media via NFS
+    # iDRAC7 requires -u/-p even for NFS (dummy values, NFS uses no_root_squash)
+    attach_cmd = f"racadm remoteimage -c -u root -p root -l {nfs_image_location}"
+    proc = racadm_via_jump(
+        target_host, jump_host, bmc_user, bmc_password,
+        attach_cmd,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        errors.append(f"virtual_media_attach failed: {stdout or stderr}")
+    else:
+        controls_executed.append("virtual_media_attach")
+
+    # Step 3: Verify remote image is connected
+    proc = racadm_via_jump(
+        target_host, jump_host, bmc_user, bmc_password,
+        "racadm remoteimage -s",
+    )
+    remote_image_status = (proc.stdout or "").strip()
+
+    # Step 4: Set one-time boot to virtual CD
+    boot_cmd = "racadm config -g cfgServerInfo -o cfgServerBootOnce 1"
+    proc = racadm_via_jump(
+        target_host, jump_host, bmc_user, bmc_password,
+        boot_cmd,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        errors.append(f"one_time_boot_enable failed: {stdout or stderr}")
+    else:
+        controls_executed.append("one_time_boot_enable")
+
+    boot_dev_cmd = "racadm config -g cfgServerInfo -o cfgServerFirstBootDevice VCD-DVD"
+    proc = racadm_via_jump(
+        target_host, jump_host, bmc_user, bmc_password,
+        boot_dev_cmd,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        errors.append(f"one_time_boot_device failed: {stdout or stderr}")
+    else:
+        controls_executed.append("one_time_boot_device_vcd")
+
+    # Step 5: Optional power cycle
+    power_action_taken = False
+    if power_cycle and not errors:
+        proc = racadm_via_jump(
+            target_host, jump_host, bmc_user, bmc_password,
+            "racadm serveraction powercycle",
+        )
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()
+            stdout = (proc.stdout or "").strip()
+            errors.append(f"power_cycle failed: {stdout or stderr}")
+        else:
+            controls_executed.append("power_cycle")
+            power_action_taken = True
+
+    return {
+        "controls_executed": controls_executed,
+        "errors": errors,
+        "nfs_image_location": nfs_image_location,
+        "remote_image_status": remote_image_status,
+        "power_action_taken": power_action_taken,
+    }
+
+
+# ── Main ──────────────────────────────────────────────────────────
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Bounded Dell iDRAC first-touch boot-control rail (SSH+racadm, iDRAC7)."
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--target-id", default="", help="Governed ssh.targets ID for a BMC target")
+    group.add_argument("--target-ip", default="", help="Direct BMC IP when no target ID exists yet")
+    parser.add_argument("--probe-via", default="", help="Optional governed SSH target to use as a jump host")
+    parser.add_argument("--artifact-ref", default="", help="ISO path on custody host (absolute or relative to iso_library_ref)")
+    parser.add_argument("--username", default="", help="Override iDRAC username")
+    parser.add_argument("--password", default="", help="Override iDRAC password")
+    parser.add_argument("--timeout", type=int, default=10, help="Network timeout in seconds (default higher than discovery for iDRAC7 TLS retry)")
+    parser.add_argument("--execute", action="store_true", help="Actually perform boot-prep controls (attach, boot override, optional power cycle)")
+    parser.add_argument("--power-cycle", action="store_true", help="Power cycle after setting boot override (only with --execute)")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without executing")
+    args = parser.parse_args()
+
+    # ── Discovery ─────────────────────────────────────────────────
+    discover_payload, discover_exit = discover(args)
+    recognition = discover_payload.get("recognition") if isinstance(discover_payload.get("recognition"), dict) else {}
+    target_info = discover_payload.get("target") if isinstance(discover_payload.get("target"), dict) else {}
+    access_info = discover_payload.get("access") if isinstance(discover_payload.get("access"), dict) else {}
+    identity_info = discover_payload.get("identity") if isinstance(discover_payload.get("identity"), dict) else {}
+
+    bmc_generation = str(recognition.get("source") or "unknown")
+    target_host = str(target_info.get("resolved_host") or "")
+
+    # ── Artifact resolution ───────────────────────────────────────
+    shelf = load_yaml(SHELF_CONTRACT)
+    artifact_shelf = shelf.get("artifact_shelf") if isinstance(shelf.get("artifact_shelf"), dict) else {}
+    iso_library_ref = normalize_text(artifact_shelf.get("iso_library_ref"))
+    custody_host_ref = normalize_text(artifact_shelf.get("custody_host_ref"))
+    artifact = resolve_artifact_ref(args.artifact_ref, iso_library_ref)
+
+    # ── Target binding for credentials ────────────────────────────
+    binding = load_yaml(SSH_BINDING)
+    ssh_root = binding.get("ssh")
+    targets_list = ssh_root.get("targets") if isinstance(ssh_root, dict) and isinstance(ssh_root.get("targets"), list) else []
+    targets_map = {str(item.get("id")): item for item in targets_list if isinstance(item, dict) and item.get("id")}
+    target_entry = targets_map.get(normalize_text(args.target_id) or "") if args.target_id else None
+
+    probe_via = normalize_text(args.probe_via) or normalize_text((target_entry or {}).get("probe_via"))
+    jump_host = resolve_jump_host(probe_via)
+
+    bmc_user, bmc_password, cred_source = resolve_target_credentials(
+        target_entry, args.username, args.password,
+    )
+
+    # ── NFS server for virtual media ──────────────────────────────
+    # The custody host serves ISOs via NFS to the iDRAC
+    # NFS server must be the LAN IP — iDRAC BMCs cannot reach Tailscale IPs
+    nfs_server = resolve_nfs_server_for_bmc(jump_host, target_host) or jump_host
+
+    # ── Blockers ──────────────────────────────────────────────────
+    blockers: list[str] = []
+    if not recognition.get("reachable"):
+        blockers.append("target BMC is not reachable")
+    if not recognition.get("recognized_as_idrac"):
+        blockers.append("target BMC is not positively recognized")
+    if bmc_generation not in ("idrac7_pre_redfish",):
+        blockers.append(f"first-touch only supports iDRAC7 (SSH+racadm), got bmc_generation={bmc_generation}")
+    if not bmc_password:
+        blockers.append("BMC credentials could not be resolved")
+    if not artifact["resolved_ref"]:
+        blockers.append("no installer artifact selected (use --artifact-ref)")
+    if not jump_host:
+        blockers.append("no jump host resolved for SSH+racadm access")
+
+    # ── Artifact verification ─────────────────────────────────────
+    iso_exists = False
+    nfs_exported = False
+    if artifact["resolved_ref"] and jump_host and not blockers:
+        iso_exists = verify_iso_on_host(artifact["resolved_ref"], jump_host)
+        if not iso_exists:
+            blockers.append(f"ISO not found on custody host: {artifact['resolved_ref']}")
+        else:
+            iso_dir = str(Path(artifact["resolved_ref"]).parent)
+            nfs_exported = check_nfs_export(jump_host, iso_dir)
+
+    # ── Decision ──────────────────────────────────────────────────
+    exec_result: dict[str, Any] | None = None
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if blockers:
+        decision = "BLOCKED"
+        reason = "first-touch preconditions not satisfied"
+        exit_code = 1
+    elif args.dry_run:
+        decision = "DRY_RUN"
+        reason = "preconditions satisfied; would execute boot-prep controls"
+        exit_code = 0
+    elif args.execute:
+        # Set up NFS export if needed
+        if not nfs_exported and jump_host and artifact["resolved_ref"]:
+            iso_dir = str(Path(artifact["resolved_ref"]).parent)
+            if not setup_nfs_export(jump_host, iso_dir, target_host):
+                decision = "FAILED"
+                reason = "could not set up NFS export for virtual media"
+                exit_code = 1
+                exec_result = {"controls_executed": [], "errors": ["nfs_export_setup_failed"]}
+            else:
+                nfs_exported = True
+
+        if nfs_exported and not exec_result:
+            exec_result = execute_first_touch(
+                target_host=target_host,
+                jump_host=jump_host,
+                bmc_user=bmc_user,
+                bmc_password=bmc_password,
+                nfs_server=nfs_server,
+                iso_path=artifact["resolved_ref"],
+                power_cycle=args.power_cycle,
+            )
+            if exec_result["errors"]:
+                decision = "FAILED"
+                reason = f"boot-prep errors: {'; '.join(exec_result['errors'])}"
+                exit_code = 1
+            else:
+                decision = "DONE"
+                reason = "boot-prep controls applied successfully"
+                exit_code = 0
+    else:
+        decision = "READY"
+        reason = "preconditions satisfied; use --execute to apply boot-prep controls"
+        exit_code = 0
+
+    # ── Result ────────────────────────────────────────────────────
+    result: dict[str, Any] = {
+        "capability": "baremetal.idrac.first-touch",
+        "status": decision,
+        "timestamp_utc": timestamp,
+        "reason": reason,
+        "execute_requested": bool(args.execute),
+        "dry_run": bool(args.dry_run),
+        "target": {
+            "label": target_info.get("label"),
+            "target_id": normalize_text(args.target_id),
+            "resolved_host": target_host,
+            "bmc_generation": bmc_generation,
+        },
+        "discovery_summary": {
+            "status": discover_payload.get("status"),
+            "recognized_as_idrac": recognition.get("recognized_as_idrac"),
+            "credential_status": recognition.get("credential_status"),
+            "model": identity_info.get("model"),
+            "service_tag": identity_info.get("service_tag"),
+        },
+        "artifact_custody": {
+            "requested_ref": artifact["requested_ref"],
+            "resolved_ref": artifact["resolved_ref"],
+            "selection_mode": artifact["selection_mode"],
+            "iso_exists_on_host": iso_exists,
+            "nfs_exported": nfs_exported,
+            "custody_host_ref": custody_host_ref,
+        },
+        "access": {
+            "method": "ssh_racadm_via_jump",
+            "jump_host": jump_host,
+            "probe_via": probe_via,
+            "credential_source": cred_source,
+        },
+        "controls": {
+            "planned": ["virtual_media_attach", "one_time_boot_virtual_cd", "optional_power_cycle"],
+            "executed": (exec_result or {}).get("controls_executed", []),
+            "nfs_image_location": (exec_result or {}).get("nfs_image_location"),
+            "remote_image_status": (exec_result or {}).get("remote_image_status"),
+            "power_action_taken": (exec_result or {}).get("power_action_taken", False),
+        },
+        "blockers": blockers,
+        "errors": (exec_result or {}).get("errors", []),
+        "claim_boundary": "claim rail owns proof after first boot — not performed here",
+        "admit_boundary": "admit rail owns binding mutation after proof — not performed here",
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=False))
+    else:
+        print(render_text(result))
+    return exit_code
+
+
+def render_text(result: dict[str, Any]) -> str:
+    target = result["target"]
+    artifact = result["artifact_custody"]
+    controls = result["controls"]
+    lines = [
+        "baremetal.idrac.first-touch",
+        f"status:          {result['status']}",
+        f"target:          {target.get('label') or target.get('resolved_host') or 'unknown'}",
+        f"bmc_generation:  {target.get('bmc_generation') or 'unknown'}",
+        f"artifact_ref:    {artifact.get('resolved_ref') or 'not selected'}",
+        f"iso_on_host:     {'yes' if artifact.get('iso_exists_on_host') else 'no'}",
+        f"nfs_exported:    {'yes' if artifact.get('nfs_exported') else 'no'}",
+        f"access_method:   {result['access']['method']}",
+        f"credential_src:  {result['access']['credential_source']}",
+    ]
+    if controls.get("executed"):
+        lines.append(f"controls_done:   {', '.join(controls['executed'])}")
+    if controls.get("nfs_image_location"):
+        lines.append(f"nfs_image:       {controls['nfs_image_location']}")
+    if controls.get("power_action_taken"):
+        lines.append("power_cycle:     yes")
+    lines.append(f"reason:          {result['reason']}")
+    if result.get("blockers"):
+        lines.append("blockers:")
+        for b in result["blockers"]:
+            lines.append(f"  - {b}")
+    if result.get("errors"):
+        lines.append("errors:")
+        for e in result["errors"]:
+            lines.append(f"  - {e}")
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
