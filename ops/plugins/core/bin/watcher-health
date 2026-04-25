@@ -5,17 +5,27 @@ set -euo pipefail
 #
 # This capability reads the rolling cycle state file written by each
 # alerting-probe-cycle run. It answers "what has the watcher done recently?"
-# without requiring SSH to the watcher node.
+# without requiring manual SSH to the watcher node.
+#
+# Read path:
+#   1. Local file: $SPINE_LOGS/watcher-cycle-state.json (on-node fast path)
+#   2. Remote fetch: SSH to watcher node via ssh-resolve.sh (cross-node governed path)
 #
 # State file: $SPINE_LOGS/watcher-cycle-state.json
 # Writer: ops/plugins/core/bin/alerting-probe-cycle.sh
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$ROOT/ops/lib/runtime-paths.sh"
+source "$ROOT/ops/lib/ssh-resolve.sh"
 spine_runtime_resolve_paths
 
 JSON_MODE=0
 SHOW_CYCLES=5
+
+# Watcher node SSH target (declared in ssh.targets.yaml)
+WATCHER_SSH_TARGET="proxmox-home"
+# Remote env file that declares the watcher's SPINE_RUNTIME_ROOT
+WATCHER_REMOTE_ENV="/etc/spine/watcher-node.env"
 
 usage() {
   cat <<'USAGE'
@@ -59,34 +69,99 @@ done
 
 CYCLE_STATE="${SPINE_LOGS}/watcher-cycle-state.json"
 
-if [[ ! -f "$CYCLE_STATE" ]]; then
-  if [[ "$JSON_MODE" -eq 1 ]]; then
-    jq -n '{capability:"watcher.health",status:"no_data",message:"Watcher cycle state file not found. The watcher may not have run yet, or logs are not synced to this host.",state_path:"'"$CYCLE_STATE"'"}'
-  else
-    echo "watcher.health"
-    echo ""
-    echo "  STATUS: no_data"
-    echo "  Watcher cycle state file not found."
-    echo "  Path: $CYCLE_STATE"
-    echo ""
-    echo "  The watcher may not have run yet, or logs are not synced to this host."
-    echo "  On the watcher node (proxmox-home), this file is written by each"
-    echo "  alerting-probe-cycle run."
-  fi
-  exit 0
-fi
+# --- Evidence source resolution ---
+# Try local file first (on-node fast path), then SSH remote fetch (cross-node governed path).
+READ_SOURCE="local"
+TRANSPORT_PATH=""
+SOURCE_NODE=""
+FETCHED_AT=""
 
-state="$(jq -c '.' "$CYCLE_STATE" 2>/dev/null || echo '{}')"
+if [[ -f "$CYCLE_STATE" ]]; then
+  state="$(jq -c '.' "$CYCLE_STATE" 2>/dev/null || echo '{}')"
+  SOURCE_NODE="$(hostname -s 2>/dev/null || echo "local")"
+  READ_SOURCE="local"
+else
+  # Local file missing — attempt SSH remote fetch from watcher node.
+  # Inline (not a function) to avoid subshell variable loss.
+  _resolve_result="$(ssh_resolve_ssh_host_with_fallback "$WATCHER_SSH_TARGET" 5 2>/dev/null)" || _resolve_result=""
+  _resolved_ip="$(echo "$_resolve_result" | awk '{print $1}')"
+  _path_used="$(echo "$_resolve_result" | awk '{print $2}')"
+  remote_result=""
+
+  if [[ -n "$_resolve_result" && "$_path_used" != "unreachable" ]]; then
+    _ssh_user="$(ssh_resolve_user "$WATCHER_SSH_TARGET")"
+    _identity_opts="$(ssh_resolve_machine_identity_opts "$WATCHER_SSH_TARGET" 2>/dev/null)" || true
+
+    _ssh_cmd=(ssh "${SSH_BATCH_OPTS[@]}")
+    if [[ -n "$_identity_opts" ]]; then
+      # shellcheck disable=SC2206
+      _ssh_cmd+=($_identity_opts)
+    fi
+    _ssh_cmd+=("${_ssh_user}@${_resolved_ip}")
+
+    remote_result="$("${_ssh_cmd[@]}" "source $WATCHER_REMOTE_ENV 2>/dev/null; cat \"\${SPINE_RUNTIME_ROOT}/logs/watcher-cycle-state.json\" 2>/dev/null" 2>/dev/null)" || remote_result=""
+
+    # Validate JSON
+    if [[ -n "$remote_result" ]] && echo "$remote_result" | jq -c '.' >/dev/null 2>&1; then
+      TRANSPORT_PATH="$_path_used"
+      SOURCE_NODE="$WATCHER_SSH_TARGET"
+      FETCHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      READ_SOURCE="remote"
+    else
+      remote_result=""
+    fi
+  fi
+
+  if [[ -n "$remote_result" ]]; then
+    state="$(echo "$remote_result" | jq -c '.' 2>/dev/null || echo '{}')"
+  else
+    # Both local and remote failed
+    if [[ "$JSON_MODE" -eq 1 ]]; then
+      jq -n \
+        --arg capability "watcher.health" \
+        --arg state_path "$CYCLE_STATE" \
+        --arg watcher_node "$WATCHER_SSH_TARGET" \
+        '{
+          capability: $capability,
+          status: "watcher_node_unreachable",
+          message: "Local state file not found and SSH remote fetch from watcher node failed. The watcher node may be down or unreachable.",
+          state_path: $state_path,
+          watcher_node: $watcher_node,
+          read_mode: "failed",
+          suggestion: "Check watcher node reachability: ssh proxmox-home"
+        }'
+    else
+      echo "watcher.health"
+      echo ""
+      echo "  [FAIL] STATUS: watcher_node_unreachable"
+      echo ""
+      echo "  Local state file not found: $CYCLE_STATE"
+      echo "  SSH remote fetch from $WATCHER_SSH_TARGET also failed."
+      echo ""
+      echo "  The watcher node may be down or unreachable."
+      echo "  Check: ssh proxmox-home  (or Tailscale status)"
+    fi
+    exit 0
+  fi
+fi
 
 if [[ "$JSON_MODE" -eq 1 ]]; then
   jq -n \
     --arg capability "watcher.health" \
     --arg state_path "$CYCLE_STATE" \
+    --arg read_source "$READ_SOURCE" \
+    --arg source_node "$SOURCE_NODE" \
+    --arg transport_path "$TRANSPORT_PATH" \
+    --arg fetched_at "$FETCHED_AT" \
     --argjson state "$state" \
     --argjson show_cycles "$SHOW_CYCLES" \
     '{
       capability: $capability,
       state_path: $state_path,
+      read_source: $read_source,
+      source_node: $source_node,
+      transport_path: (if $transport_path == "" then null else $transport_path end),
+      fetched_at: (if $fetched_at == "" then null else $fetched_at end),
       health: $state.health,
       last_run_at: $state.last_run_at,
       last_run_status: $state.last_run_status,
@@ -94,6 +169,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       last_failure_at: $state.last_failure_at,
       consecutive_successes: $state.consecutive_successes,
       consecutive_failures: $state.consecutive_failures,
+      pending_interventions: ($state.pending_interventions // 0),
       threshold: $state.threshold,
       recent_cycles: ($state.cycles[:$show_cycles]),
       total_cycles_stored: ($state.cycles | length)
@@ -115,8 +191,8 @@ thresh_intervention="$(jq -r '.threshold.failure_count_for_intervention // "?"' 
 # Compute age of last run
 now_epoch="$(date +%s)"
 if [[ "$last_run_at" != "never" ]]; then
-  # Try GNU date first, fall back to macOS date
-  last_epoch="$(date -d "$last_run_at" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%SZ" "$last_run_at" +%s 2>/dev/null || echo 0)"
+  # Try GNU date first, fall back to macOS date (TZ=UTC so the Z suffix is honored)
+  last_epoch="$(date -d "$last_run_at" +%s 2>/dev/null || TZ=UTC date -jf "%Y-%m-%dT%H:%M:%SZ" "$last_run_at" +%s 2>/dev/null || echo 0)"
   if [[ "$last_epoch" =~ ^[0-9]+$ ]] && (( last_epoch > 0 )); then
     age_s=$(( now_epoch - last_epoch ))
     age_m=$(( age_s / 60 ))
@@ -142,6 +218,15 @@ echo "watcher.health"
 echo ""
 echo "  $health_icon Health: $health"
 echo ""
+
+# Source honesty
+if [[ "$READ_SOURCE" == "remote" ]]; then
+  echo "  Source:         $SOURCE_NODE (remote fetch via $TRANSPORT_PATH)"
+  echo "  Fetched at:     $FETCHED_AT"
+else
+  echo "  Source:         $SOURCE_NODE (local)"
+fi
+echo ""
 echo "  Last run:       $last_run_at ($age_display)"
 echo "  Last status:    $last_run_status"
 echo "  Last success:   $last_success"
@@ -153,22 +238,12 @@ echo "  Threshold degraded: $thresh_degraded failures"
 echo "  Threshold intervention: $thresh_intervention failures"
 echo ""
 
-# Intervention check
-intervention_dir="${SPINE_STATE}/interventions"
-pending_interventions=0
-if [[ -d "$intervention_dir" ]]; then
-  while IFS= read -r f; do
-    [[ -f "$f" ]] || continue
-    disp="$(grep -m1 '^disposition:' "$f" 2>/dev/null | awk '{print $2}' || true)"
-    if [[ "$disp" == *pending* ]]; then
-      pending_interventions=$((pending_interventions + 1))
-    fi
-  done < <(find "$intervention_dir" -name 'INTERVENTION-watcher-*.yaml' -type f 2>/dev/null || true)
-fi
+# Intervention check — read from state JSON (embedded at write time by alerting-probe-cycle).
+# This works for both local and remote reads; no local filesystem scan needed.
+pending_interventions="$(jq -r '.pending_interventions // 0' <<<"$state")"
 
 if (( pending_interventions > 0 )); then
   echo "  PENDING INTERVENTIONS: $pending_interventions"
-  echo "  Dir: $intervention_dir"
   echo ""
 fi
 
@@ -183,4 +258,8 @@ jq -r --argjson n "$SHOW_CYCLES" '.cycles[:$n][] | [.at, .status, (.duration_s|t
     done
 
 echo ""
-echo "  State file: $CYCLE_STATE"
+if [[ "$READ_SOURCE" == "remote" ]]; then
+  echo "  State source: $WATCHER_SSH_TARGET (remote via $TRANSPORT_PATH)"
+else
+  echo "  State file: $CYCLE_STATE"
+fi

@@ -138,38 +138,9 @@ _watcher_write_cycle_state() {
   updated_cycles="$(jq -c --argjson new "$new_cycle" --argjson max "$WATCHER_CYCLE_MAX" \
     '[$new] + . | .[:$max]' <<<"$prev_cycles")"
 
-  jq -n \
-    --arg node "watcher_node" \
-    --arg program "alerting-probe-cycle" \
-    --arg last_run_at "$cycle_at" \
-    --arg last_run_status "$cycle_status" \
-    --arg last_success_at "$new_last_success" \
-    --arg last_failure_at "$new_last_failure" \
-    --argjson consecutive_successes "$new_consecutive_successes" \
-    --argjson consecutive_failures "$new_consecutive_failures" \
-    --arg health "$health" \
-    --argjson cycles "$updated_cycles" \
-    --argjson threshold_degraded "$WATCHER_THRESHOLD_DEGRADED" \
-    --argjson threshold_intervention "$WATCHER_THRESHOLD_INTERVENTION" \
-    '{
-      node: $node,
-      program: $program,
-      last_run_at: $last_run_at,
-      last_run_status: $last_run_status,
-      last_success_at: $last_success_at,
-      last_failure_at: (if $last_failure_at == "null" then null else $last_failure_at end),
-      consecutive_successes: $consecutive_successes,
-      consecutive_failures: $consecutive_failures,
-      health: $health,
-      cycles: $cycles,
-      threshold: {
-        failure_count_for_degraded: $threshold_degraded,
-        failure_count_for_intervention: $threshold_intervention
-      }
-    }' > "${WATCHER_CYCLE_STATE}.tmp" && mv "${WATCHER_CYCLE_STATE}.tmp" "$WATCHER_CYCLE_STATE"
-
   # Threshold-based intervention birth: if consecutive failures cross the
   # intervention threshold, scaffold a governed intervention artifact.
+  # This runs BEFORE state write so the pending count is accurate.
   if (( new_consecutive_failures == WATCHER_THRESHOLD_INTERVENTION )); then
     spine_enqueue_email_intent \
       "watcher-self-health" \
@@ -199,6 +170,53 @@ disposition: "pending"
 INTERVENTION
     echo "[alerting-probe-cycle] INTERVENTION scaffolded: ${intervention_file}"
   fi
+
+  # Count pending interventions (after any new one was created above)
+  local intervention_dir="${SPINE_STATE:-${HOME}/code/.runtime/spine/state}/interventions"
+  local pending_count=0
+  if [[ -d "$intervention_dir" ]]; then
+    while IFS= read -r _f; do
+      [[ -f "$_f" ]] || continue
+      local _disp
+      _disp="$(grep -m1 '^disposition:' "$_f" 2>/dev/null | awk '{print $2}' || true)"
+      if [[ "$_disp" == *pending* ]]; then
+        pending_count=$((pending_count + 1))
+      fi
+    done < <(find "$intervention_dir" -name 'INTERVENTION-watcher-*.yaml' -type f 2>/dev/null || true)
+  fi
+
+  # Write cycle state with embedded intervention count
+  jq -n \
+    --arg node "watcher_node" \
+    --arg program "alerting-probe-cycle" \
+    --arg last_run_at "$cycle_at" \
+    --arg last_run_status "$cycle_status" \
+    --arg last_success_at "$new_last_success" \
+    --arg last_failure_at "$new_last_failure" \
+    --argjson consecutive_successes "$new_consecutive_successes" \
+    --argjson consecutive_failures "$new_consecutive_failures" \
+    --arg health "$health" \
+    --argjson cycles "$updated_cycles" \
+    --argjson threshold_degraded "$WATCHER_THRESHOLD_DEGRADED" \
+    --argjson threshold_intervention "$WATCHER_THRESHOLD_INTERVENTION" \
+    --argjson pending_interventions "$pending_count" \
+    '{
+      node: $node,
+      program: $program,
+      last_run_at: $last_run_at,
+      last_run_status: $last_run_status,
+      last_success_at: $last_success_at,
+      last_failure_at: (if $last_failure_at == "null" then null else $last_failure_at end),
+      consecutive_successes: $consecutive_successes,
+      consecutive_failures: $consecutive_failures,
+      health: $health,
+      pending_interventions: $pending_interventions,
+      cycles: $cycles,
+      threshold: {
+        failure_count_for_degraded: $threshold_degraded,
+        failure_count_for_intervention: $threshold_intervention
+      }
+    }' > "${WATCHER_CYCLE_STATE}.tmp" && mv "${WATCHER_CYCLE_STATE}.tmp" "$WATCHER_CYCLE_STATE"
 }
 
 _watcher_exit_with_failure() {
