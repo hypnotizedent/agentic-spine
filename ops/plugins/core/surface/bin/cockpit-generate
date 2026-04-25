@@ -1756,6 +1756,7 @@ def operator_front_door_section(fd: dict) -> str:
 
     pending_i = int(approve.get("pending_ingress", 0) or 0)
     pending_h = int(approve.get("pending_handoffs", 0) or 0)
+    pending_reviews = int(approve.get("needs_review", 0) or 0)
     approve_total = int(approve.get("total", 0) or 0)
     if approve_total == 0:
         approve_count = "nothing pending"
@@ -1765,6 +1766,8 @@ def operator_front_door_section(fd: dict) -> str:
             ap.append(f"{pending_i} ingress")
         if pending_h:
             ap.append(f"{pending_h} handoff{'s' if pending_h != 1 else ''}")
+        if pending_reviews:
+            ap.append(f"{pending_reviews} review{'s' if pending_reviews != 1 else ''}")
         approve_count = " &middot; ".join(ap)
 
     active_int = int(intervene.get("active_interventions", 0) or 0)
@@ -1779,14 +1782,21 @@ def operator_front_door_section(fd: dict) -> str:
         intervene_count = " &middot; ".join(ip)
 
     waves = int(execute.get("active_waves", 0) or 0)
-    exec_loops = int(execute.get("loops_needing_execution", 0) or 0)
+    active_delegations = int(execute.get("active_delegations", 0) or 0)
+    executing = int(execute.get("executing", 0) or 0)
+    picked_up = int(execute.get("picked_up", 0) or 0)
     if int(execute.get("total", 0) or 0) == 0:
         execute_count = "idle"
     else:
         ep = []
-        ep.append(f"{waves} wave{'s' if waves != 1 else ''}")
-        if exec_loops:
-            ep.append(f"{exec_loops} loops")
+        if waves:
+            ep.append(f"{waves} wave{'s' if waves != 1 else ''}")
+        if active_delegations:
+            ep.append(f"{active_delegations} delegation{'s' if active_delegations != 1 else ''}")
+        if executing:
+            ep.append(f"{executing} executing")
+        elif picked_up:
+            ep.append(f"{picked_up} picked up")
         execute_count = " &middot; ".join(ep)
 
     return f"""
@@ -1811,6 +1821,58 @@ def operator_front_door_section(fd: dict) -> str:
   </div>"""
 
 
+def standing_exception_section(payload: dict) -> str:
+    sph = payload.get("standing_program_health", {}) if isinstance(payload, dict) else {}
+    specimens = list(sph.get("v1_exception_specimens", []) or [])
+    if not specimens:
+        return ""
+
+    badge = {
+        "standing_healthy": ("var(--grn)", "HEALTHY"),
+        "standing_stale_or_degraded": ("var(--ylw)", "DRIFT"),
+        "auto_birthed_intervention_active": ("var(--red)", "INTERVENTION"),
+        "human_born_only": ("var(--blu)", "HUMAN"),
+    }
+    rows = ""
+    active = 0
+    for item in specimens:
+        state = str(item.get("operator_state") or "standing_healthy")
+        color, tag = badge.get(state, ("var(--t)", "UNKNOWN"))
+        label = str(item.get("label") or "").replace("com.ronny.", "")
+        active_triggers = ", ".join(item.get("active_trigger_types") or []) or "none"
+        if item.get("intervention_active"):
+            active += 1
+            governable = (
+                f"{item.get('intervention_id', '')} · "
+                f"{item.get('delegation_state', 'not_delegated')}"
+            )
+        elif item.get("drift_present"):
+            governable = "drift present · no intervention packet yet"
+        else:
+            governable = "no active exception packet"
+        rows += (
+            f'<div style="padding:.45rem 0;border-bottom:1px solid rgba(26,35,50,.5)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(label)}</span>'
+            f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;'
+            f'background:rgba(42,52,68,.75);color:{color}">{tag}</span>'
+            f'</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">enabled: {_h(", ".join(item.get("enabled_trigger_types") or []))}</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">active drift: {_h(active_triggers)}</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(governable)}</div>'
+            f'</div>'
+        )
+
+    return f"""
+    <section id="standing-exceptions-drilldown">
+      <div class="sh">Standing Exceptions</div>
+      <details open>
+        <summary>{len(specimens)} specimen(s) <span class="det-count">{active} intervention-active</span></summary>
+        <div class="det-body">{rows}</div>
+      </details>
+    </section>"""
+
+
 def generate(payload: dict | None = None) -> str:
     p = payload if isinstance(payload, dict) else build_payload(compact=False)
 
@@ -1833,6 +1895,7 @@ def generate(payload: dict | None = None) -> str:
     # Build sections
     sec_front_door = operator_front_door_section(p.get("operator_front_door", {}))
     sec_board = board_section(p)
+    sec_standing_exceptions = standing_exception_section(p)
     sec_waiting = waiting_section(p)
     sec_vision = operator_vision_section(
         p.get("operator_vision", {}),
@@ -1905,6 +1968,7 @@ def generate(payload: dict | None = None) -> str:
 
   <!-- Board: the glanceable operator surface -->
   {sec_board}
+  {sec_standing_exceptions}
 
   <!-- Drilldown: everything else, collapsed -->
   <hr class="drilldown-sep">

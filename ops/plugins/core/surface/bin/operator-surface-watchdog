@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
-"""operator-surface-watchdog — bounded liveness repair for the public surface.
+"""operator-surface-watchdog — bounded surface repair plus exception-birth poll.
 
-Checks the local operator surface leaf endpoints on :8900. If any fail, restart
-the server service, trigger a regenerate pass, and poll for recovery.
+Runs the bounded V1 standing-program exception birth check, triggers a surface
+regenerate pass so the payload stays current, then checks the local operator
+surface leaf endpoints on :8900. If any fail, restart the server service,
+trigger another regenerate pass, and poll for recovery.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib import error, request
 
 
 SERVER_SERVICE = "com.ronny.operator-surface-server.service"
 REGENERATE_SERVICE = "com.ronny.operator-surface-regenerate.service"
 DEFAULT_ENDPOINTS = ("/", "/mobile.json", "/payload.json")
+ROOT = Path(__file__).resolve().parents[5]
+STANDING_PROGRAM_BIRTH_BIN = (
+    ROOT / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "standing-program-intervention-birth"
+)
 
 
 def fail(message: str) -> "NoReturn":
@@ -70,6 +78,29 @@ def restart_services() -> None:
         fail(f"failed to start {REGENERATE_SERVICE}: {detail}")
 
 
+def run_birth_check() -> tuple[bool, dict[str, object]]:
+    proc = subprocess.run(
+        ["python3", str(STANDING_PROGRAM_BIRTH_BIN), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    stdout = (proc.stdout or "").strip()
+    if stdout:
+        try:
+            data = json.loads(stdout)
+            ok = proc.returncode == 0 and str(data.get("status") or "ok") != "error"
+            return ok, data if isinstance(data, dict) else {"status": "error", "stdout": stdout}
+        except Exception:
+            pass
+    return False, {
+        "status": "error",
+        "stdout": stdout,
+        "stderr": (proc.stderr or "").strip(),
+        "returncode": proc.returncode,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Repair operator surface if the public leaf stops serving")
     parser.add_argument("--host", default="127.0.0.1")
@@ -85,15 +116,40 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    birth_ok, birth_data = run_birth_check()
+    birth_error = ""
+    print("operator-surface-watchdog")
+    if birth_ok:
+        print(
+            "exception_birth: "
+            f"evaluated={birth_data.get('evaluated', 0)} "
+            f"birthed={birth_data.get('birthed', 0)} "
+            f"locked={birth_data.get('locked', 0)}"
+        )
+        regenerate = run_systemctl("start", REGENERATE_SERVICE)
+        if regenerate.returncode != 0:
+            birth_ok = False
+            birth_error = (regenerate.stderr or regenerate.stdout or "unknown error").strip()
+            print(f"exception_birth: regenerate start failed: {birth_error}")
+    else:
+        birth_error = str(
+            birth_data.get("error")
+            or birth_data.get("stderr")
+            or birth_data.get("stdout")
+            or "birth check failed"
+        )
+        print(f"exception_birth: FAIL {birth_error}")
+
     endpoints = tuple(str(path) for path in args.paths)
     ok, lines = probe(args.host, args.port, endpoints, args.probe_timeout)
-    print("operator-surface-watchdog")
     print(f"server_service: {SERVER_SERVICE} ({service_state(SERVER_SERVICE)})")
     print(f"regenerate_service: {REGENERATE_SERVICE} ({service_state(REGENERATE_SERVICE)})")
     for line in lines:
         print(f"probe: {line}")
 
     if ok:
+        if not birth_ok:
+            fail(f"surface healthy but autonomous exception birth degraded: {birth_error}")
         print("status: PASS")
         return 0
 
@@ -109,6 +165,8 @@ def main() -> int:
         if ok:
             print(f"server_service: {SERVER_SERVICE} ({service_state(SERVER_SERVICE)})")
             print(f"regenerate_service: {REGENERATE_SERVICE} ({service_state(REGENERATE_SERVICE)})")
+            if not birth_ok:
+                fail(f"surface repaired but autonomous exception birth degraded: {birth_error}")
             print("status: REPAIRED")
             return 0
 

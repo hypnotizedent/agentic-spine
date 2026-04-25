@@ -5842,15 +5842,17 @@ gates:
   name: intervention-hygiene
   category: ssot-hygiene
   gate_class: invariant
-  description: All intervention YAML files in $SPINE_STATE/interventions/ must have required fields (intervention_id,
-    label, trigger_type, disposition, triggered_at_utc) with valid values. disposition must be active/resolved/dismissed.
-    trigger_type must be stale/failure/never_run/unreachable.
+  description: All intervention YAML files in $SPINE_STATE/interventions/ must match the bounded V1 schema
+    (intervention_id, created_at, last_observed_at, disposition, escalation_state, source_label, birth_mode,
+    intended_node_role, source_node, trigger_type, dedupe_key, evidence_surface, evidence_ref, observed_status,
+    observed_counts, suggested_actions). dedupe_key must match source_label::trigger_type.
   severity: high
   ring: standard
   domain: spine
   check_script: surfaces/verify/d432-intervention-hygiene.sh
-  fix_hint: Fix the offending YAML in $SPINE_STATE/interventions/. Required fields — intervention_id, label, trigger_type,
-    disposition, triggered_at_utc. Valid dispositions — active, resolved, dismissed.
+  fix_hint: Fix the offending YAML in $SPINE_STATE/interventions/ to the V1 intervention schema. Use
+    the accepted trigger types (threshold_breach, stale_failure, missed_heartbeat, repeated_degraded) and
+    a dedupe_key of <source_label>::<trigger_type>.
   inline: false
 - id: D433
   name: delegation-state-hygiene
@@ -5865,4 +5867,18 @@ gates:
   check_script: surfaces/verify/d433-delegation-state-hygiene.sh
   fix_hint: Fix the offending YAML in $SPINE_STATE/delegations/. Required fields — delegation_id, loop_id, packet_id,
     delegation_state, delegated_at_utc. Valid states — delegated, picked_up, executing, landed, needs_review, cancelled.
+  inline: false
+- id: D434
+  name: autonomous-exception-birth-v1
+  category: runtime-behavior
+  gate_class: regression
+  description: The bounded V1 exception-birth lane must evaluate the two allowed standing_program specimens,
+    birth exactly one intervention packet per label::trigger_type, suppress duplicates while the packet remains
+    open, clear the lock after terminal disposition, and surface intervention-active state over raw degraded telemetry.
+  severity: high
+  ring: standard
+  domain: spine
+  check_script: surfaces/verify/d434-autonomous-exception-birth-v1.sh
+  fix_hint: Re-run the bounded V1 birth path against the two allowed labels only and inspect the intervention
+    packet schema, observation lock state, delegation-readiness state, and operator surface specimen states.
   inline: false

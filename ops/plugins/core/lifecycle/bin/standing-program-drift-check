@@ -1,112 +1,31 @@
 #!/usr/bin/env python3
-"""standing-program-drift-check — evaluate standing program health via proof channels.
+"""standing-program-drift-check — evaluate bounded V1 standing-program drift."""
 
-Reads launchd.scheduler.registry.yaml for all labels with state=active and
-birth_mode=standing_program, evaluates each proof_channel, and classifies health.
-
-Usage:
-  standing-program-drift-check [--json] [--label LABEL]
-
-Options:
-  --json         Output as JSON (default is human-readable table)
-  --label LABEL  Evaluate only one specific label
-"""
+from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    import yaml
-except ImportError:
-    print("FAIL: pyyaml not available. Install with: pip3 install pyyaml", file=sys.stderr)
-    sys.exit(2)
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import standing_program_exception_v1 as spx
 
 
-# ---------------------------------------------------------------------------
-# Path resolution
-# ---------------------------------------------------------------------------
-
-def resolve_spine_repo():
-    """Resolve SPINE_REPO from env or relative to this script."""
-    env_repo = os.environ.get("SPINE_REPO")
-    if env_repo and os.path.isdir(env_repo):
-        return env_repo
-    # Script is at ops/plugins/core/lifecycle/bin/<this>
-    return str(Path(__file__).resolve().parent.parent.parent.parent.parent.parent)
+HEALTH_SYMBOLS = {
+    "healthy": "[OK]",
+    "stale": "[STALE]",
+    "failed": "[FAIL]",
+    "unreachable": "[UNREACH]",
+    "unknown": "[?]",
+}
 
 
-def resolve_spine_state():
-    return os.environ.get("SPINE_STATE", os.path.expanduser("~/code/.runtime/spine/state"))
-
-
-def resolve_spine_logs():
-    return os.environ.get("SPINE_LOGS", os.path.expanduser("~/code/.runtime/spine/logs"))
-
-
-SPINE_REPO = resolve_spine_repo()
-SPINE_STATE = resolve_spine_state()
-SPINE_LOGS = resolve_spine_logs()
-REGISTRY_PATH = os.path.join(SPINE_REPO, "ops/bindings/launchd.scheduler.registry.yaml")
-SSH_RESOLVE_SCRIPT = os.path.join(SPINE_REPO, "ops/lib/ssh-resolve.sh")
-
-
-# ---------------------------------------------------------------------------
-# Registry loading
-# ---------------------------------------------------------------------------
-
-def load_standing_programs(filter_label=None):
-    """Load active standing_program entries from the registry."""
-    with open(REGISTRY_PATH, "r") as f:
-        registry = yaml.safe_load(f)
-
-    programs = []
-    for entry in registry.get("labels", []):
-        if entry.get("state") != "active":
-            continue
-        if entry.get("birth_mode") != "standing_program":
-            continue
-        if filter_label and entry.get("label") != filter_label:
-            continue
-        programs.append(entry)
-    return programs
-
-
-# ---------------------------------------------------------------------------
-# Time helpers
-# ---------------------------------------------------------------------------
-
-def parse_utc_iso(ts_str):
-    """Parse an ISO8601 UTC timestamp string to a datetime object."""
-    if not ts_str:
-        return None
-    # Handle both 'Z' suffix and '+00:00'
-    ts_str = ts_str.replace("Z", "+00:00")
-    try:
-        return datetime.fromisoformat(ts_str)
-    except (ValueError, TypeError):
-        return None
-
-
-def utc_now():
-    return datetime.now(timezone.utc)
-
-
-def age_seconds(dt):
-    """Seconds since dt (UTC)."""
-    if dt is None:
-        return None
-    return int((utc_now() - dt).total_seconds())
-
-
-def human_age(seconds):
-    """Human-readable age string."""
+def _human_age(seconds: int | None) -> str:
     if seconds is None:
-        return "unknown"
+        return "-"
     if seconds < 60:
         return f"{seconds}s ago"
     if seconds < 3600:
@@ -116,395 +35,100 @@ def human_age(seconds):
     return f"{seconds // 86400}d ago"
 
 
-# ---------------------------------------------------------------------------
-# SSH remote file fetch (mirrors watcher-health pattern lines 79-117)
-# ---------------------------------------------------------------------------
-
-def ssh_fetch_file(host, remote_path, timeout=8):
-    """Fetch a remote file's contents over SSH using ssh-resolve.sh.
-
-    Shells out to bash, sources ssh-resolve.sh, and uses the same
-    ssh_resolve_ssh_host_with_fallback + ssh_resolve_user +
-    ssh_resolve_machine_identity_opts pattern as watcher-health.
-    """
-    bash_script = f"""
-set -euo pipefail
-source "{SSH_RESOLVE_SCRIPT}"
-
-_resolve_result="$(ssh_resolve_ssh_host_with_fallback "{host}" 5 2>/dev/null)" || _resolve_result=""
-_resolved_ip="$(echo "$_resolve_result" | awk '{{print $1}}')"
-_path_used="$(echo "$_resolve_result" | awk '{{print $2}}')"
-
-if [[ -z "$_resolve_result" || "$_path_used" == "unreachable" ]]; then
-    exit 1
-fi
-
-_ssh_user="$(ssh_resolve_user "{host}")"
-_identity_opts="$(ssh_resolve_machine_identity_opts "{host}" 2>/dev/null)" || true
-
-_ssh_cmd=(ssh "${{SSH_BATCH_OPTS[@]}}")
-if [[ -n "$_identity_opts" ]]; then
-    _ssh_cmd+=($_identity_opts)
-fi
-_ssh_cmd+=("${{_ssh_user}}@${{_resolved_ip}}")
-
-"${{_ssh_cmd[@]}}" "cat {remote_path} 2>/dev/null" 2>/dev/null
-"""
-    try:
-        result = subprocess.run(
-            ["bash", "-c", bash_script],
-            capture_output=True, text=True, timeout=timeout
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Proof channel evaluators
-# ---------------------------------------------------------------------------
-
-def evaluate_heartbeat(proof_channel):
-    """Evaluate a heartbeat proof channel."""
-    threshold = proof_channel.get("stale_threshold_seconds", 300)
-    file_path = proof_channel.get("path", "")
-
-    # Try local state root first
-    local_path = os.path.join(
-        SPINE_STATE,
-        "inputs/operator-ingress/.auto-metabolizer-heartbeat.json"
-    )
-
-    content = None
-    if os.path.isfile(local_path):
-        try:
-            with open(local_path, "r") as f:
-                content = f.read()
-        except OSError:
-            pass
-
-    # If not local, try the declared path directly (may be local on execution host)
-    if content is None and file_path and os.path.isfile(file_path):
-        try:
-            with open(file_path, "r") as f:
-                content = f.read()
-        except OSError:
-            pass
-
-    # If still nothing and there's a remote host, try SSH
-    if content is None:
-        host = proof_channel.get("host")
-        if host and file_path:
-            content = ssh_fetch_file(host, file_path)
-
-    if content is None:
-        return "unreachable", None, threshold, "heartbeat file not found"
-
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        return "unreachable", None, threshold, "heartbeat file unreadable"
-
-    heartbeat_at = parse_utc_iso(data.get("heartbeat_at"))
-    if heartbeat_at is None:
-        return "unreachable", None, threshold, "no heartbeat_at field"
-
-    age = age_seconds(heartbeat_at)
-    if age > threshold:
-        return "stale", heartbeat_at, threshold, f"last heartbeat {human_age(age)}"
-    return "healthy", heartbeat_at, threshold, f"last heartbeat {human_age(age)}"
-
-
-def evaluate_cycle_state(proof_channel):
-    """Evaluate a cycle_state proof channel."""
-    threshold = proof_channel.get("stale_threshold_seconds", 1200)
-    host = proof_channel.get("host", "")
-    remote_path = proof_channel.get("path", "")
-
-    # Try local first
-    local_path = os.path.join(SPINE_LOGS, "watcher-cycle-state.json")
-    content = None
-
-    if os.path.isfile(local_path):
-        try:
-            with open(local_path, "r") as f:
-                content = f.read()
-        except OSError:
-            pass
-
-    # Try SSH to remote host
-    if content is None and host:
-        fetch_path = remote_path if remote_path else "/opt/spine-logs/watcher-cycle-state.json"
-        content = ssh_fetch_file(host, fetch_path)
-
-    if content is None:
-        return "unreachable", None, threshold, "cycle state file not found"
-
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        return "unreachable", None, threshold, "cycle state file unreadable"
-
-    cycles = data.get("cycles", [])
-    if not cycles:
-        return "never_run", None, threshold, "no cycles recorded"
-
-    last_cycle = cycles[0]  # cycles array: most recent first
-    completed_at = parse_utc_iso(last_cycle.get("completed_at") or last_cycle.get("at"))
-    if completed_at is None:
-        return "unreachable", None, threshold, "no timestamp in last cycle"
-
-    age = age_seconds(completed_at)
-    if age > threshold:
-        return "stale", completed_at, threshold, f"last cycle {human_age(age)}"
-    return "healthy", completed_at, threshold, f"last cycle {human_age(age)}"
-
-
-def evaluate_runtime_telemetry(proof_channel):
-    """Evaluate a runtime_telemetry proof channel."""
-    threshold = proof_channel.get("stale_threshold_seconds", 90000)
-    label_match = proof_channel.get("label_match", "")
-
-    # Read local runtime-jobs.ndjson
-    ndjson_path = os.path.join(SPINE_LOGS, "runtime-jobs.ndjson")
-
-    if not os.path.isfile(ndjson_path):
-        # Try SSH if host is specified
-        host = proof_channel.get("host")
-        remote_path = proof_channel.get("path", "")
-        if host and remote_path:
-            content = ssh_fetch_file(host, remote_path, timeout=10)
-            if content is None:
-                return "unreachable", None, threshold, "runtime-jobs.ndjson not found"
-        else:
-            return "unreachable", None, threshold, "runtime-jobs.ndjson not found locally"
-    else:
-        try:
-            with open(ndjson_path, "r") as f:
-                content = f.read()
-        except OSError:
-            return "unreachable", None, threshold, "runtime-jobs.ndjson unreadable"
-
-    if not content or not content.strip():
-        return "never_run", None, threshold, "runtime-jobs.ndjson is empty"
-
-    # Find the most recent entry matching label_match in job_name
-    matching_entry = None
-    for line in reversed(content.strip().split("\n")):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        job_name = entry.get("job_name", "")
-        if label_match and label_match in job_name:
-            matching_entry = entry
-            break
-
-    if matching_entry is None:
-        return "never_run", None, threshold, f"no entry matching '{label_match}'"
-
-    ended_at = parse_utc_iso(matching_entry.get("ended_at"))
-    if ended_at is None:
-        return "unreachable", None, threshold, "no ended_at in matching entry"
-
-    age = age_seconds(ended_at)
-    exit_code = matching_entry.get("exit_code")
-
-    if exit_code is not None and int(exit_code) != 0:
-        return "failed", ended_at, threshold, f"exit_code={exit_code}, {human_age(age)}"
-
-    if age > threshold:
-        return "stale", ended_at, threshold, f"last run {human_age(age)}"
-
-    return "healthy", ended_at, threshold, f"last run {human_age(age)}"
-
-
-def evaluate_systemd_journal(proof_channel):
-    """Evaluate a systemd_journal proof channel.
-
-    # TODO: implement systemd_journal evaluation
-    For the first cut, mark as unknown since systemd journal requires complex parsing.
-    """
-    return "unknown", None, proof_channel.get("stale_threshold_seconds", 300), \
-        "systemd_journal evaluation not yet implemented"
-
-
-# ---------------------------------------------------------------------------
-# Main evaluation
-# ---------------------------------------------------------------------------
-
-EVALUATORS = {
-    "heartbeat": evaluate_heartbeat,
-    "cycle_state": evaluate_cycle_state,
-    "runtime_telemetry": evaluate_runtime_telemetry,
-    "systemd_journal": evaluate_systemd_journal,
-}
-
-
-def evaluate_program(entry):
-    """Evaluate a single standing program and return its health record."""
-    label = entry.get("label", "unknown")
-    proof_channel = entry.get("proof_channel")
-
-    if not proof_channel:
-        return {
-            "label": label,
-            "birth_mode": entry.get("birth_mode", ""),
-            "proof_channel_type": None,
-            "proof_channel_host": None,
-            "health": "unknown",
-            "last_evidence_at_utc": None,
-            "staleness_seconds": None,
-            "stale_threshold_seconds": None,
-            "detail": "no proof_channel configured",
-        }
-
-    channel_type = proof_channel.get("type", "")
-    channel_host = proof_channel.get("host", "")
-    evaluator = EVALUATORS.get(channel_type)
-
-    if evaluator is None:
-        health = "unknown"
-        last_dt = None
-        threshold = proof_channel.get("stale_threshold_seconds")
-        detail = f"unsupported proof_channel type: {channel_type}"
-    else:
-        health, last_dt, threshold, detail = evaluator(proof_channel)
-
-    staleness = age_seconds(last_dt) if last_dt else None
-
-    return {
-        "label": label,
-        "birth_mode": entry.get("birth_mode", ""),
-        "proof_channel_type": channel_type or None,
-        "proof_channel_host": channel_host or None,
-        "health": health,
-        "last_evidence_at_utc": last_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if last_dt else None,
-        "staleness_seconds": staleness,
-        "stale_threshold_seconds": threshold,
-        "detail": detail,
-    }
-
-
-def build_summary(results):
-    """Build a summary dict from evaluation results."""
+def _build_summary(results: list[dict]) -> dict[str, int]:
     summary = {
         "total": len(results),
         "healthy": 0,
         "stale": 0,
         "failed": 0,
         "unreachable": 0,
-        "never_run": 0,
         "unknown": 0,
+        "drift_present": 0,
+        "intervention_ready": 0,
     }
-    for r in results:
-        h = r["health"]
-        if h in summary:
-            summary[h] += 1
+    for row in results:
+        health = str(row.get("health") or "unknown")
+        if health in summary:
+            summary[health] += 1
+        else:
+            summary["unknown"] += 1
+        if row.get("drift_present"):
+            summary["drift_present"] += 1
+        if row.get("enabled_trigger_types"):
+            summary["intervention_ready"] += 1
     return summary
 
 
-# ---------------------------------------------------------------------------
-# Output formatters
-# ---------------------------------------------------------------------------
-
-HEALTH_SYMBOLS = {
-    "healthy": "[OK]",
-    "stale": "[STALE]",
-    "failed": "[FAIL]",
-    "unreachable": "[UNREACH]",
-    "never_run": "[NEVER]",
-    "unknown": "[?]",
-}
-
-
-def print_table(results, summary):
-    """Print human-readable table output."""
+def _print_table(results: list[dict], summary: dict[str, int]) -> None:
     print("standing-program-drift-check")
     print()
-
     if not results:
-        print("  No active standing programs found.")
+        print("  No V1 standing-program specimens found.")
         return
 
-    # Header
-    fmt = "  {:<50s} {:<10s} {:<18s} {:<12s} {}"
-    print(fmt.format("LABEL", "HEALTH", "TYPE", "AGE", "DETAIL"))
-    print(fmt.format("-" * 50, "-" * 10, "-" * 18, "-" * 12, "-" * 30))
+    fmt = "  {:<42s} {:<10s} {:<24s} {:<12s} {}"
+    print(fmt.format("LABEL", "HEALTH", "ENABLED TRIGGERS", "AGE", "DETAIL"))
+    print(fmt.format("-" * 42, "-" * 10, "-" * 24, "-" * 12, "-" * 32))
 
-    for r in results:
-        label = r["label"]
-        if len(label) > 48:
-            label = label[:45] + "..."
-        health_str = HEALTH_SYMBOLS.get(r["health"], r["health"])
-        ch_type = r["proof_channel_type"] or "none"
-        age_str = human_age(r["staleness_seconds"]) if r["staleness_seconds"] is not None else "-"
-        detail = r["detail"] or ""
-        print(fmt.format(label, health_str, ch_type, age_str, detail))
+    for row in results:
+        label = str(row.get("label") or "")
+        health = HEALTH_SYMBOLS.get(str(row.get("health") or "unknown"), "[?]")
+        triggers = ",".join(row.get("enabled_trigger_types") or []) or "none"
+        age = _human_age(row.get("staleness_seconds"))
+        detail = str(row.get("detail") or "")
+        print(fmt.format(label[:42], health, triggers[:24], age, detail))
+        active = list(row.get("active_trigger_types") or [])
+        if active:
+            print(f"    active: {', '.join(active)}")
 
     print()
-    print(f"  Summary: {summary['total']} programs — "
-          f"{summary['healthy']} healthy, {summary['stale']} stale, "
-          f"{summary['failed']} failed, {summary['unreachable']} unreachable, "
-          f"{summary['never_run']} never_run, {summary['unknown']} unknown")
-    print()
-
-
-def print_json(results, summary):
-    """Print JSON output."""
-    output = {
-        "evaluated_at_utc": utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "programs": results,
-        "summary": summary,
-    }
-    print(json.dumps(output, indent=2))
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Evaluate standing program health via proof channels."
+    print(
+        f"  Summary: {summary['total']} specimen(s) — "
+        f"{summary['healthy']} healthy, {summary['stale']} stale, "
+        f"{summary['failed']} failed, {summary['unreachable']} unreachable, "
+        f"{summary['drift_present']} drifting"
     )
-    parser.add_argument("--json", action="store_true",
-                        help="Output as JSON (default is human-readable table)")
-    parser.add_argument("--label", type=str, default=None,
-                        help="Evaluate only one specific label")
-    # Accept -- for spine arg passing convention
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Evaluate bounded V1 standing-program drift via accepted proof surfaces."
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON.",
+    )
+    parser.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        help="Evaluate one bounded V1 label. Repeat to check both explicitly.",
+    )
     args = parser.parse_args()
 
-    if not os.path.isfile(REGISTRY_PATH):
-        print(f"FAIL: registry not found: {REGISTRY_PATH}", file=sys.stderr)
-        sys.exit(2)
-
-    programs = load_standing_programs(filter_label=args.label)
-
-    if args.label and not programs:
-        msg = f"No active standing_program found with label: {args.label}"
+    try:
+        labels = spx.v1_labels(args.label or None)
+        results = spx.evaluate_labels(labels)
+    except Exception as exc:
         if args.json:
-            print(json.dumps({"error": msg}))
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
         else:
-            print(f"  {msg}", file=sys.stderr)
-        sys.exit(1)
+            print(f"standing-program-drift-check FAIL: {exc}", file=sys.stderr)
+        return 1
 
-    results = []
-    for prog in programs:
-        results.append(evaluate_program(prog))
-
-    summary = build_summary(results)
-
+    summary = _build_summary(results)
     if args.json:
-        print_json(results, summary)
+        print(json.dumps({
+            "evaluated_at_utc": spx.utc_now(),
+            "labels": labels,
+            "programs": results,
+            "summary": summary,
+        }, indent=2))
     else:
-        print_table(results, summary)
+        _print_table(results, summary)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
 # TRIAGE: Fix the offending YAML in $SPINE_STATE/interventions/.
-#         Required fields: intervention_id, label, trigger_type, disposition, triggered_at_utc.
-#         Valid dispositions: active, resolved, dismissed.
-#         Valid trigger_types: stale, failure, never_run, unreachable.
+#         Required fields: intervention_id, created_at, last_observed_at, disposition,
+#         escalation_state, source_label, birth_mode, intended_node_role, source_node,
+#         trigger_type, dedupe_key, evidence_surface, evidence_ref, observed_status,
+#         observed_counts, suggested_actions.
 set -euo pipefail
-
-# D432: Intervention Packet Hygiene
-# Enforces that all intervention YAML files in $SPINE_STATE/interventions/
-# have required fields with valid values.
-#
-# Authority: $SPINE_STATE/interventions/*.yaml
 
 SPINE_STATE="${SPINE_STATE:-${HOME}/code/.runtime/spine/state}"
 INTERVENTIONS_DIR="${SPINE_STATE}/interventions"
@@ -19,54 +14,63 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
 
 need python3
 
-# Clean state: no interventions directory is valid
 if [[ ! -d "$INTERVENTIONS_DIR" ]]; then
-  echo "D432 PASS: 0 intervention(s), all valid (0 active, 0 resolved, 0 dismissed)"
+  echo "D432 PASS: 0 intervention(s), all valid"
   exit 0
 fi
 
-# Guard: reject old-format bespoke intervention files (pre-generic schema)
-shopt -s nullglob
-old_format=("${INTERVENTIONS_DIR}"/INTERVENTION-watcher-*.yaml)
-shopt -u nullglob
-if [[ ${#old_format[@]} -gt 0 ]]; then
-  fail "${#old_format[@]} old-format INTERVENTION-watcher-* file(s) found. Migrate to INT-{label}--{trigger_type}.yaml generic schema."
-fi
-
-# Collect YAML files (generic schema only)
 shopt -s nullglob
 yaml_files=("${INTERVENTIONS_DIR}"/*.yaml "${INTERVENTIONS_DIR}"/*.yml)
 shopt -u nullglob
 
 if [[ ${#yaml_files[@]} -eq 0 ]]; then
-  echo "D432 PASS: 0 intervention(s), all valid (0 active, 0 resolved, 0 dismissed)"
+  echo "D432 PASS: 0 intervention(s), all valid"
   exit 0
 fi
 
-# Use python3 for YAML parsing (PyYAML available in spine environments)
 result=$(python3 - "${yaml_files[@]}" <<'PYEOF'
-import sys, os
-try:
-    import yaml
-except ImportError:
-    print("FAIL:missing dependency: PyYAML (python3 yaml)")
-    sys.exit(0)
+import os
+import sys
 
-REQUIRED_FIELDS = ["intervention_id", "label", "trigger_type", "disposition", "triggered_at_utc"]
-VALID_DISPOSITIONS = {"active", "resolved", "dismissed"}
-VALID_TRIGGER_TYPES = {"stale", "failure", "never_run", "unreachable"}
+import yaml
+
+REQUIRED_FIELDS = [
+    "intervention_id",
+    "created_at",
+    "last_observed_at",
+    "disposition",
+    "escalation_state",
+    "source_label",
+    "birth_mode",
+    "intended_node_role",
+    "source_node",
+    "trigger_type",
+    "dedupe_key",
+    "evidence_surface",
+    "evidence_ref",
+    "observed_status",
+    "observed_counts",
+    "suggested_actions",
+]
+VALID_DISPOSITIONS = {
+    "pending", "acknowledged", "escalated",
+    "landed", "cancelled", "resolved", "dismissed", "superseded",
+}
+VALID_TRIGGER_TYPES = {
+    "threshold_breach", "stale_failure", "missed_heartbeat", "repeated_degraded",
+}
 
 violations = []
-counts = {"active": 0, "resolved": 0, "dismissed": 0}
+counts = {}
 total = 0
 
 for fpath in sys.argv[1:]:
     fname = os.path.basename(fpath)
     try:
-        with open(fpath) as f:
+        with open(fpath, encoding="utf-8") as f:
             doc = yaml.safe_load(f)
-    except Exception as e:
-        violations.append(f"{fname}: invalid YAML — {e}")
+    except Exception as exc:
+        violations.append(f"{fname}: invalid YAML — {exc}")
         continue
 
     if not isinstance(doc, dict):
@@ -74,42 +78,56 @@ for fpath in sys.argv[1:]:
         continue
 
     total += 1
-
-    # Check required fields
-    missing = [k for k in REQUIRED_FIELDS if k not in doc or doc[k] is None or str(doc[k]).strip() == ""]
+    missing = [k for k in REQUIRED_FIELDS if k not in doc or doc[k] in (None, "", [])]
     if missing:
         violations.append(f"{fname}: missing required field(s): {', '.join(missing)}")
         continue
 
-    # Validate disposition
-    disposition = str(doc["disposition"]).strip()
+    disposition = str(doc.get("disposition", "")).strip()
     if disposition not in VALID_DISPOSITIONS:
-        violations.append(f"{fname}: disposition '{disposition}' not in ({', '.join(sorted(VALID_DISPOSITIONS))})")
+        violations.append(f"{fname}: invalid disposition '{disposition}'")
         continue
 
-    # Validate trigger_type
-    trigger_type = str(doc["trigger_type"]).strip()
+    trigger_type = str(doc.get("trigger_type", "")).strip()
     if trigger_type not in VALID_TRIGGER_TYPES:
-        violations.append(f"{fname}: trigger_type '{trigger_type}' not in ({', '.join(sorted(VALID_TRIGGER_TYPES))})")
+        violations.append(f"{fname}: invalid trigger_type '{trigger_type}'")
+        continue
+
+    if str(doc.get("birth_mode", "")).strip() != "standing_program":
+        violations.append(f"{fname}: birth_mode must be standing_program")
+        continue
+
+    dedupe_key = str(doc.get("dedupe_key", "")).strip()
+    source_label = str(doc.get("source_label", "")).strip()
+    expected_key = f"{source_label}::{trigger_type}"
+    if dedupe_key != expected_key:
+        violations.append(f"{fname}: dedupe_key '{dedupe_key}' does not match '{expected_key}'")
+        continue
+
+    if not isinstance(doc.get("observed_counts"), dict):
+        violations.append(f"{fname}: observed_counts must be a mapping")
+        continue
+
+    actions = doc.get("suggested_actions")
+    if not isinstance(actions, list) or not actions:
+        violations.append(f"{fname}: suggested_actions must be a non-empty list")
         continue
 
     counts[disposition] = counts.get(disposition, 0) + 1
 
 if violations:
     print(f"FAIL:{len(violations)} violation(s):")
-    for v in violations:
-        print(f"  - {v}")
+    for violation in violations:
+        print(f"  - {violation}")
 else:
-    a, r, d = counts["active"], counts["resolved"], counts["dismissed"]
-    print(f"PASS:{total} intervention(s), all valid ({a} active, {r} resolved, {d} dismissed)")
+    summary = ", ".join(f"{key}={counts[key]}" for key in sorted(counts)) or "no dispositions"
+    print(f"PASS:{total} intervention(s), all valid ({summary})")
 PYEOF
 )
 
 if [[ "$result" == FAIL:* ]]; then
-  msg="${result#FAIL:}"
-  echo "D432 FAIL: $msg" >&2
+  echo "D432 FAIL: ${result#FAIL:}" >&2
   exit 1
 fi
 
-msg="${result#PASS:}"
-echo "D432 PASS: $msg"
+echo "D432 PASS: ${result#PASS:}"

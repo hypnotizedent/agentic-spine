@@ -1,335 +1,229 @@
 #!/usr/bin/env python3
-"""Birth intervention packets from standing-program drift check results.
+"""standing-program-intervention-birth — bounded V1 autonomous exception birth."""
 
-Reads drift check JSON (from standing-program-drift-check --json), evaluates
-each program's health classification, and births/resolves intervention packets
-under $SPINE_STATE/interventions/.
-
-Usage:
-    standing-program-intervention-birth [--dry-run] [--drift-json FILE] [--stdin]
-
-Flags:
-    --dry-run        Show what would be birthed without writing
-    --drift-json F   Read drift check output from file
-    --stdin          Read drift check output from stdin (default if no --drift-json)
-    -h, --help       Show this help
-
-Trigger type mapping:
-    stale     -> stale
-    failed    -> failure
-    never_run -> never_run
-    unreachable -> unreachable
-    healthy   -> skip (no intervention)
-    unknown   -> skip (no intervention)
-"""
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-import yaml
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
-def spine_state() -> Path:
-    return Path(
-        os.environ.get(
-            "SPINE_STATE",
-            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
-        )
-    )
+import standing_program_exception_v1 as spx
 
 
-def interventions_dir() -> Path:
-    return spine_state() / "interventions"
+def _normalize_programs(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        programs = data
+    elif isinstance(data, dict) and isinstance(data.get("programs"), list):
+        programs = data["programs"]
+    else:
+        raise ValueError("expected a JSON array or an object with a 'programs' key")
+
+    results: list[dict[str, Any]] = []
+    for row in programs:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or "").strip()
+        if label not in spx.V1_ALLOWED_LABELS:
+            raise ValueError(f"label outside bounded V1 lane: {label}")
+        results.append(row)
+    return results
 
 
-# ---------------------------------------------------------------------------
-# Trigger-type mapping
-# ---------------------------------------------------------------------------
-
-HEALTH_TO_TRIGGER: dict[str, str | None] = {
-    "stale": "stale",
-    "failed": "failure",
-    "never_run": "never_run",
-    "unreachable": "unreachable",
-    "healthy": None,
-    "unknown": None,
-}
-
-
-# ---------------------------------------------------------------------------
-# Intervention file helpers
-# ---------------------------------------------------------------------------
-
-def sanitize_label(label: str) -> str:
-    """Sanitize a label for use in filenames (keep dots and hyphens)."""
-    return label.replace("/", "-").replace(" ", "-")
-
-
-def intervention_filename(label: str, trigger_type: str) -> str:
-    return f"INT-{sanitize_label(label)}--{trigger_type}.yaml"
-
-
-def intervention_id(label: str, trigger_type: str) -> str:
-    return f"INT-{sanitize_label(label)}--{trigger_type}"
-
-
-def read_intervention(path: Path) -> dict | None:
-    """Read an existing intervention YAML file, returning None if missing."""
-    if not path.is_file():
-        return None
-    try:
-        with open(path) as f:
-            return yaml.safe_load(f)
-    except Exception:
-        return None
-
-
-def write_intervention(path: Path, data: dict, dry_run: bool = False) -> None:
-    """Write intervention YAML, creating parent dirs as needed."""
-    if dry_run:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
-    path.write_text(content)
-    os.chmod(path, 0o644)
-
-
-# ---------------------------------------------------------------------------
-# Timestamp helpers
-# ---------------------------------------------------------------------------
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def format_ts(ts: str) -> str:
-    """Pass through a timestamp string, ensuring it's quoted in YAML."""
-    return ts
-
-
-# ---------------------------------------------------------------------------
-# Core logic
-# ---------------------------------------------------------------------------
-
-def build_intervention_record(program: dict, trigger_type: str, now: str) -> dict:
-    """Build a new intervention record from a drift check program entry."""
-    label = program["label"]
-    iid = intervention_id(label, trigger_type)
-
-    record: dict = {
-        "intervention_id": iid,
-        "label": label,
+def build_intervention_record(program: dict[str, Any], trigger_type: str, now: str) -> dict[str, Any]:
+    trigger = dict((program.get("trigger_evaluations") or {}).get(trigger_type) or {})
+    label = str(program.get("label") or "")
+    return {
+        "intervention_id": spx.intervention_id(label, trigger_type),
+        "created_at": now,
+        "last_observed_at": str(program.get("last_evidence_at_utc") or now),
+        "disposition": "pending",
+        "escalation_state": "packet_only",
+        "source_label": label,
         "birth_mode": "standing_program",
+        "intended_node_role": str(program.get("intended_node_role") or ""),
+        "source_node": str(program.get("source_node") or ""),
         "trigger_type": trigger_type,
-        "disposition": "active",
-        "triggered_at_utc": now,
+        "dedupe_key": spx.dedupe_key(label, trigger_type),
+        "evidence_surface": str(trigger.get("evidence_surface") or program.get("evidence_surface") or ""),
+        "evidence_ref": str(trigger.get("evidence_ref") or program.get("evidence_ref") or ""),
+        "observed_status": str(trigger.get("observed_status") or program.get("observed_status") or ""),
+        "observed_counts": dict(trigger.get("observed_counts") or {}),
+        "suggested_actions": list(trigger.get("suggested_actions") or []),
+        "delegation_state": "not_delegated",
+        "delegation_id": None,
+        "linked_loop_id": None,
     }
 
-    # proof_channel — copy from program if present
-    if "proof_channel" in program:
-        record["proof_channel"] = program["proof_channel"]
 
-    # observed block
-    observed: dict = {
-        "health": program.get("health", "unknown"),
-    }
-    if "last_evidence_at_utc" in program:
-        observed["last_evidence_at_utc"] = program["last_evidence_at_utc"]
-    if "staleness_seconds" in program:
-        observed["staleness_seconds"] = program["staleness_seconds"]
-    if "detail" in program:
-        observed["detail"] = program["detail"]
-    # Fallback detail from health
-    if "detail" not in observed:
-        observed["detail"] = f"health classified as {program.get('health', 'unknown')}"
+def _load_programs(args: argparse.Namespace) -> list[dict[str, Any]]:
+    raw = ""
+    if args.drift_json:
+        raw = Path(args.drift_json).read_text(encoding="utf-8")
+    elif args.stdin or not sys.stdin.isatty():
+        raw = sys.stdin.read()
 
-    record["observed"] = observed
-    return record
+    if raw.strip():
+        return _normalize_programs(json.loads(raw))
+
+    labels = spx.v1_labels(args.label or None)
+    return spx.evaluate_labels(labels)
 
 
 def process_programs(
-    programs: list[dict],
+    programs: list[dict[str, Any]],
+    *,
+    state_root: str,
     dry_run: bool = False,
-) -> dict:
-    """Process drift check results and birth/resolve interventions.
-
-    Returns a summary dict with counts and action log.
-    """
-    now = utc_now()
-    idir = interventions_dir()
+) -> dict[str, Any]:
+    state = spx.load_observation_state(state_root)
     actions: list[str] = []
     birthed = 0
-    skipped = 0
-    resolved = 0
-    healthy_count = 0
+    locked = 0
+    healthy = 0
+    evaluated = 0
+    now = spx.utc_now()
 
-    # Collect labels that are healthy for auto-resolution
-    healthy_labels: set[str] = set()
-
-    for prog in programs:
-        label = prog.get("label", "")
-        health = prog.get("health", "unknown")
-        trigger_type = HEALTH_TO_TRIGGER.get(health)
-
-        if trigger_type is None:
-            # healthy or unknown — no intervention needed
-            healthy_count += 1
-            if health == "healthy":
-                healthy_labels.add(label)
+    for program in programs:
+        label = str(program.get("label") or "")
+        evaluated += 1
+        trigger_evaluations = dict(program.get("trigger_evaluations") or {})
+        if not trigger_evaluations:
+            healthy += 1
             continue
 
-        # Check dedupe
-        fname = intervention_filename(label, trigger_type)
-        fpath = idir / fname
-        existing = read_intervention(fpath)
+        for trigger_type in spx.V1_ALLOWED_LABELS.get(label, ()):
+            trigger = dict(trigger_evaluations.get(trigger_type) or {})
+            if not trigger.get("enabled"):
+                continue
 
-        if existing is not None and existing.get("disposition") == "active":
-            # Already tracked
-            iid = intervention_id(label, trigger_type)
-            actions.append(
-                f"[{now}] SKIP: {iid} (already active)"
-            )
-            skipped += 1
-            continue
+            key = spx.dedupe_key(label, trigger_type)
+            obs = dict(state.get(key) or {})
+            existing_path, existing = spx.find_open_intervention(state_root, label, trigger_type)
+            condition_met = bool(trigger.get("condition_met"))
+            required_observations = int(trigger.get("required_observations", 1) or 1)
 
-        # Birth new intervention (existing resolved/dismissed or doesn't exist)
-        record = build_intervention_record(prog, trigger_type, now)
-        write_intervention(fpath, record, dry_run=dry_run)
+            if existing_path is None and obs.get("locked"):
+                obs = {}
 
-        iid = record["intervention_id"]
-        detail_parts = [f"trigger={trigger_type}"]
-        if "staleness_seconds" in prog:
-            detail_parts.append(f"staleness={prog['staleness_seconds']}s")
-        actions.append(
-            f"[{now}] BIRTH: {iid} ({', '.join(detail_parts)})"
-        )
-        birthed += 1
+            if existing_path is not None:
+                obs["locked"] = True
 
-    # Auto-resolution: find active interventions for now-healthy labels
-    if idir.is_dir():
-        for label in healthy_labels:
-            prefix = f"INT-{sanitize_label(label)}--"
-            for fpath in sorted(idir.glob(f"{prefix}*.yaml")):
-                existing = read_intervention(fpath)
-                if existing is None:
-                    continue
-                if existing.get("disposition") != "active":
-                    continue
-                # Resolve it
-                existing["disposition"] = "resolved"
-                existing["resolved_at_utc"] = now
-                write_intervention(fpath, existing, dry_run=dry_run)
-                iid = existing.get("intervention_id", fpath.stem)
+            if not condition_met:
+                obs["confirmations"] = 0
+                obs["last_condition_met"] = False
+                if existing_path is None:
+                    obs["locked"] = False
+                state[key] = obs
+                continue
+
+            if existing_path is not None and existing is not None:
                 actions.append(
-                    f"[{now}] RESOLVE: {iid} (now healthy)"
+                    f"[{now}] LOCKED: {existing.get('intervention_id', existing_path.stem)}"
                 )
-                resolved += 1
+                obs["last_condition_met"] = True
+                obs["confirmations"] = max(int(obs.get("confirmations", 0) or 0), required_observations)
+                state[key] = obs
+                locked += 1
+                continue
+
+            if required_observations <= 1:
+                confirmations = 1
+                birth_now = True
+            else:
+                if obs.get("last_condition_met"):
+                    confirmations = int(obs.get("confirmations", 0) or 0) + 1
+                else:
+                    confirmations = 1
+                birth_now = confirmations >= required_observations
+
+            obs["last_condition_met"] = True
+            obs["confirmations"] = confirmations
+
+            if not birth_now:
+                actions.append(
+                    f"[{now}] OBSERVE: {label}::{trigger_type} confirmation {confirmations}/{required_observations}"
+                )
+                state[key] = obs
+                continue
+
+            record = build_intervention_record(program, trigger_type, now)
+            path = spx.interventions_dir(state_root) / spx.intervention_filename(label, trigger_type)
+            if not dry_run:
+                spx.atomic_write_yaml(path, record)
+
+            actions.append(
+                f"[{now}] BIRTH: {record['intervention_id']} ({label}::{trigger_type})"
+            )
+            obs["locked"] = True
+            state[key] = obs
+            birthed += 1
+
+        if not program.get("drift_present"):
+            healthy += 1
+
+    if not dry_run:
+        spx.save_observation_state(state_root, state)
 
     return {
-        "actions": actions,
+        "evaluated": evaluated,
         "birthed": birthed,
-        "skipped": skipped,
-        "resolved": resolved,
-        "healthy": healthy_count,
+        "locked": locked,
+        "healthy": healthy,
+        "actions": actions,
+        "surface_refresh_recommended": birthed > 0,
     }
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Birth intervention packets from standing-program drift check results."
+        description="Birth bounded V1 intervention packets for governed standing-program drift."
     )
+    parser.add_argument("--dry-run", action="store_true", help="Compute births without writing.")
+    parser.add_argument("--drift-json", default=None, help="Read drift-check JSON from a file.")
+    parser.add_argument("--stdin", action="store_true", help="Read drift-check JSON from stdin.")
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be birthed without writing",
+        "--label",
+        action="append",
+        default=[],
+        help="Restrict evaluation to one bounded V1 label. Repeat for both.",
     )
-    parser.add_argument(
-        "--drift-json",
-        type=str,
-        default=None,
-        help="Read drift check output from file",
+    parser.add_argument("--json", action="store_true", help="Emit JSON result.")
+    args = parser.parse_args()
+
+    state_root = os.environ.get(
+        "SPINE_STATE",
+        str(Path.home() / "code" / ".runtime" / "spine" / "state"),
     )
-    parser.add_argument(
-        "--stdin",
-        action="store_true",
-        help="Read drift check output from stdin (default if no --drift-json)",
-    )
-    # Cap framework passthrough separator
-    parser.add_argument("--", dest="passthrough_separator", nargs="?", help=argparse.SUPPRESS)
-    args, _unknown = parser.parse_known_args()
 
-    # Read input
-    raw: str = ""
-    if args.drift_json:
-        fpath = Path(args.drift_json)
-        if not fpath.is_file():
-            print(f"ERROR: drift-json file not found: {args.drift_json}", file=sys.stderr)
-            return 1
-        raw = fpath.read_text()
-    else:
-        # Default: read from stdin
-        if sys.stdin.isatty() and not args.stdin:
-            print(
-                "ERROR: no input. Use --drift-json FILE or pipe drift check output via stdin.",
-                file=sys.stderr,
-            )
-            return 1
-        raw = sys.stdin.read()
-
-    if not raw.strip():
-        print("ERROR: empty input", file=sys.stderr)
-        return 1
-
-    # Parse JSON
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"ERROR: invalid JSON input: {e}", file=sys.stderr)
+        programs = _load_programs(args)
+        result = process_programs(programs, state_root=state_root, dry_run=args.dry_run)
+    except Exception as exc:
+        if args.json:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"standing-program-intervention-birth FAIL: {exc}", file=sys.stderr)
         return 1
 
-    # Accept either a list of programs or a dict with a "programs" key
-    if isinstance(data, list):
-        programs = data
-    elif isinstance(data, dict) and "programs" in data:
-        programs = data["programs"]
+    if args.json:
+        print(json.dumps(result, indent=2))
     else:
+        if args.dry_run:
+            print("[DRY RUN]")
+        for line in result.get("actions", []):
+            print(line)
         print(
-            "ERROR: expected a JSON array or an object with a 'programs' key",
-            file=sys.stderr,
+            f"evaluated={result['evaluated']} birthed={result['birthed']} "
+            f"locked={result['locked']} healthy={result['healthy']}"
         )
-        return 1
-
-    if args.dry_run:
-        print("[DRY RUN]")
-        print()
-
-    result = process_programs(programs, dry_run=args.dry_run)
-
-    for action in result["actions"]:
-        print(action)
-
-    print(
-        f"Summary: {result['birthed']} birthed, "
-        f"{result['skipped']} skipped, "
-        f"{result['resolved']} resolved, "
-        f"{result['healthy']} healthy"
-    )
-
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

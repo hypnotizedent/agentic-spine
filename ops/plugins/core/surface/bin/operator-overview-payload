@@ -18,12 +18,16 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(REPO / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import standing_program_exception_v1 as spx
 STATE_ROOT = Path(
     os.environ.get(
         "SPINE_STATE",
@@ -285,6 +289,9 @@ def collect_spine_now(status: dict) -> dict:
         if isinstance(status.get("temporal_truth"), dict)
         else {}
     )
+    terminal_telemetry = status.get("terminal_telemetry", {})
+    if not isinstance(terminal_telemetry, dict):
+        terminal_telemetry = {}
     verify_status_raw = counts.get("verify_status", "unknown")
     verify_temporal_class = str(temporal_verify.get("temporal_class", "") or "")
     return {
@@ -296,6 +303,10 @@ def collect_spine_now(status: dict) -> dict:
         "open_gap_count": counts.get("open_gaps", 0),
         "active_wave_count": counts.get("active_waves", 0),
         "orphaned_wave_count": counts.get("orphaned_waves", 0),
+        "terminal_custody_status": str(terminal_telemetry.get("status", "") or "unknown"),
+        "mapped_open_loops": int(terminal_telemetry.get("mapped_open_loops", 0) or 0),
+        "fresh_terminals": int(terminal_telemetry.get("fresh_terminals", 0) or 0),
+        "fresh_custody_terminals": int(terminal_telemetry.get("fresh_custody_terminals", 0) or 0),
         "coherence_ok": not counts.get("coherence_attention", False),
     }
 
@@ -304,10 +315,14 @@ def collect_temporal_truth(status: dict) -> dict:
     temporal = status.get("temporal_truth", {})
     if not isinstance(temporal, dict):
         temporal = {}
+    terminal_telemetry = status.get("terminal_telemetry", {})
+    if not isinstance(terminal_telemetry, dict):
+        terminal_telemetry = {}
     return {
         "verify": temporal.get("verify", {}) if isinstance(temporal.get("verify"), dict) else {},
         "comms_queue": temporal.get("comms_queue", {}) if isinstance(temporal.get("comms_queue"), dict) else {},
         "daemons": temporal.get("daemons", {}) if isinstance(temporal.get("daemons"), dict) else {},
+        "terminal_custody": terminal_telemetry,
     }
 
 
@@ -721,6 +736,25 @@ def collect_terminal_telemetry(status: dict) -> dict:
     }
 
 
+def collect_delegations(status: dict) -> dict:
+    raw = status.get("delegations", {})
+    if not isinstance(raw, dict):
+        return {"available": False, "status": "unavailable", "count": 0, "active": 0, "by_state": {}}
+
+    by_state_raw = raw.get("by_state", {})
+    if not isinstance(by_state_raw, dict):
+        by_state_raw = {}
+
+    return {
+        "available": raw.get("status") == "ok",
+        "status": str(raw.get("status", "unknown") or "unknown"),
+        "count": int(raw.get("count", 0) or 0),
+        "active": int(raw.get("active", 0) or 0),
+        "by_state": {str(k): int(v or 0) for k, v in by_state_raw.items()},
+        "delegations": raw.get("delegations", []) if isinstance(raw.get("delegations"), list) else [],
+    }
+
+
 def collect_node_roles(status: dict) -> dict:
     daemons = status.get("daemons", {})
     exec_host = daemons.get("execution_host", {})
@@ -791,15 +825,37 @@ def collect_birth_mode_audit() -> dict:
     }
 
 
-def collect_standing_program_health() -> dict:
-    """Standing program health: birth_mode counts + active interventions."""
+def collect_standing_program_health(status: dict) -> dict:
+    """Standing program health: prefer status proof summary, fallback to local specimen reads."""
     registry_path = REPO / "ops" / "bindings" / "launchd.scheduler.registry.yaml"
     result: dict = {
-        "total": 0,
+        "status": "unknown",
+        "evaluated_at_utc": "",
+        "summary": {
+            "total": 0,
+            "healthy": 0,
+            "stale": 0,
+            "failed": 0,
+            "unreachable": 0,
+            "never_run": 0,
+            "unknown": 0,
+        },
         "birth_modes": {},
         "active_interventions": 0,
         "intervention_labels": [],
+        "v1_exception_specimens": [],
+        "v1_state_counts": {},
+        "v1_labels_by_state": {},
     }
+
+    status_sph = status.get("standing_program_health", {})
+    if isinstance(status_sph, dict) and isinstance(status_sph.get("summary"), dict):
+        result["status"] = str(status_sph.get("status", "") or "unknown")
+        result["evaluated_at_utc"] = str(status_sph.get("evaluated_at_utc", "") or "")
+        result["summary"] = dict(status_sph.get("summary") or {})
+        result["active_interventions"] = int(status_sph.get("active_interventions", 0) or 0)
+        result["intervention_labels"] = list(status_sph.get("intervention_labels", []) or [])
+        result["programs"] = list(status_sph.get("programs", []) or [])
 
     # --- scheduler registry ---
     if registry_path.is_file():
@@ -811,7 +867,6 @@ def collect_standing_program_health() -> dict:
             registry = {}
 
         labels = registry.get("labels", [])
-        result["total"] = len(labels)
         mode_counts: dict[str, int] = {}
         state_counts: dict[str, int] = {}
         for row in labels:
@@ -823,24 +878,28 @@ def collect_standing_program_health() -> dict:
         result["state_counts"] = state_counts
 
     # --- intervention packets ---
-    interventions_dir = STATE_ROOT / "interventions"
-    if interventions_dir.is_dir():
-        try:
-            import yaml as _yaml
-            for yf in sorted(interventions_dir.glob("*.yaml")) + sorted(interventions_dir.glob("*.yml")):
-                try:
-                    doc = _yaml.safe_load(yf.read_text()) or {}
-                except Exception:
-                    continue
-                if not isinstance(doc, dict):
-                    continue
-                disposition = str(doc.get("disposition", "")).strip()
-                if disposition == "active":
-                    result["active_interventions"] += 1
-                    label = doc.get("label", yf.stem)
-                    result["intervention_labels"].append(label)
-        except Exception:
-            pass
+    if not result["active_interventions"]:
+        for doc in spx.list_open_interventions(str(STATE_ROOT)):
+            result["active_interventions"] += 1
+            label = str(doc.get("_source_label") or doc.get("source_label") or doc.get("label") or "")
+            if label:
+                result["intervention_labels"].append(label)
+
+    try:
+        evaluations = spx.evaluate_labels()
+        specimens = spx.build_exception_specimen_states(evaluations, str(STATE_ROOT))
+        result["v1_exception_specimens"] = specimens
+        state_counts: dict[str, int] = {}
+        labels_by_state: dict[str, list[str]] = {}
+        for item in specimens:
+            state = str(item.get("operator_state") or "unknown")
+            label = str(item.get("label") or "")
+            state_counts[state] = state_counts.get(state, 0) + 1
+            labels_by_state.setdefault(state, []).append(label)
+        result["v1_state_counts"] = state_counts
+        result["v1_labels_by_state"] = labels_by_state
+    except Exception as exc:
+        result["v1_exception_error"] = str(exc)
 
     return result
 
@@ -848,27 +907,47 @@ def collect_standing_program_health() -> dict:
 def collect_operator_front_door(payload: dict) -> dict:
     """Aggregate existing payload data into the four-verb operator model."""
     sph = payload.get("standing_program_health", {})
+    delegations = payload.get("delegations", {})
     ws = payload.get("work_state", {})
     ov = payload.get("operator_vision", {})
-    loops_data = payload.get("active_loops", {})
     handoffs = payload.get("active_handoffs", {})
-    attention = payload.get("attention", [])
     terminal_telemetry = payload.get("terminal_telemetry", {})
+    specimens = list(sph.get("v1_exception_specimens", []) or [])
+    proof_summary = sph.get("summary", {}) if isinstance(sph.get("summary"), dict) else {}
+    delegation_states = delegations.get("by_state", {}) if isinstance(delegations.get("by_state"), dict) else {}
 
     # --- inspect ---
-    total_standing = int(sph.get("total", 0) or 0)
+    total_standing = int(proof_summary.get("total", 0) or 0)
     active_interventions = int(sph.get("active_interventions", 0) or 0)
-    degraded = active_interventions
-    healthy = max(0, total_standing - degraded)
-    # Count non-standing labels (human_session_only): birth_mode == "human_session"
+    if total_standing:
+        healthy = int(proof_summary.get("healthy", 0) or 0)
+        specimen_degraded = sum(int(proof_summary.get(key, 0) or 0) for key in ("stale", "failed", "unreachable", "never_run", "unknown"))
+        specimen_intervention_active = active_interventions
+        degraded = specimen_degraded + specimen_intervention_active
+    elif specimens:
+        specimen_healthy = sum(1 for item in specimens if item.get("operator_state") == "standing_healthy")
+        specimen_degraded = sum(1 for item in specimens if item.get("operator_state") == "standing_stale_or_degraded")
+        specimen_intervention_active = sum(1 for item in specimens if item.get("operator_state") == "auto_birthed_intervention_active")
+        degraded = specimen_degraded + specimen_intervention_active
+        healthy = specimen_healthy
+    else:
+        healthy = int(proof_summary.get("healthy", 0) or 0)
+        specimen_degraded = sum(int(proof_summary.get(key, 0) or 0) for key in ("stale", "failed", "unreachable", "never_run", "unknown"))
+        specimen_intervention_active = active_interventions
+        degraded = specimen_degraded + specimen_intervention_active
+    # Count non-standing labels (human_session_only).
     birth_modes = sph.get("birth_modes", {})
-    human_session_only = int(birth_modes.get("human_session", 0) or 0)
+    human_session_only = int(
+        birth_modes.get("human_session_only", birth_modes.get("human_session", 0)) or 0
+    )
     open_loops = int(ws.get("open_loops", 0) or 0)
     inspect_parts = []
     if healthy:
         inspect_parts.append(f"{healthy} standing healthy")
-    if degraded:
-        inspect_parts.append(f"{degraded} degraded")
+    if specimen_degraded:
+        inspect_parts.append(f"{specimen_degraded} degraded")
+    if specimen_intervention_active:
+        inspect_parts.append(f"{specimen_intervention_active} intervention-active")
     inspect_parts.append(f"{open_loops} loops")
     telemetry_status = str(terminal_telemetry.get("status", "") or "")
     if telemetry_status and telemetry_status != "ok":
@@ -876,9 +955,12 @@ def collect_operator_front_door(payload: dict) -> dict:
     inspect = {
         "healthy_standing": healthy,
         "degraded_standing": degraded,
+        "intervention_active": specimen_intervention_active,
         "human_session_only": human_session_only,
         "open_loops": open_loops,
         "terminal_telemetry_status": telemetry_status or "unknown",
+        "mapped_open_loops": int(terminal_telemetry.get("mapped_open_loops", 0) or 0),
+        "unmapped_open_loops": int(terminal_telemetry.get("unmapped_open_loops", 0) or 0),
         "summary": ", ".join(inspect_parts),
     }
 
@@ -886,15 +968,19 @@ def collect_operator_front_door(payload: dict) -> dict:
     mhw = ov.get("my_human_work_now", {}) if isinstance(ov, dict) else {}
     pending_ingress = int(mhw.get("pending_ingress", 0) or 0)
     pending_handoffs = int(handoffs.get("count", 0) or 0)
-    approve_total = pending_ingress + pending_handoffs
+    pending_reviews = int(delegation_states.get("needs_review", 0) or 0)
+    approve_total = pending_ingress + pending_handoffs + pending_reviews
     approve_parts = []
     if pending_ingress:
         approve_parts.append(f"{pending_ingress} pending ingress")
     if pending_handoffs:
         approve_parts.append(f"{pending_handoffs} handoff{'s' if pending_handoffs != 1 else ''}")
+    if pending_reviews:
+        approve_parts.append(f"{pending_reviews} review{'s' if pending_reviews != 1 else ''}")
     approve = {
         "pending_ingress": pending_ingress,
         "pending_handoffs": pending_handoffs,
+        "needs_review": pending_reviews,
         "total": approve_total,
         "summary": ", ".join(approve_parts) if approve_parts else "nothing pending",
     }
@@ -917,22 +1003,26 @@ def collect_operator_front_door(payload: dict) -> dict:
 
     # --- execute ---
     active_waves = int(ws.get("active_waves", 0) or 0)
-    loop_items = loops_data.get("items", []) if isinstance(loops_data, dict) else []
-    loops_needing_execution = 0
-    for loop in loop_items:
-        na = str(loop.get("next_action", "") or "").lower()
-        if "execute" in na or "implement" in na:
-            loops_needing_execution += 1
-    execute_total = active_waves + loops_needing_execution
+    active_delegations = sum(int(delegation_states.get(name, 0) or 0) for name in ("delegated", "picked_up", "executing"))
+    picked_up = int(delegation_states.get("picked_up", 0) or 0)
+    executing = int(delegation_states.get("executing", 0) or 0)
+    execute_total = active_waves + active_delegations
     execute_parts = []
-    execute_parts.append(f"{active_waves} wave{'s' if active_waves != 1 else ''}")
-    if loops_needing_execution:
-        execute_parts.append(f"{loops_needing_execution} loops need execution")
+    if active_waves:
+        execute_parts.append(f"{active_waves} wave{'s' if active_waves != 1 else ''}")
+    if active_delegations:
+        execute_parts.append(f"{active_delegations} delegation{'s' if active_delegations != 1 else ''}")
+    if executing:
+        execute_parts.append(f"{executing} executing")
+    elif picked_up:
+        execute_parts.append(f"{picked_up} picked up")
     execute = {
         "active_waves": active_waves,
-        "loops_needing_execution": loops_needing_execution,
+        "active_delegations": active_delegations,
+        "picked_up": picked_up,
+        "executing": executing,
         "total": execute_total,
-        "summary": ", ".join(execute_parts),
+        "summary": ", ".join(execute_parts) if execute_parts else "idle",
     }
 
     return {
@@ -1655,6 +1745,7 @@ def build_payload(compact: bool = False) -> dict:
     active_handoffs = collect_active_handoffs()
     work_state = collect_work_state(status)
     terminal_telemetry = collect_terminal_telemetry(status)
+    delegations = collect_delegations(status)
     temporal_standing = collect_temporal_standing(
         generated_utc,
         projection_freshness,
@@ -1696,13 +1787,14 @@ def build_payload(compact: bool = False) -> dict:
         "active_handoffs": active_handoffs,
         "work_state": work_state,
         "terminal_telemetry": terminal_telemetry,
+        "delegations": delegations,
         "git_refs": refs,
         "node_roles": collect_node_roles(status),
         "current_posture": current_posture,
         "aperture": collect_aperture_summary(),
         "proposals": collect_proposals(),
         "birth_mode_audit": collect_birth_mode_audit(),
-        "standing_program_health": collect_standing_program_health(),
+        "standing_program_health": collect_standing_program_health(status),
         "directional_boundary": collect_directional_boundary(
             operator_vision, active_handoffs, attention
         ),

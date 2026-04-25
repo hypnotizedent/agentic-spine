@@ -19,6 +19,7 @@ PROBE_BIN="${SPINE_ROOT}/ops/plugins/core/alerting/bin/alerting-probe"
 DISPATCH_BIN="${SPINE_ROOT}/ops/plugins/core/alerting/bin/alerting-dispatch"
 SNAPSHOT_FILE="/tmp/spine-alerting-probe-latest.json"
 RECOVERY_DISPATCH_BIN="${SPINE_ROOT}/ops/plugins/core/recovery/bin/recovery-dispatch"
+STANDING_PROGRAM_INTERVENTION_BIRTH_BIN="${SPINE_ROOT}/ops/plugins/core/lifecycle/bin/standing-program-intervention-birth"
 
 # Watcher v1 scope: only probe domains in the scoped external-escalation path.
 # Authority: stability.control.contract.yaml#watcher_v1_scope
@@ -74,6 +75,42 @@ WATCHER_CYCLE_STATE="${SPINE_LOGS:-${HOME}/code/.runtime/spine/logs}/watcher-cyc
 WATCHER_CYCLE_MAX=20
 WATCHER_THRESHOLD_DEGRADED=2
 WATCHER_THRESHOLD_INTERVENTION=5
+
+_watcher_count_open_interventions() {
+  local intervention_dir="${SPINE_STATE:-${HOME}/code/.runtime/spine/state}/interventions"
+  python3 - "$intervention_dir" <<'PY'
+import pathlib
+import sys
+
+import yaml
+
+OPEN = {"active", "pending", "acknowledged", "escalated"}
+TERM = {"cancelled", "dismissed", "landed", "resolved", "superseded"}
+
+count = 0
+root = pathlib.Path(sys.argv[1])
+if root.is_dir():
+    for path in sorted(root.glob("*.yaml")) + sorted(root.glob("*.yml")):
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        disposition = str(doc.get("disposition") or "").strip().lower()
+        if disposition and (disposition in OPEN or disposition not in TERM):
+            count += 1
+print(count)
+PY
+}
+
+_watcher_refresh_pending_interventions() {
+  local pending_count
+  pending_count="$(_watcher_count_open_interventions)"
+  [[ -f "$WATCHER_CYCLE_STATE" ]] || return 0
+  jq --argjson pending "$pending_count" '.pending_interventions = $pending' "$WATCHER_CYCLE_STATE" > "${WATCHER_CYCLE_STATE}.tmp" \
+    && mv "${WATCHER_CYCLE_STATE}.tmp" "$WATCHER_CYCLE_STATE"
+}
 
 _watcher_write_cycle_state() {
   local cycle_status="$1"
@@ -138,71 +175,8 @@ _watcher_write_cycle_state() {
   updated_cycles="$(jq -c --argjson new "$new_cycle" --argjson max "$WATCHER_CYCLE_MAX" \
     '[$new] + . | .[:$max]' <<<"$prev_cycles")"
 
-  # Threshold-based intervention birth: if consecutive failures cross the
-  # intervention threshold, scaffold a governed intervention artifact.
-  # This runs BEFORE state write so the pending count is accurate.
-  if (( new_consecutive_failures == WATCHER_THRESHOLD_INTERVENTION )); then
-    spine_enqueue_email_intent \
-      "watcher-self-health" \
-      "incident" \
-      "Watcher intervention: ${new_consecutive_failures} consecutive probe failures" \
-      "The watcher alerting-probe-cycle has failed ${new_consecutive_failures} consecutive times. Health: ${health}. Last failure: ${cycle_at}. Manual investigation required." \
-      "watcher-cycle-state"
-
-    # Generic intervention packet — shared schema with standing-program-intervention-birth
-    local intervention_dir="${SPINE_STATE:-${HOME}/code/.runtime/spine/state}/interventions"
-    mkdir -p "$intervention_dir"
-    local _trigger_at
-    _trigger_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    local intervention_file="${intervention_dir}/INT-com.ronny.alerting-probe-cycle--failure.yaml"
-
-    # Dedupe: only birth if no active intervention exists for this label::trigger_type
-    local _skip=false
-    if [[ -f "$intervention_file" ]]; then
-      local _existing_disp
-      _existing_disp="$(grep -m1 '^disposition:' "$intervention_file" 2>/dev/null | awk '{print $2}' | tr -d '"' || true)"
-      if [[ "$_existing_disp" == "active" ]]; then
-        _skip=true
-      fi
-    fi
-
-    if ! $_skip; then
-      cat > "$intervention_file" <<INTERVENTION
-intervention_id: "INT-com.ronny.alerting-probe-cycle--failure"
-label: "com.ronny.alerting-probe-cycle"
-birth_mode: "standing_program"
-trigger_type: "failure"
-disposition: "active"
-triggered_at_utc: "${_trigger_at}"
-proof_channel:
-  type: "cycle_state"
-  host: "proxmox-home"
-  stale_threshold_seconds: 1200
-observed:
-  health: "${health}"
-  last_evidence_at_utc: "${cycle_at}"
-  consecutive_failures: ${new_consecutive_failures}
-  detail: "consecutive_failures >= ${WATCHER_THRESHOLD_INTERVENTION}"
-INTERVENTION
-      echo "[alerting-probe-cycle] INTERVENTION birthed: ${intervention_file}"
-    else
-      echo "[alerting-probe-cycle] INTERVENTION already active, skipping dedupe"
-    fi
-  fi
-
-  # Count active interventions (generic schema — all INT-*.yaml files)
-  local intervention_dir="${SPINE_STATE:-${HOME}/code/.runtime/spine/state}/interventions"
-  local pending_count=0
-  if [[ -d "$intervention_dir" ]]; then
-    while IFS= read -r _f; do
-      [[ -f "$_f" ]] || continue
-      local _disp
-      _disp="$(grep -m1 '^disposition:' "$_f" 2>/dev/null | awk '{print $2}' | tr -d '"' || true)"
-      if [[ "$_disp" == "active" ]]; then
-        pending_count=$((pending_count + 1))
-      fi
-    done < <(find "$intervention_dir" -name 'INT-*.yaml' -type f 2>/dev/null || true)
-  fi
+  local pending_count
+  pending_count="$(_watcher_count_open_interventions)"
 
   # Write cycle state with embedded intervention count
   jq -n \
@@ -236,6 +210,12 @@ INTERVENTION
         failure_count_for_intervention: $threshold_intervention
       }
     }' > "${WATCHER_CYCLE_STATE}.tmp" && mv "${WATCHER_CYCLE_STATE}.tmp" "$WATCHER_CYCLE_STATE"
+
+  if [[ -x "$STANDING_PROGRAM_INTERVENTION_BIRTH_BIN" ]]; then
+    python3 "$STANDING_PROGRAM_INTERVENTION_BIRTH_BIN" \
+      --label com.ronny.alerting-probe-cycle >/dev/null 2>&1 || true
+    _watcher_refresh_pending_interventions
+  fi
 }
 
 _watcher_exit_with_failure() {

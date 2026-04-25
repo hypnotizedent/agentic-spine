@@ -40,6 +40,9 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 ACTIVE_LOOP_STATUSES = frozenset({"active", "open", "draft"})
+INTERVENTION_TERMINAL_DISPOSITIONS = frozenset({
+    "cancelled", "dismissed", "landed", "resolved", "superseded",
+})
 
 
 class DelegationError(Exception):
@@ -131,32 +134,42 @@ def _validate_loop_active(loop_id: str, state_root: str) -> None:
     raise DelegationError(f"no scope file found for loop_id '{loop_id}'")
 
 
-def _find_packet(packet_id: str, state_root: str) -> tuple[str, dict[str, Any]]:
-    """Find a controller-prompt packet by ID. Returns (path, frontmatter)."""
+def _find_packet(packet_id: str, state_root: str) -> tuple[str, dict[str, Any], str]:
+    """Find a delegable work item by ID. Returns (path, metadata, kind)."""
     prompts_dir = Path(state_root) / "controller-prompts"
-    if not prompts_dir.is_dir():
-        raise DelegationError(f"controller-prompts directory not found")
+    if prompts_dir.is_dir():
+        for path in prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md"):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if not text.startswith("---"):
+                continue
+            parts = text.split("---", 2)
+            if len(parts) < 3:
+                continue
+            try:
+                fm = yaml.safe_load(parts[1])
+            except yaml.YAMLError:
+                continue
+            if not isinstance(fm, dict):
+                continue
+            if str(fm.get("packet_id", "")).strip() == packet_id:
+                return str(path), fm, "controller_prompt"
 
-    for path in prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md"):
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if not text.startswith("---"):
-            continue
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            continue
-        try:
-            fm = yaml.safe_load(parts[1])
-        except yaml.YAMLError:
-            continue
-        if not isinstance(fm, dict):
-            continue
-        if str(fm.get("packet_id", "")).strip() == packet_id:
-            return str(path), fm
+    interventions_dir = Path(state_root) / "interventions"
+    if interventions_dir.is_dir():
+        for path in sorted(interventions_dir.glob("INTERVENTION-*.yaml")) + sorted(interventions_dir.glob("INTERVENTION-*.yml")):
+            try:
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            if str(data.get("intervention_id", "")).strip() == packet_id:
+                return str(path), data, "intervention"
 
-    raise DelegationError(f"packet '{packet_id}' not found in controller-prompts")
+    raise DelegationError(f"packet '{packet_id}' not found in controller-prompts or interventions")
 
 
 def _check_no_active_delegation(
@@ -178,17 +191,49 @@ def _check_no_active_delegation(
             )
 
 
+def _intervention_escalation_state(delegation_state: str) -> str:
+    mapping = {
+        "delegated": "delegated",
+        "picked_up": "picked_up",
+        "executing": "executing",
+        "needs_review": "needs_review",
+        "landed": "landed",
+        "cancelled": "cancelled",
+    }
+    return mapping.get(delegation_state, "packet_only")
+
+
 def _update_packet_frontmatter(
-    packet_path: str, delegation_id: str, delegation_state: str
+    packet_path: str,
+    delegation_id: str,
+    delegation_state: str,
+    *,
+    loop_id: str = "",
+    terminal_disposition: str = "",
 ) -> None:
-    """Add delegation_state and delegation_id to packet frontmatter."""
+    """Update delegation metadata on a controller packet or intervention YAML."""
     try:
         text = Path(packet_path).read_text(encoding="utf-8")
     except OSError as exc:
         raise DelegationError(f"cannot read packet for update: {exc}") from exc
 
     if not text.startswith("---"):
-        return  # cannot update non-frontmatter packet
+        try:
+            fm = yaml.safe_load(text)
+        except yaml.YAMLError:
+            return
+        if not isinstance(fm, dict):
+            return
+        fm["delegation_state"] = delegation_state
+        fm["delegation_id"] = delegation_id
+        if loop_id:
+            fm["linked_loop_id"] = loop_id
+        fm["escalation_state"] = _intervention_escalation_state(delegation_state)
+        if terminal_disposition:
+            fm["disposition"] = terminal_disposition
+            fm["closed_at"] = _now_utc()
+        _atomic_write(packet_path, fm)
+        return
 
     parts = text.split("---", 2)
     if len(parts) < 3:
@@ -203,6 +248,8 @@ def _update_packet_frontmatter(
 
     fm["delegation_state"] = delegation_state
     fm["delegation_id"] = delegation_id
+    if loop_id:
+        fm["loop_id"] = loop_id
 
     new_fm = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True)
     new_text = "---\n" + new_fm + "---" + parts[2]
@@ -248,19 +295,26 @@ def delegate(
     _validate_loop_active(loop_id, state_root)
 
     # ── Validate packet ──────────────────────────────────────────
-    packet_path, packet_fm = _find_packet(packet_id, state_root)
+    packet_path, packet_fm, packet_kind = _find_packet(packet_id, state_root)
 
-    packet_status = str(packet_fm.get("status", "")).strip().lower()
-    if packet_status != "draft":
-        raise DelegationError(
-            f"packet '{packet_id}' is not in draft state (status: '{packet_status}')"
-        )
+    if packet_kind == "controller_prompt":
+        packet_status = str(packet_fm.get("status", "")).strip().lower()
+        if packet_status != "draft":
+            raise DelegationError(
+                f"packet '{packet_id}' is not in draft state (status: '{packet_status}')"
+            )
 
-    packet_loop = str(packet_fm.get("loop_id", "")).strip()
-    if packet_loop != loop_id:
-        raise DelegationError(
-            f"packet '{packet_id}' is bound to '{packet_loop}', not '{loop_id}'"
-        )
+        packet_loop = str(packet_fm.get("loop_id", "")).strip()
+        if packet_loop != loop_id:
+            raise DelegationError(
+                f"packet '{packet_id}' is bound to '{packet_loop}', not '{loop_id}'"
+            )
+    else:
+        disposition = str(packet_fm.get("disposition", "")).strip().lower()
+        if not disposition or disposition in INTERVENTION_TERMINAL_DISPOSITIONS:
+            raise DelegationError(
+                f"intervention '{packet_id}' is not open (disposition: '{disposition or 'unknown'}')"
+            )
 
     # ── Check no duplicate delegation ────────────────────────────
     del_dir = _delegations_dir(state_root)
@@ -268,7 +322,13 @@ def delegate(
 
     # ── Derive objective ─────────────────────────────────────────
     if not objective:
-        objective = str(packet_fm.get("concern", "")).strip() or packet_id
+        if packet_kind == "controller_prompt":
+            objective = str(packet_fm.get("concern", "")).strip() or packet_id
+        else:
+            objective = (
+                f"{packet_fm.get('source_label', packet_id)} :: "
+                f"{packet_fm.get('trigger_type', 'intervention')}"
+            )
 
     if not delegator_terminal:
         delegator_terminal = os.environ.get("OPS_TERMINAL_ID", "unknown")
@@ -282,6 +342,7 @@ def delegate(
         "loop_id": loop_id,
         "packet_id": packet_id,
         "packet_path": packet_path,
+        "packet_kind": packet_kind,
         "objective": objective,
         "delegation_state": "delegated",
         "delegated_at_utc": now,
@@ -298,7 +359,7 @@ def delegate(
     _atomic_write(del_path, delegation_data)
 
     # ── Update packet frontmatter ────────────────────────────────
-    _update_packet_frontmatter(packet_path, delegation_id, "delegated")
+    _update_packet_frontmatter(packet_path, delegation_id, "delegated", loop_id=loop_id)
 
     return {
         "status": "delegated",
@@ -306,6 +367,7 @@ def delegate(
         "delegation_path": del_path,
         "loop_id": loop_id,
         "packet_id": packet_id,
+        "packet_kind": packet_kind,
         "packet_path": packet_path,
         "objective": objective,
         "delegator_terminal": delegator_terminal,
@@ -382,7 +444,12 @@ def pickup(
     packet_path = str(target_data.get("packet_path", ""))
     del_id = str(target_data.get("delegation_id", ""))
     if packet_path and os.path.isfile(packet_path):
-        _update_packet_frontmatter(packet_path, del_id, "picked_up")
+        _update_packet_frontmatter(
+            packet_path,
+            del_id,
+            "picked_up",
+            loop_id=str(target_data.get("loop_id", "")),
+        )
 
     return {
         "status": "picked_up",
@@ -447,8 +514,19 @@ def transition(
 
     # ── Update packet frontmatter ────────────────────────────────
     packet_path = str(data.get("packet_path", ""))
+    terminal_disposition = ""
+    if new_state == "landed":
+        terminal_disposition = "landed"
+    elif new_state == "cancelled":
+        terminal_disposition = "cancelled"
     if packet_path and os.path.isfile(packet_path):
-        _update_packet_frontmatter(packet_path, delegation_id, new_state)
+        _update_packet_frontmatter(
+            packet_path,
+            delegation_id,
+            new_state,
+            loop_id=str(data.get("loop_id", "")),
+            terminal_disposition=terminal_disposition,
+        )
 
     return {
         "status": new_state,
