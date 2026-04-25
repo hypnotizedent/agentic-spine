@@ -52,7 +52,7 @@ from typing import Any
 import yaml
 
 
-SCHEMA_MIGRATION_ID = "20260330_loops_authority_v2"
+SCHEMA_MIGRATION_ID = "20260425_loops_authority_v3"
 ENV_DB_PATH = "LOOPS_DB_PATH"
 ENV_SCOPES_DIR = "LOOPS_SCOPES_DIR"
 DEFAULT_SCOPES_DIR_REL = "loop-scopes"
@@ -685,6 +685,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           next_action TEXT,
           evidence_refs TEXT,
           linked_gaps TEXT,
+          closed_at TEXT,
+          disposition TEXT,
+          completion_level TEXT,
           data_json TEXT,
           created_at_utc TEXT NOT NULL,
           updated_at_utc TEXT NOT NULL
@@ -729,6 +732,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     }
     if "evidence_refs" not in columns:
         conn.execute("ALTER TABLE loops ADD COLUMN evidence_refs TEXT")
+    if "closed_at" not in columns:
+        conn.execute("ALTER TABLE loops ADD COLUMN closed_at TEXT")
+    if "disposition" not in columns:
+        conn.execute("ALTER TABLE loops ADD COLUMN disposition TEXT")
+    if "completion_level" not in columns:
+        conn.execute("ALTER TABLE loops ADD COLUMN completion_level TEXT")
     conn.commit()
 
 
@@ -779,6 +788,7 @@ COLUMN_NAMES = (
     "status", "owner", "created", "scope", "priority", "horizon",
     "execution_readiness", "execution_mode", "objective",
     "blocked_by", "next_action", "evidence_refs", "linked_gaps",
+    "closed_at", "disposition", "completion_level",
 )
 
 
@@ -815,6 +825,7 @@ def loop_to_frontmatter(loop: dict[str, Any]) -> dict[str, Any]:
         "loop_id", "created", "status", "owner", "scope", "priority",
         "horizon", "execution_readiness", "execution_mode", "objective",
         "blocked_by", "next_action", "evidence_refs", "linked_gaps",
+        "closed_at", "disposition", "completion_level",
     ]
     entry: dict[str, Any] = {}
     for k in ordered_keys:
@@ -874,7 +885,7 @@ def upsert_loop(conn: sqlite3.Connection, loop: dict[str, Any]) -> None:
 
     raw_st = loop.get("status")
     status = str(raw_st).strip() if raw_st else "active"
-    reopened_statuses = {"active", "planned"}
+    reopened_statuses = LIVE_SCOPE_STATUSES
     close_keys = ("closed_at", "disposition", "completion_level")
     if status in reopened_statuses:
         for key in close_keys:
@@ -892,8 +903,9 @@ def upsert_loop(conn: sqlite3.Connection, loop: dict[str, Any]) -> None:
           loop_id, status, owner, created, scope, priority, horizon,
           execution_readiness, execution_mode, objective,
           blocked_by, next_action, evidence_refs, linked_gaps,
+          closed_at, disposition, completion_level,
           data_json, created_at_utc, updated_at_utc
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(loop_id) DO UPDATE SET
           status = excluded.status,
           owner = excluded.owner,
@@ -908,6 +920,9 @@ def upsert_loop(conn: sqlite3.Connection, loop: dict[str, Any]) -> None:
           next_action = excluded.next_action,
           evidence_refs = excluded.evidence_refs,
           linked_gaps = excluded.linked_gaps,
+          closed_at = excluded.closed_at,
+          disposition = excluded.disposition,
+          completion_level = excluded.completion_level,
           data_json = excluded.data_json,
           updated_at_utc = excluded.updated_at_utc
         """,
@@ -926,6 +941,9 @@ def upsert_loop(conn: sqlite3.Connection, loop: dict[str, Any]) -> None:
             _str_or_none(loop.get("next_action")),
             _json_list_or_none(loop.get("evidence_refs")),
             _json_list_or_none(loop.get("linked_gaps")),
+            _str_or_none(loop.get("closed_at")),
+            _str_or_none(loop.get("disposition")),
+            _str_or_none(loop.get("completion_level")),
             json.dumps(loop, sort_keys=True, default=str),
             created_at,
             now,
