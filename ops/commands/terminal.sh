@@ -7,7 +7,8 @@
 # Opens an iTerm window with truthful runtime identity:
 #   - OPS_TERMINAL_ROLE     (terminal character name)
 #   - SPINE_RUNTIME_ROLE    (mutation policy role from contract)
-#   - SPINE_LOOP_ID         (only if explicitly requested)
+#   - SPINE_LOOP_ID         (explicitly requested, or auto-attached when exactly
+#                            one live loop exists)
 #   - Claude launcher preserves legacy bypass-permissions behavior for
 #     picker-launched interactive terminals
 #
@@ -42,14 +43,14 @@ Usage:
 Options:
   --tool <tool>         Tool to run (claude|codex|opencode|verify)
   --terminal <name>     Terminal character name (sets OPS_TERMINAL_ROLE)
-  --loop <loop_id>      Explicitly attach a loop (sets SPINE_LOOP_ID)
+  --loop <loop_id>      Explicitly attach a loop (otherwise one live loop auto-attaches)
   --session-posture <controller|membrane|worker|translator>  Explicit session posture (validated by node type)
   --dry-run             Print the command without opening iTerm
 
 Runtime identity:
   OPS_TERMINAL_ROLE   = terminal character name (from --terminal)
   SPINE_RUNTIME_ROLE  = mutation policy role (resolved from contract by terminal type)
-  SPINE_LOOP_ID       = active loop (only when --loop is passed)
+  SPINE_LOOP_ID       = explicit loop, or auto-attached when exactly one live loop exists
   SPINE_NODE_TYPE, SPINE_SESSION_POSTURE (resolved at birth from terminal type / explicit flag)
 
 Examples:
@@ -205,7 +206,7 @@ $posture_exports
 POSTURE_EOF
     fi
 
-    # Explicit loop attachment only
+    # Attach the resolved loop identity, whether explicit or auto-resolved.
     if [[ -n "$loop_id" ]]; then
         parts+=("export SPINE_LOOP_ID=$(printf '%q' "$loop_id")")
         parts+=("export OPS_WORKTREE_IDENTITY=$(printf '%q' "$loop_id")")

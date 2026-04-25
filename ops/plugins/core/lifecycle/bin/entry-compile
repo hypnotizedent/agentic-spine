@@ -24,6 +24,7 @@ import sys
 # ── Constants ────────────────────────────────────────────────────────────
 
 _OPEN_STATUSES = frozenset({"open", "active", "draft"})
+_TERMINAL_TRACKER_STATUSES = frozenset({"complete", "closed", "superseded", "archived"})
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -58,6 +59,18 @@ def _parse_frontmatter(text: str) -> dict:
             # Empty value — might be a list key
             current_list_key = key
     return result
+
+
+def _normalize_tracker_value(value: object) -> str | None:
+    """Normalize nullish tracker strings to None."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.lower() in {"none", "null", "<none>"}:
+        return None
+    return text
 
 
 def _find_active_loop(state_root: str) -> dict | None:
@@ -113,49 +126,69 @@ def _find_active_loop(state_root: str) -> dict | None:
     return None
 
 
-def _find_execution_tracker(state_root: str) -> dict | None:
-    """Find the execution tracker and extract structured fields."""
+def _find_execution_tracker(state_root: str, loop_id: str | None = None) -> dict | None:
+    """Find the current execution tracker for the active loop, if any."""
     artifacts_dir = os.path.join(state_root, "controller-prompts", "_intake-artifacts")
     if not os.path.isdir(artifacts_dir):
         return None
 
-    tracker_path = None
     try:
         for name in sorted(os.listdir(artifacts_dir), reverse=True):
             if "PACKET-EXECUTION" in name and name.endswith(".md"):
                 tracker_path = os.path.join(artifacts_dir, name)
-                break
+
+                try:
+                    with open(tracker_path, "r", encoding="utf-8") as f:
+                        text = f.read()
+                except OSError:
+                    continue
+
+                fm = _parse_frontmatter(text)
+                result = {"_path": tracker_path}
+
+                # Parse the Current State section for structured fields
+                state_section = False
+                for line in text.split("\n"):
+                    stripped = line.strip()
+                    if stripped == "## Current State":
+                        state_section = True
+                        continue
+                    if state_section and stripped.startswith("## "):
+                        break
+                    if state_section and stripped.startswith("- "):
+                        # Parse "- key: value" lines
+                        m = re.match(r"^-\s+(\w+):\s+(.+)$", stripped)
+                        if m:
+                            result[m.group(1)] = m.group(2).strip()
+
+                tracker_loop_id = _normalize_tracker_value(fm.get("loop_id"))
+                tracker_status = str(fm.get("status", "")).strip().lower()
+                active_packet = _normalize_tracker_value(result.get("active_packet"))
+                packet_status = str(result.get("packet_status", "")).strip().lower()
+                next_packet = _normalize_tracker_value(result.get("next_packet"))
+
+                if loop_id and tracker_loop_id and tracker_loop_id != loop_id:
+                    continue
+
+                # Historical/terminal trackers with no active packet are evidence,
+                # not current assignment truth.
+                if (
+                    not active_packet
+                    and (
+                        tracker_status in _TERMINAL_TRACKER_STATUSES
+                        or packet_status in _TERMINAL_TRACKER_STATUSES
+                    )
+                ):
+                    continue
+
+                result["loop_id"] = tracker_loop_id
+                result["active_packet"] = active_packet
+                result["next_packet"] = next_packet
+                return result
     except OSError:
         return None
 
-    if not tracker_path:
-        return None
-
-    try:
-        with open(tracker_path, "r", encoding="utf-8") as f:
-            text = f.read()
-    except OSError:
-        return None
-
-    fm = _parse_frontmatter(text)
-    result = {"_path": tracker_path}
-
-    # Parse the Current State section for structured fields
-    state_section = False
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if stripped == "## Current State":
-            state_section = True
-            continue
-        if state_section and stripped.startswith("## "):
-            break
-        if state_section and stripped.startswith("- "):
-            # Parse "- key: value" lines
-            m = re.match(r"^-\s+(\w+):\s+(.+)$", stripped)
-            if m:
-                result[m.group(1)] = m.group(2).strip()
-
-    return result
+    return None
 
 
 def _find_active_wave_kind(state_root: str, loop_id: str) -> str | None:
@@ -337,7 +370,7 @@ def compile_assignment(state_root: str) -> dict:
         assignment["wave_kind"] = wave_kind
 
     # Step 2: Find execution tracker
-    tracker = _find_execution_tracker(state_root)
+    tracker = _find_execution_tracker(state_root, loop_id=loop_id)
 
     if not tracker:
         assignment["compilation_state"] = "loop_only"
@@ -382,7 +415,10 @@ def compile_assignment(state_root: str) -> dict:
     else:
         assignment["context_sources"] = loop_result.get("evidence_refs")
         assignment["stop_condition"] = None
-        assignment["mutation_ground"] = None
+        assignment["mutation_ground"] = {
+            "mutation_permitted": loop_result.get("mutation_permitted", "false").lower() == "true",
+            "runtime_role": os.environ.get("SPINE_RUNTIME_ROLE"),
+        }
         assignment["compilation_state"] = "partial"
 
     return assignment
