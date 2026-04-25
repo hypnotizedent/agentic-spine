@@ -54,6 +54,8 @@ fi
 CACHE_DIR="${HOME}/.cache/infisical"
 CACHE_TTL="${INFISICAL_CACHE_TTL:-14400}"  # Default: 4 hours (14400 seconds)
 ALLOW_DEPRECATED_READ="${INFISICAL_ALLOW_DEPRECATED_READ:-0}"
+INFISICAL_CONNECT_TIMEOUT_SEC="${INFISICAL_CONNECT_TIMEOUT_SEC:-5}"
+INFISICAL_MAX_TIME_SEC="${INFISICAL_MAX_TIME_SEC:-15}"
 
 inventory_project_field() {
   local project="$1"
@@ -422,6 +424,8 @@ infisical_auth() {
 
   local response
   response=$(curl -s -X POST "${INFISICAL_API_URL}/api/v1/auth/universal-auth/login" \
+    --connect-timeout "${INFISICAL_CONNECT_TIMEOUT_SEC}" \
+    --max-time "${INFISICAL_MAX_TIME_SEC}" \
     -H "Content-Type: application/json" \
     -d "{\"clientId\": \"${INFISICAL_CLIENT_ID}\", \"clientSecret\": \"${INFISICAL_CLIENT_SECRET}\"}")
 

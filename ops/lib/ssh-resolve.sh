@@ -460,4 +460,4 @@ ssh_build_cmd_with_fallback() {
 }
 
 # Standard SSH options for non-interactive batch mode
-SSH_BATCH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+SSH_BATCH_OPTS=(-o ConnectTimeout=8 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)

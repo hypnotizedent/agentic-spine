@@ -11,6 +11,9 @@ set -euo pipefail
 # Resolve ROOT only if not already set by the sourcing caller.
 : "${ROOT:="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"}"
 
+HA_SERVICE_CALL_CONNECT_TIMEOUT_SEC="${HA_SERVICE_CALL_CONNECT_TIMEOUT_SEC:-5}"
+HA_SERVICE_CALL_MAX_TIME_SEC="${HA_SERVICE_CALL_MAX_TIME_SEC:-15}"
+
 # ha_service_call — POST to a Home Assistant service endpoint.
 #
 # Arguments:
@@ -42,6 +45,8 @@ ha_service_call() {
   url="${ha_url%/}${service_path}"
 
   curl -fsS -X POST "$url" \
+    --connect-timeout "${HA_SERVICE_CALL_CONNECT_TIMEOUT_SEC}" \
+    --max-time "${HA_SERVICE_CALL_MAX_TIME_SEC}" \
     -H "Authorization: Bearer $ha_token" \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg t "$title" --arg m "$message" '{title:$t, message:$m}')" >/dev/null

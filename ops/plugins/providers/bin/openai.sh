@@ -33,6 +33,8 @@ chat_path="${SPINE_PROVIDER_CHAT_PATH:-/chat/completions}"
 endpoint="${base%/}${chat_path}"
 model="${SPINE_PROVIDER_MODEL:-${SPINE_ENGINE_MODEL:-gpt-4.1-mini}}"
 max_tokens="${SPINE_ENGINE_MAX_TOKENS:-200}"
+provider_connect_timeout_sec="${SPINE_PROVIDER_CONNECT_TIMEOUT_SEC:-10}"
+provider_max_time_sec="${SPINE_PROVIDER_MAX_TIME_SEC:-300}"
 
 payload="$(SPINE_PROVIDER_MODEL="$model" SPINE_ENGINE_MAX_TOKENS="$max_tokens" python3 - "${request_file}" <<'PY'
 import json, os, sys
@@ -77,6 +79,8 @@ fi
 
 http_code="$(
   curl -sS -o "${response_file}" -w "%{http_code}" \
+    --connect-timeout "${provider_connect_timeout_sec}" \
+    --max-time "${provider_max_time_sec}" \
     "${header_args[@]}" \
     --data-binary "${payload}" \
     "${endpoint}" || true
