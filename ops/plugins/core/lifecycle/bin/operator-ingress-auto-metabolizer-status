@@ -6,13 +6,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 
 import operator_ingress as oi
+
+# Execution host constants — daemon runs here, not locally.
+_EXEC_HOST_TARGET_ID = "ai-consolidation"
+_EXEC_HOST_STATE_ROOT = "/opt/spine-state"
+_EXEC_HOST_HEARTBEAT = f"{_EXEC_HOST_STATE_ROOT}/inputs/operator-ingress/.auto-metabolizer-heartbeat.json"
+_STALE_THRESHOLD_SECONDS = 300  # 5 minutes — local heartbeat older than this triggers remote probe
 
 
 def _format_age(seconds: int | None) -> str:
@@ -40,6 +48,99 @@ def _health_label(status: str, worker: dict) -> str:
     return status.upper()
 
 
+def _resolve_ssh_host() -> str | None:
+    """Resolve ai-consolidation SSH host via ssh-resolve.sh."""
+    resolver = ROOT / "ops" / "lib" / "ssh-resolve.sh"
+    if not resolver.is_file():
+        return None
+    # Source the resolver and call ssh_resolve_tailscale_ip, falling back to host
+    script = f"""
+        source "{resolver}"
+        ts="$(ssh_resolve_tailscale_ip "{_EXEC_HOST_TARGET_ID}")"
+        host="$(ssh_resolve_host "{_EXEC_HOST_TARGET_ID}")"
+        echo "${{ts:-$host}}"
+    """
+    try:
+        result = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True, text=True, timeout=5,
+        )
+        addr = result.stdout.strip()
+        return addr if addr else None
+    except Exception:
+        return None
+
+
+def _fetch_remote_heartbeat() -> dict | None:
+    """SSH to execution host and read the heartbeat file. Returns parsed JSON or None."""
+    host = _resolve_ssh_host()
+    if not host:
+        return None
+    # Resolve machine identity opts
+    resolver = ROOT / "ops" / "lib" / "ssh-resolve.sh"
+    id_script = f'source "{resolver}"; ssh_resolve_machine_identity_opts "{_EXEC_HOST_TARGET_ID}"'
+    try:
+        id_result = subprocess.run(
+            ["bash", "-c", id_script],
+            capture_output=True, text=True, timeout=5,
+        )
+        identity_opts = id_result.stdout.strip().split() if id_result.returncode == 0 else []
+    except Exception:
+        identity_opts = []
+
+    ssh_cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+        "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+        *identity_opts,
+        f"ubuntu@{host}",
+        f"cat {_EXEC_HOST_HEARTBEAT}",
+    ]
+    try:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout.strip():
+            return json.loads(result.stdout)
+    except Exception:
+        pass
+    return None
+
+
+def _heartbeat_to_result(hb: dict) -> dict:
+    """Convert a raw heartbeat JSON into the same shape as oi.operator_ingress_auto_metabolizer_status."""
+    heartbeat_at = hb.get("heartbeat_at", "")
+    age_seconds = None
+    if heartbeat_at:
+        try:
+            hb_time = datetime.fromisoformat(heartbeat_at.replace("Z", "+00:00"))
+            age_seconds = int((datetime.now(timezone.utc) - hb_time).total_seconds())
+        except Exception:
+            pass
+
+    pid = hb.get("pid", 0)
+    # Derive status from heartbeat age
+    if age_seconds is not None and age_seconds < _STALE_THRESHOLD_SECONDS:
+        status = "running"
+    elif age_seconds is not None:
+        status = "stale"
+    elif not heartbeat_at:
+        status = "idle"
+    else:
+        status = "stale"
+
+    return {
+        "status": status,
+        "worker": {
+            "heartbeat_at": heartbeat_at or None,
+            "heartbeat_age_seconds": age_seconds,
+            "pid": pid,
+            "pid_alive": True if status == "running" else False,
+            "last_ingress_ids": hb.get("last_ingress_ids", []),
+        },
+        "queue": {
+            "pending": hb.get("pending_count", 0),
+        },
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="operator-ingress-auto-metabolizer-status",
@@ -50,6 +151,16 @@ def main() -> int:
         action="store_true",
         dest="json_output",
         help="Emit JSON output.",
+    )
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="Force read from execution host (ai-consolidation) via SSH.",
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Force read from local state only (no remote fallback).",
     )
     parser.add_argument(
         "--self-check",
@@ -71,7 +182,7 @@ def main() -> int:
 
     args = parser.parse_args()
     state_root = os.environ.get("SPINE_STATE", "")
-    if not state_root:
+    if not state_root and not args.remote:
         msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
         if args.json_output:
             print(json.dumps({"status": "error", "error": msg}, indent=2))
@@ -79,35 +190,61 @@ def main() -> int:
             print(f"operator.ingress.auto_metabolize.status FAIL: {msg}", file=sys.stderr)
         return 1
 
-    try:
-        result = oi.operator_ingress_auto_metabolizer_status(state_root)
-    except oi.OperatorIngressError as exc:
-        if args.json_output:
-            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+    result = None
+    source = "local"
+
+    # Try local first (unless --remote forces remote)
+    if not args.remote and state_root:
+        try:
+            result = oi.operator_ingress_auto_metabolizer_status(state_root)
+        except oi.OperatorIngressError:
+            result = None
+
+        # If local heartbeat is stale/missing and --local not forced, try remote
+        if result and not args.local:
+            worker = result.get("worker", {})
+            age = worker.get("heartbeat_age_seconds")
+            has_heartbeat = bool(worker.get("heartbeat_at"))
+            if not has_heartbeat or (age is not None and age > _STALE_THRESHOLD_SECONDS):
+                remote_hb = _fetch_remote_heartbeat()
+                if remote_hb:
+                    result = _heartbeat_to_result(remote_hb)
+                    source = "remote"
+
+    # --remote or local failed entirely
+    if result is None:
+        remote_hb = _fetch_remote_heartbeat()
+        if remote_hb:
+            result = _heartbeat_to_result(remote_hb)
+            source = "remote"
         else:
-            print(f"operator.ingress.auto_metabolize.status FAIL: {exc}", file=sys.stderr)
-        return 1
+            msg = "no heartbeat available (local missing, remote unreachable)"
+            if args.json_output:
+                print(json.dumps({"status": "error", "error": msg}, indent=2))
+            else:
+                print(f"Metabolizer: UNKNOWN  ({msg})")
+            return 1
+
+    worker = result["worker"]
+    queue = result["queue"]
+    age = worker.get("heartbeat_age_seconds")
+    health = _health_label(result["status"], worker)
 
     if args.json_output:
-        worker = result["worker"]
-        age = worker.get("heartbeat_age_seconds")
         out = {
-            "health": _health_label(result["status"], worker),
+            "health": health,
+            "source": source,
             "heartbeat_at": worker["heartbeat_at"] or None,
             "heartbeat_age": _format_age(age) if age is not None else None,
             "pid_alive": worker["pid_alive"],
-            "queue_pending": result["queue"]["pending"],
+            "queue_pending": queue["pending"],
             "last_processed": worker.get("last_ingress_ids", []),
         }
         print(json.dumps(out, indent=2))
     else:
-        worker = result["worker"]
-        queue = result["queue"]
-        age = worker.get("heartbeat_age_seconds")
-        health = _health_label(result["status"], worker)
-
+        source_tag = f"  (via {source})" if source == "remote" else ""
         age_str = f" ({_format_age(age)} ago)" if age is not None else ""
-        print(f"Metabolizer: {health}  heartbeat: {worker['heartbeat_at'] or 'never'}{age_str}")
+        print(f"Metabolizer: {health}  heartbeat: {worker['heartbeat_at'] or 'never'}{age_str}{source_tag}")
         if queue["pending"] > 0:
             print(f"Queue: {queue['pending']} pending")
 
