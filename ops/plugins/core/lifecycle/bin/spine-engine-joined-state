@@ -231,9 +231,10 @@ def resolve_paths(root: Path) -> dict[str, Path]:
     }
 
 
-def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
     rows_by_id: dict[str, dict[str, Any]] = {}
     status_index: dict[str, str] = {}
+    scope_only_orphans: list[dict[str, Any]] = []
     scopes_dir = paths["scopes_dir"]
     if loops_authority is not None:
         previous_spine_state = os.environ.get("SPINE_STATE")
@@ -320,14 +321,20 @@ def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dic
                     rows_by_id[loop_id] = merged
                 # If SQLite says closed and scope also says closed — no row needed.
             else:
-                # Loop NOT in SQLite — scope file is sole source (backward compat).
+                # Loop NOT in SQLite — do NOT adopt as an open loop.
+                # SQLite is canonical authority; scope-only files are orphans
+                # that need explicit bootstrap or quarantine.
                 status_index[loop_id] = status
                 if status in OPEN_LOOP_STATUSES:
-                    rows_by_id[loop_id] = row
-                # If scope-only and closed, no row needed.
+                    scope_only_orphans.append({
+                        "loop_id": loop_id,
+                        "scope_status": status,
+                        "path": str(path),
+                    })
+                # Closed scope-only files are historical residue, not anomalies.
 
     rows = sorted(rows_by_id.values(), key=lambda row: (row.get("created_at_utc", ""), row.get("loop_id", "")), reverse=True)
-    return rows, status_index
+    return rows, status_index, scope_only_orphans
 
 
 def normalize_gap_row(item: dict[str, Any]) -> dict[str, Any]:
@@ -959,7 +966,7 @@ def _gap_projection_match(gap_state: dict[str, Any]) -> bool | None:
 
 def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str, Any]:
     paths = resolve_paths(root)
-    open_loops, loop_status_index = collect_loop_rows(paths)
+    open_loops, loop_status_index, scope_only_orphans = collect_loop_rows(paths)
     gap_state = collect_gap_state(paths, loop_status_index)
     open_gaps = gap_state.get("open", []) if gap_state.get("status") == "ok" else []
     orphaned_gaps = gap_state.get("orphaned", []) if gap_state.get("status") == "ok" else []
@@ -1036,6 +1043,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
         },
         "summary": {
             "open_loops": len(open_loops),
+            "scope_only_orphans": len(scope_only_orphans),
             "open_gaps": len(open_gaps) if gap_state.get("status") == "ok" else None,
             "orphaned_gaps": len(orphaned_gaps) if gap_state.get("status") == "ok" else None,
             "active_handoffs": len(handoffs),
@@ -1060,7 +1068,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "gap_projection_match": _gap_projection_match(gap_state),
             "completion_state": completion_summary,
         },
-        "loops": {"open": open_loops},
+        "loops": {"open": open_loops, "scope_only_orphans": scope_only_orphans},
         "gaps": {
             "status": gap_state.get("status", "degraded"),
             "source": gap_state.get("source", "gaps_sql_authority"),
@@ -1138,6 +1146,9 @@ def main() -> int:
     print("spine.engine.joined_state")
     print(f"path: {payload['paths']['joined_state_path']}")
     print(f"open_loops: {summary.get('open_loops', 0)}")
+    _soo = summary.get('scope_only_orphans', 0)
+    if _soo:
+        print(f"scope_only_orphans: {_soo}")
     print(f"open_gaps: {open_gaps}")
     print(f"orphaned_gaps: {orphaned_gaps}")
     print(f"blocked_worktrees: {summary.get('blocked_worktrees', 0)}")
