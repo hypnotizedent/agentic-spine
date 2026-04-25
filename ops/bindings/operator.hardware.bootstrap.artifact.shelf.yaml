@@ -3,8 +3,8 @@ status: authoritative
 owner: "@ronny"
 scope: operator-hardware-bootstrap-artifact-shelf
 version: 1
-updated_at: "2026-04-13"
-last_verified: "2026-04-13"
+updated_at: "2026-04-25"
+last_verified: "2026-04-25"
 
 # Operator Hardware Bootstrap Artifact Shelf
 #
@@ -20,10 +20,12 @@ last_verified: "2026-04-13"
 # - claim examples/templates and receipts
 #
 # This surface does NOT:
-# - perform PXE/OOB boot orchestration
 # - wipe or reimage any device
-# - imply remote boot control
 # - assign any role or host
+#
+# Note: remote boot control (virtual media + one-time boot) is now a
+# separate governed rail: baremetal.idrac.first-touch. This shelf provides
+# artifact custody; first-touch consumes artifacts from the shelf path.
 
 subordinate_to: ops/bindings/root.authority.contract.yaml
 
@@ -40,14 +42,16 @@ related_contracts:
 artifact_shelf:
   custody_host_ref: pve
   serving_host_ref: pve
-  storage_plane_ref: md1400/archive/live-share/ronny-projects
-  canonical_root: /md1400/archive/live-share/ronny-projects/spine/bootstrap
-  canonical_transport: ssh_to_pve_then_md1400_path
-  iso_library_ref: /md1400/archive/games
+  storage_plane_ref: pve-local
+  canonical_root: /var/lib/vz/template/iso
+  canonical_transport: nfs_from_pve_lan_to_bmc
+  iso_library_ref: /var/lib/vz/template/iso
   served_surface_note: >
-    Artifacts are stored on md1400 and accessed via direct pve path.
+    ISOs are stored on pve local storage (/var/lib/vz/template/iso/).
+    First-touch serves them to iDRAC BMCs via NFS export from pve LAN IP.
     archive-smb Samba export retired 2026-04-14 (no live consumers).
-    The shelf is artifact custody only, not device boot control.
+    md1400 archive path is for long-term bootstrap kit/autoinstall storage,
+    not for live ISO serving. The shelf is artifact custody only.
 
 generated_runtime_staging:
   root: $SPINE_STATE/domain-state/generated/operator_hardware/bootstrap
@@ -78,9 +82,9 @@ truth_boundary:
     - retain provenance and checksums
     - expose a stable shelf path for retrieval
   first_touch_boot_responsibilities:
-    - operator local-hands or separate PXE/OOB rail selects the boot path
+    - baremetal.idrac.first-touch rail consumes ISOs from shelf and controls boot-prep
+    - operator local-hands for non-iDRAC targets or when remote path is unavailable
   not_implied:
-    - remote BIOS control
     - remote wipe
     - remote USB insertion
-    - automatic machine boot
+    - automatic machine boot (first-touch sets one-time boot, does not auto-cycle)
