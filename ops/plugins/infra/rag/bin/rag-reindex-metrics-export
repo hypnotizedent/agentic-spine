@@ -13,7 +13,19 @@
 #   - rag.embedding.backend.yaml (Ollama URL, model, probe prompt)
 #
 # Safety: read-only — no mutation to reindex state or retrieval behavior
+#
+# Flags:
+#   --local   Skip SSH; read reindex state from local filesystem (for cron on ai-consolidation)
 set -euo pipefail
+
+LOCAL_MODE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --local) LOCAL_MODE=1; shift ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -55,6 +67,15 @@ fi
 TARGET="${REMOTE_USER}@${REMOTE_HOST}"
 SSH_ARGS=(-o BatchMode=yes -o ConnectTimeout=10 -p "$REMOTE_PORT")
 
+# Helper: run a command locally or via SSH depending on mode
+run_cmd() {
+  if [[ "$LOCAL_MODE" -eq 1 ]]; then
+    bash -c "$1"
+  else
+    ssh "${SSH_ARGS[@]}" "$TARGET" "$1"
+  fi
+}
+
 # --- Resolve Ollama URL for embedding probe ---
 OLLAMA_URL="${OLLAMA_URL:-${OLLAMA_BASE_URL:-}}"
 if [[ -z "$OLLAMA_URL" && -f "$BACKEND_BINDING" ]]; then
@@ -76,44 +97,46 @@ fi
 
 # --- Collect metrics ---
 
-# 1. SSH connectivity check — if we can't reach the host, emit error metrics and exit
-if ! ssh "${SSH_ARGS[@]}" "$TARGET" "echo ok >/dev/null" 2>/dev/null; then
-  echo "# HELP rag_reindex_exporter_up Whether the metrics exporter can reach the remote host."
-  echo "# TYPE rag_reindex_exporter_up gauge"
-  echo "rag_reindex_exporter_up 0"
-  exit 0
+# 1. Connectivity check — if remote and can't reach host, emit error metrics and exit
+if [[ "$LOCAL_MODE" -eq 0 ]]; then
+  if ! ssh "${SSH_ARGS[@]}" "$TARGET" "echo ok >/dev/null" 2>/dev/null; then
+    echo "# HELP rag_reindex_exporter_up Whether the metrics exporter can reach the remote host."
+    echo "# TYPE rag_reindex_exporter_up gauge"
+    echo "rag_reindex_exporter_up 0"
+    exit 0
+  fi
 fi
 
 # 2. Session running (gauge: 1/0)
 session_running=0
-if ssh "${SSH_ARGS[@]}" "$TARGET" "tmux has-session -t '$TMUX_SESSION' 2>/dev/null"; then
+if run_cmd "tmux has-session -t '$TMUX_SESSION' 2>/dev/null" 2>/dev/null; then
   session_running=1
 fi
 
 # 3. Uploaded/failed counts from log, scoped to latest run
 REMOTE_REPO="$(read_runner '.remote.repo_path')"
 effective_log="$REMOTE_LOG"
-if ! ssh "${SSH_ARGS[@]}" "$TARGET" "[ -f '$REMOTE_LOG' ]" 2>/dev/null; then
-  fallback_log="$(ssh "${SSH_ARGS[@]}" "$TARGET" "ls -1t '$REMOTE_REPO'/mailroom/logs/rag-sync-*.log 2>/dev/null | head -n 1" 2>/dev/null || true)"
+if ! run_cmd "[ -f '$REMOTE_LOG' ]" 2>/dev/null; then
+  fallback_log="$(run_cmd "ls -1t '$REMOTE_REPO'/mailroom/logs/rag-sync-*.log 2>/dev/null | head -n 1" 2>/dev/null || true)"
   if [[ -n "$fallback_log" ]]; then
     effective_log="$fallback_log"
   fi
 fi
 
-run_start_line="$(ssh "${SSH_ARGS[@]}" "$TARGET" \
+run_start_line="$(run_cmd \
   "if [ -f '$effective_log' ]; then awk '/START rag sync/{n=NR} END{print (n>0?n:1)}' '$effective_log'; else echo 1; fi" \
   2>/dev/null || echo 1)"
 
-uploaded="$(ssh "${SSH_ARGS[@]}" "$TARGET" \
+uploaded="$(run_cmd \
   "awk -v s='$run_start_line' 'NR>=s && /OK: Uploaded/{c++} END{print c+0}' '$effective_log'" \
   2>/dev/null || echo 0)"
 
-failed="$(ssh "${SSH_ARGS[@]}" "$TARGET" \
+failed="$(run_cmd \
   "awk -v s='$run_start_line' 'NR>=s && /ERROR: Upload failed/{c++} END{print c+0}' '$effective_log'" \
   2>/dev/null || echo 0)"
 
 # 4. Stall detection — minutes since last log line modification
-stall_minutes="$(ssh "${SSH_ARGS[@]}" "$TARGET" \
+stall_minutes="$(run_cmd \
   "if [ -f '$effective_log' ]; then
      last_mod=\$(stat -c %Y '$effective_log' 2>/dev/null || stat -f %m '$effective_log' 2>/dev/null || echo 0)
      now=\$(date +%s)
