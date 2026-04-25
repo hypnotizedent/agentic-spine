@@ -901,11 +901,18 @@ def operator_ingress_auto_metabolizer_status(state_root: str) -> dict[str, Any]:
         except ValueError:
             heartbeat_age_seconds = None
 
+    # Stale threshold: 3x the default 60s poll interval.
+    _STALE_HEARTBEAT_SECONDS = 180
+
+    heartbeat_stale = False
+    if heartbeat_age_seconds is not None and heartbeat_age_seconds > _STALE_HEARTBEAT_SECONDS:
+        heartbeat_stale = True
+
     status = "idle"
     if pid_alive:
         status = "running"
     elif heartbeat_at:
-        status = "recent" if (heartbeat_age_seconds is not None and heartbeat_age_seconds < 300) else "stale"
+        status = "recent" if not heartbeat_stale else "stale"
 
     return {
         "status": status,
@@ -917,6 +924,8 @@ def operator_ingress_auto_metabolizer_status(state_root: str) -> dict[str, Any]:
             "pid_alive": pid_alive,
             "heartbeat_at": heartbeat_at,
             "heartbeat_age_seconds": heartbeat_age_seconds,
+            "heartbeat_stale": heartbeat_stale,
+            "heartbeat_stale_threshold_seconds": _STALE_HEARTBEAT_SECONDS,
             "worker_id": str(heartbeat.get("worker_id", "")),
             "mode": str(heartbeat.get("mode", "")),
             "poll_seconds": heartbeat.get("poll_seconds"),

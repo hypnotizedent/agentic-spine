@@ -7,7 +7,19 @@ import argparse
 import json
 import os
 import sys
+import urllib.parse
+import urllib.request
+import urllib.error
 from pathlib import Path
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Raise HTTPError on redirects so we can extract Location header."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code, msg, headers, fp
+        )
 
 ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
@@ -63,6 +75,16 @@ def main() -> int:
         help="Emit JSON output.",
     )
     parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="POST to execution host via operator surface server instead of local write.",
+    )
+    parser.add_argument(
+        "--remote-url",
+        default="https://spine.ronny.works/submit",
+        help="Remote submit endpoint URL (default: https://spine.ronny.works/submit).",
+    )
+    parser.add_argument(
         "--self-check",
         action="store_true",
         help="Verify dependencies and exit.",
@@ -79,6 +101,85 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    raw_content = sys.stdin.read() if args.stdin else args.raw_content
+
+    # --- Remote submission: POST to execution host operator surface server ---
+    if args.remote:
+        payload = json.dumps({
+            "content_type": args.content_type,
+            "raw_content": raw_content,
+            "operator_hint": args.hint,
+            "source_device": args.source_device,
+            "source_app": args.source_app,
+        }).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "operator-ingress-submit/1.0",
+        }
+        # Cloudflare Access service-token auth when available
+        cf_id = os.environ.get("CF_ACCESS_CLIENT_ID", "")
+        cf_secret = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
+        if cf_id and cf_secret:
+            headers["CF-Access-Client-Id"] = cf_id
+            headers["CF-Access-Client-Secret"] = cf_secret
+
+        req = urllib.request.Request(
+            args.remote_url,
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        opener = urllib.request.build_opener(_NoRedirectHandler)
+        try:
+            with opener.open(req, timeout=30) as resp:
+                body = resp.read().decode("utf-8")
+                ctype = resp.headers.get("Content-Type", "")
+                if "application/json" in ctype and body.strip():
+                    result = json.loads(body)
+                else:
+                    result = {"status": "ok", "ingress_id": "submitted (non-JSON response)"}
+        except urllib.error.HTTPError as exc:
+            # 303 redirect means success — extract ingress_id from Location header
+            if exc.code == 303:
+                location = exc.headers.get("Location", "")
+                ingress_id = "unknown"
+                if "submitted=" in location:
+                    ingress_id = location.split("submitted=")[-1].split("&")[0]
+                result = {
+                    "status": "ok",
+                    "ingress_id": urllib.parse.unquote(ingress_id),
+                    "lifecycle_state": "submitted",
+                    "disposition": "awaiting_classification",
+                }
+            else:
+                body = exc.read().decode("utf-8", errors="replace")
+                try:
+                    err_data = json.loads(body)
+                    msg = err_data.get("error", body)
+                except Exception:
+                    msg = body
+                if args.json_output:
+                    print(json.dumps({"status": "error", "error": msg}, indent=2))
+                else:
+                    print(f"operator.ingress.submit FAIL (remote): {msg}", file=sys.stderr)
+                return 1
+        except Exception as exc:
+            if args.json_output:
+                print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+            else:
+                print(f"operator.ingress.submit FAIL (remote): {exc}", file=sys.stderr)
+            return 1
+
+        if args.json_output:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"CREATED (remote): {result.get('ingress_id', '?')}")
+            print(f"  state: {result.get('lifecycle_state', '?')}")
+            print(f"  disposition: {result.get('disposition', '?')}")
+        return 0
+
+    # --- Local submission: write directly to SPINE_STATE ---
     state_root = os.environ.get("SPINE_STATE", "")
     if not state_root:
         msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
@@ -87,8 +188,6 @@ def main() -> int:
         else:
             print(f"operator.ingress.submit FAIL: {msg}", file=sys.stderr)
         return 1
-
-    raw_content = sys.stdin.read() if args.stdin else args.raw_content
 
     try:
         result = oi.create_operator_ingress(
