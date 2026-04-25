@@ -725,6 +725,60 @@ def collect_birth_mode_audit() -> dict:
     }
 
 
+def collect_standing_program_health() -> dict:
+    """Standing program health: birth_mode counts + active interventions."""
+    registry_path = REPO / "ops" / "bindings" / "launchd.scheduler.registry.yaml"
+    result: dict = {
+        "total": 0,
+        "birth_modes": {},
+        "active_interventions": 0,
+        "intervention_labels": [],
+    }
+
+    # --- scheduler registry ---
+    if registry_path.is_file():
+        try:
+            import yaml as _yaml
+            with registry_path.open() as f:
+                registry = _yaml.safe_load(f) or {}
+        except Exception:
+            registry = {}
+
+        labels = registry.get("labels", [])
+        result["total"] = len(labels)
+        mode_counts: dict[str, int] = {}
+        state_counts: dict[str, int] = {}
+        for row in labels:
+            bm = row.get("birth_mode", "unknown")
+            mode_counts[bm] = mode_counts.get(bm, 0) + 1
+            st = row.get("state", "unknown")
+            state_counts[st] = state_counts.get(st, 0) + 1
+        result["birth_modes"] = mode_counts
+        result["state_counts"] = state_counts
+
+    # --- intervention packets ---
+    interventions_dir = STATE_ROOT / "interventions"
+    if interventions_dir.is_dir():
+        try:
+            import yaml as _yaml
+            for yf in sorted(interventions_dir.glob("*.yaml")) + sorted(interventions_dir.glob("*.yml")):
+                try:
+                    doc = _yaml.safe_load(yf.read_text()) or {}
+                except Exception:
+                    continue
+                if not isinstance(doc, dict):
+                    continue
+                disposition = str(doc.get("disposition", "")).strip()
+                if disposition == "active":
+                    result["active_interventions"] += 1
+                    label = doc.get("label", yf.stem)
+                    result["intervention_labels"].append(label)
+        except Exception:
+            pass
+
+    return result
+
+
 def collect_proposals() -> dict:
     data = _run_json([
         str(REPO / "ops" / "plugins" / "core" / "proposals" / "bin" / "proposals-status"),
@@ -1482,6 +1536,7 @@ def build_payload(compact: bool = False) -> dict:
         "aperture": collect_aperture_summary(),
         "proposals": collect_proposals(),
         "birth_mode_audit": collect_birth_mode_audit(),
+        "standing_program_health": collect_standing_program_health(),
         "directional_boundary": collect_directional_boundary(
             operator_vision, active_handoffs, attention
         ),
