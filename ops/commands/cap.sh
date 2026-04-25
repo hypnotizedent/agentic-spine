@@ -194,7 +194,7 @@ evaluate_role_policy() {
         return 0
     fi
 
-    runtime_role="${SPINE_RUNTIME_ROLE:-worker}"
+    runtime_role="${SPINE_RUNTIME_ROLE:-researcher}"
     if ! runtime_role_is_read_only "$runtime_role"; then
         return 0
     fi
@@ -216,7 +216,7 @@ emit_role_policy_stop() {
 
     override_env="$(role_policy_override_env_name '.runtime_roles.execution_policy.override_env' 'SPINE_ROLE_POLICY_OVERRIDE_REF')"
     override_reason_env="$(role_policy_override_env_name '.runtime_roles.execution_policy.override_reason_env' 'SPINE_ROLE_POLICY_OVERRIDE_REASON')"
-    runtime_role="${SPINE_RUNTIME_ROLE:-worker}"
+    runtime_role="${SPINE_RUNTIME_ROLE:-researcher}"
     session_posture="${SPINE_SESSION_POSTURE:-unset}"
     terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-unset}}}"
 
@@ -458,7 +458,7 @@ write_cap_receipt() {
     local output_hash=""
     local receipt_hash=""
     local exec_receipt_hash=""
-    local runtime_role="${SPINE_RUNTIME_ROLE:-worker}"
+    local runtime_role="${SPINE_RUNTIME_ROLE:-researcher}"
     local terminal_id="${TERMINAL_ID:-${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-unknown-terminal}}}}"
     local lane_id="${SPINE_LANE:-execution}"
     local args_display="none"
