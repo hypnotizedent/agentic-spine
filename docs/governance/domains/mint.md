@@ -24,8 +24,8 @@ Mint status/proof capability registration is now complete for the governed read 
 ## Residue Notice
 
 Older schema (`ops/plugins/domains/mint/schema/`), runtime state (36 subdirs under
-`/Users/ronnyworks/code/.runtime/spine/state/mint/`), unregistered bins (51 scripts in
-`ops/plugins/domains/mint/bin/`), and lib files (10 in `ops/plugins/domains/mint/lib/`)
+`/Users/ronnyworks/code/.runtime/spine/state/mint/`), unregistered bins (53 scripts in
+`ops/plugins/domains/mint/bin/`), and lib files (1 in `ops/plugins/domains/mint/lib/`)
 remain parked in spine pending a fresh aperture lift and fresh loop.
 This doc does not authorize migration.
 
