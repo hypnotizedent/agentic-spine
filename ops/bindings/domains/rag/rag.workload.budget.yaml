@@ -1,0 +1,75 @@
+# RAG Workload Budget Contract
+# Advisory resource budget for AnythingLLM + Qdrant on ai-consolidation.
+# Does NOT enforce container runtime limits — documents and makes legible.
+#
+# Authority: ops/bindings/services.health.yaml (liveness), this file (budget)
+# Consumers: ops/plugins/infra/rag/bin/rag-budget-status
+
+schema_version: "1.0"
+updated_at: "2026-04-25"
+owner: "@ronny"
+status: authoritative
+
+host_context:
+  host: ai-consolidation
+  tailscale_ip: "100.71.17.29"
+  total_workload_count: 7
+  note: >
+    ai-consolidation carries execution-host duties with 7 workloads.
+    RAG containers share resources with spine runtime, n8n, and other
+    domain workloads. Budget ceilings are advisory — operator must
+    monitor for contention manually until enforcement lands.
+
+containers:
+  anythingllm:
+    description: "RAG frontend — workspace management, document upload, query routing"
+    port: 3002
+    health_endpoint: "/api/ping"
+    resource_posture:
+      note: >
+        CPU spikes during document upload (embedding dispatch to Ollama)
+        and query execution. Memory grows with active workspace count
+        and cached context. Idle footprint is low (~200-400MB).
+      recommended_memory_ceiling: "2GB"
+      recommended_cpu_limit: 2
+      idle_memory_estimate: "300MB"
+      peak_memory_estimate: "1.5GB"
+      peak_trigger: "document upload or multi-workspace query"
+    enforcement: advisory
+
+  qdrant:
+    description: "Vector database — stores and serves embedding indices"
+    port: 6333
+    health_endpoint: "/healthz"
+    resource_posture:
+      note: >
+        Memory pressure from vector index kept in RAM (HNSW graph).
+        Disk usage from WAL segments and snapshots. CPU spikes during
+        collection rebuild or large batch upserts. At current corpus
+        size (~100-230 docs) pressure is low, but ungoverned growth
+        would hit memory ceiling first.
+      recommended_memory_ceiling: "1GB"
+      recommended_cpu_limit: 1
+      idle_memory_estimate: "150MB"
+      peak_memory_estimate: "800MB"
+      peak_trigger: "collection rebuild or snapshot creation"
+    enforcement: advisory
+
+capacity_pressure:
+  description: >
+    Thresholds that indicate the RAG subsystem is approaching budget
+    limits. These are operator-alert triggers, not hard enforcement.
+  thresholds:
+    qdrant_collection_count:
+      warn: 10
+      description: "More than 10 collections suggests ungoverned growth"
+    anythingllm_workspace_count:
+      warn: 5
+      description: "More than 5 workspaces increases idle memory and query fan-out"
+    corpus_document_count:
+      warn: 500
+      description: "Large corpus increases reindex time and embedding memory"
+  posture_levels:
+    - within_budget: "All metrics below warn thresholds"
+    - approaching_ceiling: "One or more metrics at or above warn threshold"
+    - over_budget: "Multiple metrics above warn OR host contention observed"

@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# RAG Budget Status
+# Read-only probe that checks AnythingLLM + Qdrant resource posture
+# against the workload budget contract.
+#
+# Authority: ops/bindings/domains/rag/rag.workload.budget.yaml
+# Outputs deterministic key=value lines + posture verdict.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${git_root:-}" && "${git_root:-}" != "null" ]]; then
+  SP="${SPINE_ROOT:-$git_root}"
+else
+  SP="${SPINE_ROOT:-$(cd "$script_dir/../../../../.." && pwd)}"
+fi
+
+BUDGET_BINDING="$SP/ops/bindings/domains/rag/rag.workload.budget.yaml"
+SERVICES_BINDING="$SP/ops/bindings/services.health.yaml"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+for t in yq curl jq; do
+  command -v "$t" >/dev/null 2>&1 || fail "missing required tool: $t"
+done
+
+[[ -f "$BUDGET_BINDING" ]] || fail "budget binding not found: $BUDGET_BINDING"
+
+# --- Read budget contract ---
+HOST_IP="$(yq -r '.host_context.tailscale_ip' "$BUDGET_BINDING")"
+TOTAL_WORKLOADS="$(yq -r '.host_context.total_workload_count' "$BUDGET_BINDING")"
+QDRANT_COLLECTION_WARN="$(yq -r '.capacity_pressure.thresholds.qdrant_collection_count.warn' "$BUDGET_BINDING")"
+WORKSPACE_WARN="$(yq -r '.capacity_pressure.thresholds.anythingllm_workspace_count.warn' "$BUDGET_BINDING")"
+
+ANYTHINGLLM_PORT="$(yq -r '.containers.anythingllm.port' "$BUDGET_BINDING")"
+QDRANT_PORT="$(yq -r '.containers.qdrant.port' "$BUDGET_BINDING")"
+
+ANYTHINGLLM_URL="http://${HOST_IP}:${ANYTHINGLLM_PORT}"
+QDRANT_URL="http://${HOST_IP}:${QDRANT_PORT}"
+
+# --- Resolve AnythingLLM API key ---
+ANYTHINGLLM_API_KEY="${ANYTHINGLLM_API_KEY:-}"
+if [[ -z "$ANYTHINGLLM_API_KEY" ]]; then
+  # Try media.api.resolve pattern
+  if command -v "$SP/bin/ops" >/dev/null 2>&1; then
+    ANYTHINGLLM_API_KEY="$("$SP/bin/ops" media.api.resolve --service anythingllm 2>/dev/null || true)"
+  fi
+fi
+
+echo "=== RAG Budget Status ==="
+echo "host=${HOST_IP}"
+echo "host_workload_count=${TOTAL_WORKLOADS}"
+echo ""
+
+# --- Probe AnythingLLM ---
+echo "--- AnythingLLM ---"
+allm_healthy="false"
+allm_workspace_count="unknown"
+
+allm_ping="$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" "${ANYTHINGLLM_URL}/api/ping" 2>/dev/null || echo "000")"
+if [[ "$allm_ping" == "200" ]]; then
+  allm_healthy="true"
+fi
+echo "anythingllm_health=${allm_healthy}"
+echo "anythingllm_http_status=${allm_ping}"
+
+if [[ -n "$ANYTHINGLLM_API_KEY" && "$allm_healthy" == "true" ]]; then
+  ws_resp="$(curl -sS --max-time 10 \
+    -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" \
+    -H "Content-Type: application/json" \
+    "${ANYTHINGLLM_URL}/api/v1/workspaces" 2>/dev/null || echo "")"
+  if [[ -n "$ws_resp" ]]; then
+    allm_workspace_count="$(echo "$ws_resp" | jq -r '.workspaces | length' 2>/dev/null || echo "parse_error")"
+  fi
+else
+  if [[ -z "$ANYTHINGLLM_API_KEY" ]]; then
+    echo "anythingllm_api_key=missing (set ANYTHINGLLM_API_KEY or configure media.api.resolve)"
+  fi
+fi
+echo "anythingllm_workspace_count=${allm_workspace_count}"
+
+# --- Probe Qdrant ---
+echo ""
+echo "--- Qdrant ---"
+qdrant_healthy="false"
+qdrant_collection_count="unknown"
+
+qdrant_ping="$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" "${QDRANT_URL}/healthz" 2>/dev/null || echo "000")"
+if [[ "$qdrant_ping" == "200" ]]; then
+  qdrant_healthy="true"
+fi
+echo "qdrant_health=${qdrant_healthy}"
+echo "qdrant_http_status=${qdrant_ping}"
+
+if [[ "$qdrant_healthy" == "true" ]]; then
+  collections_resp="$(curl -sS --max-time 10 "${QDRANT_URL}/collections" 2>/dev/null || echo "")"
+  if [[ -n "$collections_resp" ]]; then
+    qdrant_collection_count="$(echo "$collections_resp" | jq -r '.result.collections | length' 2>/dev/null || echo "parse_error")"
+  fi
+fi
+echo "qdrant_collection_count=${qdrant_collection_count}"
+
+# --- Compute posture ---
+echo ""
+echo "--- Budget Posture ---"
+warnings=0
+
+if [[ "$qdrant_collection_count" =~ ^[0-9]+$ ]]; then
+  if [[ "$qdrant_collection_count" -ge "$QDRANT_COLLECTION_WARN" ]]; then
+    echo "WARNING: qdrant_collection_count=${qdrant_collection_count} >= threshold=${QDRANT_COLLECTION_WARN}"
+    warnings=$((warnings + 1))
+  fi
+fi
+
+if [[ "$allm_workspace_count" =~ ^[0-9]+$ ]]; then
+  if [[ "$allm_workspace_count" -ge "$WORKSPACE_WARN" ]]; then
+    echo "WARNING: anythingllm_workspace_count=${allm_workspace_count} >= threshold=${WORKSPACE_WARN}"
+    warnings=$((warnings + 1))
+  fi
+fi
+
+if [[ "$allm_healthy" == "false" || "$qdrant_healthy" == "false" ]]; then
+  echo "WARNING: one or more RAG services unreachable"
+  warnings=$((warnings + 1))
+fi
+
+if [[ "$warnings" -ge 2 ]]; then
+  posture="over_budget"
+elif [[ "$warnings" -ge 1 ]]; then
+  posture="approaching_ceiling"
+else
+  posture="within_budget"
+fi
+
+echo "budget_posture=${posture}"
+echo "budget_warnings=${warnings}"
+echo ""
+echo "contract=${BUDGET_BINDING}"
