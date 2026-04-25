@@ -297,14 +297,34 @@ def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dic
                 "updated_at_utc": render_dt(dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)),
                 "path": str(path),
             }
-            status_index[loop_id] = status
-            if status in OPEN_LOOP_STATUSES:
+            sqlite_status = status_index.get(loop_id)
+            sqlite_is_open = sqlite_status in OPEN_LOOP_STATUSES if sqlite_status else False
+
+            if sqlite_is_open and status not in OPEN_LOOP_STATUSES:
+                # SQLite says open, scope file says closed/complete — SQLite wins.
+                # Enrich metadata only; do NOT change status or remove from rows.
                 existing = rows_by_id.get(loop_id, {})
                 merged = dict(existing)
-                merged.update({k: v for k, v in row.items() if v})
+                enrich_keys = {"scope", "path", "created_at_utc", "updated_at_utc"}
+                merged.update({k: v for k, v in row.items() if v and k in enrich_keys})
+                merged["_status_disagreement"] = f"sqlite={sqlite_status},scope_file={status}"
                 rows_by_id[loop_id] = merged
-            elif loop_id in rows_by_id:
-                rows_by_id.pop(loop_id, None)
+                # status_index keeps the SQLite value (already set above)
+            elif sqlite_status is not None:
+                # SQLite already has this loop — keep SQLite status in the index,
+                # but allow scope file to enrich metadata when both agree it's open.
+                if status in OPEN_LOOP_STATUSES:
+                    existing = rows_by_id.get(loop_id, {})
+                    merged = dict(existing)
+                    merged.update({k: v for k, v in row.items() if v and k != "status"})
+                    rows_by_id[loop_id] = merged
+                # If SQLite says closed and scope also says closed — no row needed.
+            else:
+                # Loop NOT in SQLite — scope file is sole source (backward compat).
+                status_index[loop_id] = status
+                if status in OPEN_LOOP_STATUSES:
+                    rows_by_id[loop_id] = row
+                # If scope-only and closed, no row needed.
 
     rows = sorted(rows_by_id.values(), key=lambda row: (row.get("created_at_utc", ""), row.get("loop_id", "")), reverse=True)
     return rows, status_index
