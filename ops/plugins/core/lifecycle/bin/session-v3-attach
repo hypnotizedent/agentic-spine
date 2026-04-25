@@ -481,6 +481,7 @@ import json
 import os
 import sys
 import re
+import sqlite3
 
 args = sys.argv[1:]
 terminal_id       = args[0] or None
@@ -551,55 +552,80 @@ if routing_json_raw:
     except Exception:
         pass
 
-# If we have a loop_id and state_root, read the scope file for full details
+# Authority: SQLite (scope-file fallback)
+# Enrich loop metadata from SQLite, falling back to scope-file parsing
+_sql_resolved = False
 if loop_id and state_root:
-    scope_dir = os.path.join(state_root, "loop-scopes")
-    for name in sorted(os.listdir(scope_dir)) if os.path.isdir(scope_dir) else []:
-        if not name.endswith(".scope.md"):
-            continue
-        path = os.path.join(scope_dir, name)
+    db_path = os.path.join(state_root, "shared_authority.db")
+    if os.path.isfile(db_path):
         try:
-            with open(path, "r") as f:
-                text = f.read(16384)
-        except OSError:
-            continue
-        if loop_id not in text:
-            continue
-        # Parse frontmatter
-        lines = text.split("\n")
-        if not lines or lines[0].strip() != "---":
-            continue
-        in_fm = True
-        current_list_key = None
-        for line in lines[1:]:
-            stripped = line.strip()
-            if stripped == "---":
-                break
-            # List item under a key
-            if stripped.startswith("- ") and current_list_key:
-                val = stripped[2:].strip().strip('"').strip("'")
-                if current_list_key == "evidence_refs":
-                    loop_evidence_refs.append(val)
-                elif current_list_key == "exclusions":
-                    loop_exclusions.append(val)
+            lib_dir = os.path.join(spine_root, "ops", "plugins", "core", "lifecycle", "lib")
+            if lib_dir not in sys.path:
+                sys.path.insert(0, lib_dir)
+            from loops_sql_authority import get_loop as _sql_get_loop
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            loop_data = _sql_get_loop(conn, loop_id)
+            conn.close()
+            if loop_data:
+                loop_objective = loop_data.get("objective") or loop_objective
+                loop_priority = loop_data.get("priority") or loop_priority
+                refs = loop_data.get("evidence_refs")
+                if isinstance(refs, list) and refs:
+                    loop_evidence_refs = refs
+                excl = loop_data.get("exclusions")
+                if isinstance(excl, list) and excl:
+                    loop_exclusions = excl
+                _sql_resolved = True
+        except Exception:
+            pass
+
+    # Scope-file fallback when SQLite unavailable or missing loop
+    if not _sql_resolved:
+        scope_dir = os.path.join(state_root, "loop-scopes")
+        for name in sorted(os.listdir(scope_dir)) if os.path.isdir(scope_dir) else []:
+            if not name.endswith(".scope.md"):
                 continue
-            # Key: value
-            colon = stripped.find(":")
-            if colon < 1:
-                current_list_key = None
+            path = os.path.join(scope_dir, name)
+            try:
+                with open(path, "r") as f:
+                    text = f.read(16384)
+            except OSError:
                 continue
-            key = stripped[:colon].strip()
-            val = stripped[colon+1:].strip().strip('"').strip("'")
+            if loop_id not in text:
+                continue
+            # Parse frontmatter
+            lines = text.split("\n")
+            if not lines or lines[0].strip() != "---":
+                continue
             current_list_key = None
-            if key == "objective" and val:
-                loop_objective = val
-            elif key == "priority" and val:
-                loop_priority = val
-            elif key == "evidence_refs":
-                current_list_key = "evidence_refs"
-            elif key == "exclusions":
-                current_list_key = "exclusions"
-        break
+            for line in lines[1:]:
+                stripped = line.strip()
+                if stripped == "---":
+                    break
+                if stripped.startswith("- ") and current_list_key:
+                    val = stripped[2:].strip().strip('"').strip("'")
+                    if current_list_key == "evidence_refs":
+                        loop_evidence_refs.append(val)
+                    elif current_list_key == "exclusions":
+                        loop_exclusions.append(val)
+                    continue
+                colon = stripped.find(":")
+                if colon < 1:
+                    current_list_key = None
+                    continue
+                key = stripped[:colon].strip()
+                val = stripped[colon+1:].strip().strip('"').strip("'")
+                current_list_key = None
+                if key == "objective" and val:
+                    loop_objective = val
+                elif key == "priority" and val:
+                    loop_priority = val
+                elif key == "evidence_refs":
+                    current_list_key = "evidence_refs"
+                elif key == "exclusions":
+                    current_list_key = "exclusions"
+            break
 
 # Compose the assignment object
 assignment = {

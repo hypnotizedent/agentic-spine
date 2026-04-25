@@ -88,39 +88,90 @@ _fm_list() {
   ' "$file"
 }
 
-# ── Check 1: Loop scope exists ───────────────────────────────────
+# ── Check 1: Loop exists ─────────────────────────────────────────
+# Authority: SQLite (scope-file fallback)
 SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+_SQLITE_LOOP_OK=0
 
-if [[ ! -f "$SCOPE_FILE" ]]; then
-  manifest_file="$SPINE_STATE/orchestration/$LOOP_ID/manifest.yaml"
-  if [[ -f "$manifest_file" ]]; then
-    echo "FAIL: loop scope not found: $SCOPE_FILE" >&2
-    echo "HINT: orchestration manifest exists at $manifest_file but the scope file was never created." >&2
-    echo "Run loops.create first, then retry wave.execute.start." >&2
-    exit 2
-  fi
-  echo "FAIL: loop scope not found: $SCOPE_FILE" >&2
-  exit 2
+if command -v python3 >/dev/null 2>&1; then
+  _loop_vars="$(python3 -c "
+import sys, os, json, shlex
+sys.path.insert(0, os.path.join('$SP', 'ops', 'plugins', 'core', 'lifecycle', 'lib'))
+try:
+    import loops_sql_authority as lsa
+    db, _ = lsa.resolve_paths('$SP')
+    if not os.path.exists(str(db)):
+        sys.exit(1)
+    conn = lsa.connect(db)
+    lsa.ensure_schema(conn)
+    loop = lsa.get_loop(conn, '$LOOP_ID')
+    conn.close()
+    if loop is None:
+        sys.exit(1)
+    def sh_val(v, default=''):
+        if v is None:
+            return default
+        if isinstance(v, list):
+            return ','.join(str(x) for x in v)
+        return str(v)
+    def sh_assign(name, val):
+        print(name + '=' + shlex.quote(val))
+    sh_assign('LOOP_STATUS', sh_val(loop.get('status'), 'unknown'))
+    sh_assign('LOOP_OWNER', sh_val(loop.get('owner'), '@ronny'))
+    sh_assign('LOOP_PRIORITY', sh_val(loop.get('priority'), ''))
+    sh_assign('LOOP_HORIZON', sh_val(loop.get('horizon'), ''))
+    sh_assign('EXEC_MODE', sh_val(loop.get('execution_mode'), 'single_worker'))
+    sh_assign('OBJECTIVE', sh_val(loop.get('objective'), '<not set>'))
+    sh_assign('EXEC_READINESS', sh_val(loop.get('execution_readiness'), 'runnable'))
+    excl = loop.get('exclusions') or []
+    if isinstance(excl, str):
+        excl = [excl]
+    sh_assign('EXCLUSIONS_RAW', ','.join(excl))
+    sup = loop.get('supersedes') or []
+    if isinstance(sup, str):
+        sup = [sup]
+    sh_assign('SUPERSEDES_RAW', ','.join(sup))
+except Exception as e:
+    print('_SQLITE_ERROR=' + str(e), file=sys.stderr)
+    sys.exit(1)
+" 2>/dev/null)" && _SQLITE_LOOP_OK=1
 fi
 
-LOOP_STATUS="$(_fm_value "$SCOPE_FILE" "status")"
-LOOP_OWNER="$(_fm_value "$SCOPE_FILE" "owner")"
-LOOP_PRIORITY="$(_fm_value "$SCOPE_FILE" "priority")"
-LOOP_HORIZON="$(_fm_value "$SCOPE_FILE" "horizon")"
-EXEC_MODE="$(_fm_value "$SCOPE_FILE" "execution_mode")"
-OBJECTIVE="$(_fm_value "$SCOPE_FILE" "objective")"
-EXEC_READINESS="$(_fm_value "$SCOPE_FILE" "execution_readiness")"
+if [[ "$_SQLITE_LOOP_OK" -eq 1 ]]; then
+  eval "$_loop_vars"
+else
+  # Fallback: read from scope file
+  if [[ ! -f "$SCOPE_FILE" ]]; then
+    manifest_file="$SPINE_STATE/orchestration/$LOOP_ID/manifest.yaml"
+    if [[ -f "$manifest_file" ]]; then
+      echo "FAIL: loop not found in SQLite or scope file: $LOOP_ID" >&2
+      echo "HINT: orchestration manifest exists at $manifest_file but the loop was never created." >&2
+      echo "Run loops.create first, then retry wave.execute.start." >&2
+      exit 2
+    fi
+    echo "FAIL: loop not found: $LOOP_ID" >&2
+    exit 2
+  fi
 
-# Defaults for fields that may be absent in older scope files
-LOOP_STATUS="${LOOP_STATUS:-unknown}"
-LOOP_OWNER="${LOOP_OWNER:-@ronny}"
-EXEC_MODE="${EXEC_MODE:-single_worker}"
-EXEC_READINESS="${EXEC_READINESS:-runnable}"
-OBJECTIVE="${OBJECTIVE:-<not set>}"
+  LOOP_STATUS="$(_fm_value "$SCOPE_FILE" "status")"
+  LOOP_OWNER="$(_fm_value "$SCOPE_FILE" "owner")"
+  LOOP_PRIORITY="$(_fm_value "$SCOPE_FILE" "priority")"
+  LOOP_HORIZON="$(_fm_value "$SCOPE_FILE" "horizon")"
+  EXEC_MODE="$(_fm_value "$SCOPE_FILE" "execution_mode")"
+  OBJECTIVE="$(_fm_value "$SCOPE_FILE" "objective")"
+  EXEC_READINESS="$(_fm_value "$SCOPE_FILE" "execution_readiness")"
 
-# Parse list fields
-EXCLUSIONS_RAW="$(_fm_list "$SCOPE_FILE" "exclusions")"
-SUPERSEDES_RAW="$(_fm_list "$SCOPE_FILE" "supersedes")"
+  # Defaults for fields that may be absent in older scope files
+  LOOP_STATUS="${LOOP_STATUS:-unknown}"
+  LOOP_OWNER="${LOOP_OWNER:-@ronny}"
+  EXEC_MODE="${EXEC_MODE:-single_worker}"
+  EXEC_READINESS="${EXEC_READINESS:-runnable}"
+  OBJECTIVE="${OBJECTIVE:-<not set>}"
+
+  # Parse list fields
+  EXCLUSIONS_RAW="$(_fm_list "$SCOPE_FILE" "exclusions")"
+  SUPERSEDES_RAW="$(_fm_list "$SCOPE_FILE" "supersedes")"
+fi
 
 # ── Check 2: Loop is active ─────────────────────────────────────
 if [[ "$LOOP_STATUS" != "active" ]]; then
@@ -133,12 +184,43 @@ WIP_COUNT=0
 WIP_STATE="within_cap"
 WIP_NOTE=""
 
-if [[ -d "$SCOPES_DIR" ]]; then
-  while IFS= read -r scope_file; do
-    [[ -f "$scope_file" ]] || continue
-    file_status="$(awk '/^status:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
-    [[ "$file_status" == "active" ]] && (( WIP_COUNT++ )) || true
-  done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
+# Authority: SQLite (scope-file fallback)
+_WIP_SQLITE_OK=0
+if command -v python3 >/dev/null 2>&1; then
+  _wip_result="$(python3 -c "
+import sys, os
+sys.path.insert(0, os.path.join('$SP', 'ops', 'plugins', 'core', 'lifecycle', 'lib'))
+try:
+    import loops_sql_authority as lsa
+    db, _ = lsa.resolve_paths('$SP')
+    if not os.path.exists(str(db)):
+        sys.exit(1)
+    conn = lsa.connect(db)
+    lsa.ensure_schema(conn)
+    wip_statuses = lsa.WIP_COUNTED_STATUSES
+    placeholders = ','.join('?' for _ in wip_statuses)
+    row = conn.execute(
+        f'SELECT COUNT(*) AS c FROM loops WHERE status IN ({placeholders})',
+        tuple(wip_statuses)
+    ).fetchone()
+    conn.close()
+    print(row['c'])
+except Exception:
+    sys.exit(1)
+" 2>/dev/null)" && _WIP_SQLITE_OK=1
+fi
+
+if [[ "$_WIP_SQLITE_OK" -eq 1 ]]; then
+  WIP_COUNT="$_wip_result"
+else
+  # Fallback: count from scope files
+  if [[ -d "$SCOPES_DIR" ]]; then
+    while IFS= read -r scope_file; do
+      [[ -f "$scope_file" ]] || continue
+      file_status="$(awk '/^status:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
+      [[ "$file_status" == "active" ]] && (( WIP_COUNT++ )) || true
+    done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
+  fi
 fi
 
 # If this loop is already active, do not deadlock reduction work just because the
@@ -187,22 +269,61 @@ fi
 LINKED_GAP_COUNT="$(echo "$LINKED_GAPS_JSON" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)"
 
 # ── Check 5: No superseding loops ───────────────────────────────
+# Authority: SQLite (scope-file fallback)
 SUPERSEDED_BY=""
-if [[ -d "$SCOPES_DIR" ]]; then
-  while IFS= read -r scope_file; do
-    [[ -f "$scope_file" ]] || continue
-    file_status="$(awk '/^status:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
-    [[ "$file_status" == "active" ]] || continue
-    file_id="$(awk '/^loop_id:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
-    [[ "$file_id" != "$LOOP_ID" ]] || continue
-    # Check if this loop's supersedes list contains our loop_id
-    supersedes_line="$(_fm_list "$scope_file" "supersedes")"
-    if echo "$supersedes_line" | grep -q "$LOOP_ID"; then
-      SUPERSEDED_BY="$file_id"
-      BLOCKERS+=("superseded by active loop $file_id")
-      break
-    fi
-  done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
+_SUPERSEDE_SQLITE_OK=0
+if command -v python3 >/dev/null 2>&1; then
+  _supersede_result="$(python3 -c "
+import sys, os, json
+sys.path.insert(0, os.path.join('$SP', 'ops', 'plugins', 'core', 'lifecycle', 'lib'))
+try:
+    import loops_sql_authority as lsa
+    db, _ = lsa.resolve_paths('$SP')
+    if not os.path.exists(str(db)):
+        sys.exit(1)
+    conn = lsa.connect(db)
+    lsa.ensure_schema(conn)
+    active = lsa.list_loops(conn, status='active')
+    conn.close()
+    target = '$LOOP_ID'
+    for loop in active:
+        if loop.get('loop_id') == target:
+            continue
+        sup = loop.get('supersedes') or []
+        if isinstance(sup, str):
+            sup = [sup]
+        if target in sup:
+            print(loop['loop_id'])
+            sys.exit(0)
+    print('')
+except Exception:
+    sys.exit(1)
+" 2>/dev/null)" && _SUPERSEDE_SQLITE_OK=1
+fi
+
+if [[ "$_SUPERSEDE_SQLITE_OK" -eq 1 ]]; then
+  if [[ -n "$_supersede_result" ]]; then
+    SUPERSEDED_BY="$_supersede_result"
+    BLOCKERS+=("superseded by active loop $SUPERSEDED_BY")
+  fi
+else
+  # Fallback: iterate scope files
+  if [[ -d "$SCOPES_DIR" ]]; then
+    while IFS= read -r scope_file; do
+      [[ -f "$scope_file" ]] || continue
+      file_status="$(awk '/^status:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
+      [[ "$file_status" == "active" ]] || continue
+      file_id="$(awk '/^loop_id:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
+      [[ "$file_id" != "$LOOP_ID" ]] || continue
+      # Check if this loop's supersedes list contains our loop_id
+      supersedes_line="$(_fm_list "$scope_file" "supersedes")"
+      if echo "$supersedes_line" | grep -q "$LOOP_ID"; then
+        SUPERSEDED_BY="$file_id"
+        BLOCKERS+=("superseded by active loop $file_id")
+        break
+      fi
+    done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
+  fi
 fi
 
 # ── Check 6: Dirty residue ──────────────────────────────────────
