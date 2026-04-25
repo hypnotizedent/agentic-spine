@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""delegate-to-execution — CLI for delegate.to.execution capability.
+
+Creates a delegation from control surface to worker execution custody.
+Validates loop + packet, writes delegation envelope, updates packet
+frontmatter. Does NOT start a wave.
+
+Exit codes:
+  0  success
+  1  delegation failed
+  2  invalid arguments
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import delegation_broker as db
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="delegate-to-execution",
+        description="Delegate a packet to worker execution custody.",
+    )
+    parser.add_argument(
+        "--loop-id", required=True,
+        help="Active loop ID to delegate within",
+    )
+    parser.add_argument(
+        "--packet-id", required=True,
+        help="Packet ID to delegate (must be status: draft)",
+    )
+    parser.add_argument(
+        "--objective", default="",
+        help="Override objective text (default: packet concern)",
+    )
+    parser.add_argument(
+        "--target-role", default="worker",
+        help="Target role for execution (default: worker)",
+    )
+    parser.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Emit JSON output",
+    )
+    parser.add_argument(
+        "--self-check", action="store_true",
+        help="Verify dependencies and exit",
+    )
+
+    if "--self-check" in sys.argv:
+        try:
+            import delegation_broker  # noqa: F401
+            import yaml  # noqa: F401
+            print("delegate.to.execution self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"delegate.to.execution self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    args = parser.parse_args()
+
+    spine_state = os.environ.get("SPINE_STATE", "")
+    if not spine_state:
+        msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": msg}, indent=2))
+        else:
+            print(f"delegate.to.execution FAIL: {msg}", file=sys.stderr)
+        return 1
+
+    try:
+        result = db.delegate(
+            loop_id=args.loop_id,
+            packet_id=args.packet_id,
+            state_root=spine_state,
+            objective=args.objective or "",
+            target_role=args.target_role,
+        )
+    except db.DelegationError as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"delegate.to.execution FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"DELEGATED: {result.get('delegation_id', '')}")
+        print(f"  loop:     {result.get('loop_id', '')}")
+        print(f"  packet:   {result.get('packet_id', '')}")
+        print(f"  objective: {result.get('objective', '')}")
+        print(f"  target:   {result.get('target_role', '')}")
+        print(f"  path:     {result.get('delegation_path', '')}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -86,14 +86,41 @@ stay on `main` and clean. All wave/feature work happens in managed worktrees.
 
 ## Default Lifecycle
 
+The **delegation path** is the default operator path. The operator stays on
+the control surface and delegates execution to worker custody via the broker.
+
 ```
 operator intent
   → loop opened or attached                  [governed: loops.create]
-    → packet scoped inside loop              [governed: controller_prompt.create, or operator authors directly for orchestration/kickoff]
-      → worktree opened for mutation         [governed: kickoff allocates, or agent bootstraps]
-        → wave dispatched                    [governed: wave.execute]
-        → wave finished with receipt         [governed: wave.finish]
-      → worktree merged, then pruned         [manual: agent pushes/merges, runs hygiene]
+    → packet scoped inside loop              [governed: controller_prompt.create]
+      → delegated to worker execution        [governed: delegate.to.execution]  ← DEFAULT
+        → worker picks up delegation         [governed: delegation.pickup]
+          → worktree opened for mutation     [governed: kickoff allocates, or agent bootstraps]
+            → wave dispatched                [governed: wave.execute]
+            → wave finished with receipt     [governed: wave.finish]
+          → worktree merged, then pruned     [manual: agent pushes/merges, runs hygiene]
+        → delegation state updated           [automatic: wave-close hook]
+    → packet closed with artifact            [governed: orchestration via wave.finish, prompts via controller_prompt.close]
+  → loop closed with acceptance              [governed: loop-closeout-finalize]
+  → handoff emitted at session boundary      [manual: session.handoff.create]
+```
+
+### Compatibility: Manual Custody Path
+
+The manual path (direct terminal switch + worker attach without delegation)
+remains available as a **compatibility/expert fallback**. Use delegation as the
+default unless you have a specific reason not to.
+
+```
+# Compatibility path — manual custody choreography
+operator intent
+  → loop opened or attached                  [governed: loops.create]
+    → packet scoped inside loop              [governed: controller_prompt.create]
+      → operator switches to worker terminal [manual: terminal switch]
+        → operator re-attaches to loop       [manual: context reconstruction]
+          → wave dispatched                  [governed: wave.execute]
+          → wave finished with receipt       [governed: wave.finish]
+      → operator switches back               [manual: terminal switch]
     → packet closed with artifact            [governed: orchestration via wave.finish, prompts via controller_prompt.close]
   → loop closed with acceptance              [governed: loop-closeout-finalize]
   → handoff emitted at session boundary      [manual: session.handoff.create]
@@ -156,6 +183,12 @@ not as a fix list.
 - **Loop auto-attach at session start** — terminal birth (`ops terminal launch`) auto-attaches the active loop when exactly one exists; standalone `session.v3.attach` remains read-only and does not bind loop context into the caller's environment
 - **Membrane-to-controller handoff** — no governed artifact between what the membrane understood and what the controller executes
 - **Controller-prompt packet amend/checkpoint** — no governed mid-packet surface between birth (`controller_prompt.create`) and death (`controller_prompt.close`); the execution phase is ungoverned by design
+
+## Resolved Seams
+
+These seams were previously absent and have been addressed.
+
+- **Control-surface delegation** — `delegate.to.execution` bridges control surface intent to worker execution custody without manual terminal switching (landed 2026-04-25)
 
 ## Desktop
 

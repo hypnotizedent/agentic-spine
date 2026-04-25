@@ -39,6 +39,72 @@ WORKTREE_LIFECYCLE_CONTRACT="$SP/ops/bindings/worktree.lifecycle.contract.yaml"
 
 mkdir -p "$WAVES_DIR"
 
+DELEGATION_BROKER="$SP/ops/plugins/core/lifecycle/lib/delegation_broker.py"
+
+# ── Delegation hooks ─────────────────────────────────────────────
+# These are best-effort hooks that update delegation state when waves
+# start or complete. Failures are non-fatal — delegation is a
+# convenience layer, not a wave-lifecycle gate.
+
+_delegation_transition_executing() {
+  local loop_id="$1"
+  local wave_id="$2"
+  [[ -f "$DELEGATION_BROKER" ]] || return 0
+  local spine_state="${SPINE_STATE:-}"
+  [[ -n "$spine_state" ]] || return 0
+  local del_dir="$spine_state/delegations"
+  [[ -d "$del_dir" ]] || return 0
+
+  # Find active delegation for this loop in picked_up state
+  python3 -c "
+import sys, os
+sys.path.insert(0, os.path.join(sys.argv[1], 'ops', 'plugins', 'core', 'lifecycle', 'lib'))
+import delegation_broker as db
+state_root = sys.argv[2]
+wave_id = sys.argv[3]
+loop_id = sys.argv[4]
+result = db.status(state_root)
+for d in result.get('delegations', []):
+    if d.get('loop_id') == loop_id and d.get('delegation_state') == 'picked_up':
+        db.transition(state_root, d['delegation_id'], 'executing', wave_id=wave_id)
+        print(f'delegation {d[\"delegation_id\"]} -> executing (wave {wave_id})')
+        break
+" "$SP" "$spine_state" "$wave_id" "$loop_id" 2>/dev/null || true
+}
+
+_delegation_transition_complete() {
+  local loop_id="$1"
+  local wave_id="$2"
+  local disposition="$3"
+  [[ -f "$DELEGATION_BROKER" ]] || return 0
+  local spine_state="${SPINE_STATE:-}"
+  [[ -n "$spine_state" ]] || return 0
+  local del_dir="$spine_state/delegations"
+  [[ -d "$del_dir" ]] || return 0
+
+  local new_state="needs_review"
+  if [[ "$disposition" == "landed" ]]; then
+    new_state="landed"
+  fi
+
+  python3 -c "
+import sys, os
+sys.path.insert(0, os.path.join(sys.argv[1], 'ops', 'plugins', 'core', 'lifecycle', 'lib'))
+import delegation_broker as db
+state_root = sys.argv[2]
+wave_id = sys.argv[3]
+loop_id = sys.argv[4]
+new_state = sys.argv[5]
+disposition = sys.argv[6]
+result = db.status(state_root)
+for d in result.get('delegations', []):
+    if d.get('loop_id') == loop_id and d.get('delegation_state') == 'executing' and d.get('wave_id') == wave_id:
+        db.transition(state_root, d['delegation_id'], new_state, wave_id=wave_id, disposition=disposition)
+        print(f'delegation {d[\"delegation_id\"]} -> {new_state} (disposition: {disposition})')
+        break
+" "$SP" "$spine_state" "$wave_id" "$loop_id" "$new_state" "$disposition" 2>/dev/null || true
+}
+
 # ── Usage ────────────────────────────────────────────────────────
 usage() {
   cat <<'USAGE'
@@ -840,6 +906,9 @@ for g in d.get('linked_gaps',[]):
   echo "WAVE STARTED -- dispatch tasks with:"
   echo "  wave-execute dispatch --wave-id $wave_id --lane <lane> --task \"...\""
   echo ""
+
+  # ── Delegation hook: transition active delegation to executing ──
+  _delegation_transition_executing "$loop_id" "$wave_id" || true
 }
 
 # ── Subcommand: dispatch ─────────────────────────────────────────
@@ -1406,6 +1475,9 @@ for p in pending:
         _fail "wave.finish failed"
       }
       _remove_temp_worktree "$finish_repo_root" "$finish_runner"
+
+      # ── Delegation hook: transition to landed/needs_review ──
+      _delegation_transition_complete "$loop_id" "$wave_id" "$disposition" || true
     fi
   fi
   echo ""

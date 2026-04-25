@@ -465,6 +465,43 @@ def main() -> None:
 
     assignment = compile_assignment(state_root)
 
+    # ── Delegation state enrichment ──────────────────────────────
+    # If active delegations exist, surface them as primary next-action
+    # context. Delegation state is more specific than raw packet/handoff.
+    delegations_dir = os.path.join(state_root, "delegations")
+    if os.path.isdir(delegations_dir):
+        try:
+            import yaml
+            active_dels = []
+            for fname in sorted(os.listdir(delegations_dir)):
+                if not fname.endswith(".yaml"):
+                    continue
+                fpath = os.path.join(delegations_dir, fname)
+                try:
+                    with open(fpath) as f:
+                        doc = yaml.safe_load(f)
+                except Exception:
+                    continue
+                if not isinstance(doc, dict):
+                    continue
+                ds = str(doc.get("delegation_state", "")).strip()
+                if ds not in ("landed", "needs_review", "cancelled"):
+                    active_dels.append({
+                        "delegation_id": doc.get("delegation_id"),
+                        "delegation_state": ds,
+                        "loop_id": doc.get("loop_id"),
+                        "packet_id": doc.get("packet_id"),
+                        "objective": doc.get("objective"),
+                    })
+            if active_dels:
+                assignment["active_delegations"] = active_dels
+                assignment["delegation_preferred"] = True
+        except ImportError:
+            pass
+    else:
+        assignment["active_delegations"] = []
+        assignment["delegation_preferred"] = False
+
     if args.format == "summary":
         cs = assignment.get("compilation_state", "unknown")
         print(f"compilation: {cs}")
@@ -476,6 +513,13 @@ def main() -> None:
         mg = assignment.get("mutation_ground") or {}
         print(f"mutation:    permitted={mg.get('mutation_permitted', '?')} role={mg.get('runtime_role', '?')}")
         print(f"handoff:     {assignment.get('handoff_target') or '<none>'}")
+        active_dels = assignment.get("active_delegations") or []
+        if active_dels:
+            print(f"delegations: {len(active_dels)} active")
+            for d in active_dels:
+                print(f"  {d.get('delegation_id', '?')} [{d.get('delegation_state', '?')}] {d.get('objective', '')[:60]}")
+        else:
+            print(f"delegations: none")
     else:
         print(json.dumps(assignment, indent=2))
 
