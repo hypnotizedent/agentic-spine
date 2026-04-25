@@ -243,7 +243,26 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
         hint = _H(str(item.get("operator_hint", "")))
         ctype = _H(str(item.get("content_type", "")))
         submitted = _H(str(item.get("submitted_at", "")))
+        disposition = _H(str(item.get("disposition", "awaiting_classification")))
+        classification = _H(str(item.get("classification", "")))
+        disposition_detail = _H(str(item.get("disposition_detail", "")))
+        next_stage = _H(str(item.get("next_stage", "")))
         badge_cls = f"badge-{state}" if state in ("submitted", "classified", "routed") else ""
+
+        # Outcome detail line: shows disposition and classification
+        outcome_parts = []
+        if disposition:
+            outcome_parts.append(disposition)
+        if classification:
+            outcome_parts.append(classification)
+        outcome_line = " · ".join(outcome_parts)
+
+        # Next stage / detail line
+        detail_line = ""
+        if next_stage:
+            detail_line = f"<div class='item-meta'>→ {next_stage}</div>"
+        elif disposition_detail:
+            detail_line = f"<div class='item-meta'>{disposition_detail}</div>"
 
         rows += f"""
         <div class="item">
@@ -252,11 +271,15 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
             <span class="badge {badge_cls}">{_H(state)}</span>
           </div>
           {"<div class='item-hint'>" + hint + "</div>" if hint else ""}
-          <div class="item-meta">{ctype} &middot; {submitted}</div>
+          <div class="item-meta">{outcome_line}</div>
+          {detail_line}
+          <div class="item-meta">{ctype} · {submitted}</div>
         </div>
         """
     if not rows:
         rows = '<div class="item"><div class="item-meta">No submissions yet.</div></div>'
+
+    state_root_display = _H(str(state_root))
 
     body = f"""
     <div class="nav">
@@ -267,6 +290,7 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
       <h1>Submissions</h1>
       {success_html}
       {rows}
+      <div class="item-meta" style="margin-top:.5rem;font-size:.7rem;opacity:.5">reading from {state_root_display}</div>
     </div>
     """
     return _render_page("Submissions", body)
