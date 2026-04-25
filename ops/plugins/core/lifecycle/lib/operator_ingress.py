@@ -26,6 +26,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1331,6 +1332,31 @@ def promote_operator_ingress(
         date_part = now.strftime("%Y%m%d")
         loop_id = f"LOOP-OI-PROMOTED-{slug}-{date_part}"
 
+        # Actually open the governed loop via orchestration-loop-open
+        repo_root = Path(__file__).resolve().parents[5]
+        loop_open_script = repo_root / "ops" / "plugins" / "core" / "orchestration" / "bin" / "orchestration-loop-open"
+        orch_dir = Path(state_root) / "orchestration" / loop_id
+        loop_already_exists = (orch_dir / "manifest.yaml").exists()
+
+        if not loop_already_exists:
+            proc = subprocess.run(
+                [
+                    str(loop_open_script),
+                    "--loop-id", loop_id,
+                    "--apply-owner", "activation_consumer",
+                    "--repo", str(repo_root),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(repo_root),
+            )
+            if proc.returncode != 0:
+                err = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+                raise OperatorIngressError(
+                    f"open_loop failed for {loop_id}: {err}"
+                )
+
         doc["lifecycle_state"] = "routed"
         doc["disposition"] = "attached"
         doc["disposition_detail"] = f"Promoted by activation consumer: opened {loop_id}."
@@ -1361,7 +1387,7 @@ def promote_operator_ingress(
         after=copy.deepcopy(doc),
     )
 
-    return {
+    result = {
         "status": "ok",
         "ingress_id": ingress_id,
         "action": action,
@@ -1374,6 +1400,11 @@ def promote_operator_ingress(
         "path": str(path),
         "covering_loop": covering_loop or "",
     }
+    # For open_loop actions, report whether the loop was freshly opened
+    if action == "open_loop":
+        result["loop_opened"] = not loop_already_exists
+        result["loop_id"] = loop_id
+    return result
 
 
 def process_promotable_operator_ingress(
