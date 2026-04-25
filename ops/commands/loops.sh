@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# ops loops - Open Loop Engine (scope-file backed)
+# ops loops - Open Loop Engine (SQLite-backed, scope-file fallback)
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # Usage:
-#   ops loops list [--open|--closed|--all]   List loops from scope files
+#   ops loops list [--open|--closed|--all]   List loops from SQLite authority
 #   ops loops close <loop_id> --disposition <state> [--completion-level <level>]  Mark loop as closed (updates scope)
 #   ops loops show <loop_id>                  Show loop scope file
 #   ops loops summary                         Show loop counts by status/severity
@@ -12,8 +12,8 @@
 #
 # Canonical operator-facing current-work surface is `ops status`. This command
 # remains the raw loop-scope view for loop surgery and archival inspection.
-# Scope files remain the SSOT for loop state; closed scope history drains to
-# archive/closed-loop-scopes/.
+# SQLite (loops_sql_authority) is the SSOT for loop state; scope files are
+# the fallback when the SQLite library is unavailable.
 # See: LOOP-MAILROOM-CONSOLIDATION-20260210 for the migration rationale.
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -33,10 +33,10 @@ DISPOSITION_CONTRACT="$SPINE_REPO/ops/bindings/closeout.disposition.contract.yam
 
 usage() {
     cat <<'EOF'
-ops loops - Open Loop Engine (scope-file backed)
+ops loops - Open Loop Engine (SQLite-backed, scope-file fallback)
 
 Usage:
-  ops loops list [--open|--closed|--all]   Raw loop-scope listing (default: open only)
+  ops loops list [--open|--closed|--all]   List loops from SQLite authority (default: open only)
   ops loops close <loop_id> --disposition <state> [--completion-level <level>] [--close-summary "<text>"]
                                            Mark loop as closed
   ops loops show <loop_id>                  Show loop scope file
@@ -47,8 +47,8 @@ Deprecated:
 
 Canonical source:
   - operator front door: ./bin/ops status
-  - live: .runtime/spine/state/loop-scopes/*.scope.md
-  - archived closed: .runtime/spine/state/archive/closed-loop-scopes/*.scope.md
+  - authority: SQLite via loops_sql_authority
+  - fallback: .runtime/spine/state/loop-scopes/*.scope.md
 EOF
 }
 
@@ -172,9 +172,10 @@ _scope_title() {
 }
 
 # Is this status considered "open"?
+# planned and blocked are live but not "open" for WIP purposes.
 _is_open_status() {
     case "$1" in
-        active|draft|open) return 0 ;;
+        active|draft|open|planned|blocked) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -275,86 +276,146 @@ list_loops() {
     echo "=== $label ==="
     echo ""
 
-    if [[ ! -d "$SCOPES_DIR" && ! -d "$SCOPES_ARCHIVE_DIR" ]]; then
-        echo "(no loops — $SCOPES_DIR not found)"
-        return 0
-    fi
-    python3 - "$SCOPES_DIR" "$SCOPES_ARCHIVE_DIR" "$filter" <<'PY'
+    python3 - "$SPINE_REPO" "$SCOPES_DIR" "$SCOPES_ARCHIVE_DIR" "$filter" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-scopes_dir = Path(sys.argv[1])
-archive_dir = Path(sys.argv[2])
-filter_mode = sys.argv[3]
+spine_repo = Path(sys.argv[1])
+scopes_dir = Path(sys.argv[2])
+archive_dir = Path(sys.argv[3])
+filter_mode = sys.argv[4]
 
 live_statuses = {"active", "draft", "open", "planned"}
 closed_statuses = {"closed", "completed", "deferred", "superseded", "abandoned", "landed"}
 valid_statuses = live_statuses | closed_statuses
-fm_re = re.compile(r"^---\s*$")
+# For --open filter: active, draft, open (NOT planned — planned is deferred intent)
+open_filter_statuses = {"active", "draft", "open"}
 
 
-def parse_scope(path: Path) -> dict[str, str]:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    fm = {}
-    in_fm = False
-    for line in lines:
-        if fm_re.match(line):
-            if in_fm:
-                break
-            in_fm = True
+def _entries_from_sqlite():
+    """Read loop data from SQLite authority. Returns list of entry dicts or None on failure."""
+    lib_path = spine_repo / "ops" / "plugins" / "core" / "lifecycle" / "lib"
+    sys.path.insert(0, str(lib_path))
+    try:
+        import loops_sql_authority as lsa
+
+        db_path, _ = lsa.resolve_paths(spine_repo)
+        conn = lsa.connect(db_path)
+        lsa.ensure_schema(conn)
+        all_loops = lsa.list_loops(conn)
+        conn.close()
+    except Exception:
+        return None
+
+    entries = []
+    for loop in all_loops:
+        loop_id = str(loop.get("loop_id", "")).strip()
+        status = str(loop.get("status", "")).strip().lower()
+        if not loop_id or status not in valid_statuses:
             continue
-        if in_fm and ":" in line:
-            key, _, val = line.partition(":")
-            fm[key.strip()] = val.strip().strip('"')
 
-    fm_count = 0
-    for line in lines:
-        if fm_re.match(line):
-            fm_count += 1
-            continue
-        if fm_count >= 2 and line.startswith("#"):
-            fm["_title"] = re.sub(r"^Loop Scope:\s*", "", re.sub(r"^#+\s*", "", line))
-            break
-    return fm
-
-
-roots = [scopes_dir]
-if filter_mode != "--open":
-    roots.append(archive_dir)
-
-entries = []
-seen = set()
-for root in roots:
-    if not root.is_dir():
-        continue
-    for path in sorted(root.glob("*.scope.md")):
-        fm = parse_scope(path)
-        loop_id = (fm.get("loop_id") or path.stem).strip()
-        status = (fm.get("status") or "").strip().lower()
-        if not loop_id or status not in valid_statuses or loop_id in seen:
-            continue
-        seen.add(loop_id)
-
-        if filter_mode == "--open" and status not in {"active", "draft", "open"}:
+        if filter_mode == "--open" and status not in open_filter_statuses:
             continue
         if filter_mode == "--closed" and status not in closed_statuses:
             continue
+
+        # blocked_by may be a list from SQLite
+        blocked_by_raw = loop.get("blocked_by") or ""
+        if isinstance(blocked_by_raw, list):
+            blocked_by_raw = ", ".join(str(b) for b in blocked_by_raw if b)
 
         entries.append(
             {
                 "loop_id": loop_id,
                 "status": status,
-                "severity": (fm.get("severity") or "-").strip() or "-",
-                "owner": (fm.get("owner") or "unassigned").strip() or "unassigned",
-                "title": (fm.get("_title") or path.stem).strip() or path.stem,
-                "execution_mode": (fm.get("execution_mode") or "").strip(),
-                "active_terminal": (fm.get("active_terminal") or "").strip(),
-                "blocked_by": (fm.get("blocked_by") or "").strip(),
-                "horizon": (fm.get("horizon") or "").strip(),
-                "execution_readiness": (fm.get("execution_readiness") or "").strip(),
+                "severity": str(loop.get("priority") or "-").strip() or "-",
+                "owner": str(loop.get("owner") or "unassigned").strip() or "unassigned",
+                "title": str(loop.get("objective") or loop_id).strip() or loop_id,
+                "execution_mode": str(loop.get("execution_mode") or "").strip(),
+                "active_terminal": str(loop.get("active_terminal") or "").strip(),
+                "blocked_by": blocked_by_raw,
+                "horizon": str(loop.get("horizon") or "").strip(),
+                "execution_readiness": str(loop.get("execution_readiness") or "").strip(),
             }
         )
+    return entries
+
+
+def _entries_from_scope_files():
+    """Fallback: read loop data from .scope.md files."""
+    fm_re = re.compile(r"^---\s*$")
+
+    def parse_scope(path):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        fm = {}
+        in_fm = False
+        for line in lines:
+            if fm_re.match(line):
+                if in_fm:
+                    break
+                in_fm = True
+                continue
+            if in_fm and ":" in line:
+                key, _, val = line.partition(":")
+                fm[key.strip()] = val.strip().strip('"')
+        fm_count = 0
+        for line in lines:
+            if fm_re.match(line):
+                fm_count += 1
+                continue
+            if fm_count >= 2 and line.startswith("#"):
+                fm["_title"] = re.sub(r"^Loop Scope:\s*", "", re.sub(r"^#+\s*", "", line))
+                break
+        return fm
+
+    if not scopes_dir.is_dir() and not archive_dir.is_dir():
+        return []
+
+    roots = [scopes_dir]
+    if filter_mode != "--open":
+        roots.append(archive_dir)
+
+    entries = []
+    seen = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*.scope.md")):
+            fm = parse_scope(path)
+            loop_id = (fm.get("loop_id") or path.stem).strip()
+            status = (fm.get("status") or "").strip().lower()
+            if not loop_id or status not in valid_statuses or loop_id in seen:
+                continue
+            seen.add(loop_id)
+
+            if filter_mode == "--open" and status not in open_filter_statuses:
+                continue
+            if filter_mode == "--closed" and status not in closed_statuses:
+                continue
+
+            entries.append(
+                {
+                    "loop_id": loop_id,
+                    "status": status,
+                    "severity": (fm.get("severity") or "-").strip() or "-",
+                    "owner": (fm.get("owner") or "unassigned").strip() or "unassigned",
+                    "title": (fm.get("_title") or path.stem).strip() or path.stem,
+                    "execution_mode": (fm.get("execution_mode") or "").strip(),
+                    "active_terminal": (fm.get("active_terminal") or "").strip(),
+                    "blocked_by": (fm.get("blocked_by") or "").strip(),
+                    "horizon": (fm.get("horizon") or "").strip(),
+                    "execution_readiness": (fm.get("execution_readiness") or "").strip(),
+                }
+            )
+    return entries
+
+
+# Try SQLite first, fall back to scope files
+entries = _entries_from_sqlite()
+if entries is None:
+    print("(SQLite unavailable — falling back to scope files)", file=sys.stderr)
+    entries = _entries_from_scope_files()
 
 if not entries:
     print("(no loops)")
@@ -607,25 +668,79 @@ summary() {
     echo "=== LOOP SUMMARY ==="
     echo ""
 
-    if [[ ! -d "$SCOPES_DIR" && ! -d "$SCOPES_ARCHIVE_DIR" ]]; then
-        echo "Open: 0"
-        echo "Closed: 0"
-        echo "Total: 0"
-        return 0
-    fi
-
     # Python for reliable counting (associative arrays need bash 4+, macOS ships bash 3)
-    python3 - "$SCOPES_DIR" "$SCOPES_ARCHIVE_DIR" <<'PY'
+    python3 - "$SPINE_REPO" "$SCOPES_DIR" "$SCOPES_ARCHIVE_DIR" <<'PY'
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
-scopes_dir = Path(sys.argv[1])
-archive_dir = Path(sys.argv[2])
-if not scopes_dir.is_dir() and not archive_dir.is_dir():
-    print("Open: 0\nClosed: 0\nTotal: 0")
-    sys.exit(0)
+spine_repo = Path(sys.argv[1])
+scopes_dir = Path(sys.argv[2])
+archive_dir = Path(sys.argv[3])
+
+closed_statuses = {"closed", "completed", "deferred", "superseded", "abandoned", "landed"}
+open_statuses = {"active", "draft", "open"}
+all_live = {"active", "draft", "open", "planned"}
+all_valid = all_live | closed_statuses
+
+
+def _loops_from_sqlite():
+    """Return list of loop dicts from SQLite, or None on failure."""
+    lib_path = spine_repo / "ops" / "plugins" / "core" / "lifecycle" / "lib"
+    sys.path.insert(0, str(lib_path))
+    try:
+        import loops_sql_authority as lsa
+
+        db_path, _ = lsa.resolve_paths(spine_repo)
+        conn = lsa.connect(db_path)
+        lsa.ensure_schema(conn)
+        loops = lsa.list_loops(conn)
+        conn.close()
+        return loops
+    except Exception:
+        return None
+
+
+def _loops_from_scope_files():
+    """Fallback: read from scope files."""
+    FM_RE = re.compile(r'^---\s*$')
+    loops = []
+    seen = set()
+    for root in (scopes_dir, archive_dir):
+        if not root.is_dir():
+            continue
+        is_archive = root == archive_dir
+        for f in sorted(root.glob("*.scope.md")):
+            lines = f.read_text().splitlines()
+            in_fm = False
+            fm = {}
+            for line in lines:
+                if FM_RE.match(line):
+                    if in_fm:
+                        break
+                    in_fm = True
+                    continue
+                if in_fm and ':' in line:
+                    key, _, val = line.partition(':')
+                    fm[key.strip()] = val.strip().strip('"')
+            status = fm.get("status", "")
+            loop_id = fm.get("loop_id", f.stem)
+            if status not in all_valid or loop_id in seen:
+                continue
+            seen.add(loop_id)
+            # Archived files with live status are treated as closed
+            if is_archive and status in all_live:
+                fm["status"] = "closed"
+            loops.append(fm)
+    return loops
+
+
+# Try SQLite first
+all_loops = _loops_from_sqlite()
+if all_loops is None:
+    print("(SQLite unavailable — falling back to scope files)", file=sys.stderr)
+    all_loops = _loops_from_scope_files()
 
 open_count = 0
 planned_count = 0
@@ -635,57 +750,26 @@ severity_counts = Counter()
 owner_counts = Counter()
 background_open = []
 
-FM_RE = re.compile(r'^---\s*$')
-closed_statuses = {"closed", "completed", "deferred", "superseded", "abandoned", "landed"}
-seen_loop_ids = set()
-
-for root in (scopes_dir, archive_dir):
-    if not root.is_dir():
+for loop in all_loops:
+    status = str(loop.get("status", "")).strip().lower()
+    if status not in all_valid:
         continue
-    for f in sorted(root.glob("*.scope.md")):
-        lines = f.read_text().splitlines()
-        in_fm = False
-        fm = {}
-        for line in lines:
-            if FM_RE.match(line):
-                if in_fm:
-                    break
-                in_fm = True
-                continue
-            if in_fm and ':' in line:
-                key, _, val = line.partition(':')
-                fm[key.strip()] = val.strip().strip('"')
+    loop_id = str(loop.get("loop_id", "")).strip()
+    total += 1
+    severity = str(loop.get("priority") or loop.get("severity") or "unknown").strip() or "unknown"
+    owner = str(loop.get("owner") or "unassigned").strip() or "unassigned"
 
-        status = fm.get("status", "")
-        loop_id = fm.get("loop_id", f.stem)
-        if status not in ("active", "draft", "open", "planned") and status not in closed_statuses:
-            continue
-        if loop_id in seen_loop_ids:
-            continue
-        seen_loop_ids.add(loop_id)
-
-        # Archived scope files are historical evidence only. Even if an archived
-        # file retains a stale active/open frontmatter status, it must not affect
-        # the current open-loop operator count.
-        is_archive_root = root == archive_dir
-        effective_status = status
-        if is_archive_root and status in ("active", "draft", "open", "planned"):
-            effective_status = "closed"
-
-        total += 1
-        severity = fm.get("severity", "unknown")
-        owner = fm.get("owner", "unassigned")
-
-        if effective_status in ("active", "draft", "open"):
-            open_count += 1
-            severity_counts[severity] += 1
-            owner_counts[owner] += 1
-            if fm.get("execution_mode", "") == "background":
-                background_open.append(loop_id)
-        elif effective_status == "planned":
-            planned_count += 1
-        else:
-            closed_count += 1
+    if status in open_statuses:
+        open_count += 1
+        severity_counts[severity] += 1
+        owner_counts[owner] += 1
+        exec_mode = str(loop.get("execution_mode") or "").strip()
+        if exec_mode == "background":
+            background_open.append(loop_id)
+    elif status == "planned":
+        planned_count += 1
+    else:
+        closed_count += 1
 
 print("By Status:")
 print(f"  Open:    {open_count}")

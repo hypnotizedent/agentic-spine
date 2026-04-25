@@ -11,6 +11,30 @@ project_to_scope_files().
 Authority: SQLite (WAL mode, shared_authority.db -- same DB as gaps)
 Projection: live .scope.md files in $SPINE_STATE/loop-scopes/ and archived
 closed scopes in $SPINE_STATE/archive/closed-loop-scopes/ (on-demand)
+
+Loop Status Taxonomy (canonical — all surfaces must agree on these meanings):
+
+  LIVE statuses (loop exists, scope file lives in loop-scopes/):
+    active    — live work in progress; counts toward WIP cap
+    open      — synonym for active (historical); counts toward WIP cap
+    draft     — initial state before work starts; counts toward WIP cap
+    planned   — deferred intent (horizon != now); does NOT count toward WIP
+    blocked   — live but waiting on external dependency; does NOT count toward WIP
+
+  WIP-counted subset: {active, open, draft}
+  Non-WIP live subset: {planned, blocked}
+
+  TERMINAL statuses (loop is done, scope file drains to archive/):
+    closed      — generic terminal state
+    completed   — alias: work finished (historical)
+    complete    — alias: work finished (scope-file variant, normalized to closed)
+    deferred    — work paused indefinitely
+    superseded  — replaced by another loop
+    abandoned   — work dropped
+    landed      — work merged/delivered
+
+  All surfaces must read these categories from SQLite.
+  Scope files are projections of SQLite, not independent policy.
 """
 
 from __future__ import annotations
@@ -35,9 +59,11 @@ DEFAULT_SCOPES_DIR_REL = "loop-scopes"
 DEFAULT_SCOPES_ARCHIVE_DIR_REL = "archive/closed-loop-scopes"
 DEFAULT_SCOPES_QUARANTINE_DIR_REL = "quarantine/loop-scopes"
 DEFAULT_SCOPE_PROJECTION_LOCK_NAME = ".loops-scope-projection.lock"
-LIVE_SCOPE_STATUSES = {"active", "planned", "draft", "open"}
+LIVE_SCOPE_STATUSES = {"active", "planned", "draft", "open", "blocked"}
+WIP_COUNTED_STATUSES = {"active", "open", "draft"}
 ARCHIVED_SCOPE_STATUSES = {
     "closed",
+    "complete",
     "completed",
     "deferred",
     "superseded",
