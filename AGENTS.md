@@ -37,6 +37,15 @@ Legal work:
 - verify, status, and reconcile operations
 - bug fixes to existing spine-core surfaces when provably broken
 
+Bounded lane widening (operator-approved):
+- STANDING-PROGRAM-BIRTH-RULES: classify existing recurring inventory by birth
+  mode, add birth_mode field to scheduler registry, wire enforcement gate into
+  verify, surface result in status. Scope: birth-mode vocabulary
+  (standing_program, exception_only, migration_project, human_session_only),
+  one new verify check, one registry field. No new node types, no plane
+  restructuring, no authority promotion beyond this lane.
+  Approved: 2026-04-25 by Ronny.
+
 Illegal work until Ronny lifts this aperture:
 - net-new governance surfaces, doctrine shelves, or surface type vocabulary
 - broad architecture reopening (node topology, plane restructuring, fleet

@@ -573,6 +573,46 @@ def execution_host_section(roles: dict) -> str:
     </details>"""
 
 
+def birth_mode_section(audit: dict) -> str:
+    if not audit:
+        return ""
+    ok = audit.get("ok", True)
+    violations = audit.get("violations", [])
+    summary = audit.get("summary", {})
+    total = audit.get("total_labels", 0)
+
+    mode_parts = [f'{_h(m)}: {c}' for m, c in sorted(summary.items())]
+    mode_line = " · ".join(mode_parts) if mode_parts else "none classified"
+
+    if ok:
+        badge = (
+            '<span style="color:var(--grn);font-weight:600;font-size:.5rem;'
+            'padding:.1rem .3rem;border-radius:3px;background:rgba(42,52,68,.75)">'
+            'ALL HONEST</span>'
+        )
+        detail_body = f'<div style="font-size:.5rem;color:var(--t);opacity:.7">{_h(mode_line)}</div>'
+    else:
+        badge = (
+            f'<span style="color:var(--red);font-weight:600;font-size:.5rem;'
+            f'padding:.1rem .3rem;border-radius:3px;background:rgba(42,52,68,.75)">'
+            f'{len(violations)} VIOLATION{"S" if len(violations) != 1 else ""}</span>'
+        )
+        rows = ""
+        for v in violations:
+            rows += (
+                f'<div style="font-size:.5rem;color:var(--red);padding:.15rem 0">'
+                f'{_h(v.get("label",""))}: {_h(v.get("issue",""))}</div>'
+            )
+        detail_body = rows
+
+    return f"""
+    <div class="sh">Birth Mode Audit</div>
+    <details{"" if ok else ' open'}>
+      <summary>{total} labels {badge}</summary>
+      <div class="det-body">{detail_body}</div>
+    </details>"""
+
+
 def comms_incident_card(cq: dict) -> str:
     slo = cq.get("slo_status", "ok")
     pending = int(cq.get("pending", 0) or 0)
@@ -1593,6 +1633,7 @@ def generate(payload: dict | None = None) -> str:
     sec_fresh = freshness_card(p)
     sec_roles = node_role_card(p["node_roles"])
     sec_exec = execution_host_section(p["node_roles"])
+    sec_birth = birth_mode_section(p.get("birth_mode_audit", {}))
     sec_comms = comms_incident_card(p["work_state"]["comms_queue"])
     sec_timeline = timeline_section(git_log, p.get("continuity", {}))
     sec_caps = capability_atlas(caps_data, inv_counts)
@@ -1605,7 +1646,7 @@ def generate(payload: dict | None = None) -> str:
         '<details>'
         '<summary>Infrastructure <span class="det-count">machine + projection + release posture</span></summary>'
         '<div class="det-body">'
-        f'{sec_comms}{sec_fresh}{sec_temporal}{sec_roles}{sec_exec}{sec_release}'
+        f'{sec_comms}{sec_fresh}{sec_temporal}{sec_roles}{sec_exec}{sec_birth}{sec_release}'
         '</div>'
         '</details>'
         '</section>'

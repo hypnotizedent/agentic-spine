@@ -20,9 +20,7 @@ scheduler_execution:
 
     '
   labels:
-  - com.ronny.backup-monitor-hourly
   - com.ronny.domain-inventory-refresh-daily
-  - com.ronny.operator-hygiene-daily
   forbidden_env_vars:
   - SPINE_RUNTIME_WORKTREE
   - SPINE_RUNTIME_WORKTREE_BRANCH
@@ -73,11 +71,8 @@ required_labels:
   - com.ronny.alerting-probe-cycle
   - com.ronny.communications-alerts-dispatcher
   - com.ronny.domain-inventory-refresh-daily
-  - com.ronny.verify-gate-review-consumer-daily
-  - com.ronny.operator-hygiene-daily
   - com.ronny.simplefin-daily-sync
   - com.ronny.finance-backup-weekly
-  - com.ronny.backup-monitor-hourly
   - com.ronny.media-capacity-snapshot-daily
   - com.ronny.infra-core-smoke
 canonical_path_policy:
@@ -103,6 +98,66 @@ operator_console_locality:
     truth and is not affected by this local posture.
   archived_plist_count: 38
   archive_path: .runtime/spine/state/archive/launchd-locality-residue-20260416
+birth_mode_vocabulary:
+  description: >
+    Every recurring workload in the scheduler registry MUST declare exactly one
+    birth_mode. Birth mode governs how and when work may start and what the
+    system expects from its lifecycle.
+  effective_date: "2026-04-25"
+  modes:
+    standing_program:
+      description: >
+        Autonomous headless work that runs on a schedule or as a daemon without
+        human initiation. The system expects it to be scheduled and running.
+        If a human must manually birth it, something is broken.
+      permitted_host_roles:
+        - execution_host
+        - watcher_node
+        - storage_evidence_node
+      enforcement:
+        must_have_scheduler: true
+        human_birth_warning: true
+        state_must_be: active
+    exception_only:
+      description: >
+        Work that should not run on a schedule. It is birthed automatically by
+        a threshold breach, stale detection, or intervention scaffold. Humans
+        enter at review/repair, not at normal breathing.
+      permitted_host_roles:
+        - execution_host
+        - watcher_node
+      enforcement:
+        must_have_scheduler: false
+        human_birth_warning: false
+        state_must_be: null
+    migration_project:
+      description: >
+        Temporary work with a defined end state. Runs on a schedule only while
+        the migration is active. Must have an expiry or sunset condition.
+      permitted_host_roles:
+        - execution_host
+      enforcement:
+        must_have_scheduler: true
+        requires_sunset_condition: true
+        state_must_be: active
+    human_session_only:
+      description: >
+        Work that exists to support interactive operator sessions. Not scheduled.
+        The operator starts it manually or it starts as part of session attach.
+        If it appears in a scheduler, the classification is wrong.
+      permitted_host_roles:
+        - operator_console
+      enforcement:
+        must_have_scheduler: false
+        scheduler_presence_is_error: true
+        state_must_be: suspended
+  validation_rules:
+    - every active label MUST have a birth_mode field
+    - birth_mode value MUST be one of the defined modes
+    - state active + birth_mode human_session_only is illegal (use suspended)
+    - birth_mode standing_program + no active scheduler is a verify failure
+    - birth_mode human_session_only + intended_node_role != operator_console is illegal
+    - parked labels MUST use birth_mode classify_on_promotion
 orphaned_live_labels:
   description: >
     Resolved 2026-04-16. All orphaned plists removed from ~/Library/LaunchAgents/
