@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Emit a minimal receipt.exec.json payload."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+
+def csv_list(raw: str) -> list[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def csv_map(raw: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in csv_list(raw):
+        if "=" in item:
+            key, value = item.split("=", 1)
+            result[key.strip()] = value.strip() or "missing"
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task-id", required=True)
+    parser.add_argument("--terminal-id", required=True)
+    parser.add_argument("--lane", required=True)
+    parser.add_argument("--status", required=True)
+    parser.add_argument("--files-changed", default="")
+    parser.add_argument("--run-keys", default="")
+    parser.add_argument("--ready-for-verify", default="false")
+    parser.add_argument("--timestamp-utc", required=True)
+    parser.add_argument("--prompt-set-id", required=True)
+    parser.add_argument("--prompt-version", required=True)
+    parser.add_argument("--prompt-source-refs", default="")
+    parser.add_argument("--prompt-source-hash", default="none")
+    parser.add_argument("--prompt-source-hashes", default="")
+    parser.add_argument("--prompt-registry-path", required=True)
+    parser.add_argument("--prompt-resolution", required=True)
+    parser.add_argument("--json-out", required=True)
+    args = parser.parse_args()
+
+    payload = {
+        "task_id": args.task_id,
+        "terminal_id": args.terminal_id,
+        "lane": args.lane,
+        "status": args.status,
+        "timestamp_utc": args.timestamp_utc,
+        "files_changed": csv_list(args.files_changed),
+        "run_keys": csv_list(args.run_keys),
+        "ready_for_verify": args.ready_for_verify.lower() == "true",
+        "prompt_lineage": {
+            "prompt_set_id": args.prompt_set_id,
+            "version": args.prompt_version,
+            "source_refs": csv_list(args.prompt_source_refs),
+            "source_hash": args.prompt_source_hash,
+            "source_hashes": csv_map(args.prompt_source_hashes),
+            "registry_path": args.prompt_registry_path,
+            "resolution": args.prompt_resolution,
+        },
+    }
+
+    out_path = Path(args.json_out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(str(out_path))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

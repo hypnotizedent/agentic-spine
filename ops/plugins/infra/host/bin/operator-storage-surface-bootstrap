@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/plugins/infra/host/lib/operator-storage-surface-common.sh"
+
+usage() {
+  cat <<'EOF'
+operator.storage.surface.bootstrap
+
+Usage:
+  operator-storage-surface-bootstrap [install|status] [--force]
+
+Provides one boring bootstrap path for governed Mac client storage surfaces.
+It delegates local installation to the runtime workbench installer.
+EOF
+}
+
+main() {
+  local command="install"
+  local force=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      install|status)
+        command="$1"
+        shift
+        ;;
+      --force)
+        force=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        operator_storage_fail "unknown argument: $1"
+        ;;
+    esac
+  done
+
+  operator_storage_load_contract
+  local installer
+  installer="$(operator_storage_bootstrap_installer)"
+  [[ -x "$installer" ]] || operator_storage_fail "missing bootstrap installer: $installer"
+
+  if [[ "$command" == "status" ]]; then
+    exec "$installer" status
+  fi
+
+  if [[ "$force" -eq 1 ]]; then
+    exec "$installer" install --force
+  fi
+  exec "$installer" install
+}
+
+main "$@"

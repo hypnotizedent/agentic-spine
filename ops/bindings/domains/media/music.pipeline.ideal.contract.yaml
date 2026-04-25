@@ -1,0 +1,231 @@
+# ┌──────────────────────────────────────────────────────────────────────┐
+# │ COMPATIBILITY PROJECTION — DO NOT EDIT HERE                         │
+# │ Canonical authority: ~/code/workbench/agents/media/bindings/        │
+# │ This copy is retained at this spine path for live consumer          │
+# │ compatibility. Edits must land in the workbench canonical copy      │
+# │ first, then be synced here.                                         │
+# │ Relocation: MEDIA_WORKBENCH_HOME_RELOCATION (2026-03-30)           │
+# └──────────────────────────────────────────────────────────────────────┘
+# Music Pipeline Ideal State Contract
+# Status: authoritative
+# Owner: "@operator"
+# Scope: Target architecture for the complete music pipeline
+# Operator intent: "I want more music and good Arabic music"
+# Generated: 2026-03-24
+
+contract: MUSIC_PIPELINE_IDEAL_V1
+version: "1.0"
+created: "2026-03-24"
+owner: "@operator"
+
+operator_intent: |
+  "I want more music and it's really been taking me a while to get good Arabic music."
+  The pipeline must maximize discovery, support niche/Arabic content, and create
+  a feedback loop: listen → scrobble → discover → grab → listen more.
+
+pipeline_flow: "DISCOVER → WANTED → GRAB → DOWNLOAD → IMPORT → INDEX → STREAM → SCROBBLE → DISCOVER MORE"
+
+discovery_sources:
+  manual:
+    method: "Operator adds artists/albums directly in Lidarr"
+    status: active
+    priority: 1
+  spotisub:
+    method: "Spotify playlists/likes → Navidrome library"
+    status: active
+    promoted_at: "2026-03-24"
+    arabic_value: "Spotify Arabic playlists and algorithmic discovery feed into library"
+  lastfm:
+    method: "Scrobbling → similar artists → recommendations"
+    status: configured
+    restored_at: "2026-03-24"
+    arabic_value: "Last.fm Arabic artist similar/related feeds discovery"
+  import_lists:
+    method: "Lidarr import lists from external sources"
+    status: missing
+    target: configured
+    gap: "No import lists configured in Lidarr — zero automated discovery"
+  music_assistant:
+    method: "HA addon multi-provider discovery"
+    status: running
+    target: integrated
+    gap: "Music Assistant running on HA but Navidrome provider not verified"
+
+grab_chain:
+  usenet:
+    client: sabnzbd
+    indexers: [NinjaCentral, NZBFinder, NZBgeek, Usenet-Crawler]
+    protocol: usenet
+    status: active
+    arabic_effectiveness: low
+    note: "Arabic music poorly represented on Usenet. Good for mainstream Western."
+  soulseek:
+    client: slskd
+    bridge: soularr
+    protocol: p2p
+    vpn: gluetun
+    status: active
+    arabic_effectiveness: high
+    note: "Richest source for Arabic and niche music. MUST stay running."
+  torrent:
+    client: qbittorrent
+    indexers: "NONE for music — gap"
+    protocol: torrent
+    vpn: gluetun
+    status: active
+    re_enabled_at: "2026-03-24"
+    arabic_effectiveness: medium
+    remaining_gap: "No torrent indexers for music in Prowlarr yet."
+
+import_chain:
+  flow: "download complete → Lidarr import scan → MusicBrainz match → /media/music"
+  lidarr_root: /media/music
+  matching_threshold: "80% (causing 24 stuck items — may need relaxation for Arabic)"
+  hardlinks: true
+  staging_paths:
+    sabnzbd: /media/downloads/complete/audio
+    slskd: /media/downloads/slskd
+    qbittorrent: /media/downloads/complete/lidarr
+
+index_chain:
+  navidrome:
+    library_path: /music
+    host_path: /srv/media/music
+    scan_schedule: 15m
+    restored_at: "2026-03-24"
+
+stream_chain:
+  navidrome:
+    port: 4533
+    status: active
+    clients: [feishin]
+    transcoding: "Unknown — legacy was Opus 192kbps"
+    integrations_target:
+      spotify: {env: [ND_SPOTIFY_ID, ND_SPOTIFY_SECRET], purpose: "artist metadata/images"}
+      lastfm: {env: [ND_LASTFM_APIKEY, ND_LASTFM_SECRET], purpose: "scrobbling + recommendations"}
+      lrclib: {env: [ND_LRCLIB_URL], value: "https://lrclib.net", purpose: "lyrics display"}
+    integrations_current: [spotify, lastfm, lrclib]
+    restored_at: "2026-03-24"
+  music_assistant:
+    platform: ha_addon
+    version: 2.7.11
+    status: started
+    target: "Navidrome provider configured"
+
+scrobble_chain:
+  lastfm:
+    status: configured
+    restored_at: "2026-03-24"
+    feedback_loop: "scrobbles → similar artists → discovery → Lidarr adds"
+    note: "ND_LASTFM_APIKEY + ND_LASTFM_SECRET set. User auth via Navidrome UI needed to activate scrobbling."
+
+playback_clients:
+  feishin:
+    type: client_app
+    server: navidrome
+    protocol: subsonic
+    platforms: [desktop, mobile]
+    status: active
+    documented_at: "2026-03-24"
+
+# Ideal state service map — all on media-home (VM 106)
+ideal_services:
+  lidarr:
+    status: active
+    target_changes:
+      - "Add import lists for automated discovery"
+      - "Consider relaxing MusicBrainz match threshold for Arabic content"
+  slskd:
+    status: active
+    note: "CRITICAL for Arabic music. Must stay running and VPN-tunneled."
+  soularr:
+    status: active
+    note: "5-min cycle searching Lidarr wanted list via slskd."
+  sabnzbd:
+    status: active
+    note: "Usenet music category. Good for mainstream."
+  qbittorrent:
+    status: active
+    re_enabled_at: "2026-03-24"
+    note: "Re-enabled in Lidarr via gluetun:8081. Need torrent indexers for music in Prowlarr."
+  navidrome:
+    status: active
+    restored_at: "2026-03-24"
+    note: "All integrations restored: Spotify metadata, Last.fm scrobbling, LRClib lyrics. Scan 15m."
+  spotisub:
+    status: active
+    promoted_at: "2026-03-24"
+    note: "Spotify OAuth + Last.fm keys configured. Syncing Spotify→Navidrome."
+  feishin:
+    type: client_app
+    status: documented
+    documented_at: "2026-03-24"
+  music_assistant:
+    platform: ha_addon
+    target: navidrome_provider_configured
+
+# Arabic music strategy
+arabic_strategy:
+  primary_source: soulseek
+  note: |
+    Arabic music is poorly represented on Usenet indexers and mainstream torrent trackers.
+    Soulseek (slskd) is the richest P2P source for Arabic music — must always be running.
+    Spotify discovery via spotisub can surface Arabic playlists and recommendations.
+    MusicBrainz has limited Arabic metadata — may need relaxed matching thresholds.
+  actions:
+    - "Keep slskd + soularr always running (CRITICAL)"
+    - "Promote spotisub — subscribe to Arabic music playlists on Spotify"
+    - "Enable Last.fm — Arabic artist recommendations via similar artists"
+    - "Add Arabic-focused import lists to Lidarr if available"
+    - "Consider relaxing Lidarr match threshold from 80% to 60% for problematic imports"
+
+# Gaps to close (ordered by priority)
+gaps:
+  - id: navidrome-integrations-lost
+    priority: high
+    status: fixed
+    fixed_at: "2026-03-24"
+    description: "Restore Spotify, Last.fm, LRClib integrations in Navidrome compose"
+    action: "Add env vars to media-playback compose, recreate container"
+  - id: spotisub-parked
+    priority: high
+    status: fixed
+    fixed_at: "2026-03-24"
+    description: "Promote spotisub from parked to active"
+    action: "Start container from media-playback compose"
+  - id: no-import-lists
+    priority: medium
+    description: "No automated discovery in Lidarr"
+    action: "Add MusicBrainz popular lists, genre lists, Spotify import list"
+  - id: no-torrent-music-indexers
+    priority: medium
+    description: "No torrent indexers for music in Prowlarr"
+    action: "Add music-capable torrent indexers via Prowlarr"
+  - id: qbit-disabled-in-lidarr
+    priority: medium
+    status: fixed
+    fixed_at: "2026-03-24"
+    description: "qBittorrent disabled in Lidarr for music"
+    action: "Re-enable qBit as secondary download client in Lidarr (host: gluetun)"
+  - id: navidrome-scan-degraded
+    priority: low
+    status: fixed
+    fixed_at: "2026-03-24"
+    description: "Scan schedule 1h vs legacy 15m"
+    action: "Changed ND_SCANSCHEDULE to 15m in compose"
+  - id: lidarr-queue-stuck
+    priority: low
+    status: fixed
+    fixed_at: "2026-03-24"
+    description: "24 items stuck on MusicBrainz matching"
+    action: "Bulk-removed 24 warning items via Lidarr API"
+  - id: feishin-undocumented
+    priority: low
+    status: fixed
+    fixed_at: "2026-03-24"
+    description: "Feishin client not in spine bindings"
+    action: "Added client_app binding in media.services.yaml"
+  - id: music-assistant-integration
+    priority: low
+    description: "Music Assistant HA addon integration undocumented"
+    action: "Verify Navidrome provider, document in binding"

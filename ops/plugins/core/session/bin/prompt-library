@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+from pathlib import Path
+
+import yaml
+
+
+def resolve_dirs(root: Path) -> tuple[Path, Path]:
+    contract = yaml.safe_load((root / "ops/bindings/prompt.library.contract.yaml").read_text()) or {}
+    arch = ((contract.get("architecture") or {}).get("canonical_source")) or "ops/plugins/core/session/templates"
+    runtime = ((contract.get("architecture") or {}).get("runtime_target")) or "$SPINE_STATE/prompts"
+    state_fallback = str(root.parent / ".runtime" / "spine" / "state")
+    runtime = runtime.replace("$SPINE_STATE", os.environ.get("SPINE_STATE", state_fallback))
+    return root / arch, Path(runtime)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=["bootstrap", "list"])
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[5]
+    source, runtime = resolve_dirs(root)
+    if args.command == "list":
+        templates = sorted(p.name for p in source.glob("*.yaml")) if source.exists() else []
+        print(json.dumps({"capability": "prompt.library.list", "status": "ok", "source": str(source), "templates": templates}, indent=2))
+        return 0
+    if not source.exists():
+        print(json.dumps({"capability": "prompt.library.bootstrap", "status": "fail", "error": f"missing canonical source: {source}"}))
+        return 1
+    runtime.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for item in source.glob("*.yaml"):
+        shutil.copy2(item, runtime / item.name)
+        copied.append(item.name)
+    print(json.dumps({"capability": "prompt.library.bootstrap", "status": "ok", "runtime_target": str(runtime), "copied": copied}, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

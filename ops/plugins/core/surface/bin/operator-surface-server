@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+"""operator-surface-server — tiny operator surface server.
+
+Serves precomputed cockpit HTML and mobile JSON from a static directory, plus
+bounded operator ingress form/POST and a phone-readable ingress readback page.
+
+Dynamic paths:
+  GET  /submit   → render operator ingress form
+  POST /submit   → create non-authoritative operator ingress object
+  GET  /ingress  → phone-readable readback of recent ingress objects
+"""
+from __future__ import annotations
+
+import argparse
+import html as html_mod
+import json
+import os
+import subprocess
+import sys
+import threading
+from functools import partial
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse, quote
+
+
+STATE_ROOT = Path(
+    os.environ.get(
+        "SPINE_STATE",
+        str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+    )
+)
+DEFAULT_DIR = STATE_ROOT / "operator-surface"
+DEFAULT_PORT = 8900
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import operator_ingress as oi
+
+_H = html_mod.escape
+_REGEN_LOCK = threading.Lock()
+_REGEN_THREAD: threading.Thread | None = None
+_REGEN_PENDING = False
+
+
+def _run_surface_regenerate() -> None:
+    try:
+        proc = subprocess.run(
+            ["python3", str(ROOT / "ops" / "plugins" / "core" / "surface" / "bin" / "operator-surface-regenerate")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=90,
+            env=os.environ.copy(),
+        )
+    except Exception as exc:
+        print(f"warning: operator-surface-regenerate exception: {exc}", file=sys.stderr)
+        return
+
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        print(f"warning: operator-surface-regenerate failed: {err}", file=sys.stderr)
+
+
+def _surface_regenerate_worker() -> None:
+    global _REGEN_PENDING, _REGEN_THREAD
+
+    while True:
+        with _REGEN_LOCK:
+            if not _REGEN_PENDING:
+                _REGEN_THREAD = None
+                return
+            _REGEN_PENDING = False
+
+        _run_surface_regenerate()
+
+
+def _request_surface_regenerate_background() -> None:
+    global _REGEN_PENDING, _REGEN_THREAD
+
+    with _REGEN_LOCK:
+        _REGEN_PENDING = True
+        if _REGEN_THREAD is not None and _REGEN_THREAD.is_alive():
+            return
+        _REGEN_THREAD = threading.Thread(
+            target=_surface_regenerate_worker,
+            daemon=True,
+        )
+        _REGEN_THREAD.start()
+
+
+def _render_page(title: str, body: str) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    :root {{
+      --bg:#070b12; --s:#0f1622; --b:#223047; --t:#d8e2ee; --m:#9aabc0;
+      --c:#22d3ee; --g:#34d399; --y:#fbbf24; --r:#f87171;
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;
+      background:var(--bg); color:var(--t); padding:1rem; }}
+    .wrap {{ max-width:760px; margin:0 auto; }}
+    .card {{ background:var(--s); border:1px solid var(--b); border-radius:14px; padding:1rem; }}
+    h1 {{ margin:0 0 .5rem; font-size:1rem; }}
+    p {{ color:var(--m); line-height:1.45; }}
+    .meta {{ font-size:.8rem; color:var(--m); margin-bottom:1rem; }}
+    label {{ display:block; font-size:.85rem; font-weight:600; margin:.8rem 0 .35rem; }}
+    input, select, textarea {{
+      width:100%; background:#0a111b; color:var(--t); border:1px solid var(--b);
+      border-radius:10px; padding:.75rem; font:inherit; font-size:16px;
+    }}
+    textarea {{ min-height:220px; resize:vertical; }}
+    .row {{ display:grid; grid-template-columns:1fr 1fr; gap:.75rem; }}
+    @media (max-width:500px) {{ .row {{ grid-template-columns:1fr; }} }}
+    .btn {{
+      display:block; width:100%; background:var(--c); color:#001017; border:none;
+      border-radius:10px; padding:.9rem 1rem; font-weight:700; font-size:1rem;
+      cursor:pointer; margin-top:1rem; -webkit-appearance:none;
+    }}
+    .btn:disabled {{ opacity:.5; cursor:not-allowed; }}
+    .note {{ margin-top:1rem; font-size:.8rem; color:var(--m); }}
+    .ok {{ border-color:rgba(52,211,153,.35); }}
+    .err {{ border-color:rgba(248,113,113,.35); }}
+    .flash {{
+      border:1px solid var(--b); border-radius:10px; padding:.75rem; margin-bottom:1rem;
+      background:#0a111b;
+    }}
+    .flash.ok {{ border-color:rgba(52,211,153,.35); color:var(--g); }}
+    .flash.err {{ border-color:rgba(248,113,113,.35); color:var(--r); }}
+    a {{ color:var(--c); }}
+    .nav {{ display:flex; gap:1rem; margin-bottom:1rem; font-size:.85rem; }}
+    .item {{ background:var(--s); border:1px solid var(--b); border-radius:12px;
+      padding:.75rem; margin-bottom:.6rem; }}
+    .item-id {{ font-family:ui-monospace,monospace; font-size:.75rem; color:var(--c); }}
+    .item-hint {{ font-size:.85rem; margin:.3rem 0; }}
+    .item-meta {{ font-size:.75rem; color:var(--m); }}
+    .badge {{
+      display:inline-block; font-size:.65rem; font-weight:700; padding:.15rem .4rem;
+      border-radius:5px; vertical-align:middle;
+    }}
+    .badge-submitted {{ background:rgba(251,191,36,.15); color:var(--y); }}
+    .badge-classified {{ background:rgba(34,211,238,.15); color:var(--c); }}
+    .badge-routed {{ background:rgba(52,211,153,.15); color:var(--g); }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    {body}
+  </div>
+</body>
+</html>"""
+
+
+def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> str:
+    values = values or {}
+    error_html = f'<div class="flash err">{_H(error)}</div>' if error else ""
+    content_type = values.get("content_type", "note")
+    hint = _H(values.get("operator_hint", ""))
+    raw_content = _H(values.get("raw_content", ""))
+    source_app = _H(values.get("source_app", "browser"))
+    body = f"""
+    <div class="nav">
+      <a href="/submit"><strong>Submit</strong></a>
+      <a href="/ingress">My Submissions</a>
+      <a href="/">Cockpit</a>
+    </div>
+    <div class="card {'err' if error else ''}">
+      <h1>Operator Vision Submit</h1>
+      <p class="meta">Non-authoritative ingress. Preserves raw input. Does not execute or create packets.</p>
+      {error_html}
+      <form method="post" action="/submit" id="submitForm">
+        <div class="row">
+          <div>
+            <label for="content_type">Content Type</label>
+            <select name="content_type" id="content_type">
+              <option value="note" {'selected' if content_type == 'note' else ''}>note</option>
+              <option value="conversation" {'selected' if content_type == 'conversation' else ''}>conversation</option>
+              <option value="url" {'selected' if content_type == 'url' else ''}>url</option>
+              <option value="voice_transcript" {'selected' if content_type == 'voice_transcript' else ''}>voice_transcript</option>
+            </select>
+          </div>
+          <div>
+            <label for="source_app">Source App</label>
+            <input type="text" name="source_app" id="source_app" value="{source_app}">
+          </div>
+        </div>
+        <label for="operator_hint">Operator Hint (optional)</label>
+        <input type="text" name="operator_hint" id="operator_hint" value="{hint}" placeholder="One-line intent signal">
+        <label for="raw_content">Raw Content</label>
+        <textarea name="raw_content" id="raw_content" placeholder="Paste thought, note, conversation, transcript, or URL here.">{raw_content}</textarea>
+        <button class="btn" type="submit" id="submitBtn">Submit To Spine</button>
+      </form>
+      <div class="note">
+        After submit, view <a href="/ingress">your submissions</a> to confirm readback.
+      </div>
+    </div>
+    <script>
+    (function(){{
+      var form=document.getElementById('submitForm');
+      var btn=document.getElementById('submitBtn');
+      form.addEventListener('submit',function(e){{
+        e.preventDefault();
+        if(btn.disabled) return;
+        btn.disabled=true;
+        btn.textContent='Submitting\u2026';
+        var body=new URLSearchParams(new FormData(form)).toString();
+        var ctrl=new AbortController();
+        var timer=setTimeout(function(){{ ctrl.abort(); }},15000);
+        fetch('/submit',{{
+          method:'POST',
+          headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
+          body:body,
+          signal:ctrl.signal
+        }}).then(function(r){{
+          clearTimeout(timer);
+          if(r.redirected){{ window.location.href=r.url; return; }}
+          if(r.ok||r.status===303){{
+            var loc=r.headers.get('Location');
+            if(loc){{ window.location.href=loc; return; }}
+          }}
+          return r.text().then(function(t){{ throw new Error('Server error ('+r.status+')'); }});
+        }}).catch(function(err){{
+          clearTimeout(timer);
+          btn.disabled=false;
+          btn.textContent='Submit To Spine';
+          var msg=err.name==='AbortError'?'Request timed out. Tap to retry.':err.message||'Network error. Tap to retry.';
+          var flash=document.createElement('div');
+          flash.className='flash err';
+          flash.textContent=msg;
+          var old=form.parentNode.querySelector('.flash.err');
+          if(old) old.remove();
+          form.parentNode.insertBefore(flash,form);
+        }});
+      }});
+    }})();
+    </script>
+    """
+    return _render_page("Operator Vision Submit", body)
+
+
+def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
+    """Phone-readable readback of recent operator ingress objects."""
+    data = oi.list_operator_ingress(state_root=state_root, limit=20)
+    items = data.get("items", [])
+    count = data.get("count", 0)
+
+    success_html = ""
+    if submitted_id:
+        success_html = f'<div class="flash ok">Submitted <strong>{_H(submitted_id)}</strong> — preserved in runtime, awaiting classification.</div>'
+
+    rows = ""
+    for item in items:
+        iid = _H(str(item.get("ingress_id", "")))
+        state = str(item.get("lifecycle_state", "submitted"))
+        disposition = _H(str(item.get("disposition", "")))
+        detail = _H(str(item.get("disposition_detail", "")))
+        hint = _H(str(item.get("operator_hint", "")))
+        ctype = _H(str(item.get("content_type", "")))
+        submitted = _H(str(item.get("submitted_at", "")))
+        device = _H(str(item.get("source_device", "")))
+        app = _H(str(item.get("source_app", "")))
+        badge_cls = f"badge-{state}" if state in ("submitted", "classified", "routed") else ""
+        rows += f"""
+        <div class="item">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.3rem">
+            <span class="item-id">{iid}</span>
+            <span class="badge {badge_cls}">{_H(state)}</span>
+          </div>
+          {"<div class='item-hint'>" + hint + "</div>" if hint else ""}
+          <div class="item-meta">{ctype} &middot; {device}/{app} &middot; {submitted}</div>
+          <div class="item-meta">{disposition}: {detail}</div>
+        </div>
+        """
+    if not rows:
+        rows = '<div class="item"><div class="item-meta">No submissions yet.</div></div>'
+
+    body = f"""
+    <div class="nav">
+      <a href="/submit">Submit</a>
+      <a href="/ingress"><strong>My Submissions</strong></a>
+      <a href="/">Cockpit</a>
+    </div>
+    <div class="card">
+      <h1>Recent Submissions</h1>
+      <p class="meta">{count} ingress object{"s" if count != 1 else ""} in runtime. Newest first.</p>
+      {success_html}
+      {rows}
+    </div>
+    """
+    return _render_page("Operator Ingress", body)
+
+
+class QuietHandler(SimpleHTTPRequestHandler):
+    """Serve static operator surfaces plus bounded operator ingress submit."""
+
+    def log_message(self, format, *args):
+        # Only log errors, not every request
+        if args and isinstance(args[0], str) and (args[0].startswith("4") or args[0].startswith("5")):
+            super().log_message(format, *args)
+
+    def _send_html(self, status: int, html: str) -> None:
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _parse_submit_body(self) -> dict[str, str]:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            raise oi.OperatorIngressError("request body is empty")
+        if length > 200_000:
+            raise oi.OperatorIngressError("request body too large")
+        raw = self.rfile.read(length)
+        ctype = self.headers.get("Content-Type", "")
+        if "application/json" in ctype:
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except Exception as exc:
+                raise oi.OperatorIngressError(f"invalid JSON body: {exc}") from exc
+            if not isinstance(data, dict):
+                raise oi.OperatorIngressError("JSON body must be an object")
+            return {
+                "content_type": str(data.get("content_type", "note")),
+                "operator_hint": str(data.get("operator_hint", "")),
+                "raw_content": str(data.get("raw_content", "")),
+                "source_app": str(data.get("source_app", "browser")),
+                "source_device": str(data.get("source_device", "phone")),
+            }
+
+        fields = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+        return {
+            "content_type": fields.get("content_type", ["note"])[0],
+            "operator_hint": fields.get("operator_hint", [""])[0],
+            "raw_content": fields.get("raw_content", [""])[0],
+            "source_app": fields.get("source_app", ["browser"])[0],
+            "source_device": fields.get("source_device", ["phone"])[0],
+        }
+
+    def _regenerate_surfaces_background(self) -> None:
+        """Queue a coalesced background regenerate without overlapping writers."""
+        _request_surface_regenerate_background()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        clean = parsed.path.rstrip("/")
+        if clean == "/submit":
+            self._send_html(200, _submit_form_html())
+            return
+        if clean == "/ingress":
+            qs = parse_qs(parsed.query)
+            submitted_id = qs.get("submitted", [""])[0]
+            self._send_html(200, _ingress_readback_html(str(STATE_ROOT), submitted_id=submitted_id))
+            return
+        return super().do_GET()
+
+    def _wants_json(self) -> bool:
+        accept = self.headers.get("Accept", "")
+        return "application/json" in accept
+
+    def _send_json(self, status: int, data: dict) -> None:
+        body = json.dumps(data, indent=2).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if self.path.rstrip("/") != "/submit":
+            self.send_error(404, "Not Found")
+            return
+
+        wants_json = self._wants_json()
+
+        try:
+            payload = self._parse_submit_body()
+            result = oi.create_operator_ingress(
+                state_root=str(STATE_ROOT),
+                raw_content=payload["raw_content"],
+                content_type=payload["content_type"],
+                operator_hint=payload["operator_hint"],
+                operator_id="ronny",
+                source_device=payload.get("source_device", "phone") or "phone",
+                source_app=payload.get("source_app", "browser") or "browser",
+                access_identity=self.headers.get("Cf-Access-Authenticated-User-Email", ""),
+                source_ip=(self.headers.get("CF-Connecting-IP") or self.client_address[0]),
+                submitted_via="operator_surface_submit",
+            )
+        except oi.OperatorIngressError as exc:
+            if wants_json:
+                self._send_json(400, {"status": "error", "error": str(exc)})
+            else:
+                self._send_html(400, _submit_form_html(str(exc), payload if 'payload' in locals() else None))
+            return
+
+        self._regenerate_surfaces_background()
+
+        if wants_json:
+            self._send_json(200, result)
+        else:
+            ingress_id = quote(result["ingress_id"])
+            self.send_response(303)
+            self.send_header("Location", f"/ingress?submitted={ingress_id}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Static operator surface server")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--dir", type=str, default=str(DEFAULT_DIR))
+    args = parser.parse_args()
+
+    serve_dir = Path(args.dir)
+    serve_dir.mkdir(parents=True, exist_ok=True)
+
+    handler = partial(QuietHandler, directory=str(serve_dir))
+    server = HTTPServer(("0.0.0.0", args.port), handler)
+    print(f"operator-surface-server listening on :{args.port} serving {serve_dir}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

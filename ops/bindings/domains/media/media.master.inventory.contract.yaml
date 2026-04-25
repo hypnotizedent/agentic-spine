@@ -1,0 +1,467 @@
+# ┌──────────────────────────────────────────────────────────────────────┐
+# │ COMPATIBILITY PROJECTION — DO NOT EDIT HERE                         │
+# │ Canonical authority: ~/code/workbench/agents/media/bindings/        │
+# │ This copy is retained at this spine path for live consumer          │
+# │ compatibility. Edits must land in the workbench canonical copy      │
+# │ first, then be synced here.                                         │
+# │ Relocation: MEDIA_WORKBENCH_HOME_RELOCATION (2026-03-30)           │
+# └──────────────────────────────────────────────────────────────────────┘
+# MEDIA MASTER INVENTORY CONTRACT
+# Status: authoritative
+# Owner: "@operator"
+# Scope: What media lives where, lifecycle rules, quality contracts
+#
+# OPERATOR DIRECTIVES:
+# - HOME (Synology DS918+) IS CANONICAL for all active media
+# - TV and Music ONLY live on the NAS. No shop copies.
+# - Movies flow: HOME (fresh/watching) → nas-primary (cold archive after watched)
+# - NO FILE DELETES by terminals. Operator deletes on his word only.
+# - nas-primary stays open as download plane + cold archive
+# - Old stuff on nas-primary sits. Moving it costs more than it's worth.
+#
+# For per-title detail (genres, lifecycle, client state, lineage):
+#   ~/code/workbench/agents/media/data/MEDIA_LIBRARY_CATALOG.yaml
+# For pipeline and container details:
+#   ops/bindings/domains/media/media.pipeline.contract.yaml
+
+contract: MEDIA_MASTER_INVENTORY_V1
+version: "1.1"
+created: "2026-03-24"
+updated_at: "2026-03-24"
+owner: "@operator"
+reconciliation_trace: "CP-060000 + CP-030000 combined wave — fresh SSH+API trace of all hosts"
+
+topology:
+  canonical_home:
+    host: synology918
+    ip: 10.0.x.x
+    volume: /volume1/media-staging
+    vm_serving: media-home
+    vm_id: 106
+    vm_ip: 10.0.x.x
+    nfs_export: "10.0.x.x:/volume1/media-staging"
+    vm_mount: /srv/media
+    container_mount: /media
+    capacity_total: 20T
+    capacity_used: 11T
+    capacity_free: 8.4T
+    capacity_pct: 57
+    role: "Active library. Where Ronny watches content at home."
+
+  cold_archive:
+    host: pve
+    zfs_pool: nas-primary
+    path: /nas-primary
+    capacity_total: 4.1T
+    capacity_used: "~128K"
+    capacity_free: 4.1T
+    capacity_pct: 1
+    role: "Passive cold archive + alternative download plane"
+    traced_at: "2026-03-24T00:00Z"
+    current_contents:
+      archive:
+        path: /nas-primary/archive
+        size: 2.7T
+        children:
+          - {name: backup-holds, type: directory}
+          - {name: games, type: directory}
+          - {name: live-share, type: directory}
+          - {name: media-holds, type: directory}
+          - {name: media-quarantine, type: directory}
+      backup_cold:
+        path: /nas-primary/backup-cold
+        size: 3.5T
+      stage:
+        path: /nas-primary/stage
+        size: 17T
+        children:
+          - {name: games, type: directory}
+          - {name: media-phase2-evacuation, type: directory, note: "Old shop content evacuated during migration. Operator decides when to clean."}
+      tombstones:
+        path: /nas-primary/tombstones
+        size: 183G
+      vms:
+        path: /nas-primary/vms
+        size: 512B
+    provisioned_archive_roots:
+      movies:
+        path: /nas-primary/archive/media/movies
+        status: active
+        size: 9T
+        note: "9TB movie archive — canonical source of truth. Extraction to 5TB WD drive in progress."
+        extraction_workflow:
+          stage: in_progress
+          drive: "5TB WD external"
+          target_nas_path: /volume1/media-staging/downloads/movies-import-20260323
+          current_state: "Failed transfer — empty directory structure created, files still on 5TB drive"
+          disposition: "Complete 5TB drive → NAS transfer, then import to Radarr"
+      tv:
+        status: forbidden
+        reason: "TV lives on NAS only — operator directive"
+      music:
+        status: forbidden
+        reason: "Music lives on NAS only — operator directive"
+    download_plane:
+      status: active
+      path: /nas-primary/stage
+      use_cases: [games, promoted_blurays, torrent_keeps]
+      note: "Do NOT close this plumbing. nas-primary is a valid download destination."
+
+library_roots:
+  movies:
+    home_path: /volume1/media-staging/movies
+    container_path: /media/movies
+    arr_root: /media/movies
+    arr_root_id: 3
+    lifecycle: "fresh → watching → watched → archive-eligible → promote to nas-primary"
+    archive_target: /nas-primary/archive/media/movies
+    quality_floor: "HD Bluray + WEB (must-have tier), Any (fill-later tier)"
+
+  tv:
+    home_path: /volume1/media-staging/tv
+    container_path: /media/tv
+    arr_root: /media/tv
+    arr_root_id: 2
+    lifecycle: "fresh → watching → watched → idle (stays on NAS forever)"
+    archive_target: null  # TV NEVER leaves the NAS
+    quality_floor: "WEB-DL 1080p preferred, Any accepted"
+
+  music:
+    home_path: /volume1/media-staging/music
+    container_path: /media/music
+    arr_root: /media/music
+    arr_root_id: 2
+    streaming_path: /music  # Navidrome narrow mount
+    lifecycle: "imported → indexed → streaming via Navidrome"
+    archive_target: null  # Music NEVER leaves the NAS
+    quality_floor: "FLAC preferred, MP3 320 accepted"
+
+current_state:
+  traced_at: "2026-03-24T17:24Z"
+  trace_method: "SSH + ARR API queries — deferred cleanup wave (stabilization + cleanup + capability alignment)"
+  movies:
+    filesystem_size: 194G
+    filesystem_dirs: 252
+    radarr_total: 240
+    radarr_with_files: 28
+    radarr_queue: 0
+    arr_free_space: 8400G
+    import_stall: false
+    note: "239 movies added via TMDB bulk lookup. 28 have files on disk. 6 TMDB lookup failures (obscure/German titles). Pipeline healthy."
+    duplicate_dirs: 1
+    duplicate_note: "Frankenstein.2025.1080p.BluRay.DD5.1 — legitimate audio codec suffix, not a dup. 21 actual dups resolved (14 deleted, 6 renamed, 1 skipped)."
+  tv:
+    filesystem_size: 4.4T
+    filesystem_dirs: 97
+    sonarr_total: 130
+    sonarr_with_files: 72
+    sonarr_episodes_on_disk: 2687
+    sonarr_queue_total: 8
+    sonarr_queue_status: "active — re-grabs in flight (Wednesday S02, Community S01)"
+    arr_free_space: 8400G
+    import_stall: false
+    import_stall_note: |
+      Deferred cleanup 2026-03-24T17:16Z: 3 orphaned dirs in complete/tv deleted.
+      - Community S01: corrupted (no audio tracks) — deleted, Sonarr re-search triggered
+      - Wednesday S02: RAR archives (unextractable) — deleted, Sonarr re-search triggered
+      - Friends S02E13: stuck unpack (already on disk 234/238 eps) — deleted
+      complete/tv now 21G (new re-grabs landing). Pipeline flowing.
+  music:
+    filesystem_size: 820G
+    filesystem_dirs: 275
+    lidarr_total: 418
+    lidarr_with_tracks: 245
+    lidarr_tracks_on_disk: 22680
+    lidarr_size_on_disk: 820G
+    lidarr_queue: 0
+    lidarr_queue_detail: "Queue fully drained. 30 warning items removed (all MusicBrainz failures). complete/music cleaned to 0."
+    lidarr_wanted: 2975
+    arr_free_space: 8400G
+    import_stall: false
+    import_stall_detail: |
+      FULLY RESOLVED 2026-03-24: Lidarr queue drained from 30→0.
+      complete/music: 50G→0 (16G deleted, unmatched MusicBrainz failures).
+      Pipeline clean. Lidarr will re-search monitored albums automatically.
+  staging_debt:
+    total: 0
+    file_counts:
+      music_import: 0
+      tv_import: 0
+      movies_import: 0
+      music_migration: 0
+    dirs:
+      - path: /volume1/media-staging/downloads/music-import-20260323
+        size: 0
+        files: 0
+        type: music_import_staging
+        status: deleted
+        deleted_at: "2026-03-24"
+        note: "DELETED after import verification. 696GB library confirmed, 22,358 files > 21,769 staging files."
+      - path: /volume1/media-staging/downloads/tv-import-20260323
+        size: 0
+        files: 0
+        type: tv_import_staging
+        status: deleted
+        deleted_at: "2026-03-24"
+        note: "DELETED during deferred cleanup. 29/42 shows confirmed redundant (canonical >= staging). 13 were empty shells. All 546G reclaimed."
+      - path: /volume1/media-staging/downloads/music-migration-staging
+        size: 0
+        files: 0
+        type: music_migration_residue
+        status: deleted
+        deleted_at: "2026-03-24"
+        note: "DELETED after import verification. Was 26G/1009 files — subset of music-import content."
+      - path: /volume1/media-staging/downloads/movies-import-20260323
+        size: 0
+        files: 0
+        type: movies_import_staging
+        status: deleted
+        deleted_at: "2026-03-24"
+        note: "DELETED during stabilization wave. 0 files confirmed, empty dir tree removed via NAS SSH."
+    downloads_active:
+      complete_tv: 21G
+      complete_tv_detail: "Sonarr re-grabs landing (Wednesday S02, Community). Orphaned dirs cleaned."
+      complete_music: 0
+      complete_music_detail: "Fully cleaned. 31 dirs with MusicBrainz failures deleted. Lidarr will re-search."
+      complete_movies: 0
+      complete_radarr: 0
+      complete_sonarr: 0
+      incomplete: 300K
+      slskd: 24G
+
+  stabilization_baseline:
+    date: "2026-03-24"
+    status: "clean_baseline"
+    method: "6-wave stabilization: freeze → snapshot → audit → fix → drain → verify"
+    pre_state:
+      complete_music: 77G
+      complete_tv: 23G
+      staging_leftovers: "546G tv-import + movies-import empty shells"
+      architecture_issues: 1
+      jellyfin_songs: 0
+    post_state:
+      complete_music: 50G
+      complete_tv: 23G
+      staging_leftovers: "546G tv-import only (movies-import deleted)"
+      architecture_issues: 0
+      jellyfin_songs: 23738
+    fixes_applied:
+      - "Jellyfin music library added — 23,738 songs now visible"
+      - "movies-import-20260323 empty shell tree deleted"
+      - "27G music drained from complete/ via Lidarr import scans"
+      - "Architecture audit: all 6 RPMs verified correct, all mounts verified, permissions functional"
+    deferred_items_resolved: "All deferred items from stabilization wave addressed in cleanup wave below"
+    external_drives:
+      wd_5tb: "Shed 652G (709G→57G). 14 shows remaining (not yet on NAS or USB has more files)."
+      sandisk: "formatted ext4, 1.8T free, ready for next transport"
+
+  deferred_cleanup:
+    date: "2026-03-24"
+    status: "domain_complete"
+    method: "7-wave CLI cleanup: preflight → Sonarr → Lidarr → Radarr → USB shed → caps → verify"
+    cli_driven: true
+    web_ui_operations: 0
+    pre_state:
+      complete_music: 50G
+      complete_tv: 23G
+      staging: 546G
+      radarr_tracked: 1
+      radarr_with_files: 1
+      lidarr_queue: 30
+      duplicate_dirs: 22
+      usb_tv: 709G
+      disk_free: 7.8T
+    post_state:
+      complete_music: 0
+      complete_tv: 21G
+      staging: 0
+      radarr_tracked: 240
+      radarr_with_files: 28
+      lidarr_queue: 0
+      duplicate_dirs: 1
+      usb_tv: 57G
+      disk_free: 8.4T
+    fixes_applied:
+      - "Sonarr complete/tv: 3 orphaned dirs deleted (corrupted/RAR/stuck-unpack), re-search triggered"
+      - "Lidarr queue drained 30→0, complete/music cleaned 50G→0 (MusicBrainz failures deleted)"
+      - "Radarr: 239 movies added via TMDB bulk lookup, 28 now have files after rescan"
+      - "Duplicate .1/.2 dirs: 21 resolved (14 deleted, 6 renamed, 1 false-positive skipped)"
+      - "tv-import-20260323: 546G deleted (29 redundant, 13 empty shells)"
+      - "USB WD 5TB: 652G shed (28 shows deleted, 14 remaining)"
+    capability_gaps_documented:
+      - name: media.queue.reconcile.sonarr
+        priority: high
+        description: "Sonarr queue reconciliation — same C1-C5 classification as Radarr"
+      - name: media.queue.reconcile.lidarr
+        priority: high
+        description: "Lidarr queue reconciliation — same C1-C5 classification"
+      - name: media.import.cli
+        priority: critical
+        description: "CLI-driven manual import for all three ARR apps — replaces web UI import"
+      - name: media.library.untracked.scan
+        priority: high
+        description: "Find dirs on disk not tracked by ARR app, add via TMDB/TVDB/MusicBrainz lookup"
+      - name: media.duplicate.cleanup
+        priority: medium
+        description: "Detect and resolve .1/.2 duplicate dirs in library"
+      - name: media.staging.cross.reference
+        priority: medium
+        description: "Cross-reference staging dirs against canonical library — identify safe-to-purge"
+
+per_title_catalog:
+  authority: "~/code/workbench/agents/media/data/MEDIA_LIBRARY_CATALOG.yaml"
+  note: "For per-title detail (genres, lifecycle state, client state, lineage), consult the workbench catalog. This contract is the topology/lifecycle layer; the catalog is the content layer."
+
+filesystem_rules:
+  - "Every path under /volume1/media-staging/ has a declared purpose"
+  - "Staging dirs (downloads/*-import-*) are temporary — exist only until import is verified"
+  - "No mystery folders. If a folder has no declared purpose, it is drift."
+  - "Scalable: structure supports adding libraries without reorganizing"
+
+storage_lifecycle:
+  movie_promotion:
+    trigger: "Operator marks as watched + archive-eligible in catalog"
+    method: "rsync from NAS → nas-primary, verify checksum, then operator confirms deletion from NAS"
+    automation: "plan_only — no automatic moves, no automatic deletes"
+    archive_root: /nas-primary/archive/media/movies
+    archive_root_status: not_yet_created
+  tv_retention:
+    policy: "TV stays on NAS forever. No promotion to nas-primary. No deletion."
+  music_retention:
+    policy: "Music stays on NAS forever. No promotion to nas-primary. No deletion."
+
+entropy_rules:
+  - severity: warn
+    condition: "Import staging dirs older than 7 days"
+    current: "No staging dirs remain — all deleted 2026-03-24"
+  - severity: critical
+    condition: "Import staging dirs older than 30 days without documented hold"
+    current: "None currently — staging is fresh"
+  - severity: warn
+    condition: "Library roots must have matching ARR root folder configs"
+    current: "PASS — all roots confirmed matching (radarr=/media/movies, sonarr=/media/tv, lidarr=/media/music)"
+  - severity: warn
+    condition: "Download complete dirs should drain to library within 24h (new content)"
+    current: "21G TV in complete/tv — Sonarr re-grabs landing (Wednesday S02, Community). Music clean. Movies clean."
+  - severity: info
+    condition: "Hardlink verification on staging dirs"
+    current: "All staging import dirs confirmed nlink=1 (no hardlinks). Safe for operator cleanup after import verification."
+
+transport_cleanup:
+  wd_5tb_music:
+    cleaned_at: "2026-03-24"
+    dirs_found: 230
+    dirs_deleted: 230
+    artists_matched_lidarr: 84
+    artists_matched_fuzzy: 12
+    artists_matched_nas: 1
+    artists_unmatched: 0
+    size_removed: "~108GB"
+    audio_files_remaining: 0
+    verified_against: "Lidarr API (390 artists) + NAS filesystem (237 dirs)"
+    empty_dir_cleanup:
+      cleaned_at: "2026-03-24"
+      empty_dirs_deleted: 406
+      music_shells: "~250"
+      movie_shells: "~156"
+      dirs_remaining: 324
+      note: "All 406 empty dir shells removed. 324 movie dirs with content remain (2.2T)."
+    not_touched:
+      - "tv-transport-20260322/ (57G, 14 shows remaining — rest shed after NAS confirmation)"
+      - "movie dirs in media-transfer/ (324 dirs, 2.2T)"
+  sandisk_ssd_music:
+    cleaned_at: "2026-03-24"
+    mount_path: "/volumeUSB1/usbshare/music/"
+    dirs_found: 237
+    dirs_deleted: 237
+    files_deleted: 21970
+    size_removed: "686GB"
+    verified_against: "NAS /volume1/media-staging/music/ (237/237 matched)"
+    note: "Required sudo via SYNOLOGY_SSH_PASSWORD — USB volume owned by UID 1000"
+    post_cleanup:
+      formatted_at: "2026-03-24"
+      formatted_by: operator
+      filesystem: ext4
+      capacity_total: 1.8T
+      capacity_used: 77M
+      capacity_free: 1.8T
+      user_files: 0
+      status: "clean — ready for next transport"
+  nas-primary:
+    status: "operator-decision-pending"
+    note: "Operator explicitly withheld authorization"
+
+known_issues:
+  - id: autopulse-path-double-prefix
+    severity: high
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: "Autopulse rewrites updated to identity (FROM=/media/tv TO=/media/tv) in media-stack compose. Container recreated."
+  - id: sonarr-queue-401-stuck
+    severity: high
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: "Queue cleaned from 315→0. 117 failed (manual qBit), 170 stale completed, 28 unavailable — all removed."
+  - id: music-pipeline-restored
+    severity: medium
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: "slskd + soularr activated on media-home. Music grab pipeline restored."
+  - id: lidarr-missing-remote-path-mappings
+    severity: critical
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: |
+      ROOT CAUSE: Lidarr had ZERO remote path mappings. SABnzbd reported /downloads/complete/music/
+      but Lidarr couldn't resolve to /media/downloads/complete/music/. All 280 completed downloads
+      (171G) were stuck with "Permissions error" (actually path-not-found).
+      FIX: Added RPMs for sabnzbd (/downloads/ → /media/downloads/) and gluetun (same).
+      RESULT: 247+ tracks imported, 78 dirs cleared from complete/music.
+  - id: qbittorrent-temp-password
+    severity: high
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: |
+      qBit v5.1.4 was generating temp passwords on each restart — PBKDF2 hash was stale from upgrade.
+      All 3 ARR apps had wrong credentials. Radarr IP was also banned by qBit (too many failed attempts).
+      FIX: Set permanent password via qBit API, restarted qBit to clear IP bans, updated all ARR download clients.
+  - id: music-library-permissions
+    severity: high
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: |
+      /volume1/media-staging/music/ was 755 (ronadmin:users). Lidarr runs as root in container,
+      NFS root_squash maps root→nobody, nobody can't write to 755 dirs.
+      Movies dir was already 777 and worked fine.
+      FIX: chmod 777 all music dirs, chmod 666 all music files (matching movies pattern).
+  - id: jellyfin-music-library-missing
+    severity: high
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: |
+      Jellyfin had NO music library configured. 21K+ tracks on disk invisible to streaming.
+      Fixed: Added /media/music as music library via Jellyfin API.
+      Result: 23,738 songs, 192 artists, 632 albums now indexed and streamable.
+  - id: radarr-empty-library
+    severity: info
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: "239 movies added via TMDB bulk lookup. 28 have files on disk. 6 lookup failures (obscure/German titles)."
+  - id: movies-import-staging-undeletable
+    severity: low
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: "movies-import-20260323/ deleted during stabilization wave via NAS SSH (ronadmin had sufficient perms after all)."
+  - id: complete-music-corrupted-downloads
+    severity: low
+    status: fixed
+    fixed_at: "2026-03-24"
+    detail: "All complete/music dirs deleted during deferred cleanup. MusicBrainz failures + corrupted grabs purged. Lidarr will re-search monitored albums."
+
+cross_references:
+  pipeline_contract: ops/bindings/domains/media/media.pipeline.contract.yaml
+  path_authority: ops/bindings/domains/media/media.path.authority.contract.yaml
+  services: ops/bindings/domains/media/media.services.yaml
+  quality_policy: ops/bindings/domains/media/media.quality.policy.yaml
+  download_guardrails: ops/bindings/domains/media/media.download.canary.guardrails.yaml
+  availability_progression: ops/bindings/domains/media/media.availability.progression.contract.yaml

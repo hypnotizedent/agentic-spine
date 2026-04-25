@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# verify-binding-coherence — check that capability references in binding
+# contracts resolve to entries in ops/capabilities.yaml
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+CAP_FILE="$ROOT/ops/capabilities.yaml"
+BINDINGS_DIR="$ROOT/ops/bindings"
+
+[[ -f "$CAP_FILE" ]] || { echo "FAIL: missing capabilities registry: $CAP_FILE" >&2; exit 1; }
+
+# Extract all capability keys from the registry
+cap_keys="$(yq e '.capabilities | keys | .[]' "$CAP_FILE" 2>/dev/null)" || {
+  echo "FAIL: unable to parse capabilities.yaml" >&2; exit 1
+}
+
+cap_set="$(echo "$cap_keys" | sort -u)"
+
+pass=0
+fail=0
+checked=0
+failing_refs=()
+
+while IFS= read -r binding_file; do
+  [[ -f "$binding_file" ]] || continue
+  rel="${binding_file#"$ROOT/"}"
+
+  # Extract values from keys containing "capability" (capability:, generator_capability:, flush_capability:, etc.)
+  refs="$(rg -oN '[a-z_]*capability:\s*(.+)' "$binding_file" 2>/dev/null | sed 's/.*capability:[[:space:]]*//' | sed 's/#.*//' | tr -d "\"'" | sed '/^$/d' || true)"
+  [[ -n "$refs" ]] || continue
+
+  while IFS= read -r ref; do
+    ref="$(echo "$ref" | xargs)"
+    [[ -n "$ref" && "$ref" != "null" && "$ref" != "~" ]] || continue
+    checked=$((checked + 1))
+
+    if echo "$cap_set" | grep -qxF "$ref"; then
+      pass=$((pass + 1))
+    else
+      fail=$((fail + 1))
+      failing_refs+=("$rel: $ref")
+    fi
+  done <<< "$refs"
+done < <(find "$BINDINGS_DIR" -name '*.yaml' -type f 2>/dev/null | LC_ALL=C sort)
+
+echo "=== BINDING-CAPABILITY COHERENCE ==="
+echo "Checked: $checked capability references across binding contracts"
+echo "  PASS: $pass"
+echo "  FAIL: $fail"
+
+if [[ ${#failing_refs[@]} -gt 0 ]]; then
+  echo
+  echo "Unresolved capability references:"
+  for r in "${failing_refs[@]}"; do
+    echo "  - $r"
+  done
+fi
+
+echo
+binding_exit=0
+if [[ $fail -eq 0 ]]; then
+  echo "Binding-capability coherence: PASS"
+else
+  echo "Binding-capability coherence: FAIL ($fail unresolved)"
+  binding_exit=1
+fi
+
+# --- GATE-CAPABILITY PARITY ---
+echo
+echo "=== GATE-CAPABILITY PARITY ==="
+
+PARITY_LIB="$ROOT/ops/plugins/core/verify/lib/capability_gate_parity.py"
+if [[ ! -f "$PARITY_LIB" ]]; then
+  echo "FAIL: missing parity helper: $PARITY_LIB" >&2
+  exit 1
+fi
+
+parity_json="$(python3 "$PARITY_LIB" --json)" || true
+
+# Parse JSON output for issue counts
+missing_caps="$(echo "$parity_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('missing_capabilities',[])))" 2>/dev/null || echo "-1")"
+unknown_cap_domains="$(echo "$parity_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('unknown_capability_domains',[])))" 2>/dev/null || echo "-1")"
+unknown_gate_domains="$(echo "$parity_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('unknown_gate_domains',[])))" 2>/dev/null || echo "-1")"
+domain_mismatches="$(echo "$parity_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('mismatches',[])))" 2>/dev/null || echo "-1")"
+caps_referenced="$(echo "$parity_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('capabilities_referenced',0))" 2>/dev/null || echo "0")"
+gates_without="$(echo "$parity_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('gates_without_capability_refs',[])))" 2>/dev/null || echo "0")"
+
+parity_exit=0
+
+# Report summary
+echo "Capabilities referenced: $caps_referenced"
+echo "Gates without capability_refs: $gates_without"
+
+if [[ "$missing_caps" == "-1" || "$unknown_cap_domains" == "-1" || "$unknown_gate_domains" == "-1" || "$domain_mismatches" == "-1" ]]; then
+  echo "FAIL: unable to parse parity helper JSON output" >&2
+  parity_exit=1
+else
+  if [[ "$missing_caps" -gt 0 ]]; then
+    echo "  Missing capabilities: $missing_caps"
+    echo "$parity_json" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for c in d.get('missing_capabilities', []):
+    print(f'    - {c}')
+" 2>/dev/null || true
+    parity_exit=1
+  fi
+
+  if [[ "$unknown_cap_domains" -gt 0 ]]; then
+    echo "  Unknown capability domains: $unknown_cap_domains"
+    echo "$parity_json" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for e in d.get('unknown_capability_domains', []):
+    print(f'    - {e[\"capability_id\"]} (domain: {e[\"domain\"] or \"none\"})')
+" 2>/dev/null || true
+    parity_exit=1
+  fi
+
+  if [[ "$unknown_gate_domains" -gt 0 ]]; then
+    echo "  Unknown gate domains: $unknown_gate_domains"
+    echo "$parity_json" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for e in d.get('unknown_gate_domains', []):
+    print(f'    - {e[\"gate_id\"]} (domain: {e[\"domain\"]})')
+" 2>/dev/null || true
+    parity_exit=1
+  fi
+
+  if [[ "$domain_mismatches" -gt 0 ]]; then
+    echo "  Domain mismatches: $domain_mismatches"
+    echo "$parity_json" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for e in d.get('mismatches', []):
+    print(f'    - {e[\"gate_id\"]} -> {e[\"capability_id\"]}: gate={e[\"gate_domain\"]} cap={e[\"capability_domain\"]}')
+" 2>/dev/null || true
+    parity_exit=1
+  fi
+fi
+
+echo
+if [[ $parity_exit -eq 0 ]]; then
+  echo "Gate-capability parity: PASS"
+else
+  echo "Gate-capability parity: FAIL"
+fi
+
+# Final exit
+if [[ $binding_exit -ne 0 || $parity_exit -ne 0 ]]; then
+  exit 1
+fi
+exit 0

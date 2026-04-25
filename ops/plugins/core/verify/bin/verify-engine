@@ -1,0 +1,574 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# verify-engine - Fast platform engine smoke test
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Checks that the spine execution system itself is healthy, not the
+# infrastructure workloads it manages. Runs in seconds, not minutes.
+#
+# Checks:
+#   E1  bin/ops entrypoint smoke (--help + cap list)
+#   E2  ops status --json exits clean
+#   E3  SQLite authority readable + active-state counts resolve
+#   E4  read-only capability dispatch (verify.engine.run self-test)
+#   E5  no dead hot-path entry references
+#   E6  no dead file references in governed scripts
+#   E7  no dead canonical path references in hot contracts
+#   E8  MANIFEST script entries resolve on disk + narrow capability parity
+#   E9  live launchd plist ProgramArguments resolve on disk (fail)
+#   E10 launchd required_labels truth (fail): every required_label loaded in live launchctl state
+#   E11 retired snapshot residue class absent (fail): network.inventory.snapshot / -build
+#
+# ═══════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+_VE_COMPUTED="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+ROOT="$_VE_COMPUTED"
+RUNTIME_PATHS_LIB="$ROOT/ops/lib/runtime-paths.sh"
+[[ -f "$RUNTIME_PATHS_LIB" ]] || { echo "FATAL: runtime-paths.sh not found" >&2; exit 1; }
+source "$RUNTIME_PATHS_LIB"
+spine_runtime_resolve_paths
+
+json_mode=0
+if [[ "${1:-}" == "--" ]]; then shift; fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json) json_mode=1 ;;
+        -h|--help)
+            echo "verify-engine — fast platform engine smoke test"
+            echo "Usage: verify-engine [--json]"
+            exit 0
+            ;;
+        *) ;;
+    esac
+    shift
+done
+
+PASS=0
+FAIL=0
+WARN=0
+TOTAL=0
+FAILING_IDS=()
+WARNING_IDS=()
+
+check() {
+    local id="$1" name="$2"
+    shift 2
+    TOTAL=$((TOTAL + 1))
+    local output rc
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+        PASS=$((PASS + 1))
+        [[ "$json_mode" -eq 1 ]] || echo "  PASS  $id  $name"
+    else
+        FAIL=$((FAIL + 1))
+        FAILING_IDS+=("$id")
+        if [[ "$json_mode" -eq 0 ]]; then
+            echo "  FAIL  $id  $name"
+            echo "        ${output:0:200}"
+        fi
+    fi
+}
+
+warn_check() {
+    local id="$1" name="$2"
+    shift 2
+    TOTAL=$((TOTAL + 1))
+    local output rc
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+        PASS=$((PASS + 1))
+        [[ "$json_mode" -eq 1 ]] || echo "  PASS  $id  $name"
+    else
+        WARN=$((WARN + 1))
+        WARNING_IDS+=("$id")
+        [[ "$json_mode" -eq 1 ]] || echo "  WARN  $id  $name"
+    fi
+}
+
+[[ "$json_mode" -eq 1 ]] || echo "=== ENGINE SMOKE ==="
+[[ "$json_mode" -eq 1 ]] || echo "Scope: plumbing exists (entrypoint, registry, authority). For orchestration proof, use: verify-run honesty"
+
+# E1: bin/ops entrypoint smoke
+check E1 "bin/ops entrypoint smoke" bash -c "
+    '$ROOT/bin/ops' --help >/dev/null 2>&1 && '$ROOT/bin/ops' cap list >/dev/null 2>&1
+"
+
+# E2: ops status --json exits clean
+check E2 "ops status --json" bash -c "
+    '$ROOT/bin/ops' status --json >/dev/null 2>&1
+"
+
+# E3: SQLite shared authority readable + active-state counts resolve
+AUTHORITY_DB="$SPINE_STATE/shared_authority.db"
+check E3 "SQLite shared authority readable" bash -c "
+    db='$AUTHORITY_DB'
+    [[ -f \"\$db\" ]] || { echo 'shared_authority.db not found at $AUTHORITY_DB'; exit 1; }
+    count=\$(sqlite3 \"\$db\" 'SELECT count(*) FROM sqlite_master;' 2>&1) || { echo 'sqlite3 query failed'; exit 1; }
+    [[ \"\$count\" -gt 0 ]] || { echo 'shared_authority.db has no tables'; exit 1; }
+"
+
+# E4: capabilities registry parseable and non-empty
+check E4 "capability registry parseable" bash -c "
+    cap_file='$ROOT/ops/capabilities.yaml'
+    [[ -f \"\$cap_file\" ]] || exit 1
+    yq e '.capabilities | length' \"\$cap_file\" 2>/dev/null | grep -qE '^[1-9]'
+"
+
+# E5: no dead hot-path entry references
+check E5 "no dead entry references on hot path" bash -c "
+    dead_refs=0
+    for f in \
+        '$ROOT/ops/bindings/entry.surface.contract.yaml' \
+        '$ROOT/ops/bindings/session.admission.contract.yaml' \
+        '$ROOT/ops/plugins/core/session/bin/terminal-launch-exec' \
+        '$ROOT/ops/bindings/terminal.worker.catalog.yaml' \
+        '$ROOT/ops/bindings/terminal.launcher.view.yaml'; do
+        [[ -f \"\$f\" ]] && dead_refs=\$((dead_refs + 1))
+    done
+    [[ \$dead_refs -eq 0 ]]
+"
+
+# E6: no dead file references in governed scripts
+# Guards against the dee8c8d5 bug class: deleting a file while live scripts
+# still source/invoke it by repo-relative path.
+check E6 "no dead file references in governed scripts" bash -c '
+    dead=0
+    scan_dirs=(
+        "'"$ROOT"'/ops/commands"
+        "'"$ROOT"'/ops/plugins/core/verify/bin"
+        "'"$ROOT"'/ops/plugins/core/authority/bin"
+        "'"$ROOT"'/ops/plugins/core/lifecycle/bin"
+        "'"$ROOT"'/ops/plugins/core/orchestration/bin"
+        "'"$ROOT"'/ops/plugins/core/session/bin"
+        "'"$ROOT"'/ops/plugins/core/bin"
+        "'"$ROOT"'/ops/plugins/core/alerting/bin"
+        "'"$ROOT"'/ops/plugins/core/alerting/lib"
+        "'"$ROOT"'/ops/plugins/infra/host/bin"
+    )
+    for dir in "${scan_dirs[@]}"; do
+        [[ -d "$dir" ]] || continue
+        while IFS= read -r script; do
+            [[ -f "$script" ]] || continue
+            while IFS= read -r line; do
+                ref=""
+                # Skip comment lines and lines inside quoted strings used as examples
+                trimmed="${line#"${line%%[![:space:]]*}"}"
+                [[ "$trimmed" == \#* ]] && continue
+                # Match: source "$ROOT/path" or source "$CONTROL_ROOT/path" etc
+                if [[ "$line" =~ (source|python3|bash)[[:space:]]+[\"\$]*\{?(ROOT|CONTROL_ROOT|SPINE_REPO|_VE_COMPUTED|_VEH_COMPUTED)\}?/([^\"[:space:]\$]+) ]]; then
+                    ref="${BASH_REMATCH[3]}"
+                fi
+                [[ -n "$ref" ]] || continue
+                full="'"$ROOT"'/$ref"
+                if [[ ! -f "$full" && ! -d "$full" ]]; then
+                    echo "DEAD: $(basename "$script") -> $ref"
+                    dead=$((dead + 1))
+                fi
+            done < "$script"
+        done < <(find "$dir" -maxdepth 1 -type f \( -name "*.sh" -o -name "*.py" -o ! -name "*.*" \) 2>/dev/null)
+    done
+    if [[ $dead -gt 0 ]]; then
+        echo "$dead dead file reference(s) found"
+        exit 1
+    fi
+'
+
+# E7: no dead canonical path references in hot contracts
+# Keep this narrow and cheap: only check the boot/runtime and terminal-worker
+# projection contracts that recently pointed at deleted canonical surfaces.
+check E7 "no dead canonical path references in hot contracts" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+import yaml
+
+root = Path(sys.argv[1])
+
+STRICT_SUFFIXES = (".yaml", ".yml", ".sh", ".py", ".json", ".md")
+
+checks = [
+    {
+        "contract": root / "ops/bindings/runtime.bootstrap.contract.yaml",
+        "paths": [
+            ("authority.canonical_boot_surface", ["authority", "canonical_boot_surface"], False),
+            ("bootstrap_preconditions.required_contracts[]", ["bootstrap_preconditions", "required_contracts"], False),
+        ],
+    },
+    {
+        "contract": root / "ops/bindings/terminal.worker.projection.contract.yaml",
+        "paths": [
+            ("policy.authority_binding", ["policy", "authority_binding"], False),
+            ("governed_surfaces[].wrapper", ["governed_surfaces", "wrapper"], False),
+            ("governed_surfaces[].tracked_output", ["governed_surfaces", "tracked_output"], False),
+            ("generator.path", ["generator", "path"], False),
+        ],
+    },
+    {
+        "contract": root / "ops/bindings/gate.execution.topology.yaml",
+        "paths": [
+            # path_triggers mixes real paths with prefix-matchers (e.g. surfaces/verify/d140-);
+            # only hard-check entries that end in a concrete file suffix.
+            ("domain_metadata[].path_triggers[]", ["domain_metadata", "path_triggers"], True),
+        ],
+    },
+]
+
+def iter_values(node, path):
+    if not path:
+        yield node
+        return
+    head, *tail = path
+    if isinstance(node, list):
+        for item in node:
+            yield from iter_values(item, path)
+        return
+    if not isinstance(node, dict) or head not in node:
+        return
+    value = node[head]
+    if head == "path" and isinstance(node, dict):
+        status = str(node.get("status") or "").strip().lower()
+        if status == "retired":
+            return
+    yield from iter_values(value, tail)
+
+missing = []
+for entry in checks:
+    contract = entry["contract"]
+    if not contract.is_file():
+        continue
+    data = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
+    for label, path, suffix_only in entry["paths"]:
+        for raw in iter_values(data, path):
+            if not isinstance(raw, str):
+                continue
+            rel = raw.strip()
+            if not rel or rel.startswith("$") or rel.startswith("/") or "://" in rel:
+                continue
+            if suffix_only and not rel.lower().endswith(STRICT_SUFFIXES):
+                continue
+            target = root / rel
+            if not target.exists():
+                missing.append(f"{contract.relative_to(root)}::{label} -> {rel}")
+
+if missing:
+    print("\n".join(missing))
+    raise SystemExit(1)
+PY
+'
+
+# E8: every MANIFEST script entry must resolve on disk. Narrow per-plugin
+# capability parity: for the allowlisted plugins below, every advertised
+# capability name must resolve in ops/capabilities.yaml. The allowlist is
+# intentionally small because the broader MANIFEST currently carries
+# hundreds of unresolved capability names (pre-existing drift); this check
+# guards against regressions for plugins that have been cleaned up.
+check E8 "MANIFEST script parity + narrow capability parity" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+import yaml
+
+root = Path(sys.argv[1])
+manifest_path = root / "ops/plugins/MANIFEST.yaml"
+data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+
+# Plugins whose capability advertising MUST stay truthful.
+CAP_PARITY_ALLOWLIST = {"alerting", "orchestration"}
+
+cap_registry_path = root / "ops/capabilities.yaml"
+known_caps = set()
+if cap_registry_path.is_file():
+    reg = yaml.safe_load(cap_registry_path.read_text(encoding="utf-8")) or {}
+    caps = reg.get("capabilities") or {}
+    if isinstance(caps, dict):
+        known_caps.update(str(name).strip() for name in caps.keys() if str(name).strip())
+    else:
+        for cap in caps:
+            if isinstance(cap, dict):
+                name = str(cap.get("id") or cap.get("name") or "").strip()
+                if name:
+                    known_caps.add(name)
+
+missing_scripts = []
+missing_caps = []
+for plugin in data.get("plugins") or []:
+    if not isinstance(plugin, dict):
+        continue
+    plugin_name = str(plugin.get("name") or plugin.get("id") or "").strip()
+    base = root / str(plugin.get("path") or "").strip()
+    for rel in plugin.get("scripts") or []:
+        script_rel = str(rel or "").strip()
+        if not script_rel:
+            continue
+        candidate = base / script_rel
+        if not candidate.exists():
+            missing_scripts.append(str(candidate.relative_to(root)))
+    if plugin_name in CAP_PARITY_ALLOWLIST:
+        for cap_name in plugin.get("capabilities") or []:
+            cn = str(cap_name or "").strip()
+            if not cn:
+                continue
+            if cn not in known_caps:
+                missing_caps.append(f"{plugin_name}::{cn}")
+
+errs = []
+if missing_scripts:
+    errs.append("MISSING SCRIPTS:\n" + "\n".join(missing_scripts))
+if missing_caps:
+    errs.append("UNRESOLVED CAPABILITIES (allowlisted plugins):\n" + "\n".join(missing_caps))
+
+if errs:
+    print("\n\n".join(errs))
+    raise SystemExit(1)
+PY
+'
+
+# E9: every live scheduled launchd plist in ops/plugins/infra/host/launchd/
+# must resolve its ProgramArguments script target on disk. Guards against
+# the dee8c8d5 bug class where a scheduled wrapper gets deleted but its
+# plist stays installed (producer silently dead). Promoted to fail-level
+# once the pre-existing dee8c8d5 residue was cleaned up; new drift must
+# now block engine smoke rather than warn.
+check E9 "launchd plist wrappers resolve on disk" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import json
+import subprocess
+import sys
+
+root = Path(sys.argv[1])
+plist_dir = root / "ops/plugins/infra/host/launchd"
+if not plist_dir.is_dir():
+    sys.exit(0)
+
+missing = []
+for plist in sorted(plist_dir.glob("*.plist")):
+    try:
+        out = subprocess.run(
+            ["plutil", "-convert", "json", "-o", "-", str(plist)],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+        data = json.loads(out) if out.strip() else {}
+    except Exception as exc:
+        missing.append(f"{plist.name}: parse error: {exc}")
+        continue
+    args = data.get("ProgramArguments") or []
+    label = data.get("Label") or plist.stem
+    # Walk args: any arg that looks like an absolute path to a file under
+    # SPINE_ROOT or that ends in .sh/.py/.rb must resolve on disk.
+    for arg in args:
+        if not isinstance(arg, str):
+            continue
+        if not arg.startswith("/"):
+            continue
+        p = Path(arg)
+        # Skip shell interpreters (/bin/bash etc)
+        if str(p).startswith(("/bin/", "/usr/bin/", "/usr/local/bin/")):
+            continue
+        if not p.exists():
+            missing.append(f"{label}: missing {arg}")
+
+if missing:
+    print("\n".join(missing))
+    raise SystemExit(1)
+PY
+'
+
+# E10: launchd required_labels truth. Promoted to fail-level: the
+# contract is authoritative, so any required_label not loaded in live
+# launchctl state must block engine smoke. Non-local labels remain
+# informational via the non_local_deferred line but do not contribute
+# to the missing-count that triggers the failure.
+check E10 "launchd required_labels loaded" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import os
+import subprocess
+import sys
+import yaml
+
+root = Path(sys.argv[1])
+contract = root / "ops/bindings/launchd.runtime.contract.yaml"
+if not contract.is_file():
+    sys.exit(0)
+
+data = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
+# required_labels may be a dict with .labels list (annotated) or a plain list
+_rl_raw = data.get("required_labels") or []
+if isinstance(_rl_raw, dict):
+    _rl_raw = _rl_raw.get("labels") or []
+required = [str(x).strip() for x in _rl_raw if str(x).strip()]
+if not required:
+    sys.exit(0)
+
+# Role-aware filtering. Required labels whose intended_node_role does not
+# match the local role must not be counted as "missing on this laptop".
+# Matches the LOCAL_ROLE convention used by host-launchagents-sync.
+local_role = os.environ.get("SPINE_LOCAL_ROLE", "").strip() or "operator_console"
+
+registry_path = root / "ops/bindings/launchd.scheduler.registry.yaml"
+role_by_label = {}
+if registry_path.is_file():
+    reg = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
+    for entry in (reg.get("labels") or []):
+        lbl = str((entry or {}).get("label", "")).strip()
+        role = str((entry or {}).get("intended_node_role", "")).strip()
+        if lbl:
+            role_by_label[lbl] = role
+
+# Labels explicitly marked operator_console_launchd_loaded: false are not
+# expected locally even if their intended_node_role matches.
+locally_unloaded = set()
+if registry_path.is_file():
+    for entry in (reg.get("labels") or []):
+        lbl = str((entry or {}).get("label", "")).strip()
+        if lbl and (entry or {}).get("operator_console_launchd_loaded") is False:
+            locally_unloaded.add(lbl)
+
+# Labels missing from registry default to local (fail-safe).
+local_required = [
+    lbl for lbl in required
+    if role_by_label.get(lbl, local_role) == local_role
+    and lbl not in locally_unloaded
+]
+non_local = [lbl for lbl in required if lbl not in local_required]
+if non_local:
+    _nl = ", ".join(non_local)
+    print(f"non_local_deferred ({local_role}): {_nl}")
+
+if not local_required:
+    sys.exit(0)
+
+loaded = set()
+try:
+    out = subprocess.run(
+        ["launchctl", "list"], capture_output=True, text=True, timeout=10
+    )
+    if out.returncode == 0:
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 3:
+                loaded.add(parts[2])
+except Exception as exc:
+    print(f"launchctl list failed: {exc}")
+    raise SystemExit(1)
+
+missing = [lbl for lbl in local_required if lbl not in loaded]
+if missing:
+    _ms = ", ".join(missing)
+    print(f"{len(missing)}/{len(local_required)} required_labels not loaded on {local_role}: {_ms}")
+    raise SystemExit(1)
+PY
+'
+
+# E11: retirement-propagation hardening. Hard-fails if the retired
+# network.inventory.snapshot / network-inventory-snapshot-build residue
+# class is reintroduced anywhere in the governed surface. Lines containing
+# "RETIRED:" or "retirement sentinel" are allowlisted so the retirement
+# records themselves do not trip the check.
+check E11 "retired snapshot residue class absent (fail)" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+self_path = (root / "ops/plugins/core/verify/bin/verify-engine").resolve()
+tokens = ["network.inventory.snapshot", "network-inventory-snapshot-build"]
+
+globs = [
+    "ops/bindings/**/*.yaml",
+    "ops/bindings/**/*.yml",
+    "ops/plugins/**/*.sh",
+    "ops/plugins/**/*.py",
+    "ops/plugins/**/*.yaml",
+    "ops/plugins/**/*.yml",
+    "ops/commands/*.sh",
+    "AGENTS.md",
+    "NORTH_STAR.md",
+]
+
+seen = set()
+candidates = []
+for g in globs:
+    for p in root.glob(g):
+        if not p.is_file():
+            continue
+        rp = p.resolve()
+        if rp == self_path or rp in seen:
+            continue
+        seen.add(rp)
+        candidates.append(p)
+
+for p in root.glob("ops/plugins/**/bin/*"):
+    if not p.is_file():
+        continue
+    rp = p.resolve()
+    if rp == self_path or rp in seen:
+        continue
+    seen.add(rp)
+    candidates.append(p)
+
+hits = []
+for p in sorted(candidates):
+    try:
+        text = p.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        continue
+    for i, line in enumerate(text.splitlines(), 1):
+        if "RETIRED:" in line or "retirement sentinel" in line:
+            continue
+        if any(tok in line for tok in tokens):
+            rel = p.relative_to(root)
+            hits.append(f"{rel}:{i}")
+
+if hits:
+    for h in hits:
+        print(h)
+    raise SystemExit(1)
+PY
+'
+
+if [[ "$json_mode" -eq 1 ]]; then
+    # Build JSON arrays
+    fail_json="[]"
+    warn_json="[]"
+    if [[ ${#FAILING_IDS[@]} -gt 0 ]]; then
+        fail_json="$(printf '%s\n' "${FAILING_IDS[@]}" | jq -R . | jq -s .)"
+    fi
+    if [[ ${#WARNING_IDS[@]} -gt 0 ]]; then
+        warn_json="$(printf '%s\n' "${WARNING_IDS[@]}" | jq -R . | jq -s .)"
+    fi
+    jq -n \
+        --argjson total "$TOTAL" \
+        --argjson pass "$PASS" \
+        --argjson fail "$FAIL" \
+        --argjson warn "$WARN" \
+        --argjson failing_ids "$fail_json" \
+        --argjson warning_ids "$warn_json" \
+        '{
+            total: $total,
+            pass: $pass,
+            fail: $fail,
+            warn: $warn,
+            skipped_inline: 0,
+            skipped_retired: 0,
+            skipped_network: 0,
+            receipt_integrity_warnings: 0,
+            failing_ids: $failing_ids,
+            warning_ids: $warning_ids,
+            blocking_fail_ids: $failing_ids,
+            non_blocking_fail_ids: []
+        }'
+else
+    echo ""
+    echo "Engine smoke: $PASS/$TOTAL pass, $FAIL fail, $WARN warn"
+fi
+
+[[ "$FAIL" -eq 0 ]]

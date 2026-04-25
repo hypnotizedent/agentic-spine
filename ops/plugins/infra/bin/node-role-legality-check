@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# node-role-legality-check
+# Read-only: evaluate whether a candidate context is legally compatible
+# with a requested node role, using current authority only.
+#
+# Does NOT elect hosts or assign roles.
+# Does NOT mutate any surface.
+#
+# Authority sources:
+#   - node.role.contract.yaml
+#   - vm.lifecycle.yaml
+#   - ssh.targets.yaml
+#   - topology.sites.yaml
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+NODE_CONTRACT="${SPINE_REPO}/ops/bindings/node.role.contract.yaml"
+VM_LIFECYCLE="${SPINE_REPO}/ops/bindings/vm.lifecycle.yaml"
+SSH_TARGETS="${SPINE_REPO}/ops/bindings/ssh.targets.yaml"
+TOPOLOGY="${SPINE_REPO}/ops/bindings/topology.sites.yaml"
+
+usage() {
+    cat <<'EOF'
+node-role-legality-check - Evaluate candidate legality for a node role
+
+Usage:
+  node-role-legality-check --role <role> --candidate <id> [--json]
+
+Arguments:
+  --role <role>          Node role from node.role.contract.yaml
+                         (operator_console, execution_host, translator_node,
+                          verification_node, storage_evidence_node, watcher_node)
+  --candidate <id>       Candidate identifier (ssh target id or "local")
+  --json                 Machine-readable JSON output
+
+This capability is READ-ONLY. No host election occurs.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+ROLE=""
+CANDIDATE=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --role) ROLE="${2:-}"; shift 2 ;;
+        --candidate) CANDIDATE="${2:-}"; shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$ROLE" ]] || fail "--role is required"
+[[ -n "$CANDIDATE" ]] || fail "--candidate is required"
+
+need yq
+need jq
+
+for f in "$NODE_CONTRACT" "$VM_LIFECYCLE" "$SSH_TARGETS" "$TOPOLOGY"; do
+    [[ -f "$f" ]] || fail "authority surface not found: $f"
+done
+
+# Validate role exists
+valid_roles=$(yq e '.node_types | keys | .[]' "$NODE_CONTRACT" 2>/dev/null)
+role_found=false
+for r in $valid_roles; do
+    [[ "$r" == "$ROLE" ]] && role_found=true
+done
+$role_found || fail "unknown role: $ROLE (valid: $valid_roles)"
+
+# Gather candidate evidence
+violations=()
+evidence=()
+candidate_site=""
+candidate_status=""
+candidate_os=""
+candidate_resources=""
+
+if [[ "$CANDIDATE" == "local" ]]; then
+    # Local machine (the current MacBook)
+    candidate_platform="darwin"
+    candidate_site="operator-local"
+    candidate_status="active"
+    candidate_os="darwin"
+    evidence+=("candidate=local (current machine)")
+    evidence+=("platform=darwin (detected)")
+else
+    # Look up in ssh.targets.yaml
+    ssh_entry=$(yq e ".ssh.targets[] | select(.id == \"$CANDIDATE\")" "$SSH_TARGETS" 2>/dev/null)
+    if [[ -z "$ssh_entry" || "$ssh_entry" == "null" ]]; then
+        violations+=("candidate '$CANDIDATE' not found in ssh.targets.yaml")
+        evidence+=("ssh.targets.yaml: no entry for '$CANDIDATE'")
+    else
+        candidate_host=$(echo "$ssh_entry" | yq e '.host // ""')
+        candidate_tags=$(echo "$ssh_entry" | yq e '.tags // [] | join(", ")')
+        candidate_site_raw=$(echo "$ssh_entry" | yq e '.site // ""')
+        candidate_desc=$(echo "$ssh_entry" | yq e '.description // ""')
+        candidate_optional=$(echo "$ssh_entry" | yq e '.optional // false')
+        evidence+=("ssh.targets.yaml: id=$CANDIDATE host=$candidate_host tags=[$candidate_tags]")
+
+        if [[ "$candidate_site_raw" != "" && "$candidate_site_raw" != "null" ]]; then
+            candidate_site="$candidate_site_raw"
+        fi
+
+        # Check if tombstoned
+        tombstone_tags=$(echo "$ssh_entry" | yq e '.tags[] | select(. == "tombstone")' 2>/dev/null || true)
+        if [[ -n "$tombstone_tags" ]]; then
+            violations+=("candidate '$CANDIDATE' is tombstoned in ssh.targets.yaml")
+        fi
+
+        # Look up in vm.lifecycle.yaml
+        vm_entry=$(yq e ".vms[] | select(.ssh_target == \"$CANDIDATE\")" "$VM_LIFECYCLE" 2>/dev/null)
+        if [[ -n "$vm_entry" && "$vm_entry" != "null" ]]; then
+            candidate_status=$(echo "$vm_entry" | yq e '.status // ""')
+            candidate_os=$(echo "$vm_entry" | yq e '.os // ""')
+            vm_id=$(echo "$vm_entry" | yq e '.id // ""')
+            vm_cpu=$(echo "$vm_entry" | yq e '.resources.cpu_cores // ""')
+            vm_mem=$(echo "$vm_entry" | yq e '.resources.memory_mb // ""')
+            candidate_resources="cpu=${vm_cpu},mem_mb=${vm_mem}"
+            evidence+=("vm.lifecycle.yaml: vmid=$vm_id status=$candidate_status os=$candidate_os resources=[$candidate_resources]")
+
+            if [[ "$candidate_status" == "decommissioned" ]]; then
+                violations+=("candidate VM $vm_id is decommissioned")
+            elif [[ "$candidate_status" == "template" ]]; then
+                violations+=("candidate VM $vm_id is a template, not a runtime target")
+            fi
+
+            candidate_platform="linux"
+        else
+            evidence+=("vm.lifecycle.yaml: no entry for ssh_target=$CANDIDATE")
+            candidate_platform="unknown"
+        fi
+    fi
+fi
+
+# Check role constraints
+role_desc=$(yq e ".node_types.$ROLE.description" "$NODE_CONTRACT")
+multi_allowed=$(yq e ".node_types.$ROLE.multiple_instances_allowed" "$NODE_CONTRACT")
+evidence+=("node.role.contract: role=$ROLE multiple_instances_allowed=$multi_allowed")
+
+# Check physical separation posture
+# For each other role, check if the candidate would violate required separation
+sep_posture=$(yq e ".node_types.$ROLE.physical_separation_posture" "$NODE_CONTRACT" 2>/dev/null)
+if [[ -n "$sep_posture" && "$sep_posture" != "null" ]]; then
+    # Note: we can only check separation if we know where other roles currently live.
+    # Currently all 5 realized roles are on "local" (MacBook).
+    # If candidate is also "local", separation posture "required" against colocated roles is a warning.
+    if [[ "$CANDIDATE" == "local" ]]; then
+        # Check: watcher_node must be physically separate from operator_console, execution_host, storage_evidence_node
+        if [[ "$ROLE" == "watcher_node" ]]; then
+            violations+=("watcher_node requires physical separation from operator_console, execution_host, storage_evidence_node — all currently on local")
+        fi
+        # Note separation preferences (not violations)
+        for other_role in operator_console execution_host translator_node verification_node storage_evidence_node watcher_node; do
+            [[ "$other_role" == "$ROLE" ]] && continue
+            posture=$(yq e ".node_types.$ROLE.physical_separation_posture.$other_role" "$NODE_CONTRACT" 2>/dev/null || echo "")
+            if [[ "$posture" == "required" ]]; then
+                # All currently-realized roles are on local, so if candidate is local, required separation is violated
+                violations+=("physical_separation from $other_role is required, but both would be on local")
+            fi
+        done
+    else
+        # Candidate is NOT local — check that required separations from local roles are satisfied
+        for other_role in operator_console execution_host translator_node verification_node storage_evidence_node; do
+            posture=$(yq e ".node_types.$ROLE.physical_separation_posture.$other_role" "$NODE_CONTRACT" 2>/dev/null || echo "")
+            if [[ "$posture" == "required" ]]; then
+                # Separation is satisfied (candidate is remote, existing role is local)
+                evidence+=("separation from $other_role: satisfied (candidate=$CANDIDATE is remote, $other_role is local)")
+            fi
+        done
+    fi
+fi
+
+# Check authority matrix compatibility
+# For execution_host: must support headless_execution
+auth_entry=$(yq e ".authority_matrix.$ROLE" "$NODE_CONTRACT" 2>/dev/null)
+if [[ -n "$auth_entry" && "$auth_entry" != "null" ]]; then
+    headless=$(yq e ".authority_matrix.$ROLE.headless_execution" "$NODE_CONTRACT" 2>/dev/null || echo "")
+    if [[ "$headless" == "allowed" && "$candidate_platform" == "darwin" ]]; then
+        evidence+=("authority: headless_execution=allowed, platform=darwin (launchd native)")
+    elif [[ "$headless" == "allowed" && "$candidate_platform" == "linux" ]]; then
+        evidence+=("authority: headless_execution=allowed, platform=linux (systemd — translation required)")
+    fi
+fi
+
+# Determine legality
+if [[ ${#violations[@]} -gt 0 ]]; then
+    legality="illegal"
+elif [[ "$candidate_platform" == "unknown" ]]; then
+    legality="insufficient_evidence"
+else
+    legality="legal"
+fi
+
+# Output
+if $JSON_MODE; then
+    violations_json="[]"
+    if [[ ${#violations[@]} -gt 0 ]]; then
+        violations_json=$(printf '%s\n' "${violations[@]}" | jq -R . | jq -s .)
+    fi
+    evidence_json=$(printf '%s\n' "${evidence[@]}" | jq -R . | jq -s .)
+
+    jq -n \
+        --arg role "$ROLE" \
+        --arg candidate "$CANDIDATE" \
+        --arg legality "$legality" \
+        --arg candidate_platform "${candidate_platform:-unknown}" \
+        --arg candidate_status "${candidate_status:-unknown}" \
+        --arg candidate_site "${candidate_site:-unknown}" \
+        --argjson violations "$violations_json" \
+        --argjson evidence "$evidence_json" \
+        '{
+            role: $role,
+            candidate: $candidate,
+            legality: $legality,
+            candidate_platform: $candidate_platform,
+            candidate_status: $candidate_status,
+            candidate_site: $candidate_site,
+            violated_constraints: $violations,
+            evidence: $evidence,
+            host_election_occurred: false,
+            note: "Read-only legality check. No host election or assignment."
+        }'
+else
+    echo "node.role.legality.check"
+    echo "========================"
+    echo "role:      $ROLE"
+    echo "candidate: $CANDIDATE"
+    echo "legality:  $legality"
+    echo "platform:  ${candidate_platform:-unknown}"
+    echo "status:    ${candidate_status:-unknown}"
+    echo "site:      ${candidate_site:-unknown}"
+    echo
+
+    if [[ ${#violations[@]} -gt 0 ]]; then
+        echo "VIOLATED CONSTRAINTS:"
+        for v in "${violations[@]}"; do
+            echo "  - $v"
+        done
+        echo
+    fi
+
+    echo "EVIDENCE:"
+    for e in "${evidence[@]}"; do
+        echo "  - $e"
+    done
+    echo
+    echo "NOTE: Read-only legality check. No host election or assignment occurred."
+fi

@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_VR_COMPUTED="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+if [[ -n "${SPINE_ROOT:-}" && "${SPINE_ROOT}" != "$_VR_COMPUTED" ]]; then
+  echo "WARN: ambient SPINE_ROOT=$SPINE_ROOT disagrees with computed=$_VR_COMPUTED (using computed)" >&2
+fi
+ROOT="$_VR_COMPUTED"
+
+VERIFY_TOPOLOGY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
+VERIFY_ENGINE="$ROOT/ops/plugins/core/verify/bin/verify-engine"
+VERIFY_ENGINE_HONESTY="$ROOT/ops/plugins/core/verify/bin/verify-engine-honesty"
+VERIFY_SPINE_SCOPE_HELPER="$ROOT/ops/plugins/core/verify/lib/spine_scope_gate_set.py"
+RECOVERY_DISPATCH="$ROOT/ops/plugins/core/recovery/bin/recovery-dispatch"
+
+fail() {
+  echo "verify.run FAIL: $*" >&2
+  exit 1
+}
+
+[[ -x "$VERIFY_TOPOLOGY" ]] || fail "missing verify runtime: $VERIFY_TOPOLOGY"
+[[ -x "$VERIFY_ENGINE" ]] || fail "missing engine verify: $VERIFY_ENGINE"
+[[ -x "$VERIFY_ENGINE_HONESTY" ]] || fail "missing engine honesty verify: $VERIFY_ENGINE_HONESTY"
+
+usage() {
+  cat <<'USAGE'
+verify.run
+
+Usage:
+  verify-run engine [--json]                  Fast platform engine smoke (spine truth)
+  verify-run honesty [--json]                 Engine orchestration proof (spine truth)
+  verify-run spine [--json]                   Honest spine-only verify scope (spine truth)
+  verify-run fast [--json] [--shadow]         Deprecated alias for infra (estate health)
+  verify-run infra [--json] [--shadow]        Preferred estate/workload health scope
+  verify-run domain <domain_id> [--json]      Domain-scoped infrastructure gates (estate health)
+  verify-run release [--json] [--shadow]      Full infrastructure gate set (estate health)
+
+Scopes:
+  engine  => platform engine smoke test; answers spine/object truth
+  honesty => engine orchestration proof; answers spine/object truth
+  spine   => curated spine-only executable set + engine/honesty surfaces
+  fast    => deprecated compatibility alias for infra
+  infra   => infrastructure workload baseline; answers estate/workload health only
+  domain  => estate/workload health gates for one domain
+  release => full estate/workload health gate set
+
+Flags:
+  --alias-source <name>  internal compatibility marker for deprecated alias surfaces
+  --shadow   accepted for compatibility and ignored by spine-lite
+  --recover  on fail, execute matching recovery-dispatch for D### failures when available
+  --json     emit machine-readable JSON output
+USAGE
+}
+
+json_mode=0
+shadow_mode=0
+recover_mode=0
+alias_source=""
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
+scope="${1:-}"
+shift || true
+
+case "$scope" in
+  engine|honesty|spine|fast|infra|domain|release) ;;
+  -h|--help|"") usage; exit 0 ;;
+  *) fail "unknown scope '$scope' (expected engine|honesty|spine|fast|infra|domain|release)" ;;
+esac
+
+target_domain=""
+if [[ "$scope" == "domain" ]]; then
+  [[ $# -ge 1 ]] || fail "domain scope requires <domain_id>"
+  target_domain="$1"
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --alias-source)
+      alias_source="${2:-}"
+      [[ -n "$alias_source" ]] || fail "--alias-source requires <name>"
+      shift 2
+      ;;
+    --json) json_mode=1 ;;
+    --shadow) shadow_mode=1 ;;
+    --recover) recover_mode=1 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+  shift
+done
+
+if [[ "$scope" == "fast" ]]; then
+  [[ -n "$alias_source" ]] || alias_source="fast"
+  scope="infra"
+fi
+
+surface_recovery() {
+  local scope_name="$1"
+  local result_json="$2"
+  local fail_id=""
+  local failure_class="deterministic"
+
+  fail_id="$(jq -r '.blocking_fail_ids[0] // .failing_ids[0] // empty' <<<"$result_json" 2>/dev/null || true)"
+  [[ "$fail_id" == D* ]] || {
+    echo "recovery.dispatch hint: scope=$scope_name fail_id=${fail_id:-none} (no D### match on this verify surface)" >&2
+    return 0
+  }
+
+  echo "recovery.dispatch hint: ops cap run recovery.dispatch -- --gate-id $fail_id --failure-class $failure_class" >&2
+  [[ "$recover_mode" -eq 1 ]] || return 0
+  [[ -x "$RECOVERY_DISPATCH" ]] || fail "missing recovery dispatch: $RECOVERY_DISPATCH"
+  echo "recovery.dispatch: scope=$scope_name gate_id=$fail_id failure_class=$failure_class" >&2
+  "$RECOVERY_DISPATCH" --gate-id "$fail_id" --failure-class "$failure_class"
+}
+
+scope_truth_plane() {
+  local mode="$1"
+  case "$mode" in
+    engine|honesty|spine) echo "spine_truth" ;;
+    infra|release|domain:*) echo "estate_health" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+scope_reading() {
+  local mode="$1"
+  case "$mode" in
+    engine|honesty|spine)
+      echo "Spine/object truth surface. Reads engine, governance, entry, orchestration, and spine-only execution truth."
+      ;;
+    infra|release|domain:*)
+      echo "Estate/workload health surface. Reads runtime host, workload, service, backup, and network state; does not answer packet, loop, or governance truth."
+      ;;
+    *)
+      echo "Unknown scope reading."
+      ;;
+  esac
+}
+
+scope_may_block_spine_truth() {
+  local mode="$1"
+  case "$mode" in
+    engine|honesty|spine) echo true ;;
+    infra|release|domain:*) echo false ;;
+    *) echo false ;;
+  esac
+}
+
+preferred_scope_for_alias() {
+  local source="$1"
+  [[ -n "$source" ]] || return 0
+  echo "infra"
+}
+
+preferred_capability_for_alias() {
+  local source="$1"
+  [[ -n "$source" ]] || return 0
+  echo "verify.infra.run"
+}
+
+emit_alias_deprecation_note() {
+  local source="$1"
+  [[ -n "$source" ]] || return 0
+  echo "verify.run deprecation: '$source' is a compatibility alias for estate/workload health. Prefer 'infra' or 'verify.infra.run'." >&2
+}
+
+emit_scope_note() {
+  local mode="$1"
+  case "$mode" in
+    engine|honesty|spine)
+      echo "verify.run note: $mode answers spine/object truth." >&2
+      ;;
+    infra|release|domain:*)
+      echo "verify.run note: $mode answers estate/workload health only; do not treat it as packet/loop/governance truth." >&2
+      ;;
+  esac
+}
+
+run_and_wrap_json() {
+  local mode="$1"
+  shift
+  local output rc truth_plane reading may_block_spine_truth preferred_scope preferred_capability
+  truth_plane="$(scope_truth_plane "$mode")"
+  reading="$(scope_reading "$mode")"
+  may_block_spine_truth="$(scope_may_block_spine_truth "$mode")"
+  preferred_scope="$(preferred_scope_for_alias "$alias_source")"
+  preferred_capability="$(preferred_capability_for_alias "$alias_source")"
+
+  set +e
+  output="$("$@" 2>/dev/null)"
+  rc=$?
+  set -e
+
+  if [[ -z "$output" ]] || ! jq -e . >/dev/null 2>&1 <<<"$output"; then
+    output='{"total":0,"pass":0,"fail":1,"warn":0,"skipped_inline":0,"skipped_retired":0,"skipped_network":0,"receipt_integrity_warnings":0,"failing_ids":[],"warning_ids":[],"blocking_fail_ids":[],"non_blocking_fail_ids":[]}'
+    rc=1
+  fi
+
+  jq -n \
+    --arg mode "$mode" \
+    --arg truth_plane "$truth_plane" \
+    --arg scope_reading "$reading" \
+    --arg alias_source "$alias_source" \
+    --arg preferred_scope "$preferred_scope" \
+    --arg preferred_capability "$preferred_capability" \
+    --argjson may_block_spine_truth "$may_block_spine_truth" \
+    --argjson shadow_mode "$shadow_mode" \
+    --argjson result "$output" \
+    '{
+      mode: $mode,
+      truth_plane: $truth_plane,
+      scope_reading: $scope_reading,
+      alias_source: (if $alias_source == "" then null else $alias_source end),
+      deprecated_alias_used: ($alias_source != ""),
+      preferred_scope: (if $preferred_scope == "" then null else $preferred_scope end),
+      preferred_capability: (if $preferred_capability == "" then null else $preferred_capability end),
+      may_block_spine_truth: $may_block_spine_truth,
+      shadow_mode_ignored: ($shadow_mode == 1),
+      total: ($result.total // 0),
+      pass: ($result.pass // 0),
+      fail: ($result.fail // 0),
+      warn: ($result.warn // 0),
+      skipped_inline: ($result.skipped_inline // 0),
+      skipped_retired: ($result.skipped_retired // 0),
+      skipped_network: ($result.skipped_network // 0),
+      receipt_integrity_warnings: ($result.receipt_integrity_warnings // 0),
+      failing_ids: ($result.failing_ids // []),
+      warning_ids: ($result.warning_ids // []),
+      blocking_fail_ids: ($result.blocking_fail_ids // []),
+      non_blocking_fail_ids: ($result.non_blocking_fail_ids // [])
+    }'
+
+  return "$rc"
+}
+
+run_scope() {
+  local mode="$1"
+  shift
+  local result="" rc=0
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    set +e
+    result="$(run_and_wrap_json "$mode" "$@" --json)"
+    rc=$?
+    set -e
+    [[ "$rc" -eq 0 ]] || surface_recovery "$mode" "$result"
+    printf '%s\n' "$result"
+    return "$rc"
+  fi
+
+  emit_alias_deprecation_note "$alias_source"
+  emit_scope_note "$mode"
+  set +e
+  "$@"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    set +e
+    result="$(run_and_wrap_json "$mode" "$@" --json)"
+    set -e
+    surface_recovery "$mode" "$result"
+  fi
+  return "$rc"
+}
+
+load_spine_helper_json() {
+  [[ -f "$VERIFY_SPINE_SCOPE_HELPER" ]] || fail "missing spine scope helper: $VERIFY_SPINE_SCOPE_HELPER"
+
+  local output rc
+  set +e
+  output="$(python3 "$VERIFY_SPINE_SCOPE_HELPER" --json 2>&1)"
+  rc=$?
+  set -e
+
+  [[ "$rc" -eq 0 ]] || fail "spine scope helper failed (exit $rc): ${output:0:400}"
+  jq -e . >/dev/null 2>&1 <<<"$output" || fail "spine scope helper did not emit valid JSON"
+  printf '%s\n' "$output"
+}
+
+run_spine_scope() {
+  local helper_json declared_json executed_json already_json missing_json stale_json out_json helper_exec_paths_json component_json
+  local overall_rc=0
+  local engine_rc=0 honesty_rc=0 gate_rc=0
+
+  helper_json="$(load_spine_helper_json)"
+  declared_json="$(jq -c '.declared_core_gate_ids' <<<"$helper_json")"
+  executed_json="$(jq -c '.executable_now_gate_ids' <<<"$helper_json")"
+  already_json="$(jq -c '.already_covered_gate_ids' <<<"$helper_json")"
+  missing_json="$(jq -c '.missing_implementation_gate_ids' <<<"$helper_json")"
+  stale_json="$(jq -c '.stale_target_gate_ids' <<<"$helper_json")"
+  out_json="$(jq -c '.out_of_spine_scope_gate_ids' <<<"$helper_json")"
+  helper_exec_paths_json="$(jq -c --arg root "$ROOT" '[.executable_surfaces[] | (.path // .check_script // .surface_id) | if startswith("/") then . else ($root + "/" + .) end]' <<<"$helper_json")"
+  component_json="$(jq -n \
+    --argjson helper_exec "$helper_exec_paths_json" \
+    --arg engine "$VERIFY_ENGINE" \
+    --arg honesty "$VERIFY_ENGINE_HONESTY" \
+    '$helper_exec + [$engine, $honesty]')"
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    set +e
+    "$VERIFY_ENGINE" --json >/dev/null 2>&1
+    engine_rc=$?
+    set -e
+
+    set +e
+    "$VERIFY_ENGINE_HONESTY" --json >/dev/null 2>&1
+    honesty_rc=$?
+    set -e
+  else
+    echo "verify.run spine"
+    echo "  curated spine-only verify scope"
+    echo "  note: spine answers spine/object truth and excludes estate/workload health gates"
+    echo "  engine: $VERIFY_ENGINE"
+    echo "  honesty: $VERIFY_ENGINE_HONESTY"
+    echo "  executable surfaces:"
+    echo "$component_json" | jq -r '.[]' | sed 's/^/    - /'
+
+    set +e
+    "$VERIFY_ENGINE"
+    engine_rc=$?
+    set -e
+
+    set +e
+    "$VERIFY_ENGINE_HONESTY"
+    honesty_rc=$?
+    set -e
+  fi
+
+  [[ "$engine_rc" -eq 0 ]] || overall_rc=1
+  [[ "$honesty_rc" -eq 0 ]] || overall_rc=1
+
+  # Build warn-only surface path set from gate registry metadata
+  local warn_only_paths
+  warn_only_paths="$(jq -r --arg root "$ROOT" \
+    '[.executable_surfaces[] | select(.warn_only == true) | (.path // .check_script) | if startswith("/") then . else ($root + "/" + .) end] | .[]' \
+    <<<"$helper_json")"
+
+  while IFS= read -r surface; do
+    [[ -n "$surface" ]] || continue
+    if [[ ! -x "$surface" ]]; then
+      echo "verify.run spine FAIL: non-executable surface: $surface" >&2
+      overall_rc=1
+      continue
+    fi
+
+    if [[ "$json_mode" -eq 1 ]]; then
+      set +e
+      "$surface" >/dev/null 2>&1
+      gate_rc=$?
+      set -e
+    else
+      set +e
+      "$surface"
+      gate_rc=$?
+      set -e
+    fi
+
+    if [[ "$gate_rc" -ne 0 ]]; then
+      if echo "$warn_only_paths" | grep -qxF "$surface"; then
+        [[ "$json_mode" -eq 1 ]] || echo "  (warn-only gate — not blocking spine.verify)"
+      else
+        overall_rc=1
+      fi
+    fi
+  done < <(jq -r '.[]' <<<"$helper_exec_paths_json")
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    jq -n \
+      --arg mode "spine" \
+      --arg truth_plane "spine_truth" \
+      --arg scope_reading "Spine/object truth surface. Excludes estate/workload health gates unless separately routed." \
+      --argjson may_block_spine_truth true \
+      --argjson declared_core_gate_ids "$declared_json" \
+      --argjson executed_gate_ids "$executed_json" \
+      --argjson already_covered_gate_ids "$already_json" \
+      --argjson missing_implementation_gate_ids "$missing_json" \
+      --argjson stale_target_gate_ids "$stale_json" \
+      --argjson out_of_spine_scope_gate_ids "$out_json" \
+      --argjson component_surfaces_run "$component_json" \
+      '{
+        mode: $mode,
+        truth_plane: $truth_plane,
+        scope_reading: $scope_reading,
+        may_block_spine_truth: $may_block_spine_truth,
+        declared_core_gate_ids: $declared_core_gate_ids,
+        executed_gate_ids: $executed_gate_ids,
+        already_covered_gate_ids: $already_covered_gate_ids,
+        missing_implementation_gate_ids: $missing_implementation_gate_ids,
+        stale_target_gate_ids: $stale_target_gate_ids,
+        out_of_spine_scope_gate_ids: $out_of_spine_scope_gate_ids,
+        component_surfaces_run: $component_surfaces_run
+      }'
+  else
+    echo
+    echo "Spine classification:"
+    echo "  declared: $(jq -r '.declared_core_gate_ids | length' <<<"$helper_json")"
+    echo "  executable-now: $(jq -r '.executable_now_gate_ids | length' <<<"$helper_json")"
+    echo "  already-covered: $(jq -r '.already_covered_gate_ids | length' <<<"$helper_json")"
+    echo "  missing-implementation: $(jq -r '.missing_implementation_gate_ids | length' <<<"$helper_json")"
+    echo "  stale-target: $(jq -r '.stale_target_gate_ids | length' <<<"$helper_json")"
+    echo "  out-of-spine-scope: $(jq -r '.out_of_spine_scope_gate_ids | length' <<<"$helper_json")"
+  fi
+
+  return "$overall_rc"
+}
+
+case "$scope" in
+  engine)  run_scope "engine" "$VERIFY_ENGINE" ;;
+  honesty) run_scope "honesty" "$VERIFY_ENGINE_HONESTY" ;;
+  spine)   run_spine_scope ;;
+  infra)
+    [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
+    run_scope "infra" "$VERIFY_TOPOLOGY" core
+    ;;
+  domain)
+    [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
+    run_scope "domain:$target_domain" "$VERIFY_TOPOLOGY" domain "$target_domain"
+    ;;
+  release)
+    [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
+    run_scope "release" "$VERIFY_TOPOLOGY" release
+    ;;
+esac

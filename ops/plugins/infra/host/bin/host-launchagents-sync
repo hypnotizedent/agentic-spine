@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+# host-launchagents-sync
+#
+# Governed sync/reload for spine-managed LaunchAgents.
+# Source templates: ops/plugins/infra/host/launchd/*.plist
+# Install target:   ~/Library/LaunchAgents/
+#
+# Role-awareness (L1):
+#   Each label has an `intended_node_role` declared in
+#   ops/bindings/launchd.scheduler.registry.yaml. This script only
+#   materializes labels whose `intended_node_role` matches the local
+#   machine role (default: operator_console). Labels with a different
+#   role are explicitly skipped with SKIPPED_ROLE_MISMATCH output — they
+#   are NOT copied, reloaded, or silently installed. This script does
+#   NOT assign hosts and does NOT decide which non-local machine should
+#   run any label; it only prevents the operator console from absorbing
+#   the entire scheduler surface.
+#
+# Usage:
+#   host-launchagents-sync [--dry-run] [--no-reload] [--label <com.ronny.foo> ...] [--local-role <role>]
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+TARGET_REPO="$(spine_resolve_target_repo)"
+CURRENT_ROOT="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "$CURRENT_ROOT" && -f "$CURRENT_ROOT/ops/capabilities.runtime.yaml" ]]; then
+  ROOT="$CURRENT_ROOT"
+else
+  ROOT="$(spine_resolve_control_root "$TARGET_REPO")"
+fi
+SPINE_CODE="$ROOT"
+SPINE_TARGET_REPO="$TARGET_REPO"
+SPINE_REPO="$TARGET_REPO"
+SOURCE_DIR="${ROOT}/ops/plugins/infra/host/launchd"
+DEST_DIR="${HOME}/Library/LaunchAgents"
+REGISTRY_PATH="${ROOT}/ops/bindings/launchd.scheduler.registry.yaml"
+UID_VAL="$(id -u)"
+
+DRY_RUN=0
+NO_RELOAD=0
+LOCAL_ROLE="operator_console"
+declare -a REQUESTED_LABELS=()
+
+usage() {
+  cat <<'USAGE'
+host-launchagents-sync
+
+Usage:
+  host-launchagents-sync [--dry-run] [--no-reload] [--label <com.ronny.foo> ...] [--local-role <role>]
+
+Options:
+  --dry-run       Show actions without mutating files or launchctl state.
+  --no-reload     Sync plist files only; do not bootout/bootstrap labels.
+  --label         Restrict to one label (repeatable). Default: all com.ronny.* templates.
+  --local-role    L1 role of this host (default: operator_console). Labels whose
+                  intended_node_role differs are skipped with SKIPPED_ROLE_MISMATCH.
+USAGE
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "FAIL: missing command: $1" >&2
+    exit 1
+  }
+}
+
+plist_label() {
+  local plist_path="$1"
+  plutil -convert json -o - "$plist_path" 2>/dev/null | jq -r '.Label // ""'
+}
+
+_launchctl_label_loaded() {
+  # Truth check: a label is "loaded" iff it appears in `launchctl list`.
+  # `launchctl print` can lie (returns 0 on stale residual state even after
+  # a failed bootstrap), so list is the authoritative surface.
+  local label="$1"
+  launchctl list 2>/dev/null | awk -v l="$label" '$3 == l { found=1 } END { exit found ? 0 : 1 }'
+}
+
+reload_label() {
+  local label="$1"
+  local dst_plist="$2"
+  local bootstrap_out bootstrap_rc
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "WOULD RELOAD: $label"
+    return 0
+  fi
+
+  launchctl bootout "gui/${UID_VAL}/${label}" 2>/dev/null || true
+
+  set +e
+  bootstrap_out="$(launchctl bootstrap "gui/${UID_VAL}" "$dst_plist" 2>&1)"
+  bootstrap_rc=$?
+  set -e
+
+  if [[ "$bootstrap_rc" -ne 0 ]]; then
+    echo "LOAD_FAILED: $label (bootstrap exit=$bootstrap_rc)"
+    [[ -n "$bootstrap_out" ]] && echo "  ${bootstrap_out}" >&2
+    return 1
+  fi
+
+  if ! _launchctl_label_loaded "$label"; then
+    echo "LOAD_DROPPED: $label (bootstrap reported success but label not in launchctl list)"
+    [[ -n "$bootstrap_out" ]] && echo "  ${bootstrap_out}" >&2
+    return 1
+  fi
+
+  echo "RELOADED: $label"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --no-reload)
+      NO_RELOAD=1
+      shift
+      ;;
+    --label)
+      REQUESTED_LABELS+=("${2:?--label requires value}")
+      shift 2
+      ;;
+    --local-role)
+      LOCAL_ROLE="${2:?--local-role requires value}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+need_cmd jq
+need_cmd plutil
+need_cmd launchctl
+need_cmd yq
+
+[[ -d "$SOURCE_DIR" ]] || {
+  echo "FAIL: missing source dir: $SOURCE_DIR" >&2
+  exit 1
+}
+
+[[ -f "$REGISTRY_PATH" ]] || {
+  echo "FAIL: missing scheduler registry: $REGISTRY_PATH" >&2
+  exit 1
+}
+
+mkdir -p "$DEST_DIR"
+
+# Cache registry role truth into a tmp file (label<TAB>intended_node_role).
+REGISTRY_CACHE="$(mktemp -t host-launchagents-sync.roles.XXXXXX)"
+trap 'rm -f "$REGISTRY_CACHE"' EXIT
+if ! yq -o=tsv '.labels[] | [.label, .intended_node_role]' "$REGISTRY_PATH" > "$REGISTRY_CACHE" 2>/dev/null; then
+  echo "FAIL: unable to extract intended_node_role rows from $REGISTRY_PATH" >&2
+  exit 1
+fi
+
+registry_role_for() {
+  local label="$1"
+  awk -v l="$label" 'BEGIN{FS="\t"} $1 == l { print $2; found=1; exit } END { if (!found) exit 2 }' "$REGISTRY_CACHE"
+}
+
+declare -a LABELS=()
+if [[ "${#REQUESTED_LABELS[@]}" -gt 0 ]]; then
+  LABELS=("${REQUESTED_LABELS[@]}")
+else
+  while IFS= read -r plist_path; do
+    [[ -f "$plist_path" ]] || continue
+    label="$(plist_label "$plist_path")"
+    [[ -n "$label" ]] || continue
+    LABELS+=("$label")
+  done < <(find "$SOURCE_DIR" -maxdepth 1 -type f -name 'com.ronny.*.plist' | sort)
+fi
+
+if [[ "${#LABELS[@]}" -eq 0 ]]; then
+  echo "FAIL: no labels resolved (source: $SOURCE_DIR)" >&2
+  exit 1
+fi
+
+copied=0
+unchanged=0
+reloaded=0
+skipped_role_mismatch=0
+errors=0
+
+echo "host.launchagents.sync"
+echo "source: $SOURCE_DIR"
+echo "target: $DEST_DIR"
+echo "registry: $REGISTRY_PATH"
+echo "local_role: $LOCAL_ROLE"
+echo "dry_run: $DRY_RUN"
+echo "no_reload: $NO_RELOAD"
+echo
+
+for label in "${LABELS[@]}"; do
+  src_plist="$SOURCE_DIR/$label.plist"
+  dst_plist="$DEST_DIR/$label.plist"
+
+  if [[ ! -f "$src_plist" ]]; then
+    echo "FAIL: missing source plist for $label: $src_plist" >&2
+    errors=$((errors + 1))
+    continue
+  fi
+
+  # L1 role gate: resolve intended_node_role from registry. If the label
+  # has no registry row, that is an honest error — the registry is the
+  # single role-truth surface.
+  set +e
+  label_role="$(registry_role_for "$label")"
+  role_rc=$?
+  set -e
+  if [[ "$role_rc" -ne 0 || -z "$label_role" ]]; then
+    echo "FAIL: no registry row for $label (registry=$REGISTRY_PATH)" >&2
+    errors=$((errors + 1))
+    continue
+  fi
+
+  if [[ "$label_role" != "$LOCAL_ROLE" ]]; then
+    echo "SKIPPED_ROLE_MISMATCH: $label intended_node_role=$label_role local_role=$LOCAL_ROLE"
+    skipped_role_mismatch=$((skipped_role_mismatch + 1))
+    continue
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    if [[ -f "$dst_plist" ]] && cmp -s "$src_plist" "$dst_plist"; then
+      echo "UNCHANGED: $label"
+      unchanged=$((unchanged + 1))
+    else
+      echo "WOULD COPY: $label -> $dst_plist"
+      copied=$((copied + 1))
+    fi
+  else
+    if [[ -f "$dst_plist" ]] && cmp -s "$src_plist" "$dst_plist"; then
+      echo "UNCHANGED: $label"
+      unchanged=$((unchanged + 1))
+    else
+      cp "$src_plist" "$dst_plist"
+      echo "COPIED: $label -> $dst_plist"
+      copied=$((copied + 1))
+    fi
+  fi
+
+  if [[ "$NO_RELOAD" -eq 1 ]]; then
+    continue
+  fi
+
+  if reload_label "$label" "$dst_plist"; then
+    reloaded=$((reloaded + 1))
+  else
+    errors=$((errors + 1))
+  fi
+done
+
+echo
+echo "summary: labels=${#LABELS[@]} copied=$copied unchanged=$unchanged reloaded=$reloaded skipped_role_mismatch=$skipped_role_mismatch errors=$errors"
+[[ "$errors" -eq 0 ]]

@@ -1,0 +1,413 @@
+#!/usr/bin/env bash
+# Shared Cloudflare API helpers for plugin scripts.
+# Auth strategy: prefer scoped API token; fallback to global key only on auth/scope failure.
+
+set -euo pipefail
+
+CF_AUTH_MODE_EFFECTIVE="${CF_AUTH_MODE_EFFECTIVE:-}"
+CF_AUTH_MODE_PREFERRED="${CF_AUTH_MODE_PREFERRED:-}"
+CF_LAST_HTTP_STATUS=""
+CF_LAST_MODE=""
+CF_LAST_BODY=""
+CF_LAST_STDERR=""
+CF_FALLBACK_USED="${CF_FALLBACK_USED:-}"
+CF_FALLBACK_REASON="${CF_FALLBACK_REASON:-}"
+
+cf_require_auth() {
+  if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+    CF_AUTH_MODE_PREFERRED="${CF_AUTH_MODE_PREFERRED:-token}"
+    return 0
+  fi
+  # DEPRECATED: Global API key auth is a fallback only. Prefer scoped API tokens (GAP-OP-1291d).
+  if [[ -n "${CLOUDFLARE_AUTH_EMAIL:-}" && -n "${CLOUDFLARE_GLOBAL_API_KEY:-}" ]]; then
+    CF_AUTH_MODE_PREFERRED="${CF_AUTH_MODE_PREFERRED:-global}"
+    return 0
+  fi
+  echo "STOP: Cloudflare auth missing. Require CLOUDFLARE_API_TOKEN or CLOUDFLARE_AUTH_EMAIL+CLOUDFLARE_GLOBAL_API_KEY." >&2
+  return 2
+}
+
+cf_has_global_auth() {
+  [[ -n "${CLOUDFLARE_AUTH_EMAIL:-}" && -n "${CLOUDFLARE_GLOBAL_API_KEY:-}" ]]
+}
+
+cf_has_token_auth() {
+  [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]
+}
+
+cf_last_error_code() {
+  local body="${CF_LAST_BODY:-}"
+  [[ "$body" =~ \"code\"[[:space:]]*:[[:space:]]*([0-9]+) ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+cf_last_error_message() {
+  local body="${CF_LAST_BODY:-}"
+  [[ "$body" =~ \"message\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+cf_last_error_hint() {
+  local code message
+  code="$(cf_last_error_code || true)"
+  message="$(cf_last_error_message || true)"
+
+  if [[ "$code" == "10042" ]] || [[ "$message" == "Please enable R2 through the Cloudflare Dashboard." ]]; then
+    echo "Enable R2 in Cloudflare Dashboard > Storage & databases > R2 > Overview."
+    return 0
+  fi
+
+  return 1
+}
+
+cf_is_feature_state_failure() {
+  local status="${1:-${CF_LAST_HTTP_STATUS:-000}}"
+  local code message
+
+  [[ "$status" == "403" ]] || return 1
+
+  code="$(cf_last_error_code || true)"
+  message="$(cf_last_error_message || true)"
+  [[ "$code" == "10042" ]] || [[ "$message" == "Please enable R2 through the Cloudflare Dashboard." ]]
+}
+
+cf_is_fallback_status() {
+  local status="${1:-}"
+  # Only auth failures trigger mode fallback; feature-state failures should surface directly.
+  if [[ "$status" == "401" ]]; then
+    return 0
+  fi
+  if [[ "$status" == "403" ]] && ! cf_is_feature_state_failure "$status"; then
+    return 0
+  fi
+  return 1
+}
+
+cf__curl_with_mode() {
+  local mode="$1"
+  local method="$2"
+  local url="$3"
+  local payload="${4:-}"
+
+  local -a curl_cmd
+  curl_cmd=(curl -sS -X "$method")
+
+  if [[ "$mode" == "token" ]]; then
+    curl_cmd+=(-H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
+  else
+    curl_cmd+=(-H "X-Auth-Email: ${CLOUDFLARE_AUTH_EMAIL}")
+    curl_cmd+=(-H "X-Auth-Key: ${CLOUDFLARE_GLOBAL_API_KEY}")
+  fi
+  curl_cmd+=(-H "Content-Type: application/json")
+
+  if [[ -n "$payload" ]]; then
+    curl_cmd+=(--data "$payload")
+  fi
+  curl_cmd+=("$url" -w $'\n%{http_code}')
+
+  local stdout_file stderr_file response body status stderr_text curl_rc
+  stdout_file="$(mktemp "${TMPDIR:-/tmp}/cloudflare-api.stdout.XXXXXX")"
+  stderr_file="$(mktemp "${TMPDIR:-/tmp}/cloudflare-api.stderr.XXXXXX")"
+  if "${curl_cmd[@]}" >"$stdout_file" 2>"$stderr_file"; then
+    curl_rc=0
+  else
+    curl_rc=$?
+  fi
+  response="$(cat "$stdout_file")"
+  stderr_text="$(cat "$stderr_file")"
+  rm -f "$stdout_file" "$stderr_file"
+
+  if [[ "$curl_rc" -ne 0 ]]; then
+    CF_LAST_MODE="$mode"
+    CF_LAST_HTTP_STATUS="000"
+    CF_LAST_BODY=""
+    CF_LAST_STDERR="$stderr_text"
+    return 1
+  fi
+
+  status="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+  if [[ "$status" == "$response" ]]; then
+    status="000"
+    body="$response"
+  fi
+
+  CF_LAST_MODE="$mode"
+  CF_LAST_HTTP_STATUS="$status"
+  CF_LAST_BODY="$body"
+  CF_LAST_STDERR="$stderr_text"
+
+  if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+    printf '%s\n' "$body"
+    return 0
+  fi
+  return 1
+}
+
+cf_log_last_failure_details() {
+  if [[ -n "${CF_LAST_BODY:-}" ]]; then
+    echo "response_body:" >&2
+    echo "$CF_LAST_BODY" >&2
+  fi
+  if [[ -n "${CF_LAST_STDERR:-}" ]]; then
+    echo "stderr:" >&2
+    echo "$CF_LAST_STDERR" >&2
+  fi
+}
+
+cf_classify_failure() {
+  local status="${1:-${CF_LAST_HTTP_STATUS:-000}}"
+  if cf_is_feature_state_failure "$status"; then
+    echo "feature_not_enabled"
+    return 0
+  fi
+  case "$status" in
+    401|403) echo "token_invalid" ;;
+    429)     echo "rate_limited" ;;
+    000)     echo "network_error" ;;
+    5[0-9][0-9]) echo "api_error" ;;
+    *)       echo "http_${status}" ;;
+  esac
+}
+
+cf_token_health() {
+  # Token-only probe: no fallback. Returns 0 if token auth succeeds, 1 otherwise.
+  # Sets CF_TOKEN_HEALTH_STATUS with classification.
+  # NOTE: stdout is intentionally suppressed — callers read CF_TOKEN_HEALTH_STATUS
+  # and CF_LAST_BODY instead. See GAP-OP-1407.
+  if ! cf_has_token_auth; then
+    CF_TOKEN_HEALTH_STATUS="no_token"
+    return 1
+  fi
+  local probe_url="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}/user/tokens/verify"
+  local _discard
+  if _discard="$(cf__curl_with_mode "token" "GET" "$probe_url")"; then
+    CF_TOKEN_HEALTH_STATUS="valid"
+    return 0
+  fi
+  CF_TOKEN_HEALTH_STATUS="$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")"
+  return 1
+}
+
+cf_api_request() {
+  local method="$1"
+  local url="$2"
+  local payload="${3:-}"
+
+  CF_FALLBACK_USED=""
+  CF_FALLBACK_REASON=""
+  CF_LAST_STDERR=""
+
+  cf_require_auth || return $?
+
+  # Preferred token path (secure default), fallback to global key on auth/scope failure.
+  if [[ "${CF_AUTH_MODE_PREFERRED}" == "token" && "$(cf_has_token_auth && echo yes || echo no)" == "yes" ]]; then
+    if cf__curl_with_mode "token" "$method" "$url" "$payload"; then
+      CF_AUTH_MODE_EFFECTIVE="token"
+      return 0
+    fi
+    if cf_is_fallback_status "${CF_LAST_HTTP_STATUS}" && cf_has_global_auth; then
+      CF_FALLBACK_USED="true"
+      CF_FALLBACK_REASON="token_$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")"
+      echo "WARN: Cloudflare token auth failed (${CF_LAST_HTTP_STATUS}), falling back to global key. Global API key fallback is DEPRECATED — fix token permissions instead (GAP-OP-1291d)." >&2
+      if cf__curl_with_mode "global" "$method" "$url" "$payload"; then
+        CF_AUTH_MODE_PREFERRED="global"
+        CF_AUTH_MODE_EFFECTIVE="global"
+        return 0
+      fi
+    fi
+    echo "STOP: Cloudflare API request failed (${method} ${url}) status=${CF_LAST_HTTP_STATUS} mode=${CF_LAST_MODE} class=$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")" >&2
+    cf_log_last_failure_details
+    return 1
+  fi
+
+  if [[ "${CF_AUTH_MODE_PREFERRED}" == "global" && "$(cf_has_global_auth && echo yes || echo no)" == "yes" ]]; then
+    if cf__curl_with_mode "global" "$method" "$url" "$payload"; then
+      CF_AUTH_MODE_EFFECTIVE="global"
+      return 0
+    fi
+    # If global key fails auth and token exists, allow a recovery attempt.
+    # NOTE: global-key-preferred mode is itself deprecated — prefer token auth (GAP-OP-1291d).
+    if cf_is_fallback_status "${CF_LAST_HTTP_STATUS}" && cf_has_token_auth; then
+      CF_FALLBACK_USED="true"
+      CF_FALLBACK_REASON="global_$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")"
+      echo "WARN: Cloudflare global key failed (${CF_LAST_HTTP_STATUS}), falling back to token. Global API key auth is DEPRECATED (GAP-OP-1291d)." >&2
+      if cf__curl_with_mode "token" "$method" "$url" "$payload"; then
+        CF_AUTH_MODE_PREFERRED="token"
+        CF_AUTH_MODE_EFFECTIVE="token"
+        return 0
+      fi
+    fi
+    echo "STOP: Cloudflare API request failed (${method} ${url}) status=${CF_LAST_HTTP_STATUS} mode=${CF_LAST_MODE} class=$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")" >&2
+    cf_log_last_failure_details
+    return 1
+  fi
+
+  # Fallback for unset/unknown preferred mode.
+  if cf_has_token_auth; then
+    CF_AUTH_MODE_PREFERRED="token"
+    cf_api_request "$method" "$url" "$payload"
+    return $?
+  fi
+  if cf_has_global_auth; then
+    CF_AUTH_MODE_PREFERRED="global"
+    cf_api_request "$method" "$url" "$payload"
+    return $?
+  fi
+
+  echo "STOP: Cloudflare auth unavailable." >&2
+  return 2
+}
+
+cf_api_get() {
+  local url="$1"
+  cf_api_request "GET" "$url"
+}
+
+cf_api_capture_into_var() {
+  local var_name="$1"
+  shift
+
+  local tmp_file body
+  tmp_file="$(mktemp "${TMPDIR:-/tmp}/cloudflare-api.capture.XXXXXX")"
+  if "$@" >"$tmp_file"; then
+    body="$(<"$tmp_file")"
+    printf -v "$var_name" '%s' "$body"
+    rm -f "$tmp_file"
+    return 0
+  fi
+  rm -f "$tmp_file"
+  return 1
+}
+
+cf_api_get_into_var() {
+  local var_name="$1"
+  local url="$2"
+  cf_api_capture_into_var "$var_name" cf_api_get "$url"
+}
+
+cf_api_get_with_retry() {
+  # Bounded retry for read paths: 3 attempts with exponential backoff + jitter on 429.
+  local url="$1"
+  local max_retries=3
+  local attempt=0
+  local backoff=2
+  while true; do
+    attempt=$((attempt + 1))
+    if cf_api_get "$url"; then
+      return 0
+    fi
+    if [[ "${CF_LAST_HTTP_STATUS}" != "429" ]] || [[ "$attempt" -ge "$max_retries" ]]; then
+      return 1
+    fi
+    local jitter=$(( (RANDOM % 1000) ))
+    local wait_ms=$(( backoff * 1000 + jitter ))
+    echo "NOTE: Cloudflare 429 rate-limited (attempt ${attempt}/${max_retries}), retrying in ${wait_ms}ms." >&2
+    sleep "$(printf '%.3f' "$(echo "scale=3; $wait_ms / 1000" | bc)")"
+    backoff=$((backoff * 2))
+  done
+}
+
+cf_api_get_with_retry_into_var() {
+  local var_name="$1"
+  local url="$2"
+  cf_api_capture_into_var "$var_name" cf_api_get_with_retry "$url"
+}
+
+cf_api_post() {
+  local url="$1"
+  local payload="${2:-}"
+  cf_api_request "POST" "$url" "$payload"
+}
+
+cf_api_put() {
+  local url="$1"
+  local payload="${2:-}"
+  cf_api_request "PUT" "$url" "$payload"
+}
+
+cf_api_delete() {
+  local url="$1"
+  cf_api_request "DELETE" "$url"
+}
+
+cf_zone_id_from_binding() {
+  local binding_file="$1"
+  local zone_name="$2"
+  python3 - "$binding_file" "$zone_name" <<'PY'
+import sys, yaml
+path, name = sys.argv[1], sys.argv[2].strip().lower()
+with open(path, "r", encoding="utf-8") as f:
+    data = yaml.safe_load(f) or {}
+for row in data.get("zones", []):
+    if str(row.get("name", "")).strip().lower() == name:
+        zid = str(row.get("id", "")).strip()
+        if zid:
+            print(zid)
+            raise SystemExit(0)
+raise SystemExit(0)
+PY
+}
+
+cf_zone_id_lookup_live() {
+  local cf_api="$1"
+  local zone_name="$2"
+  local resp
+  resp="$(cf_api_get "${cf_api}/zones?name=${zone_name}&per_page=1")" || return 1
+  python3 - "$resp" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+rows = data.get("result") or []
+if rows:
+    print(str(rows[0].get("id", "")).strip())
+PY
+}
+
+cf_zone_id_resolve() {
+  local cf_api="$1"
+  local binding_file="$2"
+  local zone_id="${3:-}"
+  local zone_name="${4:-}"
+
+  if [[ -n "$zone_id" ]]; then
+    printf '%s\n' "$zone_id"
+    return 0
+  fi
+
+  if [[ -z "$zone_name" ]]; then
+    return 1
+  fi
+
+  local resolved=""
+  if [[ -f "$binding_file" ]]; then
+    resolved="$(cf_zone_id_from_binding "$binding_file" "$zone_name" || true)"
+  fi
+  if [[ -z "$resolved" ]]; then
+    resolved="$(cf_zone_id_lookup_live "$cf_api" "$zone_name" || true)"
+  fi
+
+  if [[ -z "$resolved" ]]; then
+    return 1
+  fi
+  printf '%s\n' "$resolved"
+}
+
+cf_account_id_resolve() {
+  local binding_file="${1:-}"
+  if [[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+    printf '%s\n' "${CLOUDFLARE_ACCOUNT_ID}"
+    return 0
+  fi
+
+  if [[ -n "$binding_file" && -f "$binding_file" ]]; then
+    command -v yq >/dev/null 2>&1 || return 1
+    local resolved
+    resolved="$(yq -r '.account_id // ""' "$binding_file" 2>/dev/null || true)"
+    if [[ -n "$resolved" && "$resolved" != "null" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+
+  return 1
+}

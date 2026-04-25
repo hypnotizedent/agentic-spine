@@ -1,0 +1,124 @@
+# Surface Readonly Contract
+# Status: authoritative
+# Last verified: 2026-02-18
+# Scope: aof-surface-readonly-endpoints
+#
+# Declares readonly surface endpoints for status visibility.
+# Referenced by: D97 gate, surface.readonly.audit capability
+# Referenced by: AOF_SURFACE_READONLY_CONTRACT.md
+
+version: 1
+updated: 2026-02-28
+owner: "@operator"
+
+# Surface contract model
+# Each surface declares what data it exposes, access level, and format.
+# All surfaces are read-only — no mutations allowed through surface endpoints.
+
+surfaces:
+  spine_status:
+    description: "Unified spine status (loops, gaps, proposals, gates)"
+    capability: "spine.status"
+    format: text
+    access: local
+    data_sources:
+      - "ops/bindings/operational.gaps.yaml"
+      - "$SPINE_STATE/loop-scopes/"
+      - "surfaces/verify/drift-gate.sh"
+    exists: true
+    description: "Implemented via ./bin/ops status"
+
+  gap_reconciliation:
+    description: "Gap-loop reconciliation with orphan detection"
+    capability: "gaps.status"
+    format: text
+    access: local
+    data_sources:
+      - "ops/bindings/operational.gaps.yaml"
+    exists: true
+
+  loop_summary:
+    description: "Open/closed loop counts"
+    capability: "loops.status"
+    format: text
+    access: local
+    data_sources:
+      - "$SPINE_STATE/loop-scopes/"
+    exists: true
+
+  rag_status:
+    description: "RAG parity and index health"
+    capability: "rag.anythingllm.status"
+    format: text
+    access: local
+    data_sources:
+      - "ops/bindings/rag.reindex.quality.yaml"
+    exists: true
+
+  proposal_queue:
+    description: "Proposal queue health with SLA breach detection"
+    capability: "proposals.status"
+    format: text
+    access: local
+    data_sources:
+      - "mailroom/outbox/proposals/"
+    exists: true
+
+  mobile_dashboard:
+    description: "Mobile/customer read-only status summary"
+    capability: "surface.mobile.dashboard.status"
+    format: json
+    access: remote
+    data_sources:
+      - "Aggregation of spine_status + gap_reconciliation + loop_summary"
+    exists: true
+
+  broker_latest_loop:
+    description: "Remote broker alias for the latest governed loop"
+    capability: "spine.broker.get_latest_loop"
+    format: json
+    access: remote
+    data_sources:
+      - "$SPINE_STATE/loop-scopes/"
+      - "ops/bindings/operational.gaps.yaml"
+    exists: true
+
+  broker_loop_status:
+    description: "Remote broker status lookup for a specific loop"
+    capability: "spine.broker.get_loop_status"
+    format: json
+    access: remote
+    data_sources:
+      - "$SPINE_STATE/loop-scopes/"
+      - "ops/bindings/operational.gaps.yaml"
+    exists: true
+
+  broker_loop_progress:
+    description: "Remote broker progress lookup for a specific loop"
+    capability: "spine.broker.get_loop_progress"
+    format: json
+    access: remote
+    data_sources:
+      - "$SPINE_STATE/loop-scopes/"
+      - "ops/bindings/operational.gaps.yaml"
+    exists: true
+
+  broker_request_attestation:
+    description: "Remote request attestation envelope for mobile/ChatGPT proof surfaces"
+    capability: "spine.broker.get_request_attestation"
+    format: json
+    access: remote
+    data_sources:
+      - ".evidence/spine/sessions/*/receipt.attestation.json"
+      - ".evidence/spine/sessions/*/receipt.exec.json"
+      - ".evidence/spine/sessions/*/receipt.md"
+    exists: true
+
+enforcement:
+  gate: D97
+  capability: surface.readonly.audit
+  checks:
+    - "Contract binding exists with version field"
+    - "Each declared surface references a valid capability or gap"
+    - "Existing surfaces have corresponding capabilities in capabilities.yaml"
+    - "No surface declares mutating access"

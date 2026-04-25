@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Governed gap filing wrapper")
+    parser.add_argument("--id", default="auto")
+    parser.add_argument("--type", required=True)
+    parser.add_argument("--severity", required=True)
+    parser.add_argument("--description", required=True)
+    parser.add_argument("--parent-loop", default=os.environ.get("SPINE_LOOP_ID", ""))
+    parser.add_argument("--owner", default="")
+    parser.add_argument("--evidence", action="append", default=[])
+    args = parser.parse_args()
+
+    root = Path(__file__).resolve().parents[5]
+    bridge = root / "ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+    gap_id = args.id
+    if gap_id == "auto":
+        proc = subprocess.run([sys.executable, str(bridge), "next-id"], text=True, capture_output=True, check=False)
+        if proc.returncode != 0:
+            sys.stderr.write(proc.stderr)
+            return proc.returncode
+        gap_id = proc.stdout.strip()
+
+    payload = {
+        "id": gap_id,
+        "status": "open",
+        "type": args.type,
+        "severity": args.severity,
+        "description": args.description,
+        "parent_loop": args.parent_loop or "",
+        "owner": args.owner or "",
+        "evidence": args.evidence,
+        "notes": [f"Filed via gaps.file at {utc_now()}"],
+    }
+    proc = subprocess.run(
+        [sys.executable, str(bridge), "upsert", "--json", json.dumps(payload), "--actor", "gaps.file"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.stdout:
+        print(proc.stdout.strip())
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

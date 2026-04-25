@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# TRIAGE: Keep spine as fabric control plane. Update fabric.boundary.contract.yaml
+# when changing capability/domain ownership rules.
+set -euo pipefail
+
+git_top_level() {
+  local probe="${1:-.}"
+  git -C "$probe" rev-parse --show-toplevel 2>/dev/null || true
+}
+
+resolve_root() {
+  local cwd_root script_root env_name value
+  cwd_root="$(git_top_level "$PWD")"
+  if [[ -n "$cwd_root" ]]; then
+    printf '%s\n' "$cwd_root"
+    return 0
+  fi
+
+  script_root="$(git_top_level "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)")"
+  if [[ -n "$script_root" ]]; then
+    printf '%s\n' "$script_root"
+    return 0
+  fi
+
+  for env_name in SPINE_TARGET_REPO SPINE_ROOT SPINE_REPO SPINE_CODE; do
+    value="${!env_name:-}"
+    if [[ -n "$value" ]]; then
+      (cd "$value" && pwd)
+      return 0
+    fi
+  done
+
+  cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd
+}
+
+ROOT="$(resolve_root)"
+BOUNDARY="$ROOT/ops/bindings/fabric.boundary.contract.yaml"
+CAPS="$ROOT/ops/capabilities.yaml"
+AGENT_PROFILES="$ROOT/ops/bindings/gate.agent.profiles.yaml"
+
+fail() {
+  echo "D121 FAIL: $*" >&2
+  exit 1
+}
+
+require_file() {
+  [[ -f "$1" ]] || fail "missing required file: $1"
+}
+
+require_file "$BOUNDARY"
+require_file "$CAPS"
+require_file "$AGENT_PROFILES"
+
+command -v yq >/dev/null 2>&1 || fail "required tool missing: yq"
+
+yq e '.' "$BOUNDARY" >/dev/null 2>&1 || fail "invalid YAML: $BOUNDARY"
+yq e '.' "$CAPS" >/dev/null 2>&1 || fail "invalid YAML: $CAPS"
+yq e '.' "$AGENT_PROFILES" >/dev/null 2>&1 || fail "invalid YAML: $AGENT_PROFILES"
+
+required_prefix="$(yq e -r '.workbench.required_agent_path_prefix' "$BOUNDARY")"
+mapfile -t exempt_ids < <(yq e -r '.agents_registry_boundary.active_exempt_agent_ids[]?' "$BOUNDARY")
+mapfile -t non_wb_prefixes < <(yq e -r '.agents_registry_boundary.allowed_non_workbench_impl_prefixes[]?' "$BOUNDARY")
+
+is_exempt() {
+  local id="$1"
+  for e in "${exempt_ids[@]:-}"; do
+    [[ "$id" == "$e" ]] && return 0
+  done
+  return 1
+}
+
+is_non_workbench_allowed() {
+  local impl="$1"
+  for p in "${non_wb_prefixes[@]:-}"; do
+    [[ "$impl" == "$p"* ]] && return 0
+  done
+  return 1
+}
+
+while IFS=$'\t' read -r cap plane domain impl_repo impl_path; do
+  [[ -z "$cap" ]] && continue
+
+  if [[ -n "$plane" && "$plane" != "null" ]]; then
+    if [[ "$plane" != "fabric" && "$plane" != "domain_external" ]]; then
+      fail "capability '$cap' has invalid plane '$plane'"
+    fi
+    if [[ "$plane" == "domain_external" ]]; then
+      [[ -n "$domain" && "$domain" != "null" && "$domain" != "none" ]] || fail "capability '$cap' plane=domain_external requires domain"
+      [[ -n "$impl_repo" && "$impl_repo" != "null" ]] || fail "capability '$cap' plane=domain_external requires implementation_repo"
+      [[ -n "$impl_path" && "$impl_path" != "null" ]] || fail "capability '$cap' plane=domain_external requires implementation_path"
+    fi
+  fi
+done < <(yq e -r '.capabilities | to_entries[] | [.key, (.value.plane // ""), (.value.domain // ""), (.value.implementation_repo // ""), (.value.implementation_path // "")] | @tsv' "$CAPS")
+
+while IFS=$'\t' read -r agent_id domain_id; do
+  [[ -z "$agent_id" ]] && continue
+  if is_exempt "$agent_id"; then
+    continue
+  fi
+
+  if [[ "$domain_id" == "workbench" ]]; then
+    continue
+  fi
+
+  expected_path="$required_prefix/$domain_id"
+  if is_non_workbench_allowed "$expected_path"; then
+    continue
+  fi
+done < <(yq e -r '.profiles[] | [.agent_id, ((.domains // [])[0] // "")] | @tsv' "$AGENT_PROFILES")
+
+echo "D121 PASS: fabric boundary lock enforced"

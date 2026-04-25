@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+# infra-proxmox-maintenance - Receipt-backed Proxmox maintenance helper with site-aware guest ordering.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SEQ_BINDING="$SPINE_ROOT/ops/bindings/startup.sequencing.yaml"
+TX_CONTRACT="$SPINE_ROOT/ops/bindings/infra.maintenance.transaction.contract.yaml"
+NETWORK_OOB_STATUS="$SPINE_ROOT/ops/plugins/infra/network/bin/network-oob-guard-status"
+
+MODE=""
+HOST_ID="pve"
+EXECUTE=0
+POWEROFF=0
+ALLOW_OOB_LOSS=0
+ACK_TOKEN=""
+SHUTDOWN_TIMEOUT_SEC=180
+
+usage() {
+  cat <<'USAGE'
+infra.proxmox.maintenance
+
+Usage:
+  infra-proxmox-maintenance --mode <precheck|shutdown|startup> [--host-id <id>] [--execute|--dry-run] [--poweroff]
+                           [--allow-oob-loss] [--ack-token <value>] [--shutdown-timeout-sec <sec>]
+
+Flags:
+  --allow-oob-loss   Allow shop shutdown to continue when OOB guard fails only with matching --ack-token.
+  --ack-token        Must equal contract token when --allow-oob-loss is used for shop shutdown.
+USAGE
+}
+
+fail() {
+  echo "STOP (2): $*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --mode)
+      MODE="${2:-}"
+      shift 2
+      ;;
+    --host-id)
+      HOST_ID="${2:-}"
+      shift 2
+      ;;
+    --execute)
+      EXECUTE=1
+      shift
+      ;;
+    --dry-run)
+      EXECUTE=0
+      shift
+      ;;
+    --poweroff)
+      POWEROFF=1
+      shift
+      ;;
+    --allow-oob-loss)
+      ALLOW_OOB_LOSS=1
+      shift
+      ;;
+    --ack-token)
+      ACK_TOKEN="${2:-}"
+      shift 2
+      ;;
+    --shutdown-timeout-sec)
+      SHUTDOWN_TIMEOUT_SEC="${2:-180}"
+      shift 2
+      ;;
+    --skip-oob-guard)
+      # Backward-compatible flag; explicit ack still required.
+      ALLOW_OOB_LOSS=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown arg: $1"
+      ;;
+  esac
+done
+
+[[ -n "$MODE" ]] || fail "--mode required (precheck|shutdown|startup)"
+case "$MODE" in
+  precheck|shutdown|startup) ;;
+  *) fail "--mode must be precheck|shutdown|startup" ;;
+esac
+
+for file in "$SSH_BINDING" "$SEQ_BINDING" "$TX_CONTRACT"; do
+  [[ -f "$file" ]] || fail "missing binding file: $file"
+done
+command -v yq >/dev/null 2>&1 || fail "yq is required but not found"
+command -v python3 >/dev/null 2>&1 || fail "python3 is required but not found"
+
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+TARGET_HOST="$(ssh_resolve_host "$HOST_ID")"
+TARGET_USER="$(ssh_resolve_user "$HOST_ID" "root")"
+TARGET_PORT="$(yq -r ".ssh.targets[] | select(.id==\"$HOST_ID\") | .port // 22" "$SSH_BINDING" 2>/dev/null || true)"
+TIMEOUT="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING" 2>/dev/null || echo '5')"
+STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING" 2>/dev/null || echo 'no')"
+KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING" 2>/dev/null || echo '/dev/null')"
+IDENTITY_OPTS="$(ssh_resolve_machine_identity_opts "$HOST_ID" 2>/dev/null)" || true
+
+if [[ -z "${TARGET_HOST:-}" || "${TARGET_HOST:-}" == "null" ]]; then
+  fail "unknown host-id or missing host binding: $HOST_ID"
+fi
+
+SITE_ID="$(yq -r ".sites[] | select(.host_id==\"$HOST_ID\") | .id" "$TX_CONTRACT" 2>/dev/null || true)"
+if [[ -z "${SITE_ID:-}" || "${SITE_ID:-}" == "null" ]]; then
+  fail "host-id '$HOST_ID' is not mapped in infra maintenance transaction contract"
+fi
+ACK_TOKEN_REQUIRED="$(yq -r '.oob_policy.ack_token // ""' "$TX_CONTRACT" 2>/dev/null || true)"
+[[ -n "$ACK_TOKEN_REQUIRED" ]] || fail "missing oob_policy.ack_token in transaction contract"
+
+OOB_GUARD_SCRIPT="$NETWORK_OOB_STATUS"
+[[ -x "$OOB_GUARD_SCRIPT" ]] || fail "missing network OOB guard script: $OOB_GUARD_SCRIPT"
+
+ssh_opts=(
+  -o "ConnectTimeout=${TIMEOUT}"
+  -o "StrictHostKeyChecking=${STRICT}"
+  -o "UserKnownHostsFile=${KNOWN_HOSTS}"
+  -o "NumberOfPasswordPrompts=0"
+  -o "LogLevel=ERROR"
+  -o "BatchMode=yes"
+)
+# shellcheck disable=SC2206
+[[ -n "$IDENTITY_OPTS" ]] && ssh_opts+=($IDENTITY_OPTS)
+
+ssh_pve() {
+  ssh "${ssh_opts[@]}" -p "$TARGET_PORT" "${TARGET_USER}@${TARGET_HOST}" "$@"
+}
+
+resolve_guest_order() {
+  local site="$1"
+  local action="$2"
+  python3 - "$SEQ_BINDING" "$site" "$action" <<'PY'
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import sys
+
+import yaml
+
+seq_path = Path(sys.argv[1]).expanduser().resolve()
+site = sys.argv[2].strip()
+action = sys.argv[3].strip()
+
+text = seq_path.read_text(encoding="utf-8")
+doc = yaml.safe_load(text) or {}
+
+# Lifecycle blocks are the authoritative runtime source for startup/shutdown order.
+lifecycle_key = f"{site}_vm_lifecycle"
+lifecycle = doc.get(lifecycle_key) if isinstance(doc, dict) else None
+if isinstance(lifecycle, dict):
+    order_key = f"{action}_order"
+    values = lifecycle.get(order_key) if isinstance(lifecycle.get(order_key), list) else []
+    for value in values:
+        if str(value).isdigit():
+            print(value)
+    if values:
+        raise SystemExit(0)
+
+# Backward-compatible fallback for older sequencing bindings.
+pattern = re.compile(rf"^#\s*{re.escape(site)}_{re.escape(action)}_order:\s*\[([^\]]*)\]", re.MULTILINE)
+match = pattern.search(text)
+if match:
+    values = [x.strip() for x in match.group(1).split(",") if x.strip()]
+    for value in values:
+        if value.isdigit():
+            print(value)
+    raise SystemExit(0)
+
+phases = doc.get("phases") if isinstance(doc.get("phases"), list) else []
+rows = []
+for row in phases:
+    if not isinstance(row, dict):
+        continue
+    if str(row.get("site", "")).strip() != site:
+        continue
+    phase = int(row.get("phase", 0))
+    hosts = row.get("hosts") if isinstance(row.get("hosts"), list) else []
+    for host in hosts:
+        if not isinstance(host, dict):
+            continue
+        vm_ids = host.get("vm_ids") if isinstance(host.get("vm_ids"), list) else []
+        for vm_id in vm_ids:
+            if str(vm_id).isdigit():
+                rows.append((phase, int(vm_id)))
+
+if action == "startup":
+    rows.sort(key=lambda x: (x[0], x[1]))
+else:
+    rows.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+seen = set()
+for _, vm_id in rows:
+    if vm_id in seen:
+        continue
+    seen.add(vm_id)
+    print(vm_id)
+PY
+}
+
+guest_kind() {
+  local id="$1"
+  if ssh_pve "qm status $id >/dev/null 2>&1"; then
+    echo "qm"
+    return 0
+  fi
+  if ssh_pve "pct status $id >/dev/null 2>&1"; then
+    echo "pct"
+    return 0
+  fi
+  return 1
+}
+
+assert_guest_exists() {
+  local id="$1"
+  if ! guest_kind "$id" >/dev/null 2>&1; then
+    fail "expected guest $id missing on host-id $HOST_ID"
+  fi
+}
+
+is_guest_running() {
+  local id="$1"
+  local kind
+  local state
+  kind="$(guest_kind "$id" || true)"
+  [[ -n "$kind" ]] || return 1
+  state="$(ssh_pve "$kind status $id 2>/dev/null | awk '{print \$2}'" || true)"
+  [[ "$state" == "running" ]]
+}
+
+assert_expected_running() {
+  local ids=("$@")
+  local missing=0
+  for id in "${ids[@]}"; do
+    if ! is_guest_running "$id"; then
+      echo "- guest $id: NOT RUNNING" >&2
+      missing=1
+    fi
+  done
+  [[ "$missing" -eq 0 ]] || fail "startup assertion failed: one or more expected guests are not running"
+}
+
+shutdown_guest() {
+  local id="$1"
+  local kind
+  kind="$(guest_kind "$id" || true)"
+  [[ -n "$kind" ]] || fail "guest $id missing on host-id $HOST_ID"
+
+  if is_guest_running "$id"; then
+    echo "- $kind $id: shutdown"
+    ssh_pve "$kind shutdown $id --timeout $SHUTDOWN_TIMEOUT_SEC >/dev/null"
+    if is_guest_running "$id"; then
+      echo "  $kind $id: force stop"
+      ssh_pve "$kind stop $id >/dev/null"
+    fi
+    if is_guest_running "$id"; then
+      fail "guest $id remained running after shutdown+stop"
+    fi
+  else
+    echo "- $kind $id: already stopped"
+  fi
+}
+
+start_guest() {
+  local id="$1"
+  local kind
+  kind="$(guest_kind "$id" || true)"
+  [[ -n "$kind" ]] || fail "guest $id missing on host-id $HOST_ID"
+  echo "- $kind $id: start"
+  ssh_pve "$kind start $id >/dev/null 2>&1 || true"
+}
+
+capture_guest_state() {
+  echo "proxmox.guests"
+  ssh_pve 'qm list 2>/dev/null || true'
+  echo
+  ssh_pve 'pct list 2>/dev/null || true'
+  echo
+}
+
+capture_md1400_evidence() {
+  echo "nas-primary.evidence"
+  echo "pm80xx.config"
+  ssh_pve 'ls -la /etc/modules-load.d/pm80xx.conf /etc/modprobe.d/pm80xx.conf 2>/dev/null || true'
+  ssh_pve 'echo "--- /etc/modules-load.d/pm80xx.conf"; sed -n "1,120p" /etc/modules-load.d/pm80xx.conf 2>/dev/null || true'
+  ssh_pve 'echo "--- /etc/modprobe.d/pm80xx.conf"; sed -n "1,200p" /etc/modprobe.d/pm80xx.conf 2>/dev/null || true'
+  echo
+  echo "lspci.pm8072"
+  ssh_pve 'lspci -nnk -s 82:00.0 2>/dev/null || echo "WARN: pm8072 not present at 82:00.0"'
+  echo
+}
+
+enforce_shop_oob_policy() {
+  if [[ "$MODE" != "shutdown" ]]; then
+    return 0
+  fi
+
+  if [[ "$SITE_ID" != "shop" ]]; then
+    echo "oob.guard: SKIP (site=$SITE_ID; shop OOB parity not required)"
+    echo
+    return 0
+  fi
+
+  echo "oob.guard"
+  set +e
+  "$OOB_GUARD_SCRIPT"
+  local rc=$?
+  set -e
+  echo
+
+  if [[ "$rc" -eq 0 ]]; then
+    echo "oob.guard: PASS"
+    echo
+    return 0
+  fi
+
+  if [[ "$ALLOW_OOB_LOSS" -eq 1 && "$ACK_TOKEN" == "$ACK_TOKEN_REQUIRED" ]]; then
+    echo "oob.guard: ACKNOWLEDGED OOB RISK (onsite token accepted)"
+    echo
+    return 0
+  fi
+
+  fail "shop OOB guard failed; pass --allow-oob-loss with --ack-token $ACK_TOKEN_REQUIRED to continue"
+}
+
+shutdown_guests() {
+  mapfile -t expected_ids < <(resolve_guest_order "$SITE_ID" shutdown)
+  [[ "${#expected_ids[@]}" -gt 0 ]] || fail "no shutdown guest order resolved from startup.sequencing for site '$SITE_ID'"
+
+  echo "shutdown.plan"
+  echo "site: $SITE_ID"
+  echo "ordered_guest_ids: [$(IFS=,; echo "${expected_ids[*]}")]"
+  echo "shutdown_timeout_sec: $SHUTDOWN_TIMEOUT_SEC"
+  echo
+
+  if [[ "$EXECUTE" -ne 1 ]]; then
+    echo "dry_run: true"
+    echo "dry_run_note: shutdown would run in strict sequencing order with fail-closed verification."
+    echo
+    return 0
+  fi
+
+  for id in "${expected_ids[@]}"; do
+    assert_guest_exists "$id"
+    shutdown_guest "$id"
+  done
+
+  echo
+  echo "shutdown.verify"
+  ssh_pve 'qm list 2>/dev/null'
+  echo
+  ssh_pve 'pct list 2>/dev/null'
+  echo
+}
+
+startup_guests() {
+  mapfile -t expected_ids < <(resolve_guest_order "$SITE_ID" startup)
+  [[ "${#expected_ids[@]}" -gt 0 ]] || fail "no startup guest order resolved from startup.sequencing for site '$SITE_ID'"
+
+  echo "startup.plan"
+  echo "site: $SITE_ID"
+  echo "ordered_guest_ids: [$(IFS=,; echo "${expected_ids[*]}")]"
+  echo
+
+  if [[ "$EXECUTE" -ne 1 ]]; then
+    echo "dry_run: true"
+    echo "dry_run_note: startup would assert expected VM IDs are running after start."
+    echo
+    return 0
+  fi
+
+  for id in "${expected_ids[@]}"; do
+    assert_guest_exists "$id"
+    start_guest "$id"
+  done
+
+  echo
+  echo "startup.verify"
+  ssh_pve 'qm list 2>/dev/null'
+  echo
+  ssh_pve 'pct list 2>/dev/null'
+  echo
+
+  assert_expected_running "${expected_ids[@]}"
+  echo "startup.assertions: PASS"
+  echo
+}
+
+echo "infra.proxmox.maintenance"
+echo "mode: $MODE"
+echo "host_id: $HOST_ID"
+echo "site_id: $SITE_ID"
+echo "target: ${TARGET_USER}@${TARGET_HOST}:${TARGET_PORT}"
+echo "execute: $( [[ "$EXECUTE" -eq 1 ]] && echo true || echo false )"
+echo "poweroff: $( [[ "$POWEROFF" -eq 1 ]] && echo true || echo false )"
+echo "allow_oob_loss: $( [[ "$ALLOW_OOB_LOSS" -eq 1 ]] && echo true || echo false )"
+if [[ -n "$ACK_TOKEN" ]]; then
+  echo "ack_token_supplied: true"
+else
+  echo "ack_token_supplied: false"
+fi
+echo
+
+case "$MODE" in
+  precheck)
+    capture_guest_state
+    capture_md1400_evidence
+    echo "status: OK"
+    ;;
+  shutdown)
+    enforce_shop_oob_policy
+    capture_guest_state
+    shutdown_guests
+    if [[ "$EXECUTE" -eq 1 && "$POWEROFF" -eq 1 ]]; then
+      echo "host.poweroff"
+      echo "- action: poweroff $HOST_ID"
+      ssh_pve 'poweroff' >/dev/null 2>&1 || true
+      echo
+    else
+      echo "host.poweroff: SKIP"
+      echo
+    fi
+    echo "status: OK"
+    ;;
+  startup)
+    capture_md1400_evidence
+    startup_guests
+    echo "postchecks.required: ssh.target.status, docker.compose.status, services.health.status, verify.infra.run"
+    echo "status: OK"
+    ;;
+  *)
+    fail "unknown mode: $MODE"
+    ;;
+esac

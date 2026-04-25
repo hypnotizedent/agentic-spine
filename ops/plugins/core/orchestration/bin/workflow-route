@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_target_root() -> Path:
+    explicit = os.environ.get("SPINE_TARGET_REPO")
+    if explicit:
+        return expand(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    return expand(Path(__file__).resolve().parents[5])
+
+
+ROOT = resolve_target_root()
+CATALOG = ROOT / "ops/bindings/workflow.vocabulary.catalog.yaml"
+
+
+def fail(message: str, *, code: int = 1) -> None:
+    print(f"workflow.route FAIL: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing catalog: {path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail("catalog root must be a map")
+    return data
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="workflow-route")
+    parser.add_argument("concept", help="workflow concept or alias to route")
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    catalog = load_yaml(CATALOG)
+    concepts = catalog.get("concepts") or {}
+    query = args.concept.strip().lower()
+    match_id = None
+    match = None
+    for concept_id, raw in concepts.items():
+        row = raw if isinstance(raw, dict) else {}
+        aliases = [str(item).strip().lower() for item in (row.get("aliases") or [])]
+        if query == str(concept_id).strip().lower() or query in aliases:
+            match_id = concept_id
+            match = row
+            break
+    if match is None:
+        available = ", ".join(sorted(concepts.keys()))
+        fail(f"unknown concept '{args.concept}'. Available: {available}")
+
+    payload = {
+        "concept": match_id,
+        "description": match.get("description"),
+        "primary_capability": match.get("primary_capability"),
+        "primary_route_command": match.get("primary_route_command"),
+        "status_capability": match.get("status_capability"),
+        "supporting_capabilities": match.get("supporting_capabilities") or [],
+        "authorities": match.get("authorities") or [],
+        "route_ready": bool(match.get("route_ready")),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=False))
+        return
+
+    print("workflow.route")
+    print(f"concept: {payload['concept']}")
+    print(f"description: {payload['description']}")
+    print(f"primary_capability: {payload['primary_capability']}")
+    print(f"primary_route_command: {payload['primary_route_command']}")
+    print(f"status_capability: {payload['status_capability']}")
+    print("supporting_capabilities:")
+    for capability in payload["supporting_capabilities"]:
+        print(f"  - {capability}")
+    print("authorities:")
+    for authority in payload["authorities"]:
+        print(f"  - {authority}")
+    print(f"route_ready: {'yes' if payload['route_ready'] else 'no'}")
+
+
+if __name__ == "__main__":
+    main()

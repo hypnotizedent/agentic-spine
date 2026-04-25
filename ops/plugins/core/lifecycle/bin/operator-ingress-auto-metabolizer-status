@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""operator-ingress-auto-metabolizer-status — runtime status for ingress worker."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import operator_ingress as oi
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="operator-ingress-auto-metabolizer-status",
+        description="Show runtime status for the operator ingress auto-metabolizer.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit JSON output.",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Verify dependencies and exit.",
+    )
+
+    if "--self-check" in sys.argv:
+        try:
+            import yaml  # noqa: F401
+            print("operator.ingress.auto_metabolize.status self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(
+                f"operator.ingress.auto_metabolize.status self-check FAIL: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+
+    args = parser.parse_args()
+    state_root = os.environ.get("SPINE_STATE", "")
+    if not state_root:
+        msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": msg}, indent=2))
+        else:
+            print(f"operator.ingress.auto_metabolize.status FAIL: {msg}", file=sys.stderr)
+        return 1
+
+    try:
+        result = oi.operator_ingress_auto_metabolizer_status(state_root)
+    except oi.OperatorIngressError as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"operator.ingress.auto_metabolize.status FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(result["oneliner"])
+        worker = result["worker"]
+        print(f"  pid_alive: {worker['pid_alive']}")
+        print(f"  heartbeat_at: {worker['heartbeat_at']}")
+        age = worker.get("heartbeat_age_seconds")
+        print(f"  heartbeat_age_seconds: {age if age is not None else 'n/a'}")
+        stale = worker.get("heartbeat_stale", False)
+        threshold = worker.get("heartbeat_stale_threshold_seconds", "?")
+        print(f"  heartbeat_stale: {stale} (threshold: {threshold}s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

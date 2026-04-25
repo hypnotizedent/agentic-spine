@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+
+def main() -> int:
+    outbox = Path(os.environ.get("SPINE_OUTBOX", str(Path.home() / "code" / ".runtime" / "spine" / "mailroom" / "outbox"))) / "proposals"
+    pending = 0
+    total = 0
+    if outbox.exists():
+        for manifest in outbox.glob("CP-*/manifest.yaml"):
+            total += 1
+            data = yaml.safe_load(manifest.read_text()) or {}
+            if str(data.get("status", "pending")).lower() == "pending":
+                pending += 1
+    payload = {"capability": "proposals.status", "status": "ok", "total": total, "pending": pending, "path": str(outbox)}
+    print(json.dumps(payload, indent=2) if len(sys.argv) > 1 and sys.argv[1] == "--json" else "\n".join([
+        "proposals.status",
+        "status: ok",
+        f"total: {total}",
+        f"pending: {pending}",
+        f"path: {outbox}",
+    ]))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import selectors
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+OPS_BIN = ROOT / "bin" / "ops"
+GENERATOR = ROOT / "ops" / "plugins" / "infra" / "mcp" / "bin" / "mcp-config-generate"
+CONTRACT = ROOT / "ops" / "bindings" / "mcp.runtime.contract.yaml"
+WORKTREE_CONTRACT = ROOT / "ops" / "bindings" / "worktree.lifecycle.contract.yaml"
+AGENTS_REGISTRY = ROOT / "ops" / "bindings" / "agents.registry.yaml"
+AGENT_HELPERS = [
+    ROOT / "ops" / "plugins" / "core" / "agent" / "bin" / "agent-info",
+    ROOT / "ops" / "plugins" / "core" / "agent" / "bin" / "agent-tools",
+    ROOT / "ops" / "plugins" / "core" / "agent" / "bin" / "agent-route",
+]
+BASE_TOOLS = {
+    "cap_list",
+    "cap_run",
+    "rag_query",
+    "rag_retrieve",
+    "rag_health",
+    "get_latest_loop",
+    "get_loop_status",
+    "get_loop_progress",
+    "get_request_attestation",
+}
+AGENT_TOOLS = {"agent_list", "agent_info", "agent_tools", "route_resolve"}
+
+
+def fail(message: str) -> "NoReturn":
+    print(f"mcp.selfcheck FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_json(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        fail(f"config at {path} must be a JSON object")
+    return data
+
+
+def load_contract() -> dict:
+    if not CONTRACT.is_file():
+        fail(f"missing contract: {CONTRACT}")
+    data = yaml.safe_load(CONTRACT.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail(f"invalid contract shape: {CONTRACT}")
+    return data
+
+
+def load_worktree_policy() -> dict:
+    if not WORKTREE_CONTRACT.is_file():
+        return {}
+    data = yaml.safe_load(WORKTREE_CONTRACT.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        return {}
+    policy = data.get("policy", {}) or {}
+    return policy if isinstance(policy, dict) else {}
+
+
+WORKTREE_POLICY = load_worktree_policy()
+CONTROL_ROOT = Path(str(WORKTREE_POLICY.get("launcher_control_worktree_path", ROOT))).expanduser()
+WORKSPACE_ROOT = CONTROL_ROOT.parent
+WORKBENCH_MCP = WORKSPACE_ROOT / "workbench" / ".mcp.json"
+
+
+def expected_optional_codex_servers(contract: dict) -> list[str]:
+    optional = list(((contract.get("optional_servers", {}) or {}).get("codex", [])) or [])
+    expected: set[str] = set()
+
+    workbench = load_json(WORKBENCH_MCP).get("mcpServers", {})
+    if isinstance(workbench, dict):
+        expected.update(name for name in workbench if name in optional)
+
+    for other_surface, path_value in (contract.get("surface_paths", {}) or {}).items():
+        if other_surface in {"codex", "claude_desktop_runtime_state"}:
+            continue
+        path = Path(str(path_value)).expanduser()
+        config = load_json(path)
+        key = "mcp" if other_surface == "opencode" else "mcpServers"
+        servers = config.get(key, {})
+        if isinstance(servers, dict):
+            expected.update(name for name in servers if name in optional)
+
+    return sorted(expected)
+
+
+def run_generator_selfcheck(contract: dict) -> None:
+    expected_optional = expected_optional_codex_servers(contract)
+    with tempfile.TemporaryDirectory(prefix="mcp-selfcheck-") as tmpdir:
+        target = Path(tmpdir) / "codex.mcp.json"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(GENERATOR),
+                "--surface",
+                "codex",
+                "--apply",
+                "--config-path",
+                str(target),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            fail(f"generator apply failed: {detail}")
+
+        data = load_json(target)
+        servers = data.get("mcpServers", {})
+        if not isinstance(servers, dict):
+            fail("generated codex config missing mcpServers object")
+        if "spine" not in servers:
+            fail("generated codex config missing required spine server")
+
+        missing_optional = [name for name in expected_optional if name not in servers]
+        if missing_optional:
+            fail(f"generated codex config missing optional servers seeded from local sources: {', '.join(missing_optional)}")
+
+        print("generator: PASS")
+        print(f"  target: {target}")
+        print(f"  servers: {', '.join(sorted(servers))}")
+
+
+def expected_agent_tool_posture() -> tuple[bool, str]:
+    if not AGENTS_REGISTRY.is_file():
+        return False, "agents.registry.yaml missing"
+    missing = [str(path) for path in AGENT_HELPERS if not (path.is_file() and os.access(path, os.X_OK))]
+    if missing:
+        return False, f"agent helper binaries missing: {', '.join(missing)}"
+    return True, "agent registry + helper binaries present"
+
+
+def run_gateway_selfcheck() -> None:
+    proc = subprocess.Popen(
+        [str(OPS_BIN), "mcp", "serve"],
+        cwd=ROOT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    sel = selectors.DefaultSelector()
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    assert proc.stdin is not None
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    sel.register(proc.stderr, selectors.EVENT_READ)
+
+    for message in (
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ):
+        proc.stdin.write(json.dumps(message) + "\n")
+    proc.stdin.flush()
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    first_stdout_at: float | None = None
+    start = time.time()
+
+    while time.time() - start < 5 and len(stdout_lines) < 2:
+        for key, _ in sel.select(timeout=0.2):
+            line = key.fileobj.readline()
+            if not line:
+                continue
+            if key.fileobj is proc.stdout:
+                stdout_lines.append(line.rstrip())
+                if first_stdout_at is None:
+                    first_stdout_at = time.time() - start
+            else:
+                stderr_lines.append(line.rstrip())
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+    if len(stdout_lines) < 2:
+        fail(f"gateway did not return initialize/tools list responses in time; stderr={' | '.join(stderr_lines[:10])}")
+    if first_stdout_at is None or first_stdout_at > 5:
+        fail(f"gateway first response too slow: {first_stdout_at}")
+
+    try:
+        init_payload = json.loads(stdout_lines[0])
+        tools_payload = json.loads(stdout_lines[1])
+    except json.JSONDecodeError as exc:
+        fail(f"gateway returned invalid JSON: {exc}")
+
+    if init_payload.get("id") != 1:
+        fail("gateway initialize response missing or mismatched")
+
+    tools = tools_payload.get("result", {}).get("tools", [])
+    if not isinstance(tools, list):
+        fail("gateway tools/list result missing tools array")
+    tool_names = {str(tool.get("name")) for tool in tools if isinstance(tool, dict)}
+
+    missing_base = sorted(BASE_TOOLS - tool_names)
+    if missing_base:
+        fail(f"gateway missing base tools: {', '.join(missing_base)}")
+
+    agent_tools_enabled, reason = expected_agent_tool_posture()
+    present_agent = sorted(tool_names & AGENT_TOOLS)
+    if agent_tools_enabled:
+        missing_agent = sorted(AGENT_TOOLS - tool_names)
+        if missing_agent:
+            fail(f"gateway should advertise agent tools but is missing: {', '.join(missing_agent)}")
+    elif present_agent:
+        fail(f"gateway advertised agent tools despite unavailable posture ({reason}): {', '.join(present_agent)}")
+
+    print("gateway: PASS")
+    print(f"  first_stdout_at_seconds: {first_stdout_at:.3f}")
+    print(f"  tools: {', '.join(sorted(tool_names))}")
+    print(f"  agent_tool_posture: {'enabled' if agent_tools_enabled else 'disabled'} ({reason})")
+
+
+def main() -> int:
+    contract = load_contract()
+    print("mcp.selfcheck")
+    print(f"root: {ROOT}")
+    print(f"contract: {CONTRACT}")
+    print("")
+    run_generator_selfcheck(contract)
+    run_gateway_selfcheck()
+    print("")
+    print("status: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

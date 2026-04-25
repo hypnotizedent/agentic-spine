@@ -1,0 +1,139 @@
+# MCP Runtime Contract
+# Status: authoritative
+# Last verified: 2026-03-22
+
+version: 3
+updated_at: "2026-03-22"
+owner: "@operator"
+scope: mcp-runtime-parity
+
+# Gateway-first routing (AOF v1.1 Move 1)
+# The unified spine-MCP gateway is the primary MCP server for all surfaces.
+# It exposes cap_list, cap_run, and RAG compatibility wrappers via stdio.
+# Per-surface standalone MCP servers (finance-agent, mint-pricing, etc.)
+# remain as optional domain-specific tool providers until cap delegation
+# absorbs them fully.
+gateway:
+  server_name: spine
+  command: "$SPINE_ROOT/bin/ops"
+  args: ["mcp", "serve"]
+  absorbs:
+    - spine-rag  # RAG tools served via gateway rag_query/rag_retrieve/rag_health
+
+required_servers_by_surface:
+  codex:
+    - spine
+  claude_desktop:
+    - spine
+    - immich-photos
+    - communications-agent
+  opencode:
+    - spine
+
+aliases:
+  spine-rag:
+    - spine_rag
+  spine_rag:
+    - spine-rag
+  mint-pricing:
+    - mint_pricing
+  mint_pricing:
+    - mint-pricing
+  mint-suppliers:
+    - mint_suppliers
+  mint_suppliers:
+    - mint-suppliers
+  filesystem:
+    - filesystem-local
+  filesystem-local:
+    - filesystem
+
+optional_servers:
+  codex:
+    - finance-agent
+    - media-agent
+    - mint-pricing
+    - mint-suppliers
+    - playwright
+  claude_desktop:
+    - docker
+    - filesystem
+    - finance-agent
+    - media-agent
+  opencode:
+    - media-agent
+    - playwright
+
+# Supplemental server definitions for standalone MCP servers not backed by agents.registry.yaml.
+# These are third-party or infrastructure servers that exist in Claude Desktop config
+# but are not part of the spine agent framework. Governed here for health probe + convergence verification.
+supplemental_server_definitions:
+  filesystem:
+    description: "Local filesystem MCP server for workbench and Desktop paths"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem"]
+    surfaces: [claude_desktop]
+    health_check: binary_exists
+  docker:
+    description: "Docker MCP server via uvx (DOCKER_HOST tcp)"
+    command: "$HOME/.local/bin/uvx"
+    args: ["docker-mcp"]
+    surfaces: [claude_desktop]
+    health_check: binary_exists
+  immich-photos:
+    description: "Immich photo management MCP server — search, albums, duplicates, cleanup"
+    command: "$WORKBENCH_ROOT/agents/immich/tools/mcp/run.sh"
+    args: []
+    env:
+      IMMICH_API_URL: "http://100.x.x.x:2283"
+      IMMICH_API_KEY: "${IMMICH_API_KEY}"
+    surfaces: [claude_desktop]
+    health_check: binary_exists
+
+runtime_checks:
+  - required_registered
+  - required_enabled
+  - alias_normalization
+  - gateway_present
+
+surface_paths:
+  codex: "$SPINE_ROOT/.mcp.json"
+  claude_desktop: "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+  claude_desktop_runtime_state: "$HOME/.claude.json"
+  opencode: "$WORKBENCH_ROOT/dotfiles/opencode/opencode.json"
+
+claude_project_path: "$HOME"
+
+# Surface governance posture — classifies each AI desktop surface by spine integration level.
+#
+# Canonical governance-profile vocabulary (governance.profile.contract.yaml):
+#   full_governance: live governed hook/attach + dynamic runtime injection + enforced mutation discipline
+#   minimal_governance: governed attach + thin authoritative adapter + bounded scope
+#   lightweight_degraded: no governance parity, read/draft only
+#
+# Surfaces without a governance-profile lane assignment use integration-level labels:
+#   exempt: no spine integration
+#   advisory: local runtime acknowledged, no session governance
+surface_governance_posture:
+  claude_code:
+    classification: full_governance
+    enforced_by: [session_protocol, pre_commit_hooks, mcp_contract]
+  codex:
+    classification: minimal_governance
+    enforced_by: [agents_md, mcp_contract]
+  opencode:
+    classification: lightweight_degraded
+    enforced_by: [opencode_md, mcp_contract]
+  claude_desktop:
+    classification: lightweight_degraded
+    enforced_by: [mcp_contract, config_generation]
+    note: "MCP contract + config generation only; no session protocol or governed attach"
+  codex_desktop:
+    classification: exempt
+    reason: "No config surface — defers to codex CLI"
+  chatgpt_desktop:
+    classification: exempt
+    reason: "No spine integration, external provider"
+  ollama:
+    classification: advisory
+    reason: "Local model serving, no session governance"

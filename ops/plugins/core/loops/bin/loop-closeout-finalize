@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/loop.closeout.contract.yaml"
+DISPOSITION_CONTRACT="$ROOT/ops/bindings/closeout.disposition.contract.yaml"
+GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+SCOPES_DIR="$SPINE_STATE/loop-scopes"
+SCOPES_ARCHIVE_DIR="$SPINE_STATE/archive/closed-loop-scopes"
+
+usage() {
+  cat <<'USAGE'
+loop-closeout-finalize
+
+Usage:
+  loop-closeout-finalize --loop-id LOOP-... --disposition <state> \
+    [--acceptance-matrix <path>] [--completion-level <level>] \
+    [--lightweight] [--reason <text>] [--receipt-path <path>] \
+    [--close-gaps GAP-OP-XXXX,GAP-OP-YYYY] [--no-close-linked-gaps] \
+    [--regression-lock-id D###-...] [--evidence <ref>] [--owner <owner>] \
+    [--expiry-check <date-or-cadence>] [--root-cause <text>]
+USAGE
+}
+
+SELF_CHECK=0
+LIGHTWEIGHT=0
+LOOP_ID=""
+DISPOSITION=""
+ACCEPTANCE_MATRIX=""
+COMPLETION_LEVEL=""
+REASON=""
+RECEIPT_PATH=""
+EXPLICIT_CLOSE_GAPS=""
+CLOSE_LINKED_GAPS=1
+REGRESSION_LOCK_ID=""
+EVIDENCE=""
+OWNER=""
+EXPIRY_CHECK=""
+ROOT_CAUSE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --self-check) SELF_CHECK=1; shift ;;
+    --lightweight) LIGHTWEIGHT=1; shift ;;
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --disposition) DISPOSITION="${2:-}"; shift 2 ;;
+    --acceptance-matrix) ACCEPTANCE_MATRIX="${2:-}"; shift 2 ;;
+    --completion-level) COMPLETION_LEVEL="${2:-}"; shift 2 ;;
+    --reason) REASON="${2:-}"; shift 2 ;;
+    --receipt-path) RECEIPT_PATH="${2:-}"; shift 2 ;;
+    --close-gaps) EXPLICIT_CLOSE_GAPS="${2:-}"; shift 2 ;;
+    --no-close-linked-gaps) CLOSE_LINKED_GAPS=0; shift ;;
+    --regression-lock-id) REGRESSION_LOCK_ID="${2:-}"; shift 2 ;;
+    --evidence) EVIDENCE="${2:-}"; shift 2 ;;
+    --owner) OWNER="${2:-}"; shift 2 ;;
+    --expiry-check) EXPIRY_CHECK="${2:-}"; shift 2 ;;
+    --root-cause) ROOT_CAUSE="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *) echo "loop.closeout.finalize FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+for required in "$CONTRACT" "$LOOPS_BRIDGE" "$GAPS_BRIDGE" "$SCOPES_DIR"; do
+  [[ -e "$required" ]] || { echo "loop.closeout.finalize FAIL: missing required path: $required" >&2; exit 1; }
+done
+command -v yq >/dev/null 2>&1 || { echo "loop.closeout.finalize FAIL: missing dependency yq" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "loop.closeout.finalize FAIL: missing dependency python3" >&2; exit 1; }
+
+if [[ "$SELF_CHECK" -eq 1 ]]; then
+  yq e '.version and .validation and .protected_lanes and .closeout_receipts' "$CONTRACT" >/dev/null
+  echo "loop.closeout.finalize self-check PASS: contract and dependencies present"
+  exit 0
+fi
+
+[[ -n "$LOOP_ID" ]] || { echo "loop.closeout.finalize FAIL: --loop-id required" >&2; exit 2; }
+[[ -n "$DISPOSITION" ]] || { echo "loop.closeout.finalize FAIL: --disposition required" >&2; exit 2; }
+
+if [[ "$LIGHTWEIGHT" -eq 0 && -n "$ACCEPTANCE_MATRIX" ]]; then
+  [[ "$ACCEPTANCE_MATRIX" = /* ]] || ACCEPTANCE_MATRIX="$ROOT/$ACCEPTANCE_MATRIX"
+  [[ -f "$ACCEPTANCE_MATRIX" ]] || { echo "loop.closeout.finalize FAIL: acceptance matrix not found: $ACCEPTANCE_MATRIX" >&2; exit 1; }
+fi
+
+DISPOSITION_CSV="landed,deferred,superseded,abandoned"
+if [[ -f "$DISPOSITION_CONTRACT" ]]; then
+  dispositions="$(yq e -r '.terminal_dispositions.allowed[]?' "$DISPOSITION_CONTRACT" 2>/dev/null | sed '/^$/d' | paste -sd, -)"
+  [[ -n "$dispositions" ]] && DISPOSITION_CSV="$dispositions"
+fi
+case ",$DISPOSITION_CSV," in
+  *,"$DISPOSITION",*) ;;
+  *) echo "loop.closeout.finalize FAIL: invalid disposition '$DISPOSITION'" >&2; exit 1 ;;
+esac
+
+if [[ "$DISPOSITION" == "landed" && -f "$DISPOSITION_CONTRACT" ]]; then
+  require_cl="$(yq e -r '.completion_levels.enforcement.require_on_landed // false' "$DISPOSITION_CONTRACT" 2>/dev/null || echo false)"
+  if [[ "$require_cl" == "true" && -z "$COMPLETION_LEVEL" ]]; then
+    echo "loop.closeout.finalize FAIL: disposition landed requires --completion-level" >&2
+    exit 1
+  fi
+fi
+
+SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+[[ -f "$SCOPE_FILE" ]] || { echo "loop.closeout.finalize FAIL: scope file not found: $SCOPE_FILE" >&2; exit 1; }
+
+status_now="$(awk '/^status:/{print $2; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+case "$status_now" in
+  active|draft|open) ;;
+  *) echo "loop.closeout.finalize FAIL: unsupported loop status '$status_now' for $LOOP_ID" >&2; exit 1 ;;
+esac
+
+close_note="${REASON:-Closed via loop.closeout.finalize}"
+closed_gap_count=0
+if [[ "$CLOSE_LINKED_GAPS" -eq 1 && -n "$EXPLICIT_CLOSE_GAPS" ]]; then
+  IFS=',' read -r -a gap_ids <<< "$EXPLICIT_CLOSE_GAPS"
+  for gid in "${gap_ids[@]}"; do
+    gid="$(printf '%s' "$gid" | xargs)"
+    [[ -n "$gid" ]] || continue
+    bridge_args=("close" "--id" "$gid" "--status" "fixed" "--fixed-in" "$LOOP_ID" "--notes" "$close_note" "--actor" "loop.closeout.finalize" "--reason" "$close_note")
+    [[ -n "$COMPLETION_LEVEL" ]] && bridge_args+=("--completion-level" "$COMPLETION_LEVEL")
+    [[ -n "$REGRESSION_LOCK_ID" ]] && bridge_args+=("--regression-lock-id" "$REGRESSION_LOCK_ID")
+    [[ -n "$EVIDENCE" ]] && bridge_args+=("--evidence" "$EVIDENCE")
+    [[ -n "$OWNER" ]] && bridge_args+=("--owner" "$OWNER")
+    [[ -n "$EXPIRY_CHECK" ]] && bridge_args+=("--expiry-check" "$EXPIRY_CHECK")
+    [[ -n "$ROOT_CAUSE" ]] && bridge_args+=("--root-cause" "$ROOT_CAUSE")
+    bridge_args+=("--ungoverned-override")
+    if ! python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >/dev/null; then
+      echo "loop.closeout.finalize FAIL: explicit gap close bridge failed for $gid" >&2
+      exit 1
+    fi
+    closed_gap_count=$((closed_gap_count + 1))
+  done
+fi
+
+loop_args=("close" "--id" "$LOOP_ID" "--status" "closed" "--disposition" "$DISPOSITION" "--actor" "loop.closeout.finalize" "--reason" "$close_note" "--ungoverned-override")
+[[ -n "$COMPLETION_LEVEL" ]] && loop_args+=("--completion-level" "$COMPLETION_LEVEL")
+python3 "$LOOPS_BRIDGE" "${loop_args[@]}" >/dev/null
+
+mkdir -p "$SCOPES_ARCHIVE_DIR"
+ARCHIVED_SCOPE_FILE="$SCOPES_ARCHIVE_DIR/${LOOP_ID}.scope.md"
+if [[ -f "$SCOPES_DIR/${LOOP_ID}.scope.md" ]]; then
+  mv -f "$SCOPES_DIR/${LOOP_ID}.scope.md" "$ARCHIVED_SCOPE_FILE"
+fi
+[[ -f "$ARCHIVED_SCOPE_FILE" ]] || { echo "loop.closeout.finalize FAIL: archived scope file missing after closeout" >&2; exit 1; }
+
+# Normalize archived scope frontmatter: the live `status:` field must not survive
+# into the archive. Disposition and other metadata are preserved. Only the
+# initial YAML frontmatter block is rewritten, so later body fences are left
+# untouched.
+ARCHIVED_TMP="${ARCHIVED_SCOPE_FILE}.normalize.tmp"
+python3 - "$ARCHIVED_SCOPE_FILE" "$ARCHIVED_TMP" <<'PY'
+from pathlib import Path
+import os
+import sys
+import tempfile
+
+import yaml
+
+source = Path(sys.argv[1])
+tmp_target = Path(sys.argv[2])
+
+text = source.read_text(encoding="utf-8")
+lines = text.splitlines(keepends=True)
+if not lines or lines[0].strip() != "---":
+    raise SystemExit(f"loop.closeout.finalize FAIL: missing YAML frontmatter in {source}")
+
+frontmatter_end = None
+for idx in range(1, len(lines)):
+    if lines[idx].strip() == "---":
+        frontmatter_end = idx
+        break
+
+if frontmatter_end is None:
+    raise SystemExit(f"loop.closeout.finalize FAIL: missing YAML frontmatter terminator in {source}")
+
+frontmatter_text = "".join(lines[1:frontmatter_end])
+try:
+    frontmatter = yaml.safe_load(frontmatter_text) or {}
+except yaml.YAMLError as exc:
+    raise SystemExit(f"loop.closeout.finalize FAIL: unable to parse YAML frontmatter in {source}: {exc}")
+
+if not isinstance(frontmatter, dict):
+    raise SystemExit(f"loop.closeout.finalize FAIL: expected mapping frontmatter in {source}")
+
+frontmatter["status"] = "closed"
+rendered_fm = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=False).rstrip("\n")
+body = "".join(lines[frontmatter_end + 1 :])
+result = f"---\n{rendered_fm}\n---\n{body}"
+if not result.endswith("\n"):
+    result += "\n"
+
+tmp_target.parent.mkdir(parents=True, exist_ok=True)
+with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(tmp_target.parent), prefix=tmp_target.name + ".", delete=False) as handle:
+    handle.write(result)
+    staged = Path(handle.name)
+
+os.replace(staged, source)
+PY
+
+if [[ -z "$RECEIPT_PATH" ]]; then
+  RECEIPT_DIR="$(yq e -r '.closeout_receipts.directory // ""' "$CONTRACT" 2>/dev/null)"
+  [[ -n "$RECEIPT_DIR" && "$RECEIPT_DIR" != "null" ]] || RECEIPT_DIR="$HOME/code/.evidence/spine/loop-closeouts"
+  RECEIPT_PATH="$RECEIPT_DIR/${LOOP_ID}.closeout.md"
+elif [[ "$RECEIPT_PATH" != /* ]]; then
+  RECEIPT_PATH="$ROOT/$RECEIPT_PATH"
+fi
+mkdir -p "$(dirname "$RECEIPT_PATH")"
+cat > "$RECEIPT_PATH" <<EOF
+# Loop Closeout Receipt
+
+- loop_id: $LOOP_ID
+- disposition: $DISPOSITION
+- completion_level: ${COMPLETION_LEVEL:-n/a}
+- lightweight: $([[ "$LIGHTWEIGHT" -eq 1 ]] && echo true || echo false)
+- acceptance_matrix: ${ACCEPTANCE_MATRIX:-n/a}
+- linked_gaps_closed: $closed_gap_count
+- archived_scope_file: $ARCHIVED_SCOPE_FILE
+- reason: $close_note
+- capability: loop.closeout.finalize
+- run_key: ${SPINE_CAP_RUN_KEY:-manual}
+- generated_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
+echo "loop.closeout.finalize"
+echo "loop_id=$LOOP_ID"
+echo "disposition=$DISPOSITION"
+echo "completion_level=${COMPLETION_LEVEL:-n/a}"
+echo "linked_gaps_closed=$closed_gap_count"
+echo "receipt=$RECEIPT_PATH"
+echo "archived_scope_file=$ARCHIVED_SCOPE_FILE"

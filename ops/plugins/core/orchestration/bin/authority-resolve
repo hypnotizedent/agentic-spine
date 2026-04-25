@@ -1,0 +1,366 @@
+#!/usr/bin/env bash
+# authority-resolve — Pre-flight authority check before any wave.
+#
+# Inspects loop scope, linked gaps, WIP cap, dirty residue, supersession,
+# and execution readiness. Returns a structured verdict: READY or BLOCKED.
+#
+# Usage:
+#   authority-resolve --loop-id LOOP-... [--json]
+#
+# Exit codes:
+#   0 — ready for dispatch
+#   1 — blocked (with reasons in output)
+#   2 — loop not found or invalid args
+set -euo pipefail
+
+# ── Path bootstrap ───────────────────────────────────────────────
+SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$SP/ops/lib/spine-paths.sh"
+spine_paths_init
+
+SCOPES_DIR="$SPINE_STATE/loop-scopes"
+
+# ── Arg parsing ──────────────────────────────────────────────────
+LOOP_ID=""
+JSON_OUTPUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)        shift ;;
+    --loop-id) LOOP_ID="${2:?--loop-id requires a value}"; shift 2 ;;
+    --json)    JSON_OUTPUT=1; shift ;;
+    -h|--help)
+      echo "Usage: authority-resolve --loop-id LOOP-... [--json]"
+      echo ""
+      echo "Pre-flight authority check before any wave."
+      echo "Inspects loop scope, gaps, WIP cap, dirty residue, and execution readiness."
+      echo ""
+      echo "Options:"
+      echo "  --loop-id LOOP-...  Loop ID to resolve (required)"
+      echo "  --json              Emit JSON instead of human-readable output"
+      echo ""
+      echo "Exit codes:"
+      echo "  0  Ready for dispatch"
+      echo "  1  Blocked (with reasons)"
+      echo "  2  Loop not found or invalid args"
+      exit 0
+      ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || { echo "FAIL: --loop-id required" >&2; exit 2; }
+
+# ── Helpers ──────────────────────────────────────────────────────
+declare -a BLOCKERS=()
+
+# Extract a YAML frontmatter value from a scope file.
+# Handles both quoted and unquoted values, and YAML lists on a single line.
+_fm_value() {
+  local file="$1" key="$2"
+  awk -v key="$key" '
+    BEGIN { in_fm=0 }
+    /^---$/ { if (!in_fm) { in_fm=1; next } else { exit } }
+    in_fm && $0 ~ "^"key":" {
+      sub("^"key":[ \t]*", "")
+      gsub(/^["'\'']|["'\'']$/, "")
+      print
+      exit
+    }
+  ' "$file"
+}
+
+# Extract a YAML frontmatter list value (e.g., exclusions: [item1, item2])
+_fm_list() {
+  local file="$1" key="$2"
+  awk -v key="$key" '
+    BEGIN { in_fm=0 }
+    /^---$/ { if (!in_fm) { in_fm=1; next } else { exit } }
+    in_fm && $0 ~ "^"key":" {
+      sub("^"key":[ \t]*", "")
+      # Remove brackets and split by comma
+      gsub(/[\[\]]/, "")
+      gsub(/,[ \t]*/, "\n")
+      gsub(/^[ \t]+|[ \t]+$/, "")
+      if ($0 != "") print
+      exit
+    }
+  ' "$file"
+}
+
+# ── Check 1: Loop scope exists ───────────────────────────────────
+SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+
+if [[ ! -f "$SCOPE_FILE" ]]; then
+  echo "FAIL: loop scope not found: $SCOPE_FILE" >&2
+  exit 2
+fi
+
+LOOP_STATUS="$(_fm_value "$SCOPE_FILE" "status")"
+LOOP_OWNER="$(_fm_value "$SCOPE_FILE" "owner")"
+LOOP_PRIORITY="$(_fm_value "$SCOPE_FILE" "priority")"
+LOOP_HORIZON="$(_fm_value "$SCOPE_FILE" "horizon")"
+EXEC_MODE="$(_fm_value "$SCOPE_FILE" "execution_mode")"
+OBJECTIVE="$(_fm_value "$SCOPE_FILE" "objective")"
+EXEC_READINESS="$(_fm_value "$SCOPE_FILE" "execution_readiness")"
+
+# Defaults for fields that may be absent in older scope files
+LOOP_STATUS="${LOOP_STATUS:-unknown}"
+LOOP_OWNER="${LOOP_OWNER:-@ronny}"
+EXEC_MODE="${EXEC_MODE:-single_worker}"
+EXEC_READINESS="${EXEC_READINESS:-runnable}"
+OBJECTIVE="${OBJECTIVE:-<not set>}"
+
+# Parse list fields
+EXCLUSIONS_RAW="$(_fm_list "$SCOPE_FILE" "exclusions")"
+SUPERSEDES_RAW="$(_fm_list "$SCOPE_FILE" "supersedes")"
+
+# ── Check 2: Loop is active ─────────────────────────────────────
+if [[ "$LOOP_STATUS" != "active" ]]; then
+  BLOCKERS+=("loop status is '$LOOP_STATUS' (must be active)")
+fi
+
+# ── Check 3: WIP cap ────────────────────────────────────────────
+WIP_CAP=5
+WIP_COUNT=0
+WIP_STATE="within_cap"
+WIP_NOTE=""
+
+if [[ -d "$SCOPES_DIR" ]]; then
+  while IFS= read -r scope_file; do
+    [[ -f "$scope_file" ]] || continue
+    file_status="$(awk '/^status:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
+    [[ "$file_status" == "active" ]] && (( WIP_COUNT++ )) || true
+  done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
+fi
+
+# If this loop is already active, do not deadlock reduction work just because the
+# estate is already over cap. Only block new activation when it would add to the breach.
+if [[ "$WIP_COUNT" -gt "$WIP_CAP" ]]; then
+  if [[ "$LOOP_STATUS" == "active" ]]; then
+    WIP_STATE="over_cap_active_loop_allowed"
+    WIP_NOTE="estate already over cap; active loop allowed to continue"
+  else
+    WIP_STATE="over_cap_blocked"
+    BLOCKERS+=("WIP cap exceeded ($WIP_COUNT/$WIP_CAP active loops)")
+  fi
+elif [[ "$WIP_COUNT" -ge "$WIP_CAP" && "$LOOP_STATUS" != "active" ]]; then
+  WIP_STATE="at_cap_new_activation_blocked"
+  BLOCKERS+=("WIP cap reached ($WIP_COUNT/$WIP_CAP active loops, new activation blocked)")
+fi
+
+# ── Check 4: Linked gaps ────────────────────────────────────────
+LINKED_GAPS_JSON="[]"
+if command -v python3 >/dev/null 2>&1; then
+  LINKED_GAPS_JSON="$(python3 -c "
+import sys, json, os
+sys.path.insert(0, os.path.join('$SP', 'ops', 'plugins', 'core', 'lifecycle', 'lib'))
+try:
+    import gaps_sql_authority as gsa
+    db, _ = gsa.resolve_paths('$SP')
+    if os.path.exists(str(db)):
+        conn = gsa.connect(db)
+        gsa.ensure_schema(conn)
+        gaps = gsa.fetch_gaps(conn, status='open')
+        linked = [
+            {'gap_id': g['id'], 'severity': g.get('severity',''), 'title': g.get('title','')}
+            for g in gaps
+            if g.get('parent_loop') == '$LOOP_ID'
+        ]
+        conn.close()
+        print(json.dumps(linked))
+    else:
+        print('[]')
+except Exception as e:
+    print('[]', file=sys.stdout)
+    print(f'WARN: gap query failed: {e}', file=sys.stderr)
+" 2>/dev/null || echo '[]')"
+fi
+
+LINKED_GAP_COUNT="$(echo "$LINKED_GAPS_JSON" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)"
+
+# ── Check 5: No superseding loops ───────────────────────────────
+SUPERSEDED_BY=""
+if [[ -d "$SCOPES_DIR" ]]; then
+  while IFS= read -r scope_file; do
+    [[ -f "$scope_file" ]] || continue
+    file_status="$(awk '/^status:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
+    [[ "$file_status" == "active" ]] || continue
+    file_id="$(awk '/^loop_id:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
+    [[ "$file_id" != "$LOOP_ID" ]] || continue
+    # Check if this loop's supersedes list contains our loop_id
+    supersedes_line="$(_fm_list "$scope_file" "supersedes")"
+    if echo "$supersedes_line" | grep -q "$LOOP_ID"; then
+      SUPERSEDED_BY="$file_id"
+      BLOCKERS+=("superseded by active loop $file_id")
+      break
+    fi
+  done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
+fi
+
+# ── Check 6: Dirty residue ──────────────────────────────────────
+DIRTY_FILE_COUNT=0
+DIRTY_TARGET="$(spine_preferred_governed_checkout "$SP" "$PWD")"
+LEASE_FILENAME=".spine-lane-lease.yaml"
+WORKTREE_CONTRACT="$SP/ops/bindings/worktree.lifecycle.contract.yaml"
+if command -v yq >/dev/null 2>&1 && [[ -f "$WORKTREE_CONTRACT" ]]; then
+  LEASE_FILENAME="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$WORKTREE_CONTRACT" 2>/dev/null || echo "$LEASE_FILENAME")"
+fi
+if git -C "$DIRTY_TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  _dirty_porcelain="$(git -C "$DIRTY_TARGET" status --porcelain --untracked-files=all 2>/dev/null || true)"
+  DIRTY_FILE_COUNT="$(printf '%s\n' "$_dirty_porcelain" | python3 -c "
+import sys
+lease_name = sys.argv[1]
+count = 0
+for raw in sys.stdin:
+    line = raw.rstrip('\n')
+    if not line.strip():
+        continue
+    path = line[3:].strip() if len(line) >= 4 else line.strip()
+    path = path.strip('\"')
+    if path == lease_name:
+        continue
+    count += 1
+print(count)
+" "$LEASE_FILENAME")"
+fi
+
+if [[ "$DIRTY_FILE_COUNT" -gt 0 ]]; then
+  BLOCKERS+=("dirty residue: $DIRTY_FILE_COUNT file(s) with unstaged/uncommitted changes")
+fi
+
+# ── Check 7: Execution readiness ────────────────────────────────
+if [[ "$EXEC_READINESS" != "runnable" ]]; then
+  BLOCKERS+=("execution_readiness is '$EXEC_READINESS' (must be runnable)")
+fi
+
+# ── Verdict ──────────────────────────────────────────────────────
+READY=true
+if [[ ${#BLOCKERS[@]} -gt 0 ]]; then
+  READY=false
+fi
+
+RESOLVED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# ── Build exclusions JSON array ──────────────────────────────────
+EXCLUSIONS_JSON="[]"
+if [[ -n "$EXCLUSIONS_RAW" ]]; then
+  EXCLUSIONS_JSON="$(echo "$EXCLUSIONS_RAW" | python3 -c "
+import sys, json
+lines = [l.strip() for l in sys.stdin if l.strip()]
+print(json.dumps(lines))
+" 2>/dev/null || echo '[]')"
+fi
+
+# ── Build blockers JSON array ────────────────────────────────────
+BLOCKERS_JSON="[]"
+if [[ ${#BLOCKERS[@]} -gt 0 ]]; then
+  BLOCKERS_JSON="$(printf '%s\n' "${BLOCKERS[@]}" | python3 -c "
+import sys, json
+lines = [l.strip() for l in sys.stdin if l.strip()]
+print(json.dumps(lines))
+" 2>/dev/null || echo '[]')"
+fi
+
+# ── Output ───────────────────────────────────────────────────────
+if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+  python3 -c "
+import json, sys
+
+data = {
+    'loop_id': '$LOOP_ID',
+    'status': '$LOOP_STATUS',
+    'owner': '$LOOP_OWNER',
+    'execution_mode': '$EXEC_MODE',
+    'objective': $(python3 -c "import json; print(json.dumps('$OBJECTIVE'))" 2>/dev/null || echo '""'),
+    'exclusions': $EXCLUSIONS_JSON,
+    'ready_for_dispatch': $( [[ "$READY" == "true" ]] && echo "True" || echo "False" ),
+    'blockers': $BLOCKERS_JSON,
+    'linked_gaps': $LINKED_GAPS_JSON,
+    'wip_count': $WIP_COUNT,
+    'wip_cap': $WIP_CAP,
+    'wip_state': '$WIP_STATE',
+    'wip_note': $( [[ -n "$WIP_NOTE" ]] && python3 -c "import json; print(json.dumps('$WIP_NOTE'))" || echo 'None' ),
+    'dirty_file_count': $DIRTY_FILE_COUNT,
+    'superseded_by': $( [[ -n "$SUPERSEDED_BY" ]] && python3 -c "import json; print(json.dumps('$SUPERSEDED_BY'))" || echo 'None' ),
+    'resolved_at_utc': '$RESOLVED_AT',
+}
+print(json.dumps(data, indent=2))
+"
+else
+  # Human-readable output
+  echo ""
+  echo "======================================="
+  echo "AUTHORITY RESOLVE: $LOOP_ID"
+  echo "======================================="
+  echo ""
+
+  if [[ "$LOOP_STATUS" == "active" ]]; then
+    printf "Status:          %s (ok)\n" "$LOOP_STATUS"
+  else
+    printf "Status:          %s (BLOCKED)\n" "$LOOP_STATUS"
+  fi
+  printf "Owner:           %s\n" "$LOOP_OWNER"
+  printf "Execution Mode:  %s\n" "$EXEC_MODE"
+  printf "Objective:       %s\n" "$OBJECTIVE"
+  echo ""
+
+  if [[ "$WIP_STATE" == "within_cap" ]]; then
+    printf "WIP:             %s/%s active loops (ok)\n" "$WIP_COUNT" "$WIP_CAP"
+  elif [[ "$WIP_STATE" == "over_cap_active_loop_allowed" ]]; then
+    printf "WIP:             %s/%s active loops (active loop allowed to continue)\n" "$WIP_COUNT" "$WIP_CAP"
+  else
+    printf "WIP:             %s/%s active loops (BLOCKED)\n" "$WIP_COUNT" "$WIP_CAP"
+  fi
+
+  if [[ "$DIRTY_FILE_COUNT" -eq 0 ]]; then
+    printf "Dirty Residue:   %s files (ok)\n" "$DIRTY_FILE_COUNT"
+  else
+    printf "Dirty Residue:   %s files (BLOCKED)\n" "$DIRTY_FILE_COUNT"
+  fi
+
+  if [[ -n "$SUPERSEDED_BY" ]]; then
+    printf "Superseded By:   %s (BLOCKED)\n" "$SUPERSEDED_BY"
+  else
+    printf "Superseded By:   none (ok)\n"
+  fi
+
+  if [[ "$EXEC_READINESS" == "runnable" ]]; then
+    printf "Execution Ready: %s (ok)\n" "$EXEC_READINESS"
+  else
+    printf "Execution Ready: %s (BLOCKED)\n" "$EXEC_READINESS"
+  fi
+
+  echo ""
+
+  if [[ "$LINKED_GAP_COUNT" -gt 0 ]]; then
+    echo "Linked Gaps (open):"
+    echo "$LINKED_GAPS_JSON" | python3 -c "
+import sys, json
+gaps = json.load(sys.stdin)
+for g in gaps:
+    print('  %-14s %-8s %s' % (g['gap_id'], g['severity'], g['title']))
+"
+  else
+    echo "Linked Gaps (open): none"
+  fi
+
+  echo ""
+
+  if [[ "$READY" == "true" ]]; then
+    echo "VERDICT: READY FOR DISPATCH"
+  else
+    echo "VERDICT: BLOCKED"
+    for b in "${BLOCKERS[@]}"; do
+      echo "  - $b"
+    done
+  fi
+  echo ""
+fi
+
+# ── Exit code ────────────────────────────────────────────────────
+if [[ "$READY" == "true" ]]; then
+  exit 0
+else
+  exit 1
+fi

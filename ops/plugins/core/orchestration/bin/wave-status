@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Canonical wave status surface extracted from wave.sh."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def _runtime_root(root: Path) -> Path:
+    workspace_root = root.parent
+    return Path(os.environ.get("SPINE_RUNTIME_ROOT", workspace_root / ".runtime" / "spine"))
+
+
+def _render_wave_status(state: dict, lanes: dict, lanes_error: str = "") -> None:
+    print("=" * 72)
+    print(f"  WAVE STATUS: {state['wave_id']}")
+    print("=" * 72)
+    print()
+    print(f"  Status:    {state['status']}")
+    print(f"  Objective: {state.get('objective', '(none)')}")
+    print(f"  Created:   {state['created_at']}")
+    if state.get("closed_at"):
+        print(f"  Closed:    {state['closed_at']}")
+    workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else None
+    if workspace and workspace.get("enabled"):
+        print(f"  Worktree:  {workspace.get('worktree')}")
+        print(f"  Branch:    {workspace.get('branch')}")
+        print(f"  Lifecycle: {workspace.get('lifecycle_state', 'active')}")
+    print()
+
+    if lanes_error:
+        print(f"LANES: (unavailable: {lanes_error})")
+        print()
+    elif lanes:
+        print("LANES")
+        print("-" * 72)
+        for name, info in sorted(lanes.items()):
+            print(f"  {name:12s}  terminal={info['terminal_id']}  since={info['opened_at']}")
+        print()
+
+    dispatches = state.get("dispatches", [])
+    if dispatches:
+        print(f"DISPATCHES ({len(dispatches)})")
+        print("-" * 72)
+        for index, dispatch in enumerate(dispatches, 1):
+            status_icon = {"dispatched": "->", "running": "~~", "done": "OK", "failed": "XX"}.get(
+                dispatch["status"], "??"
+            )
+            print(f"  {status_icon} #{index} [{dispatch['lane']:10s}] {dispatch['task'][:50]}")
+            if dispatch.get("run_key"):
+                print(f"     run_key: {dispatch['run_key']}")
+            if dispatch.get("dispatch_transport") == "mailroom":
+                task_id = dispatch.get("mailroom_task_id", "")
+                task_state = dispatch.get("mailroom_task_state", "")
+                route_input = dispatch.get("mailroom_route_input", "")
+                detail = f"     mailroom: {task_id}" if task_id else "     mailroom: queued"
+                if task_state:
+                    detail += f" [{task_state}]"
+                if route_input:
+                    detail += f" route={route_input}"
+                print(detail)
+        print()
+
+    checks = state.get("watcher_checks", [])
+    if checks:
+        done_count = sum(1 for check in checks if check["status"] == "done")
+        fail_count = sum(1 for check in checks if check["status"] == "failed")
+        running_count = sum(1 for check in checks if check["status"] == "running")
+        queued_count = sum(1 for check in checks if check["status"] == "queued")
+
+        header = f"WATCHER ({done_count} done"
+        if fail_count:
+            header += f", {fail_count} failed"
+        if running_count:
+            header += f", {running_count} running"
+        if queued_count:
+            header += f", {queued_count} queued"
+        header += ")"
+
+        print(header)
+        print("-" * 72)
+        for check in checks:
+            icon = {"queued": "..", "running": "~~", "done": "OK", "failed": "XX"}.get(check["status"], "??")
+            run_key = f"  R={check['run_key']}" if check.get("run_key") else ""
+            exit_code = f"  exit={check['exit_code']}" if check.get("exit_code") is not None else ""
+            completed_at = f"  @{check['completed_at']}" if check.get("completed_at") else ""
+            print(f"  {icon} {check['cap']}{exit_code}{run_key}{completed_at}")
+
+        for check in checks:
+            if check["status"] == "running" and check.get("pid"):
+                try:
+                    os.kill(check["pid"], 0)
+                    still_alive = True
+                except (ProcessLookupError, PermissionError):
+                    still_alive = False
+                if not still_alive:
+                    print(f"  WARN: {check['cap']} PID {check['pid']} no longer running (may have crashed)")
+        print()
+
+    preflight = state.get("preflight")
+    if preflight:
+        print("PREFLIGHT")
+        print("-" * 72)
+        verdict_icon = "GO" if preflight.get("verdict") == "go" else "NO-GO" if preflight.get("verdict") == "no-go" else "??"
+        print(f"  [{verdict_icon}] domain={preflight.get('domain', '?')}  duration={preflight.get('duration_s', '?')}s")
+        if preflight.get("blockers"):
+            for blocker in preflight["blockers"]:
+                print(f"    BLOCKER: {blocker}")
+        if preflight.get("next_action"):
+            print(f"    Next: {preflight['next_action']}")
+        print()
+
+    print("=" * 72)
+    checks_complete = sum(1 for check in checks if check["status"] in ("done", "failed"))
+    lane_summary = "lanes unavailable" if lanes_error else f"{len(lanes)} lanes open"
+    print(f"  {len(dispatches)} dispatches | {checks_complete}/{len(checks)} checks complete | {lane_summary}")
+    print("=" * 72)
+
+
+def _render_all_waves(waves_dir: Path, lanes: dict, lanes_error: str = "") -> None:
+    waves: list[dict] = []
+    if waves_dir.is_dir():
+        for child in sorted(waves_dir.iterdir()):
+            state_file = child / "state.json"
+            if not state_file.is_file():
+                continue
+            try:
+                waves.append(json.loads(state_file.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    print("=" * 72)
+    print("  WAVE ORCHESTRATION STATUS")
+    print("=" * 72)
+    print()
+
+    if lanes_error:
+        print(f"LANES: (unavailable: {lanes_error})")
+        print()
+    elif lanes:
+        print(f"LANES ({len(lanes)})")
+        print("-" * 72)
+        for name, info in sorted(lanes.items()):
+            print(f"  {name:12s}  terminal={info['terminal_id']}  since={info['opened_at']}")
+        print()
+    else:
+        print("LANES: (none open)")
+        print()
+
+    if waves:
+        active = [wave for wave in waves if wave.get("status") == "active"]
+        closed = [wave for wave in waves if wave.get("status") == "closed"]
+
+        if active:
+            print(f"ACTIVE WAVES ({len(active)})")
+            print("-" * 72)
+            for wave in active:
+                checks = wave.get("watcher_checks", [])
+                done = sum(1 for check in checks if check["status"] in ("done", "failed"))
+                total = len(checks)
+                dispatches = len(wave.get("dispatches", []))
+                check_str = f"checks={done}/{total}" if total else "no checks"
+                print(f"  {wave['wave_id']:30s}  {dispatches} dispatches  {check_str}")
+                if wave.get("objective"):
+                    print(f"  {'':30s}  {wave['objective'][:50]}")
+            print()
+
+        if closed:
+            print(f"CLOSED WAVES ({len(closed)})")
+            print("-" * 72)
+            for wave in closed[-5:]:
+                print(f"  {wave['wave_id']:30s}  closed={wave.get('closed_at', '?')}")
+            print()
+    else:
+        print("WAVES: (none)")
+        print()
+
+    active_count = len([wave for wave in waves if wave.get("status") == "active"])
+    closed_count = len([wave for wave in waves if wave.get("status") == "closed"])
+    print("=" * 72)
+    lane_summary = "lanes unavailable" if lanes_error else f"{len(lanes)} lanes"
+    print(f"  {lane_summary} | {active_count} active waves | {closed_count} closed")
+    print("=" * 72)
+
+
+def main(argv: list[str]) -> int:
+    wave_id = ""
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            index += 1
+            continue
+        if token in {"-h", "--help"}:
+            print("Usage: wave-status [<WAVE_ID> | --wave-id <WAVE_ID>]")
+            print()
+            print("Without a wave id, lists all waves and open lanes.")
+            return 0
+        if token == "--wave-id":
+            if index + 1 >= len(argv) or not argv[index + 1]:
+                print("wave-status FAIL: --wave-id requires a value", file=sys.stderr)
+                return 2
+            wave_id = argv[index + 1]
+            index += 2
+            continue
+        if token.startswith("-"):
+            print(f"Unknown flag: {token}", file=sys.stderr)
+            return 1
+        wave_id = token
+        index += 1
+
+    root = _repo_root()
+    runtime_root = _runtime_root(root)
+    waves_dir = runtime_root / "waves"
+    lanes_file = runtime_root / "lanes" / "state.json"
+
+    lanes: dict = {}
+    lanes_error = ""
+    try:
+        lanes_doc = json.loads(lanes_file.read_text(encoding="utf-8"))
+        parsed_lanes = lanes_doc.get("lanes", {}) if isinstance(lanes_doc, dict) else {}
+        if isinstance(parsed_lanes, dict):
+            lanes = parsed_lanes
+        else:
+            lanes_error = "invalid lanes payload"
+    except FileNotFoundError:
+        pass
+    except json.JSONDecodeError as exc:
+        lanes_error = f"invalid JSON ({exc.msg})"
+    except OSError as exc:
+        lanes_error = str(exc)
+
+    if not wave_id:
+        _render_all_waves(waves_dir, lanes, lanes_error)
+        return 0
+
+    state_file = waves_dir / wave_id / "state.json"
+    if not state_file.is_file():
+        print(f"Wave '{wave_id}' does not exist. Create with: ops wave start {wave_id} --objective \"...\"", file=sys.stderr)
+        return 1
+
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    _render_wave_status(state, lanes, lanes_error)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

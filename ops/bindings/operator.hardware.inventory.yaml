@@ -1,0 +1,295 @@
+---
+status: authoritative
+owner: "@operator"
+scope: operator-owned-hardware-inventory
+version: 1
+updated_at: "2026-04-15"
+last_verified: "2026-04-14"
+
+# Operator-Owned Hardware Inventory
+# Canonical inventory of operator-owned Mac, Windows, and Linux machines
+# that may be candidates for dedicated node roles.
+#
+# Scope: inventory and identity only.
+# This surface does NOT assign hosts to node roles,
+# activate any machine, or promote candidates to active duty.
+#
+# Scope-widening authority:
+#   Approved 2026-04-13 under bounded operator-hardware eligibility
+#   assessment. Host assignment and node activation remain separately
+#   gated and require explicit Ronny approval.
+#
+# Related contracts:
+#   - ops/bindings/node.role.contract.yaml (node taxonomy — does not activate)
+#   - ops/bindings/hardware.inventory.yaml (infrastructure machines — separate scope)
+#   - ops/bindings/infra.placement.policy.yaml (site topology)
+#   - ops/bindings/operator.hardware.readiness.profiles.yaml (platform readiness)
+
+subordinate_to: ops/bindings/root.authority.contract.yaml
+
+related_contracts:
+  - contract: ops/bindings/node.role.contract.yaml
+    relationship: "Node taxonomy authority. This inventory does not assign node roles."
+  - contract: ops/bindings/hardware.inventory.yaml
+    relationship: "Peer inventory for infrastructure machines (servers, NAS). Separate scope."
+  - contract: ops/bindings/operator.hardware.readiness.profiles.yaml
+    relationship: "Platform-scoped readiness profiles consumed during eligibility assessment."
+
+# Eligibility classification vocabulary (read-only, non-activating)
+#
+# These states classify inventory objects only.
+# No state in this vocabulary activates, assigns, or promotes a machine.
+eligibility_states:
+  unknown:
+    description: "Machine is inventoried but no eligibility assessment has been performed."
+    terminal: false
+  candidate:
+    description: "Machine has been assessed and meets minimum identity prerequisites (Tailscale enrolled, hardware identified). Not yet evaluated against readiness profile."
+    terminal: false
+  conditionally_eligible:
+    description: "Machine passes readiness profile prerequisites with noted conditions (e.g., battery health marginal, OS version aging). Conditions are recorded in the evidence field."
+    terminal: false
+  eligible:
+    description: "Machine passes all readiness profile prerequisites for one or more node role candidacies without conditions."
+    terminal: false
+  ineligible:
+    description: "Machine fails one or more hard prerequisites. Reason recorded in the evidence field."
+    terminal: true
+
+# Node role candidacy vocabulary (non-activating)
+#
+# A machine may be a candidate for one or more node roles.
+# Candidacy does NOT equal assignment. Assignment requires separate
+# explicit Ronny approval outside this surface.
+role_candidacy_values:
+  - none
+  - execution_host
+  - watcher_node
+  - verification_node
+  - translator_node
+
+# Platform values — mac, windows, and linux are never collapsed
+# linux covers operator-owned hardware reprovisioned from any
+# prior OS to a Linux distribution (e.g., Ubuntu, Debian).
+platform_values:
+  - mac
+  - windows
+  - linux
+
+machines:
+  # ── Mac machines ──────────────────────────────────────────────────────────
+
+  - device_id: macbook-2016-pro
+    owner: "@operator"
+    platform: linux
+    model: "MacBook Pro (15-inch, 2016)"
+    year: 2016
+    site: home
+    tailscale_identity: 2016macnode
+    tailscale_ip: "100.x.x.x"
+    eligibility_state: conditionally_eligible
+    role_candidacy: [verification_node]
+    known_constraints:
+      - "T1 chip (no Secure Enclave)"
+      - "Battery: 62.76% design capacity, 1031 cycles, 8+ years old — marginal, acceptable while plugged in"
+      - "Recovery partial: Tailscale gives one remote plane, but power-loss recovery unproved (laptop battery, no UPS or iDRAC equivalent)"
+    evidence:
+      - "2026-04-15: LAN path proved at 10.0.x.x via wired USB Ethernet (MAC 00:05:1b:8d:9c:69)"
+      - "2026-04-15: Tailscale path proved at 100.x.x.x (enrolled as 2016macnode-2)"
+      - "2026-04-15: Cleanup completed — residue packages purged (NetworkManager, ModemManager, wpa_supplicant, cloud-init, watcher timer), sleep masked, single admin account (ubuntu), systemd-networkd sole manager"
+      - "2026-04-15: Reboot proof PASS — both SSH paths verified post-reboot"
+      - "2026-04-15: DHCP lease-loss-and-reclaim proof — lease lost 14:40:31, reacquired 14:41:59 at same 10.0.x.x"
+      - "2026-04-15: networkd config matches USB Ethernet by name+driver (11-ax88179b-home.network), hotplug-safe"
+      - "2026-04-15: Role candidacy confirmed — verification_node (lowest blast radius, hardware exceeds minimum)"
+      - "2026-04-16: router-primary DHCP reservation confirmed and set for MAC 00:05:1b:8d:9c:69 -> 10.0.x.x"
+      - "2026-04-16: Tailscale reauth completed; node online as 2016macnode at 100.x.x.x; LAN and Tailscale SSH both proved"
+      - "$SPINE_RUNTIME/spine/state/domain-state/spine/MACBOOK-2016-PRO-ASSESSMENT-20260415.md"
+      - "$SPINE_RUNTIME/spine/state/domain-state/spine/GOLDEN-PROVISIONING-MACBOOK-2016-20260415.md"
+      - "$SPINE_RUNTIME/spine/state/domain-state/spine/MACBOOK-2016-PRO-BORING-NODE-PLAN-20260415.md"
+    last_assessed: "2026-04-16"
+    notes: "Boring baseline complete 2026-04-15. verification_node candidacy. Single admin (ubuntu), systemd-networkd, both SSH paths proved, reboot proof passed, DHCP lease-loss-reclaim proved. Reconcile complete 2026-04-16: router-primary DHCP reservation confirmed at 10.0.x.x, and Tailscale reauth restored clean identity 2016macnode at 100.x.x.x."
+
+  - device_id: macbook-primary
+    owner: "@operator"
+    platform: mac
+    model: null
+    year: null
+    site: mobile
+    tailscale_identity: macbook
+    tailscale_ip: "100.x.x.x"
+    eligibility_state: unknown
+    role_candidacy: [none]
+    known_constraints:
+      - "Currently serves as operator_console — NORTH_STAR I2 applies"
+    evidence: []
+    last_assessed: null
+    notes: "Primary operator workstation. Eligibility assessment deferred — currently active as operator_console."
+
+  # Placeholder entries for additional MacBooks.
+  # Device identity to be populated when machines are physically
+  # audited and Tailscale-enrolled.
+
+  - device_id: macbook-additional-1
+    owner: "@operator"
+    platform: mac
+    model: null
+    year: null
+    site: null
+    tailscale_identity: null
+    tailscale_ip: null
+    eligibility_state: unknown
+    role_candidacy: [none]
+    known_constraints: []
+    evidence: []
+    last_assessed: null
+    notes: "Placeholder. Populate when physically audited."
+
+  - device_id: macbook-additional-2
+    owner: "@operator"
+    platform: mac
+    model: null
+    year: null
+    site: null
+    tailscale_identity: null
+    tailscale_ip: null
+    eligibility_state: unknown
+    role_candidacy: [none]
+    known_constraints: []
+    evidence: []
+    last_assessed: null
+    notes: "Placeholder. Populate when physically audited."
+
+  # ── Windows machines ──────────────────────────────────────────────────────
+
+  - device_id: windows-parents
+    owner: "@operator"
+    platform: windows
+    model: null
+    year: null
+    site: null
+    tailscale_identity: windows-parents
+    tailscale_ip: "100.x.x.x"
+    eligibility_state: unknown
+    role_candidacy: [none]
+    known_constraints: []
+    evidence: []
+    last_assessed: null
+    notes: "Already on tailnet. Hardware specs unknown."
+
+  - device_id: windows-mint
+    owner: "@operator"
+    platform: windows
+    model: null
+    year: null
+    site: null
+    tailscale_identity: windows-mint
+    tailscale_ip: "100.x.x.x"
+    eligibility_state: candidate
+    role_candidacy: [none]
+    known_constraints:
+      - "No remote admin plane: SSH absent, WinRM absent, RDP absent"
+      - "SMB (445) and RPC (135) open — file sharing only, no command execution"
+      - "Route advertisement inactive: ExitNode=false, PrimaryRoutes=none despite prior claim"
+      - "Real IP 192.168.x.x — not shop (192.168.1.x) or home (10.0.0.x) subnet"
+    evidence:
+      - "2026-04-14: Tailscale hostname DESKTOP-P9UVED7, DNS windows-mint.taile9480.ts.net"
+      - "2026-04-14: Port scan over Tailscale — SSH:closed, WinRM:closed, RDP:closed, SMB:open, RPC:open"
+      - "2026-04-14: Tailscale peer data — ExitNode:false, ExitNodeOption:false, PrimaryRoutes:none, AllowedIPs own /32 only"
+      - "2026-04-14: CurAddr 192.168.x.x:1156, relay mia, created 2025-05-22"
+    last_assessed: "2026-04-14"
+    notes: "On tailnet since 2025-05-22. Previously described as route advertiser / exit node but no routes are currently active or approved. No remote admin plane available — SSH, WinRM, and RDP all closed. Requires physical or RDP-enabled access to install OpenSSH before governed admission is possible."
+
+  # Placeholder entries for additional PCs.
+  # Device identity to be populated when machines are physically
+  # audited and Tailscale-enrolled.
+
+  - device_id: pc-additional-1
+    owner: "@operator"
+    platform: windows
+    model: null
+    year: null
+    site: null
+    tailscale_identity: null
+    tailscale_ip: null
+    eligibility_state: unknown
+    role_candidacy: [none]
+    known_constraints: []
+    evidence: []
+    last_assessed: null
+    notes: "Placeholder. Populate when physically audited."
+
+  - device_id: pc-additional-2
+    owner: "@operator"
+    platform: windows
+    model: null
+    year: null
+    site: null
+    tailscale_identity: null
+    tailscale_ip: null
+    eligibility_state: unknown
+    role_candidacy: [none]
+    known_constraints: []
+    evidence: []
+    last_assessed: null
+    notes: "Placeholder. Populate when physically audited."
+
+  # ── Linux machines (reprovisioned from prior OS) ─────────────────────────
+
+  - device_id: raspberry-pi-home-1
+    owner: "@operator"
+    platform: linux
+    model: "Raspberry Pi 3 Model B Rev 1.2"
+    year: 2016
+    site: home
+    tailscale_identity: rpi-home
+    tailscale_ip: "100.x.x.x"
+    eligibility_state: candidate
+    role_candidacy: [none]
+    known_constraints:
+      - "Pi 3 Model B: 1GB RAM (900MB usable), Cortex-A53 4-core, 14.8GB SD card"
+      - "No swap configured (900MB RAM, OOM risk under load)"
+      - "100Mbit ethernet only (built-in, no USB 3.0)"
+      - "Role not selected, not promoted"
+    evidence:
+      - "2026-04-15: LAN identity observed at 10.0.x.x with MAC b8:27:eb:26:52:f7"
+      - "2026-04-15: Model corrected from Pi 4 to Pi 3 Model B Rev 1.2 via /proc/device-tree/model"
+      - "2026-04-15: Cleanup completed — residue packages purged (snapd, cloud-init, modemmanager, wpasupplicant, multipath-tools, open-iscsi, open-vm-tools, lvm2), sleep masked, reboot proof PASS"
+      - "2026-04-15: Tailscale enrolled as rpi-home at 100.x.x.x (clean hostname, no suffix)"
+      - "2026-04-15: Tailscale path proved — SSH via 100.x.x.x confirmed"
+      - "2026-04-16: DHCP fixed IP confirmed on router-primary — 10.0.x.x reserved for MAC b8:27:eb:26:52:f7"
+      - "2026-04-16: Physical ethernet reconnect proof PASS — unplug/replug, DHCP reservation held, LAN SSH confirmed at 10.0.x.x"
+      - "$SPINE_RUNTIME/spine/state/domain-state/spine/RASPBERRY-PI-HOME-1-ASSESSMENT-20260415.md"
+      - "$SPINE_RUNTIME/spine/state/domain-state/spine/GOLDEN-PROVISIONING-RPI-HOME-20260415.md"
+    last_assessed: "2026-04-15"
+    notes: "Home Raspberry Pi 3 Model B. Cleaned to boring baseline on 2026-04-15: single admin account (ubuntu), systemd-networkd, ssh, wired eth0 only, sleep masked, no residue packages. Reboot proof passed. Tailscale enrolled 2026-04-15 as rpi-home (clean hostname). Both LAN (10.0.x.x) and Tailscale (100.x.x.x) paths proved. Not promoted — no role selected, hardware severely constrains viable roles (900MB RAM). DHCP fixed IP confirmed on router-primary 2026-04-16."
+
+  # Placeholder entries for machines reprovisioned to Linux.
+  # Populate when wipe/reimage is complete and Tailscale is enrolled.
+
+  - device_id: linux-reprovision-1
+    owner: "@operator"
+    platform: linux
+    model: null
+    year: null
+    site: null
+    tailscale_identity: null
+    tailscale_ip: null
+    eligibility_state: unknown
+    role_candidacy: [none]
+    known_constraints: []
+    evidence: []
+    last_assessed: null
+    notes: "Placeholder. Populate after reprovision and Tailscale enrollment."
+
+non_activation:
+  statement: >
+    This inventory records operator-owned hardware identity and eligibility
+    classification only. It does not activate, assign, or promote any machine
+    to any node role. Promotion from candidate inventory to active node
+    assignment requires separate explicit Ronny approval.
+  does_not_activate:
+    - node role assignment
+    - host activation
+    - workload redistribution
+    - scheduler materialization
+    - runtime state movement

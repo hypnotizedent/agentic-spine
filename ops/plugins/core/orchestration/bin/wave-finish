@@ -1,0 +1,1241 @@
+#!/usr/bin/env bash
+# wave-finish - Post-wave closure propagation
+#
+# After a wave's work is done, this capability enforces the 4-surface
+# agreement check and propagates closure across all surfaces.
+# Replaces the operator manually closing gaps, updating loop status,
+# checking projections, and cleaning up residue.
+#
+# Part of the authority.resolve -> wave.execute -> wave.finish triad.
+#
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+SP="$ROOT"
+
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+
+GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+GAPS_SQL_LIB="$ROOT/ops/plugins/core/lifecycle/lib"
+CLOSEOUT_BIN="$ROOT/ops/plugins/core/loops/bin/loop-closeout-finalize"
+WORKTREE_CLEANUP_BIN="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-cleanup"
+WORKTREE_LIFECYCLE_CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+SCOPES_DIR="$SPINE_STATE/loop-scopes"
+
+# ── Usage ────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'USAGE'
+wave-finish - Post-wave closure propagation
+
+Usage:
+  wave-finish --loop-id LOOP-... --disposition landed|deferred|superseded|abandoned \
+    [--completion-level slice_complete|loop_complete|domain_complete|estate_complete|readiness_complete] \
+    [--wave-id WAVE-...] [--fixed-in <commit-sha>] \
+    [--skip-residue-check] [--controller-only] [--dry-run]
+
+Disposition = landed requires --completion-level.
+
+--controller-only: Lightweight close path for clean slices with no repo mutation.
+                   Skips worktree cleanup and heavy residue checks. Requires:
+                   - Clean working tree
+                   - Closed orchestration manifest (if exists)
+                   Warns (non-blocking) if worktree cleanup candidates exist.
+
+--check-eligibility: Check if wave is eligible for controller-only mode without
+                     closing. Reports blockers and remediation if ineligible.
+                     Exit 0 always (check-only mode).
+
+Steps:
+  1. Validate loop scope (must be active)
+  2. Collect linked gaps from SQLite authority
+  3. Run 4-surface agreement check (runtime, control-plane, projection, residue)
+  4. Close open gaps and loop (unless --dry-run)
+  5. Emit summary
+
+Exit codes:
+  0  finish complete
+  1  finish failed (gap closure or loop closeout error)
+  2  invalid args or loop not found
+  3  dry-run completed (no mutations made)
+USAGE
+}
+
+resolve_worktree_cleanup_token() {
+  local token_env="OPS_WORKTREE_DELETE_TOKEN"
+  local token_value="RELEASE_MAIN_CLEANUP_WINDOW"
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$WORKTREE_LIFECYCLE_CONTRACT" ]]; then
+    token_env="$(yq e -r '.cleanup.delete_token_env_var // "OPS_WORKTREE_DELETE_TOKEN"' "$WORKTREE_LIFECYCLE_CONTRACT" 2>/dev/null || echo "$token_env")"
+    token_value="$(yq e -r '.cleanup.delete_token_value // "RELEASE_MAIN_CLEANUP_WINDOW"' "$WORKTREE_LIFECYCLE_CONTRACT" 2>/dev/null || echo "$token_value")"
+  fi
+
+  printf '%s\n%s\n' "$token_env" "$token_value"
+}
+
+worktree_cleanup_delete_candidate_count() {
+  [[ -x "$WORKTREE_CLEANUP_BIN" ]] || {
+    printf '0\n'
+    return 0
+  }
+
+  local report_json="" cleanup_count=""
+  report_json="$(mktemp "${SPINE_TMP:-/tmp}/wave-finish-cleanup-count.XXXXXX.json")"
+
+  if "$WORKTREE_CLEANUP_BIN" --mode report-only --json > "$report_json" 2>/dev/null; then
+    cleanup_count="$(python3 - "$report_json" <<'PY'
+import json
+import sys
+
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print("0")
+    raise SystemExit(0)
+
+summary = data.get("summary") or {}
+count = summary.get("delete_candidate_count")
+if count is None:
+    count = len(data.get("delete_candidates") or [])
+
+print(count if isinstance(count, int) else 0)
+PY
+)"
+  else
+    cleanup_count="$("$WORKTREE_CLEANUP_BIN" --mode report-only 2>/dev/null | sed -n 's/^delete_candidates=//p' | tail -1)"
+  fi
+
+  rm -f "$report_json"
+  [[ "$cleanup_count" =~ ^[0-9]+$ ]] || cleanup_count=0
+  printf '%s\n' "$cleanup_count"
+}
+
+RESIDUE_CLEANUP_NOTE=""
+CONTROLLER_PROOF_PATH=""
+
+parity_snapshot_fields() {
+  local payload="${1:-}"
+  python3 - "$payload" <<'PY'
+import json
+import sys
+
+try:
+    d = json.loads(sys.argv[1])
+    if not isinstance(d, dict):
+        raise ValueError("parity payload is not a dict")
+    print("\t".join([
+        "1" if d.get("match") else "0",
+        str(d.get("db_count", 0)),
+        str(d.get("yaml_count", 0)),
+        str(len(d.get("in_db_not_yaml", []))),
+        str(len(d.get("in_yaml_not_db", []))),
+        str(d.get("archived_in_db", 0)),
+        str(d.get("archive_ref", "")),
+    ]))
+except Exception as e:
+    print(f"PARSE_ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+parity_snapshot_note() {
+  local payload="${1:-}"
+  python3 - "$payload" <<'PY'
+import json
+import sys
+
+try:
+    d = json.loads(sys.argv[1])
+    if not isinstance(d, dict):
+        raise ValueError("parity payload is not a dict")
+    archive_ref = d.get("archive_ref", "")
+    if archive_ref:
+        print(
+            "YAML and SQLite aligned (active=%s archived=%s split=%s)"
+            % (d.get("db_count", 0), d.get("archived_in_db", 0), archive_ref)
+        )
+    else:
+        print(
+            "YAML and SQLite aligned (db=%s yaml=%s)"
+            % (d.get("db_count", 0), d.get("yaml_count", 0))
+        )
+except Exception as e:
+    print(f"PARSE_ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+verify_orchestration_terminal_parity() {
+  local loop_id="$1"
+  local manifest="$SPINE_STATE/orchestration/$loop_id/manifest.yaml"
+  [[ -f "$manifest" ]] || return 0
+
+  local manifest_status
+  if ! manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null)"; then
+    echo "unable to read orchestration manifest status from $manifest"
+    return 1
+  fi
+  [[ -n "$manifest_status" && "$manifest_status" != "null" ]] || {
+    echo "unable to read orchestration manifest status from $manifest"
+    return 1
+  }
+  [[ "$manifest_status" == "closed" ]] || {
+    echo "manifest status is '$manifest_status' (expected closed)"
+    return 1
+  }
+
+  local bad_lane_count
+  if ! bad_lane_count="$(yq e -r '[.lanes[] | select((.status // "open") == "open" or (.status // "open") == "ticket-issued" or (.status // "open") == "entry-ready" or (.status // "open") == "validated")] | length' "$manifest" 2>/dev/null)"; then
+    echo "unable to read orchestration manifest lanes from $manifest"
+    return 1
+  fi
+  [[ "$bad_lane_count" =~ ^[0-9]+$ ]] || bad_lane_count=0
+  if [[ "$bad_lane_count" -gt 0 ]]; then
+    echo "$bad_lane_count orchestration lane(s) remain non-terminal in $manifest"
+    return 1
+  fi
+
+  echo "orchestration manifest closed with terminal lane state"
+}
+
+maybe_consume_worktree_cleanup_candidates() {
+  [[ "$SKIP_RESIDUE" -eq 0 ]] || return 0
+  [[ -x "$WORKTREE_CLEANUP_BIN" ]] || return 0
+
+  local report_json delete_candidates root_candidate cleanup_tokens cleanup_token_env cleanup_token_value
+  local archive_out manifest_path delete_out
+
+  report_json="$(mktemp "${SPINE_TMP:-/tmp}/wave-finish-cleanup-report.XXXXXX.json")"
+  if ! "$WORKTREE_CLEANUP_BIN" --mode report-only --json > "$report_json" 2>/dev/null; then
+    rm -f "$report_json"
+    return 0
+  fi
+
+  delete_candidates="$(python3 - "$report_json" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+print(len(data.get("delete_candidates", [])))
+PY
+)"
+  root_candidate="$(python3 - "$report_json" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+root = data.get("root_normalization") or {}
+print(1 if root.get("candidate") else 0)
+PY
+)"
+
+  if [[ "$delete_candidates" -eq 0 && "$root_candidate" -eq 0 ]]; then
+    rm -f "$report_json"
+    return 0
+  fi
+
+  echo "Residue cleanup: consuming $delete_candidates safe delete candidate(s) before residue evaluation..."
+  cleanup_tokens="$(resolve_worktree_cleanup_token)"
+  cleanup_token_env="$(printf '%s\n' "$cleanup_tokens" | sed -n '1p')"
+  cleanup_token_value="$(printf '%s\n' "$cleanup_tokens" | sed -n '2p')"
+
+  if ! archive_out="$("$WORKTREE_CLEANUP_BIN" --mode archive-only 2>&1)"; then
+    echo "wave.finish WARN: lifecycle archive-only cleanup failed; residue check remains authoritative" >&2
+    rm -f "$report_json"
+    return 0
+  fi
+  manifest_path="$(printf '%s\n' "$archive_out" | sed -n 's/^artifact\.archive_manifest=//p' | tail -1)"
+  if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
+    echo "wave.finish WARN: lifecycle cleanup did not produce an archive manifest; residue check remains authoritative" >&2
+    rm -f "$report_json"
+    return 0
+  fi
+
+  if ! delete_out="$(env "$cleanup_token_env=$cleanup_token_value" "$WORKTREE_CLEANUP_BIN" --mode delete --manifest "$manifest_path" 2>&1)"; then
+    echo "wave.finish WARN: lifecycle delete cleanup failed; residue check remains authoritative" >&2
+    rm -f "$report_json"
+    return 0
+  fi
+
+  RESIDUE_CLEANUP_NOTE="auto-cleaned $delete_candidates lifecycle candidate(s)"
+  rm -f "$report_json"
+}
+
+# ── Parse args ───────────────────────────────────────────────────
+
+LOOP_ID=""
+DISPOSITION=""
+COMPLETION_LEVEL=""
+WAVE_ID=""
+FIXED_IN=""
+SKIP_RESIDUE=0
+DRY_RUN=0
+CONTROLLER_ONLY=0
+CHECK_ELIGIBILITY=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --loop-id)
+      LOOP_ID="${2:-}"
+      shift 2
+      ;;
+    --disposition)
+      DISPOSITION="${2:-}"
+      shift 2
+      ;;
+    --completion-level)
+      COMPLETION_LEVEL="${2:-}"
+      shift 2
+      ;;
+    --wave-id)
+      WAVE_ID="${2:-}"
+      shift 2
+      ;;
+    --fixed-in)
+      FIXED_IN="${2:-}"
+      shift 2
+      ;;
+    --skip-residue-check)
+      SKIP_RESIDUE=1
+      shift
+      ;;
+    --controller-only)
+      CONTROLLER_ONLY=1
+      SKIP_RESIDUE=1
+      shift
+      ;;
+    --check-eligibility)
+      CHECK_ELIGIBILITY=1
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --self-check)
+      # Minimal self-check for verify/capability registration.
+      for dep in python3 yq git; do
+        command -v "$dep" >/dev/null 2>&1 || { echo "wave.finish self-check FAIL: missing $dep" >&2; exit 1; }
+      done
+      [[ -f "$CLOSEOUT_BIN" ]] || { echo "wave.finish self-check FAIL: missing loop-closeout-finalize" >&2; exit 1; }
+      [[ -f "$GAPS_BRIDGE" ]] || { echo "wave.finish self-check FAIL: missing gaps-authority-bridge" >&2; exit 1; }
+      echo "wave.finish self-check PASS"
+      exit 0
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "wave.finish FAIL: unknown argument: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+# ── Validate required args ───────────────────────────────────────
+
+LOOP_ID="${LOOP_ID:-${SPINE_ORCH_LOOP_ID:-${SPINE_LOOP_ID:-}}}"
+[[ -n "$LOOP_ID" ]] || { echo "wave.finish FAIL: --loop-id required" >&2; exit 2; }
+
+# Skip disposition validation for check-eligibility mode (read-only)
+if [[ "$CHECK_ELIGIBILITY" -eq 0 ]]; then
+  [[ -n "$DISPOSITION" ]] || { echo "wave.finish FAIL: --disposition required" >&2; exit 2; }
+
+  ALLOWED_DISPOSITIONS="landed deferred superseded abandoned"
+  disposition_ok=0
+  for d in $ALLOWED_DISPOSITIONS; do
+    [[ "$DISPOSITION" == "$d" ]] && { disposition_ok=1; break; }
+  done
+  [[ "$disposition_ok" -eq 1 ]] || {
+    echo "wave.finish FAIL: invalid disposition '$DISPOSITION' (allowed: landed|deferred|superseded|abandoned)" >&2
+    exit 2
+  }
+
+  if [[ "$DISPOSITION" == "landed" && -z "$COMPLETION_LEVEL" ]]; then
+    echo "wave.finish FAIL: --completion-level required when disposition=landed" >&2
+    exit 2
+  fi
+fi
+
+if [[ -n "$COMPLETION_LEVEL" ]]; then
+  ALLOWED_CL="slice_complete loop_complete domain_complete estate_complete readiness_complete"
+  cl_ok=0
+  for cl in $ALLOWED_CL; do
+    [[ "$COMPLETION_LEVEL" == "$cl" ]] && { cl_ok=1; break; }
+  done
+  [[ "$cl_ok" -eq 1 ]] || {
+    echo "wave.finish FAIL: invalid completion_level '$COMPLETION_LEVEL'" >&2
+    exit 2
+  }
+fi
+
+# ── Step 1: Validate loop scope ─────────────────────────────────
+
+SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+if [[ ! -f "$SCOPE_FILE" ]]; then
+  echo "wave.finish FAIL: loop scope not found: $SCOPE_FILE" >&2
+  exit 2
+fi
+
+current_status="$(awk '/^status:/{print $2; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+case "$current_status" in
+  active|draft|open) ;;
+  closed)
+    echo "wave.finish FAIL: loop already closed: $LOOP_ID" >&2
+    exit 2
+    ;;
+  *)
+    echo "wave.finish FAIL: unsupported loop status '$current_status' for $LOOP_ID" >&2
+    exit 2
+    ;;
+esac
+
+# Extract objective for summary.
+objective="$(awk '/^objective:/{sub(/^objective: */, ""); print; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+
+# ── Controller-only eligibility check ────────────────────────────
+if [[ "$CHECK_ELIGIBILITY" -eq 1 ]]; then
+  echo ""
+  echo "================================================================="
+  echo "CONTROLLER-ONLY ELIGIBILITY CHECK: $LOOP_ID"
+  echo "================================================================="
+  echo ""
+
+  ELIGIBLE=1
+  declare -a BLOCKERS=()
+
+  # Check 1: Working tree clean
+  if ! git -C "$ROOT" diff --quiet || ! git -C "$ROOT" diff --cached --quiet || [[ -n "$(git -C "$ROOT" ls-files --others --exclude-standard)" ]]; then
+    ELIGIBLE=0
+    BLOCKERS+=("dirty working tree detected")
+    echo "❌ Working tree: dirty (staged or unstaged changes present)"
+  else
+    echo "✓ Working tree: clean"
+  fi
+
+  # Check 2: Orchestration manifest closed (if exists)
+  manifest="$SPINE_STATE/orchestration/$LOOP_ID/manifest.yaml"
+  if [[ -f "$manifest" ]]; then
+    if ! manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null)"; then
+      ELIGIBLE=0
+      BLOCKERS+=("orchestration manifest unreadable")
+      echo "❌ Orchestration manifest: unreadable at $manifest"
+    elif [[ -z "$manifest_status" || "$manifest_status" == "null" ]]; then
+      ELIGIBLE=0
+      BLOCKERS+=("orchestration manifest unreadable")
+      echo "❌ Orchestration manifest: unreadable at $manifest"
+    elif [[ "$manifest_status" != "closed" ]]; then
+      ELIGIBLE=0
+      BLOCKERS+=("orchestration manifest not closed (status=$manifest_status)")
+      echo "❌ Orchestration manifest: not closed (status=$manifest_status)"
+    else
+      echo "✓ Orchestration manifest: closed"
+    fi
+  else
+    echo "✓ Orchestration manifest: n/a (single-worker loop)"
+  fi
+
+  # Check 3: Projection parity (same SQLite parity model as real close path)
+  if ! elig_parity_result="$(python3 - "$GAPS_SQL_LIB" "$ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+lib_dir = Path(sys.argv[1])
+sys.path.insert(0, str(lib_dir))
+import gaps_sql_authority as gsa
+
+root = Path(sys.argv[2])
+db_path, gaps_yaml = gsa.resolve_paths(root)
+conn = gsa.connect(db_path)
+gsa.ensure_schema(conn)
+gsa.bootstrap_from_yaml(conn, gaps_yaml)
+parity = gsa.db_parity_snapshot(conn, gaps_yaml)
+conn.close()
+print(json.dumps(parity))
+PY
+  )"; then
+    ELIGIBLE=0
+    BLOCKERS+=("projection parity query unreadable")
+    echo "❌ Projection parity: unable to query SQLite authority"
+  elif [[ -n "$elig_parity_result" ]]; then
+    local elig_parity_db_count="" elig_parity_yaml_count="" elig_parity_db_only="" elig_parity_yaml_only="" elig_parity_archived_count="" elig_parity_archive_ref=""
+    local elig_parity_fields=""
+    if ! elig_parity_fields="$(parity_snapshot_fields "$elig_parity_result")"; then
+      ELIGIBLE=0
+      BLOCKERS+=("projection parity unreadable")
+      echo "❌ Projection parity: unreadable result"
+    elif ! IFS=$'\t' read -r elig_parity_match elig_parity_db_count elig_parity_yaml_count elig_parity_db_only elig_parity_yaml_only elig_parity_archived_count elig_parity_archive_ref <<< "$elig_parity_fields"; then
+      ELIGIBLE=0
+      BLOCKERS+=("projection parity unreadable")
+      echo "❌ Projection parity: unreadable result"
+    elif [[ "$elig_parity_match" == "1" ]]; then
+      if ! elig_parity_note="$(parity_snapshot_note "$elig_parity_result")"; then
+        ELIGIBLE=0
+        BLOCKERS+=("projection parity unreadable")
+        echo "❌ Projection parity: unreadable result"
+      else
+        echo "✓ Projection parity: $elig_parity_note"
+      fi
+    else
+      ELIGIBLE=0
+      BLOCKERS+=("projection mismatch (db_only=$elig_parity_db_only yaml_only=$elig_parity_yaml_only)")
+      echo "❌ Projection parity: mismatch (db_only=$elig_parity_db_only yaml_only=$elig_parity_yaml_only; run: gaps.projection.commit)"
+    fi
+  else
+    ELIGIBLE=0
+    BLOCKERS+=("projection parity unavailable")
+    echo "❌ Projection parity: unreadable result"
+  fi
+
+  # Check 4: Worktree cleanup pending
+  if [[ -x "$WORKTREE_CLEANUP_BIN" ]]; then
+    pending_cleanup="$(worktree_cleanup_delete_candidate_count)"
+    if [[ -n "$pending_cleanup" ]] && [[ "$pending_cleanup" -gt 0 ]]; then
+      echo "⚠️  Worktree cleanup: $pending_cleanup candidate(s) pending (will be skipped)"
+    else
+      echo "✓ Worktree cleanup: no candidates pending"
+    fi
+  else
+    echo "✓ Worktree cleanup: check unavailable (assumed clean)"
+  fi
+
+  echo ""
+  echo "================================================================="
+  if [[ "$ELIGIBLE" -eq 1 ]]; then
+    echo "VERDICT: controller-only eligible ✓"
+    echo ""
+    echo "This wave can be closed with:"
+    echo "  wave.finish --loop-id $LOOP_ID --disposition landed \\"
+    echo "    --completion-level slice_complete --controller-only"
+  else
+    echo "VERDICT: requires full ceremony ❌"
+    echo ""
+    echo "Blocking reasons:"
+    for blocker in "${BLOCKERS[@]}"; do
+      echo "  - $blocker"
+    done
+    echo ""
+    echo "Remediation:"
+    echo "  - Commit or stash changes for clean working tree"
+    echo "  - Close orchestration manifest if wave was orchestrated"
+    echo "  - Run gaps.projection.commit to sync gap state"
+  fi
+  echo "================================================================="
+  echo ""
+
+  exit 0
+fi
+
+# ── Controller-only mode validation ──────────────────────────────
+if [[ "$CONTROLLER_ONLY" -eq 1 ]]; then
+  echo "CONTROLLER-ONLY MODE: lightweight close path enabled"
+  echo ""
+  echo "Validating controller-only prerequisites:"
+
+  if [[ -n "$WAVE_ID" ]]; then
+    candidate="$SPINE_RUNTIME_ROOT/waves/$WAVE_ID/controller-close-precheck.json"
+    if [[ -f "$candidate" ]]; then
+      CONTROLLER_PROOF_PATH="$candidate"
+      echo "  ✓ Controller close proof present"
+    fi
+  fi
+
+  # Check 1: No dirty working tree
+  if ! git -C "$ROOT" diff --quiet || ! git -C "$ROOT" diff --cached --quiet || [[ -n "$(git -C "$ROOT" ls-files --others --exclude-standard)" ]]; then
+    echo "  ❌ FAIL: dirty working tree detected (controller-only requires clean state)"
+    exit 1
+  fi
+  echo "  ✓ Working tree clean"
+
+  # Check 2: Orchestration manifest closed (if exists)
+  manifest="$SPINE_STATE/orchestration/$LOOP_ID/manifest.yaml"
+  if [[ -f "$manifest" ]]; then
+    if ! manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null)"; then
+      echo "  ❌ FAIL: orchestration manifest unreadable at $manifest"
+      exit 1
+    fi
+    if [[ -z "$manifest_status" || "$manifest_status" == "null" ]]; then
+      echo "  ❌ FAIL: orchestration manifest unreadable at $manifest"
+      exit 1
+    fi
+    if [[ "$manifest_status" != "closed" ]]; then
+      echo "  ❌ FAIL: orchestration manifest not closed (status=$manifest_status)"
+      exit 1
+    fi
+    echo "  ✓ Orchestration manifest closed"
+  else
+    echo "  ✓ No orchestration manifest (single-worker loop)"
+  fi
+
+  # Check 3: No pending worktree cleanup (simplified check)
+  if [[ -x "$WORKTREE_CLEANUP_BIN" ]]; then
+    pending_cleanup="$(worktree_cleanup_delete_candidate_count)"
+    if [[ "$pending_cleanup" -gt 0 ]]; then
+      echo "  ⚠️  WARN: worktree cleanup candidates exist (will be skipped in controller-only mode)"
+    else
+      echo "  ✓ No pending worktree cleanup"
+    fi
+  fi
+
+  echo ""
+  echo "Controller-only mode validated. Skipping:"
+  echo "  - Heavy residue checks"
+  echo "  - Worktree cleanup consumption"
+  echo "  - Runtime surface validation"
+  echo ""
+fi
+
+echo ""
+echo "================================================================="
+echo "WAVE FINISH: $LOOP_ID"
+echo "================================================================="
+echo ""
+echo "Disposition:      $DISPOSITION"
+echo "Completion Level: ${COMPLETION_LEVEL:-n/a}"
+echo "Wave ID:          ${WAVE_ID:-n/a}"
+echo "Objective:        ${objective:-<none>}"
+if [[ "$CONTROLLER_ONLY" -eq 1 ]]; then
+  echo "Mode:             controller-only (lightweight)"
+  if [[ -n "$CONTROLLER_PROOF_PATH" ]]; then
+    echo "Controller Proof: $CONTROLLER_PROOF_PATH"
+  fi
+fi
+echo ""
+
+# ── Step 2: Collect linked gaps from SQLite authority ────────────
+
+# Query SQLite for all gaps with parent_loop = LOOP_ID.
+# Returns JSON lines: {"gap_id": "...", "status": "...", "severity": "..."}
+gap_query_result="$(python3 - "$GAPS_SQL_LIB" "$ROOT" "$LOOP_ID" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+lib_dir = Path(sys.argv[1])
+sys.path.insert(0, str(lib_dir))
+import gaps_sql_authority as gsa
+
+root = Path(sys.argv[2])
+loop_id = sys.argv[3]
+
+db_path, gaps_yaml = gsa.resolve_paths(root)
+conn = gsa.connect(db_path)
+gsa.ensure_schema(conn)
+gsa.bootstrap_from_yaml(conn, gaps_yaml)
+
+all_gaps = gsa.fetch_gaps(conn)
+linked = [g for g in all_gaps if g.get("parent_loop") == loop_id]
+
+open_gaps = [g for g in linked if g.get("status") in ("open", "accepted")]
+closed_gaps = [g for g in linked if g.get("status") in ("fixed", "closed", "wontfix")]
+
+result = {
+    "open": [{"gap_id": g["id"], "severity": g.get("severity", "medium"), "regression_lock_id": g.get("regression_lock_id", "")} for g in open_gaps],
+    "closed": [{"gap_id": g["id"], "severity": g.get("severity", "medium")} for g in closed_gaps],
+    "parity": gsa.db_parity_snapshot(conn, gaps_yaml),
+}
+result["total_db_count"] = gsa.gap_count(conn)
+
+conn.close()
+print(json.dumps(result))
+PY
+)" || {
+  echo "wave.finish FAIL: SQLite gap query failed" >&2
+  exit 1
+}
+
+# Parse gap query result — single validated extraction.
+_gap_parsed="$(python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    if not isinstance(d, dict):
+        raise ValueError('gap query result is not a dict')
+    for key in ('open', 'closed', 'parity'):
+        if key not in d:
+            raise KeyError(f'missing required key: {key}')
+    p = d['parity']
+    print(len(d['open']))
+    print(len(d['closed']))
+    print('1' if p.get('match') else '0')
+    print(p.get('db_count', 0))
+    print(p.get('yaml_count', 0))
+    print(len(p.get('in_db_not_yaml', [])))
+    print(len(p.get('in_yaml_not_db', [])))
+    print(p.get('archived_in_db', 0))
+    print(p.get('archive_ref', ''))
+except Exception as e:
+    print(f'PARSE_ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+" "$gap_query_result")" || {
+  echo "wave.finish FAIL: gap query result parse failed" >&2
+  exit 1
+}
+open_gap_count="$(sed -n '1p' <<< "$_gap_parsed")"
+closed_gap_count="$(sed -n '2p' <<< "$_gap_parsed")"
+parity_match="$(sed -n '3p' <<< "$_gap_parsed")"
+parity_db_count="$(sed -n '4p' <<< "$_gap_parsed")"
+parity_yaml_count="$(sed -n '5p' <<< "$_gap_parsed")"
+parity_db_only_count="$(sed -n '6p' <<< "$_gap_parsed")"
+parity_yaml_only_count="$(sed -n '7p' <<< "$_gap_parsed")"
+parity_archived_count="$(sed -n '8p' <<< "$_gap_parsed")"
+parity_archive_ref="$(sed -n '9p' <<< "$_gap_parsed")"
+
+# Slice completion means one bounded wave slice is done, not that the parent loop
+# is complete. Preserve loop continuity and leave loop-linked gaps untouched.
+PRESERVE_PARENT_LOOP=0
+if [[ "${COMPLETION_LEVEL:-}" == "slice_complete" ]]; then
+  PRESERVE_PARENT_LOOP=1
+fi
+
+# Determine gap closure behavior per disposition.
+GAP_CLOSE_STATUS=""
+if [[ "$PRESERVE_PARENT_LOOP" -eq 0 ]]; then
+  case "$DISPOSITION" in
+    landed)     GAP_CLOSE_STATUS="fixed" ;;
+    abandoned)  GAP_CLOSE_STATUS="wontfix" ;;
+    deferred)   GAP_CLOSE_STATUS="" ;;  # open gaps stay open
+    superseded) GAP_CLOSE_STATUS="" ;;  # open gaps stay open (reparent manually if needed)
+  esac
+fi
+
+echo "Gap Inventory:"
+echo "  Open:           $open_gap_count"
+echo "  Already closed: $closed_gap_count"
+if [[ -n "$GAP_CLOSE_STATUS" ]]; then
+  echo "  Action:         close as $GAP_CLOSE_STATUS"
+elif [[ "$PRESERVE_PARENT_LOOP" -eq 1 ]]; then
+  echo "  Action:         no closure (slice_complete retains parent loop continuity)"
+else
+  echo "  Action:         no closure (disposition=$DISPOSITION)"
+fi
+echo ""
+
+# ── Step 3: 4-Surface Agreement Check ───────────────────────────
+
+# Surfaces start as UNCHECKED — no silent PASS defaults.
+# Each check must explicitly set PASS, WARN, or FAIL.
+# UNCHECKED surfaces block --disposition landed (treated as non-PASS).
+surface_runtime="UNCHECKED"
+surface_runtime_note=""
+surface_control="UNCHECKED"
+surface_control_note=""
+surface_projection="UNCHECKED"
+surface_projection_note=""
+surface_residue="UNCHECKED"
+surface_residue_note=""
+declare -a NON_PASS_SURFACES=()
+declare -a PRE_MUTATION_BLOCKERS=()
+
+# Surface 1: Runtime Agreement
+# Check for open critical/high gaps that won't be closed.
+if [[ -z "$GAP_CLOSE_STATUS" && "$open_gap_count" -gt 0 ]]; then
+  # Disposition is deferred/superseded — gaps remain open. Check severity.
+  crit_high_open="$(python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+count = sum(1 for g in d['open'] if g['severity'] in ('critical','high'))
+print(count)
+" "$gap_query_result")"
+  if [[ "$crit_high_open" -gt 0 ]]; then
+    surface_runtime="WARN"
+    surface_runtime_note="$crit_high_open critical/high gaps remain open"
+  else
+    surface_runtime="PASS"
+    surface_runtime_note="no critical/high gaps remaining"
+  fi
+else
+  surface_runtime="PASS"
+  surface_runtime_note="gaps closed or none open"
+fi
+
+# Surface 2: Control-Plane Agreement
+control_plane_paths=(
+  ops/bindings/
+  ops/capabilities.yaml
+  ops/plugins/MANIFEST.yaml
+)
+dirty_control_plane="$(git -C "$ROOT" status --porcelain -- "${control_plane_paths[@]}" 2>/dev/null | head -5 || true)"
+if [[ -n "$dirty_control_plane" ]]; then
+  surface_control="WARN"
+  dirty_count="$(echo "$dirty_control_plane" | wc -l | tr -d ' ')"
+  surface_control_note="$dirty_count dirty governed control-plane files"
+else
+  surface_control="PASS"
+  surface_control_note="no dirty governed control-plane files"
+fi
+
+# Surface 3: Projection Agreement
+# If gap closure will mutate SQLite, defer projection parity until after the
+# safe projection point. Otherwise, treat the current parity as pre-mutation.
+projection_preflight_now=0
+if [[ -z "$GAP_CLOSE_STATUS" || "$open_gap_count" -eq 0 ]]; then
+  projection_preflight_now=1
+  if [[ "$parity_match" == "1" ]]; then
+    surface_projection="PASS"
+    if [[ -n "$parity_archive_ref" ]]; then
+      surface_projection_note="YAML and SQLite aligned (active=$parity_db_count archived=$parity_archived_count split=$parity_archive_ref)"
+    else
+      surface_projection_note="YAML and SQLite aligned (db=$parity_db_count yaml=$parity_yaml_count)"
+    fi
+  else
+    surface_projection="WARN"
+    surface_projection_note="projection mismatch (db_only=$parity_db_only_count yaml_only=$parity_yaml_only_count active_db=$parity_db_count yaml=$parity_yaml_count; run: gaps-authority-bridge project)"
+  fi
+else
+  surface_projection="DEFERRED"
+  surface_projection_note="will re-evaluate after deferred gap projection"
+fi
+
+# Surface 4: Residue Check
+if [[ "$SKIP_RESIDUE" -eq 0 ]]; then
+  maybe_consume_worktree_cleanup_candidates
+
+  # Check worktrees mentioning this loop or related branches.
+  loop_lower="$(echo "$LOOP_ID" | tr '[:upper:]' '[:lower:]')"
+  worktree_residue="$(git -C "$ROOT" worktree list 2>/dev/null | grep -i "$loop_lower" || true)"
+  branch_residue="$(git -C "$ROOT" branch --list "*${LOOP_ID}*" 2>/dev/null | head -5 || true)"
+
+  if [[ -n "$worktree_residue" || -n "$branch_residue" ]]; then
+    surface_residue="WARN"
+    residue_items=""
+    [[ -n "$worktree_residue" ]] && residue_items="worktrees found"
+    [[ -n "$branch_residue" ]] && {
+      [[ -n "$residue_items" ]] && residue_items+=", "
+      residue_items+="branches found"
+    }
+    surface_residue_note="$residue_items"
+    if [[ -n "$RESIDUE_CLEANUP_NOTE" ]]; then
+      surface_residue_note="$surface_residue_note after $RESIDUE_CLEANUP_NOTE"
+    fi
+  else
+    surface_residue="PASS"
+    surface_residue_note="no orphan worktrees or branches"
+    if [[ -n "$RESIDUE_CLEANUP_NOTE" ]]; then
+      surface_residue_note="$surface_residue_note after $RESIDUE_CLEANUP_NOTE"
+    fi
+  fi
+else
+  surface_residue="PASS"
+  surface_residue_note="skipped (--skip-residue-check)"
+fi
+
+for surface_status in \
+  "runtime:$surface_runtime" \
+  "control-plane:$surface_control" \
+  "residue:$surface_residue"
+do
+  surface_name="${surface_status%%:*}"
+  result="${surface_status#*:}"
+  if [[ "$result" != "PASS" ]]; then
+    PRE_MUTATION_BLOCKERS+=("$surface_name=$result")
+  fi
+done
+
+orchestration_status_summary="n/a"
+if ! orchestration_status_summary="$(verify_orchestration_terminal_parity "$LOOP_ID" 2>&1)"; then
+  echo "wave.finish FAIL: orchestration terminal parity check failed" >&2
+  echo "  - $orchestration_status_summary" >&2
+  exit 1
+fi
+
+if [[ "$projection_preflight_now" -eq 1 && "$surface_projection" != "PASS" ]]; then
+  PRE_MUTATION_BLOCKERS+=("projections=$surface_projection")
+fi
+
+# Print surface agreement.
+_surface_sym() {
+  case "$1" in
+    PASS) printf "PASS" ;;
+    WARN) printf "WARN" ;;
+    FAIL) printf "FAIL" ;;
+    DEFERRED) printf "DEFERRED" ;;
+    UNCHECKED) printf "UNCHECKED" ;;
+  esac
+}
+
+echo "Surface Agreement:"
+printf "  Runtime:        %s" "$(_surface_sym "$surface_runtime")"
+[[ -n "$surface_runtime_note" ]] && printf " (%s)" "$surface_runtime_note"
+echo ""
+printf "  Control-Plane:  %s" "$(_surface_sym "$surface_control")"
+[[ -n "$surface_control_note" ]] && printf " (%s)" "$surface_control_note"
+echo ""
+printf "  Projections:    %s" "$(_surface_sym "$surface_projection")"
+[[ -n "$surface_projection_note" ]] && printf " (%s)" "$surface_projection_note"
+echo ""
+printf "  Residue:        %s" "$(_surface_sym "$surface_residue")"
+[[ -n "$surface_residue_note" ]] && printf " (%s)" "$surface_residue_note"
+echo ""
+if [[ "$orchestration_status_summary" != "n/a" ]]; then
+  printf "  Orchestration:  %s" "$orchestration_status_summary"
+  echo ""
+fi
+echo ""
+
+if [[ "$DISPOSITION" == "landed" && "${#PRE_MUTATION_BLOCKERS[@]}" -gt 0 ]]; then
+  non_pass_csv="$(IFS=', '; echo "${PRE_MUTATION_BLOCKERS[*]}")"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "DRY RUN: landed disposition would be blocked by non-PASS surfaces: $non_pass_csv"
+    echo ""
+    echo "Use disposition=deferred or repair the reported surfaces before landing."
+    exit 3
+  fi
+  echo "wave.finish FAIL: landed disposition requires PASS on all four surfaces" >&2
+  echo "Non-PASS surfaces: $non_pass_csv" >&2
+  echo "Use disposition=deferred or repair the reported surfaces before landing." >&2
+  exit 1
+fi
+
+# ── Step 4: Execute closure ──────────────────────────────────────
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "DRY RUN: no mutations made"
+  echo ""
+  if [[ -n "$GAP_CLOSE_STATUS" && "$open_gap_count" -gt 0 ]]; then
+    echo "Would close $open_gap_count gaps as $GAP_CLOSE_STATUS"
+    python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+for g in d['open']:
+    print(f\"  {g['gap_id']} ({g['severity']})\")
+" "$gap_query_result"
+  fi
+  echo "Would close loop $LOOP_ID with disposition=$DISPOSITION"
+  if [[ "$PRESERVE_PARENT_LOOP" -eq 1 ]]; then
+    echo "Would keep parent loop active because completion_level=slice_complete"
+  fi
+  echo ""
+  echo "================================================================="
+  echo "WAVE FINISH DRY RUN COMPLETE"
+  echo "================================================================="
+  exit 3
+fi
+
+# ── 4a: Close open gaps via SQLite bridge ────────────────────────
+# loop-closeout-finalize already handles gap closure when called
+# without --no-close-linked-gaps. However, it reads gaps from YAML
+# (operational.gaps.yaml) not SQLite. Since authority is now in SQLite,
+# we close gaps via the bridge first, then tell loop-closeout-finalize
+# to skip its own gap closure with --no-close-linked-gaps.
+
+gaps_closed=0
+gaps_errored=0
+gap_close_detail=""
+severity_counts_high=0
+severity_counts_medium=0
+severity_counts_low=0
+
+if [[ -n "$GAP_CLOSE_STATUS" && "$open_gap_count" -gt 0 ]]; then
+  echo "Closing $open_gap_count linked gaps..."
+
+  # Extract gap IDs, severities, and existing regression_lock_ids.
+  mapfile -t GAP_IDS < <(python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+for g in d['open']:
+    print(g['gap_id'])
+" "$gap_query_result")
+
+  mapfile -t GAP_SEVS < <(python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+for g in d['open']:
+    print(g['severity'])
+" "$gap_query_result")
+
+  mapfile -t GAP_RLOCK < <(python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+for g in d['open']:
+    print(g.get('regression_lock_id',''))
+" "$gap_query_result")
+
+  for idx in "${!GAP_IDS[@]}"; do
+    gid="${GAP_IDS[$idx]}"
+    sev="${GAP_SEVS[$idx]}"
+    rlock="${GAP_RLOCK[$idx]}"
+
+    bridge_args=("close" "--id" "$gid" "--status" "$GAP_CLOSE_STATUS")
+    bridge_args+=("--actor" "wave.finish")
+    bridge_args+=("--reason" "Closed by wave.finish: $LOOP_ID disposition=$DISPOSITION")
+    bridge_args+=("--defer-sync")
+
+    if [[ -n "$FIXED_IN" ]]; then
+      bridge_args+=("--fixed-in" "$FIXED_IN")
+    else
+      bridge_args+=("--fixed-in" "$LOOP_ID")
+    fi
+
+    if [[ -n "$COMPLETION_LEVEL" ]]; then
+      bridge_args+=("--completion-level" "$COMPLETION_LEVEL")
+    fi
+
+    # For high/critical gaps, pass regression-lock-id.
+    # Use existing lock if present, otherwise use LOOP_ID.
+    if [[ "$sev" == "critical" || "$sev" == "high" ]]; then
+      if [[ -n "$rlock" ]]; then
+        bridge_args+=("--regression-lock-id" "$rlock")
+      else
+        bridge_args+=("--regression-lock-id" "$LOOP_ID")
+      fi
+    fi
+
+    if python3 "$GAPS_BRIDGE" "${bridge_args[@]}" >/dev/null 2>&1; then
+      gaps_closed=$((gaps_closed + 1))
+      case "$sev" in
+        critical|high) severity_counts_high=$((severity_counts_high + 1)) ;;
+        medium)        severity_counts_medium=$((severity_counts_medium + 1)) ;;
+        *)             severity_counts_low=$((severity_counts_low + 1)) ;;
+      esac
+    else
+      gaps_errored=$((gaps_errored + 1))
+      echo "  ERROR: failed to close $gid" >&2
+    fi
+  done
+
+  echo "  Closed: $gaps_closed  Errors: $gaps_errored"
+  echo ""
+fi
+
+if [[ "$gaps_errored" -gt 0 ]]; then
+  echo "wave.finish FAIL: $gaps_errored gap(s) failed to close" >&2
+  echo "Loop $LOOP_ID remains active. Resolve gap closure errors and retry." >&2
+  exit 1
+fi
+
+if [[ "$gaps_closed" -gt 0 ]]; then
+  echo "Projecting gap authority to YAML after deferred gap closes..."
+  projection_output=""
+  if ! projection_output="$(python3 "$GAPS_BRIDGE" project 2>&1)"; then
+    echo "wave.finish FAIL: gap projection sync failed" >&2
+    echo "$projection_output" >&2
+    exit 1
+  fi
+  echo "$projection_output"
+  echo ""
+
+  if ! gap_projection_refresh="$(python3 - "$GAPS_SQL_LIB" "$ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+lib_dir = Path(sys.argv[1])
+sys.path.insert(0, str(lib_dir))
+import gaps_sql_authority as gsa
+
+root = Path(sys.argv[2])
+db_path, gaps_yaml = gsa.resolve_paths(root)
+conn = gsa.connect(db_path)
+gsa.ensure_schema(conn)
+gsa.bootstrap_from_yaml(conn, gaps_yaml)
+parity = gsa.db_parity_snapshot(conn, gaps_yaml)
+conn.close()
+print(json.dumps(parity))
+PY
+  )"; then
+    echo "wave.finish FAIL: unable to re-query projection parity after sync" >&2
+    exit 1
+  fi
+
+  parity_fields="$(parity_snapshot_fields "$gap_projection_refresh")" || {
+    echo "wave.finish FAIL: unreadable projection parity payload after sync" >&2
+    exit 1
+  }
+  if ! IFS=$'\t' read -r parity_match parity_db_count parity_yaml_count parity_db_only_count parity_yaml_only_count parity_archived_count parity_archive_ref <<< "$parity_fields"; then
+    echo "wave.finish FAIL: unreadable projection parity payload after sync" >&2
+    exit 1
+  fi
+
+  if [[ "$parity_match" == "1" ]]; then
+    if [[ -n "$parity_archive_ref" ]]; then
+      surface_projection="PASS"
+      surface_projection_note="YAML and SQLite aligned (active=$parity_db_count archived=$parity_archived_count split=$parity_archive_ref)"
+    else
+      surface_projection="PASS"
+      surface_projection_note="YAML and SQLite aligned (db=$parity_db_count yaml=$parity_yaml_count)"
+    fi
+  else
+    surface_projection="WARN"
+    surface_projection_note="projection mismatch (db_only=$parity_db_only_count yaml_only=$parity_yaml_only_count active_db=$parity_db_count yaml=$parity_yaml_count; run: gaps-authority-bridge project)"
+  fi
+fi
+
+declare -a NON_PASS_SURFACES=()
+for surface_status in \
+  "runtime:$surface_runtime" \
+  "control-plane:$surface_control" \
+  "projections:$surface_projection" \
+  "residue:$surface_residue"
+do
+  surface_name="${surface_status%%:*}"
+  result="${surface_status#*:}"
+  if [[ "$result" != "PASS" ]]; then
+    NON_PASS_SURFACES+=("$surface_name=$result")
+  fi
+done
+
+if [[ "$DISPOSITION" == "landed" && "${#NON_PASS_SURFACES[@]}" -gt 0 ]]; then
+  non_pass_csv="$(IFS=', '; echo "${NON_PASS_SURFACES[*]}")"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "DRY RUN: landed disposition would be blocked by non-PASS surfaces: $non_pass_csv"
+    echo ""
+    echo "Use disposition=deferred or repair the reported surfaces before landing."
+    exit 3
+  fi
+  echo "wave.finish FAIL: landed disposition requires PASS on all four surfaces" >&2
+  echo "Non-PASS surfaces: $non_pass_csv" >&2
+  echo "Use disposition=deferred or repair the reported surfaces before landing." >&2
+  exit 1
+fi
+
+# ── 4b: Build acceptance matrix for loop-closeout-finalize ───────
+
+MATRIX_FILE="$(mktemp "${SPINE_TMP:-/tmp}/wave-finish-matrix.XXXXXX.md")"
+trap 'rm -f "$MATRIX_FILE" 2>/dev/null' EXIT INT TERM
+
+cat > "$MATRIX_FILE" <<EOF
+# Wave Finish Acceptance Matrix
+# Generated by wave.finish for $LOOP_ID
+
+decision: DONE
+blocker_count: ${#NON_PASS_SURFACES[@]}
+
+| check | surface | result | detail |
+|-------|---------|--------|--------|
+| runtime_agreement | runtime | $surface_runtime | $surface_runtime_note |
+| control_plane_agreement | control-plane | $surface_control | $surface_control_note |
+| projection_agreement | projections | $surface_projection | $surface_projection_note |
+| residue_check | residue | $surface_residue | $surface_residue_note |
+
+run_key: ${SPINE_CAP_RUN_KEY:-manual}
+
+# Contract-valid run key lines for loop-closeout-finalize validation.
+${SPINE_CAP_RUN_KEY:-manual}
+EOF
+
+# ── 4c: Close loop via loop-closeout-finalize ────────────────────
+
+loop_status_summary="closed ($DISPOSITION, ${COMPLETION_LEVEL:-n/a})"
+if [[ "$PRESERVE_PARENT_LOOP" -eq 1 ]]; then
+  echo "Preserving parent loop continuity: completion_level=slice_complete (loop remains active)"
+  echo ""
+  loop_status_summary="active (slice_complete retains parent loop)"
+else
+  echo "Closing loop: $LOOP_ID"
+
+  closeout_args=(
+    "--loop-id" "$LOOP_ID"
+    "--disposition" "$DISPOSITION"
+    "--acceptance-matrix" "$MATRIX_FILE"
+    "--no-close-linked-gaps"
+  )
+
+  if [[ -n "$COMPLETION_LEVEL" ]]; then
+    closeout_args+=("--completion-level" "$COMPLETION_LEVEL")
+  fi
+
+  # For high-severity gap fix-to-lock, pass the loop_id as regression lock.
+  closeout_args+=("--regression-lock-id" "$LOOP_ID")
+  prop_evidence="wave.finish 4-surface check: runtime=$surface_runtime, control-plane=$surface_control, projections=$surface_projection, residue=$surface_residue"
+  closeout_args+=("--evidence" "wave.finish run_key=${SPINE_CAP_RUN_KEY:-manual}; $prop_evidence")
+
+  closeout_output="$("$CLOSEOUT_BIN" "${closeout_args[@]}" 2>&1)" || {
+    closeout_rc=$?
+    echo "wave.finish FAIL: loop-closeout-finalize exited $closeout_rc" >&2
+    echo "$closeout_output" >&2
+    echo "" >&2
+    echo "CRITICAL: $gaps_closed gaps were already closed but loop remains open." >&2
+    echo "Manual intervention required: re-run wave.finish or close loop manually." >&2
+    exit 1
+  }
+
+  echo "$closeout_output"
+  echo ""
+fi
+
+# ── Step 4d: Transition parity gate ────────────────────────────
+
+PARITY_CHECK_BIN="$ROOT/ops/plugins/core/lifecycle/bin/transition-parity-check"
+parity_result="pass"
+parity_exit=0
+
+if [[ -x "$PARITY_CHECK_BIN" ]]; then
+  echo "Running transition.parity.check..."
+  parity_output="$("$PARITY_CHECK_BIN" --json 2>&1)" || parity_exit=$?
+
+  if [[ "$parity_exit" -eq 0 ]]; then
+    parity_result="pass"
+    echo "  Transition parity: PASS"
+  elif [[ "$parity_exit" -eq 2 ]]; then
+    parity_result="degraded"
+    echo "  Transition parity: DEGRADED (authority surface unavailable)" >&2
+    echo "$parity_output" >&2
+  else
+    parity_result="fail"
+    echo "  Transition parity: FAIL" >&2
+    # Extract and display failure details
+    if command -v python3 >/dev/null 2>&1; then
+      python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    for c in d.get('checks', []):
+        if c.get('result') == 'fail':
+            print(f\"    [{c['check']}] {c['name']}:\", file=sys.stderr)
+            for f in c.get('failures', []):
+                print(f'      {f}', file=sys.stderr)
+except Exception:
+    pass
+" "$parity_output" 2>&1 >&2 || true
+    fi
+  fi
+  echo ""
+else
+  echo "  Transition parity: SKIPPED (transition-parity-check not found)"
+  echo ""
+fi
+
+if [[ "$parity_result" != "pass" ]]; then
+  echo "wave.finish FAIL: transition parity $parity_result after closeout" >&2
+  echo "The canonical mutation has landed, but derived projection surfaces do not agree." >&2
+  echo "Run: transition.parity.check for details. Do NOT re-close the loop." >&2
+  exit 1
+fi
+
+# ── Step 5: Emit summary ────────────────────────────────────────
+
+echo "================================================================="
+echo "WAVE FINISH SUMMARY"
+echo "================================================================="
+echo ""
+echo "Loop:             $LOOP_ID"
+echo "Disposition:      $DISPOSITION"
+echo "Completion Level: ${COMPLETION_LEVEL:-n/a}"
+echo "Wave ID:          ${WAVE_ID:-n/a}"
+echo ""
+echo "Gap Closure:"
+echo "  Closed:         $gaps_closed ($severity_counts_high high, $severity_counts_medium medium, $severity_counts_low low)"
+echo "  Already closed: $closed_gap_count"
+echo "  Errors:         $gaps_errored"
+echo ""
+echo "Surface Agreement:"
+echo "  Runtime:        $surface_runtime"
+echo "  Control-Plane:  $surface_control"
+echo "  Projections:    $surface_projection"
+echo "  Residue:        $surface_residue"
+echo ""
+echo "Loop Status:      $loop_status_summary"
+echo "Orchestration:    $orchestration_status_summary"
+echo ""
+echo "================================================================="
+echo "WAVE FINISH COMPLETE"
+echo "================================================================="

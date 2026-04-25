@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Create a new ssh.targets.yaml entry with complete identity. Dry-run by
+default; --execute to mutate.
+
+Rejects if target_id already exists (use provision.ssh-target.update instead).
+Requires tailscale_ip — no incomplete entries.
+
+Usage:
+  ./bin/ops cap run provision.ssh-target.create -- --target-id new-device \
+      --host 10.0.x.x --tailscale-ip 100.x.x.x --user ubuntu \
+      --description "New device" --tags "operator-hardware,linux,home" \
+      --access-policy lan_first
+
+  ./bin/ops cap run provision.ssh-target.create -- --target-id new-device \
+      --host 10.0.x.x --tailscale-ip 100.x.x.x --user ubuntu \
+      --description "New device" --tags "operator-hardware,linux,home" \
+      --access-policy lan_first --execute
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+def spine_state() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_STATE",
+            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+        )
+    )
+
+
+def spine_code() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_CODE",
+            str(Path.home() / "code" / "agentic-spine"),
+        )
+    )
+
+
+def load_ssh_targets(path: Path) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def find_target(data: dict, target_id: str) -> dict | None:
+    for t in data.get("ssh", {}).get("targets", []):
+        if t.get("id") == target_id:
+            return t
+    return None
+
+
+def build_entry(args) -> dict:
+    entry = {
+        "id": args.target_id,
+        "host": args.host,
+        "tailscale_ip": args.tailscale_ip,
+        "user": args.user,
+        "access_policy": args.access_policy,
+        "description": args.description,
+        "tags": [t.strip() for t in args.tags.split(",")],
+    }
+
+    if args.mac:
+        entry["mac"] = args.mac
+    if args.site:
+        entry["site"] = args.site
+    if args.probe_via:
+        entry["probe_via"] = args.probe_via
+    if args.optional:
+        entry["optional"] = True
+
+    return entry
+
+
+def write_receipt(args, entry: dict, receipt_dir: Path) -> Path:
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    receipt_path = receipt_dir / f"ssh-target-create-{args.target_id}-{ts}.yaml"
+    receipt = {
+        "capability": "provision.ssh-target.create",
+        "target_id": args.target_id,
+        "timestamp": ts,
+        "mode": "execute",
+        "entry_created": entry,
+    }
+    with open(receipt_path, "w") as f:
+        yaml.dump(receipt, f, default_flow_style=False, sort_keys=False)
+    return receipt_path
+
+
+def dump_yaml_preserving(data: dict, path: Path) -> None:
+    with open(path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Create new SSH target entry")
+    parser.add_argument("--target-id", required=True, help="New target ID (must not exist)")
+    parser.add_argument("--host", required=True, help="LAN IP or hostname")
+    parser.add_argument("--tailscale-ip", required=True, help="Tailscale IP (required)")
+    parser.add_argument("--user", required=True, help="SSH user")
+    parser.add_argument("--description", required=True, help="Target description")
+    parser.add_argument("--tags", required=True, help="Tag list (comma-separated)")
+    parser.add_argument("--access-policy", required=True, help="Access policy value")
+    parser.add_argument("--mac", help="MAC address")
+    parser.add_argument("--site", help="Site (home, shop)")
+    parser.add_argument("--probe-via", help="Probe via target ID")
+    parser.add_argument("--optional", action="store_true", help="Mark as optional")
+    parser.add_argument("--execute", action="store_true", help="Actually mutate (default: dry-run)")
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    args, _ = parser.parse_known_args()
+
+    ssh_path = spine_code() / "ops" / "bindings" / "ssh.targets.yaml"
+    data = load_ssh_targets(ssh_path)
+
+    # Guard: reject if target already exists
+    existing = find_target(data, args.target_id)
+    if existing is not None:
+        print(f"ERROR: target_id '{args.target_id}' already exists in ssh.targets.yaml "
+              f"(use provision.ssh-target.update instead)", file=sys.stderr)
+        return 1
+
+    entry = build_entry(args)
+    mode = "execute" if args.execute else "dry-run"
+
+    if args.json:
+        result = {
+            "capability": "provision.ssh-target.create",
+            "target_id": args.target_id,
+            "mode": mode,
+            "entry": entry,
+        }
+        if args.execute:
+            data["ssh"]["targets"].append(entry)
+            dump_yaml_preserving(data, ssh_path)
+            receipt_path = write_receipt(args, entry, spine_state() / "provision-receipts")
+            result["receipt"] = str(receipt_path)
+            result["status"] = "created"
+        else:
+            result["status"] = "dry_run"
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"provision.ssh-target.create: {args.target_id}  [{mode}]")
+        print("─" * 60)
+        print(f"  Proposed new entry:")
+        for k, v in entry.items():
+            print(f"    {k}: {v}")
+
+        if args.execute:
+            data["ssh"]["targets"].append(entry)
+            dump_yaml_preserving(data, ssh_path)
+            receipt_path = write_receipt(args, entry, spine_state() / "provision-receipts")
+            print(f"\n✓ Created. Receipt: {receipt_path}")
+        else:
+            print(f"\n  (dry-run — add --execute to apply)")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

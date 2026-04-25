@@ -1,0 +1,201 @@
+# Alerting Rules Contract
+# Status: authoritative
+# Last verified: 2026-04-13
+# Scope: alerting dispatch thresholds and channels
+
+version: "1.3"
+updated_at: "2026-04-13"
+owner: "@operator"
+scope: alerting-rules
+
+defaults:
+  snapshot_path: /tmp/spine-alerting-probe-latest.json
+  alert_outbox_dir: $SPINE_OUTBOX/alerts
+  cooldown_seconds: 1800
+  trigger_statuses:
+    - warn
+    - incident
+  channels:
+    - bridge-push
+
+channels:
+  ha:
+    enabled: false
+    endpoint_env: ALERTING_HA_URL
+    token_env: ALERTING_HA_TOKEN
+    service_path: /api/services/persistent_notification/create
+    retired: true
+    retired_at: "2026-04-22"
+    retirement_reason: >
+      Dashboard persistent notification only — not a proven wake-the-operator
+      interrupt. Replaced by mobile-push for operator-critical and bridge-push
+      for artifact logging. HA URL/token remain provisioned for mobile-push.
+  bridge-push:
+    enabled: true
+    outbox_file: $SPINE_OUTBOX/alerts/bridge-push.log
+  mobile-push:
+    enabled: true
+    endpoint_env: ALERTING_HA_URL
+    token_env: ALERTING_HA_TOKEN
+    service_path: /api/services/notify/mobile_app_ronnys_iphone
+    scope: operator-critical-interrupt-only
+    trigger_gate: incident
+  email:
+    enabled: true
+    mode: intent-flush
+    # Auto dispatch writes structured intent artifacts to
+    # $SPINE_OUTBOX/alerts/email-intents/*.yaml (no direct provider call).
+    # Flush via manual capability: communications.alerts.flush
+    # which runs communications.send.preview + communications.send.execute
+    # per intent, preserving the manual approval boundary for real sends.
+    intent_dir: $SPINE_OUTBOX/alerts/email-intents
+    flush_capability: communications.alerts.flush
+
+rules:
+  - domain_id: automation-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 900
+    channels: [bridge-push, email]
+
+  - domain_id: finance-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 900
+    channels: [bridge-push, email]
+
+  - domain_id: z2m-bridge
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 1800
+    channels: [bridge-push, email]
+
+  - domain_id: immich-stack
+    trigger_statuses: [incident]
+    cooldown_seconds: 1800
+    channels: [bridge-push, email]
+
+  - domain_id: infra-core-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 900
+    channels: [bridge-push, email, mobile-push]
+
+  - domain_id: observability-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 1800
+    channels: [bridge-push, email]
+
+  - domain_id: dev-tools-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 900
+    channels: [bridge-push, email]
+
+  - domain_id: mint-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 1800
+    channels: [bridge-push, email]
+
+  - domain_id: mcp-runtime-anti-drift
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 900
+    channels: [bridge-push, email, mobile-push]
+
+# ----------------------------------------------------------------------
+# Autonomous Operator Interrupt Contract (v1)
+# Formalized: 2026-04-13
+# Amended: 2026-04-13 (authority reconciliation)
+# Loops:
+#   - LOOP-SPINE-AUTONOMOUS-OPERATOR-COMMS-V1-CONTRACT-20260413
+#   - LOOP-SPINE-OPERATOR-INTERRUPT-AUTHORITY-RECONCILE-20260413
+#
+# This section governs autonomous outbound communication to the operator.
+# It is a governed actuator class -- not general alerting, not reporting.
+#
+# Doctrine:
+#   - Autonomous operator communication is authorized as a governed actuator
+#   - Audience: Ronny (operator/steward)
+#   - Purpose: critical operator interruption only
+#   - Silence is better than noise
+#
+# Non-goals (v1):
+#   - warnings
+#   - summaries
+#   - chatter
+#   - proposal traffic
+#   - general workflow notifications
+# ----------------------------------------------------------------------
+
+operator_interrupt:
+  version: 2
+  formalized_at: "2026-04-13"
+  amended_at: "2026-04-13"
+  audience: operator
+  operator_identity: "@operator"
+  purpose: critical-operator-interruption
+  actuator_class: governed
+  actuator_subclass: operator-critical-interrupt
+
+  # -- Channel hierarchy and validation ------------------------------------
+  #
+  # mobile-push channel uses /api/services/notify/mobile_app_ronnys_iphone.
+  # This is a proven Apple APNS push via HA Companion.
+  #   evidence: 5 active automations in workbench/infra/homeassistant/config/automations.yaml
+  #   integration: entry_id 01JVG2HT0ZZ6W6ER3SBN65NTJ9 in ha.integrations.yaml
+  #
+  # mobile-push is the operator-critical interrupt delivery surface.
+  # ha persistent-notification retired 2026-04-22 (dashboard inbox only, not operator interrupt).
+  channels:
+    operator_interrupt_delivery: mobile-push
+    operator_interrupt_service_path: /api/services/notify/mobile_app_ronnys_iphone
+    operator_interrupt_provider: ha_companion_apns
+    supporting_artifact: bridge-push
+    email_disposition: manual-fallback-only
+
+  mobile_interrupt_gap:
+    status: closed
+    closed_at: "2026-04-13"
+    closed_by: LOOP-SPINE-COMMS-INCIDENT-CLOSEOUT-20260413
+    finding: >
+      notify.mobile_app_ronnys_iphone is now wired into spine alerting
+      as the mobile-push channel for operator-critical-interrupt dispatch.
+    proven_mobile_path: notify.mobile_app_ronnys_iphone
+    proven_mobile_provider: ha_companion_apns
+    activation_status: active
+
+  # -- Authority -----------------------------------------------------------
+  #
+  # execution_host.external_escalation is forbidden in base authority.
+  # Escalation authority derives from a scoped exception in node.role.contract.yaml.
+  escalation_authority:
+    active_origin: proxmox-home
+    active_origin_role: watcher_node
+    active_origin_proved_at: "2026-04-14"
+    active_origin_proof: "system-dispatch level: 4/4 channels, 0 errors, journal confirmed"
+    authority_source: "watcher_node base role (external_escalation: allowed)"
+    legacy_exception_retired: true
+    legacy_exception_retired_at: "2026-04-14"
+    legacy_exception_retirement_reason: |
+      execution_host_operator_critical_interrupt exception retired.
+      watcher_node now holds external_escalation as base authority.
+      Probe fidelity proved cross-site (infra.core.slo.status via Tailscale from proxmox-home).
+      HTTP-only observation is sufficient for watcher v1.
+
+  # Operator response surface (not a delivery channel)
+  response_surface: termux_ssh
+
+  # Calm read surface (not an interrupt channel)
+  read_surface: cockpit
+
+  # Only incident-class events may fire the operator interrupt
+  trigger_threshold: incident
+
+  # Domains authorized for operator interrupt in v1
+  # These are engine-critical domains matching "engine combustion" class truth
+  allowed_domain_ids:
+    - infra-core-stack
+    - mcp-runtime-anti-drift
+
+  # Pacing: reuse existing cooldown mechanics with severe posture
+  cooldown_seconds: 1800
+  dedupe_by: domain_fingerprint
+
+  # Dispatch state reconciled to match active runtime truth
+  # Loop: LOOP-SPINE-COMMS-INCIDENT-CLOSEOUT-20260413
+  dispatch_state: active

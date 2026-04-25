@@ -1,0 +1,510 @@
+# ┌──────────────────────────────────────────────────────────────────────┐
+# │ COMPATIBILITY PROJECTION — DO NOT EDIT HERE                         │
+# │ Canonical authority: ~/code/workbench/agents/media/bindings/        │
+# │ This copy is retained at this spine path for live consumer          │
+# │ compatibility. Edits must land in the workbench canonical copy      │
+# │ first, then be synced here.                                         │
+# │ Relocation: MEDIA_WORKBENCH_HOME_RELOCATION (2026-03-30)           │
+# └──────────────────────────────────────────────────────────────────────┘
+status: authoritative
+owner: "@operator"
+version: "1.1"
+last_verified: "2026-03-22"
+authority_concern: media_quality_policy
+scope: media-quality-tiers-and-acquisition-policy
+
+runtime_enforcement:
+  owner_surface: ~/code/workbench/agents/media
+  implementation_targets:
+    - radarr
+    - sonarr
+    - lidarr
+    - recyclarr
+  deployment_status: partially_enforced
+  note: >
+    This binding is canonical policy. TV acquisition policy is now enforced at
+    runtime on Sonarr (media-home) as of 2026-03-21. See the TV-specific
+    supplemental policy: ops/bindings/domains/media/media.tv.acquisition.policy.yaml.
+    Radarr and Lidarr enforcement is active on media-home as of 2026-03-22.
+
+tv_supplemental_policy: ops/bindings/domains/media/media.tv.acquisition.policy.yaml
+
+defaults:
+  agents_must_default_to: standard
+  acquisition_tier:
+    movies: standard
+    tv: standard
+    music: standard
+  promotion_scope: per_title_only
+  keep_duplicate_copies: false
+  language_policy:
+    movies: english_audio_required
+    tv: english_audio_required
+    music: language_agnostic
+
+hardware_gates:
+  home_theater_reference:
+    status: blocked
+    unblock_when:
+      display:
+        - projector
+        - oled_65_plus
+      audio:
+        - surround_5_1_plus
+        - dedicated_receiver
+      network:
+        - gigabit_lan_to_media_server
+
+tiers:
+  movies:
+    standard:
+      label: Standard-1080p
+      target_release: WEBDL-1080p
+      acceptable_releases:
+        - WEBDL-1080p
+        - WEBRip-1080p
+      blocked_releases:
+        - Bluray-1080p
+        - Bluray-1080p-Remux
+        - Bluray-2160p
+        - Bluray-2160p-Remux
+        - HDTV-1080p
+        - WEBDL-2160p
+        - WEBRip-2160p
+        - Raw-HD
+        - CAM
+        - TS
+        - 720p
+        - 480p
+      size_gb:
+        min: 2
+        max: 10
+    premium:
+      label: Premium-Theater
+      target_release: Bluray-1080p
+      acceptable_releases:
+        - Bluray-1080p-Remux
+        - Bluray-1080p
+        - WEBDL-1080p
+        - WEBRip-1080p
+      blocked_releases:
+        - Bluray-2160p
+        - Bluray-2160p-Remux
+        - Raw-HD
+      size_gb:
+        min: 5
+        max: 40
+    reference:
+      label: Reference-4K
+      status: blocked
+      gated_by: home_theater_reference
+      target_release: Bluray-2160p-Remux
+      acceptable_releases:
+        - Bluray-2160p-Remux
+        - Bluray-2160p
+        - WEBDL-2160p
+        - Bluray-1080p-Remux
+        - Bluray-1080p
+        - WEBDL-1080p
+      size_gb:
+        min: 10
+        max: 80
+  tv:
+    standard:
+      label: Standard-TV
+      target_release: WEBDL-1080p
+      acceptable_releases:
+        - WEBDL-1080p
+        - WEBRip-1080p
+        - WEBDL-720p
+        - WEBRip-720p
+        - HDTV-720p
+        - HDTV-1080p
+        - SDTV
+        - WEB-480p
+        - DVD
+      blocked_releases:
+        - Bluray-480p
+        - Bluray-576p
+        - Bluray-720p
+        - Bluray-1080p
+        - Bluray-1080p-Remux
+        - Bluray-2160p
+        - Bluray-2160p-Remux
+        - Raw-HD
+        - HDTV-2160p
+        - WEBDL-2160p
+        - WEBRip-2160p
+      enforcement_status: enforced_at_runtime
+      enforced_at: "2026-03-21"
+      supplemental_policy: ops/bindings/domains/media/media.tv.acquisition.policy.yaml
+      size_gb_per_episode:
+        min: 0.5
+        max: 5
+    premium:
+      label: Premium-TV
+      target_release: Bluray-1080p
+      acceptable_releases:
+        - Bluray-1080p
+        - WEBDL-1080p
+        - WEBRip-1080p
+      size_gb_per_episode:
+        min: 1
+        max: 10
+  music:
+    standard:
+      label: Standard-Music
+      target_release: FLAC
+      acceptable_releases:
+        - FLAC
+        - ALAC
+      blocked_releases:
+        - MP3
+        - AAC
+        - OGG
+    premium:
+      label: Premium-Music
+      status: planned
+      target_release: HiRes-FLAC
+      acceptable_releases:
+        - HiRes-FLAC
+        - FLAC
+        - ALAC
+      blocked_releases:
+        - MP3
+        - AAC
+        - OGG
+      note: >
+        Premium music is a policy tier, but precise Lidarr automation for this
+        tier is not yet verified. Treat it as operator-tagged exception handling,
+        not blanket automation.
+
+promotion_model:
+  per_title_only: true
+  trigger_tags:
+    premium: premium
+    reference: reference
+  rollback_supported: true
+  never:
+    - blanket_promote_library
+    - keep_standard_and_premium_just_in_case
+    - enable_reference_without_home_theater_gate
+    - acquire_above_standard_without_explicit_tag
+
+language_policy:
+  movies:
+    required_audio: english
+    foreign_films_allowed: true
+    requires_english_subtitles_when_foreign_audio: true
+    blocked_case: foreign_audio_only_without_english_subtitles
+  tv:
+    required_audio: english
+    foreign_films_allowed: true
+    requires_english_subtitles_when_foreign_audio: true
+    blocked_case: foreign_audio_only_without_english_subtitles
+  music:
+    required_audio: none
+
+dedup_policy:
+  movies:
+    one_file_per_title: true
+    keep: highest_quality_within_active_profile
+    exception: tagged_distinct_cuts_only
+  tv:
+    one_file_per_episode: true
+    keep: highest_quality_within_active_profile
+  music:
+    one_release_per_album: true
+    prefer_original_release: true
+    exception: tagged_keep_both_only
+    artist_name_normalization:
+      merge_case_variants: true
+      merge_trailing_punctuation_variants: true
+      merge_distinct_artists: false
+
+existing_library_remediation:
+  mode: organic_background_convergence
+  bulk_delete_replace: false
+  movies_tv:
+    import_existing_library_with_standard_profile: true
+    above_cutoff_behavior: search_for_standard_replacement_over_time
+    replacement_timing: opportunistic
+  music:
+    duplicate_albums: operator_review_then_recycle_bin
+
+tool_profile_targets:
+  radarr:
+    default_profile: Standard-1080p
+    enforcement_status: enforced_at_runtime
+    enforced_at: "2026-03-22"
+    profiles:
+      Standard-1080p:
+        cutoff: WEBDL-1080p
+        allowed:
+          - WEBDL-1080p
+          - WEBRip-1080p
+        blocked:
+          - Bluray-1080p
+          - Bluray-1080p-Remux
+          - Bluray-2160p
+          - Bluray-2160p-Remux
+          - HDTV-1080p
+          - WEBDL-2160p
+          - WEBRip-2160p
+          - Raw-HD
+        custom_format_scores:
+          "Language: Not English": -10000
+          "Language: Not Original": -10000
+          "German DL": -10000
+          "Italian DL": -10000
+          "French DL": -10000
+          "Dutch DL": -10000
+          "Spanish DL": -10000
+        size_gb:
+          min: 2
+          max: 10
+      Premium-Theater:
+        cutoff: Bluray-1080p
+        allowed:
+          - Bluray-1080p-Remux
+          - Bluray-1080p
+          - WEBDL-1080p
+          - WEBRip-1080p
+        blocked:
+          - Bluray-2160p
+          - Bluray-2160p-Remux
+          - Raw-HD
+        custom_format_scores:
+          BR-DISK: -10000
+          "Language: Not English": -10000
+          "Language: Not Original": -10000
+          "German DL": -10000
+          "Italian DL": -10000
+          "French DL": -10000
+          "Dutch DL": -10000
+          "Spanish DL": -10000
+        size_gb:
+          min: 5
+          max: 40
+      Reference-4K:
+        status: blocked
+        gated_by: home_theater_reference
+        cutoff: Bluray-2160p-Remux
+        allowed:
+          - Bluray-2160p-Remux
+          - Bluray-2160p
+          - WEBDL-2160p
+          - Bluray-1080p-Remux
+          - Bluray-1080p
+          - WEBDL-1080p
+        size_gb:
+          min: 10
+          max: 80
+    custom_format_scores:
+      Standard-1080p:
+        - name: "Language: Not English"
+          score: -10000
+          reason: "Prevent non-English media grabs per language_policy.movies.required_audio=english"
+        - name: "Language: Not Original"
+          score: -10000
+          reason: "Reject non-original language releases"
+        - name: "German DL"
+          score: -10000
+          reason: "Prevent German dual-language releases (bypass Language: Not English CF)"
+        - name: "Italian DL"
+          score: -10000
+          reason: "Prevent Italian dual-language releases"
+        - name: "French DL"
+          score: -10000
+          reason: "Prevent French dual-language releases"
+        - name: "Dutch DL"
+          score: -10000
+          reason: "Prevent Dutch dual-language releases"
+        - name: "Spanish DL"
+          score: -10000
+          reason: "Prevent Spanish dual-language releases"
+      Premium-Theater:
+        - name: "BR-DISK"
+          score: -10000
+          reason: "Block Blu-ray disc images"
+        - name: "Language: Not English"
+          score: -10000
+          reason: "Prevent non-English media grabs"
+        - name: "Language: Not Original"
+          score: -10000
+          reason: "Reject non-original language releases"
+        - name: "German DL"
+          score: -10000
+          reason: "Prevent German dual-language releases"
+        - name: "Italian DL"
+          score: -10000
+          reason: "Prevent Italian dual-language releases"
+        - name: "French DL"
+          score: -10000
+          reason: "Prevent French dual-language releases"
+        - name: "Dutch DL"
+          score: -10000
+          reason: "Prevent Dutch dual-language releases"
+        - name: "Spanish DL"
+          score: -10000
+          reason: "Prevent Spanish dual-language releases"
+  sonarr:
+    default_profile: Standard-TV
+    enforcement_status: enforced_at_runtime
+    enforced_at: "2026-03-21"
+    supplemental_policy: ops/bindings/domains/media/media.tv.acquisition.policy.yaml
+    profiles:
+      Standard-TV:
+        cutoff: SDTV
+        upgrade_allowed: false
+        allowed:
+          - SDTV
+          - WEBDL-480p
+          - WEBRip-480p
+          - DVD
+          - HDTV-720p
+          - HDTV-1080p
+          - WEBDL-720p
+          - WEBRip-720p
+          - WEBDL-1080p
+          - WEBRip-1080p
+        blocked:
+          - Bluray-480p
+          - Bluray-576p
+          - Bluray-720p
+          - Bluray-1080p
+          - Bluray-1080p-Remux
+          - Bluray-2160p
+          - Bluray-2160p-Remux
+          - Raw-HD
+          - HDTV-2160p
+          - WEBDL-2160p
+          - WEBRip-2160p
+        custom_format_scores:
+          BR-DISK: -10000
+          "Language: Not English": -10000
+          "Language: Not Original": 0
+          "German DL": -10000
+          "Italian DL": -10000
+          "French DL": -10000
+          "Dutch DL": -10000
+          "Spanish DL": -10000
+        size_gb_per_episode:
+          min: 0.5
+          max: 5
+      Premium-TV:
+        cutoff: Bluray-1080p
+        allowed:
+          - Bluray-1080p
+          - WEBDL-1080p
+          - WEBRip-1080p
+        size_gb_per_episode:
+          min: 1
+          max: 10
+      WEB-1080p:
+        cutoff: WEB-1080p
+        upgrade_allowed: true
+        allowed:
+          - WEBRip-1080p
+          - WEBDL-1080p
+        blocked_everything_else: true
+        custom_format_scores:
+          BR-DISK: -10000
+          "Language: Not Original": -10000
+          "Language: Not English": -10000
+          "German DL": -10000
+          "Italian DL": -10000
+          "French DL": -10000
+          "Dutch DL": -10000
+          "Spanish DL": -10000
+        note: "Strict WEB-only profile for series requiring quality guarantee"
+    custom_format_scores:
+      Standard-TV:
+        - name: "Language: Not English"
+          score: -10000
+          reason: "Prevent non-English media grabs per language_policy.tv.required_audio=english"
+        - name: "BR-DISK"
+          score: -10000
+          reason: "Block Blu-ray disc images — not a usable media format for Plex/Jellyfin"
+        - name: "German DL"
+          score: -10000
+          reason: "Prevent German dual-language releases (bypass Language: Not English CF)"
+        - name: "Italian DL"
+          score: -10000
+          reason: "Prevent Italian dual-language releases"
+        - name: "French DL"
+          score: -10000
+          reason: "Prevent French dual-language releases"
+        - name: "Dutch DL"
+          score: -10000
+          reason: "Prevent Dutch dual-language releases"
+        - name: "Spanish DL"
+          score: -10000
+          reason: "Prevent Spanish dual-language releases"
+      Premium-TV:
+        - name: "Language: Not English"
+          score: -10000
+          reason: "Prevent non-English media grabs per language_policy.tv.required_audio=english"
+        - name: "BR-DISK"
+          score: -10000
+          reason: "Block Blu-ray disc images"
+        - name: "German DL"
+          score: -10000
+          reason: "Prevent German dual-language releases"
+        - name: "Italian DL"
+          score: -10000
+          reason: "Prevent Italian dual-language releases"
+        - name: "French DL"
+          score: -10000
+          reason: "Prevent French dual-language releases"
+        - name: "Dutch DL"
+          score: -10000
+          reason: "Prevent Dutch dual-language releases"
+        - name: "Spanish DL"
+          score: -10000
+          reason: "Prevent Spanish dual-language releases"
+    blocked_qualities_in_all_profiles:
+      - Bluray-480p
+      - Bluray-576p
+      - Bluray-720p
+      - Bluray-1080p
+      - "Bluray-1080p Remux"
+      - Bluray-2160p
+      - "Bluray-2160p Remux"
+      - Raw-HD
+    note_bluray_block: >
+      All Blu-ray qualities blocked in the default "Any" profile per
+      standard tier policy. Bluray-1080p is only allowed in Premium-TV
+      tier, which requires explicit per-title tag promotion.
+    runtime_profile_mapping:
+      Any:
+        canon_profile: Standard-TV
+        note: >
+          Sonarr ships with "Any" as the default profile. All 72 series
+          are assigned to it. Rather than rename/recreate, we enforce
+          Standard-TV constraints on "Any" by blocking the right qualities
+          and setting CF scores. This is the bridge between Sonarr default
+          naming and spine canonical naming.
+  lidarr:
+    default_profile: Standard-Music
+    profiles:
+      Standard-Music:
+        cutoff: FLAC
+        allowed:
+          - FLAC
+          - ALAC
+        blocked:
+          - MP3
+          - AAC
+          - OGG
+      Premium-Music:
+        status: planned
+        cutoff: HiRes-FLAC
+        allowed:
+          - HiRes-FLAC
+          - FLAC
+          - ALAC
+        blocked:
+          - MP3
+          - AAC
+          - OGG

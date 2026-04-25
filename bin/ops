@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Main dispatcher for ops governance helpers
+set -eo pipefail
+
+# Resolve symlinks to get actual script directory
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SCRIPT_SOURCE" ]; do
+  SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+
+COMMAND="${1:-help}"
+shift || true
+
+trap 'echo "ops: command \"$COMMAND\" failed (exit $?)" >&2' ERR
+
+case "$COMMAND" in
+  verify)
+    source "$SCRIPT_DIR/../ops/commands/verify.sh" "$@"
+    ;;
+  pr)
+    source "$SCRIPT_DIR/../ops/commands/pr.sh" "$@"
+    ;;
+  run)
+    source "$SCRIPT_DIR/../ops/commands/run.sh" "$@"
+    ;;
+  cap)
+    source "$SCRIPT_DIR/../ops/commands/cap.sh" "$@"
+    ;;
+  mcp)
+    subcommand="${1:-help}"
+    shift || true
+    case "$subcommand" in
+      serve)
+        exec "$SCRIPT_DIR/../ops/plugins/infra/mcp-gateway/bin/spine-mcp-serve" "$@"
+        ;;
+      help|-h|--help|"")
+        cat <<'EOF'
+ops mcp <subcommand>
+
+Subcommands:
+  serve    Start unified spine MCP gateway (stdio transport)
+EOF
+        ;;
+      *)
+        echo "Unknown mcp subcommand: $subcommand" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  hooks)
+    source "$SCRIPT_DIR/../ops/commands/hooks.sh" "$@"
+    ;;
+  status)
+    source "$SCRIPT_DIR/../ops/commands/status.sh" "$@"
+    ;;
+  ready)
+    source "$SCRIPT_DIR/../ops/commands/ready.sh" "$@"
+    ;;
+  preflight)
+    source "$SCRIPT_DIR/../ops/commands/preflight.sh" "$@"
+    ;;
+  terminal)
+    source "$SCRIPT_DIR/../ops/commands/terminal.sh" "$@"
+    ;;
+  context)
+    source "$SCRIPT_DIR/../ops/commands/context.sh" "$@"
+    ;;
+  wave)
+    source "$SCRIPT_DIR/../ops/commands/wave.sh" "$@"
+    ;;
+  loops)
+    source "$SCRIPT_DIR/../ops/commands/loops.sh" "$@"
+    ;;
+  dispatch)
+    source "$SCRIPT_DIR/../ops/commands/dispatch.sh" "$@"
+    ;;
+  *)
+    if [[ "$COMMAND" != "help" && "$COMMAND" != "-h" && "$COMMAND" != "--help" ]]; then
+      echo "Unknown command: $COMMAND" >&2
+      echo
+    fi
+
+    echo "ops - governance-aware operations helper"
+    echo
+    echo "Primary surfaces:"
+    echo "  ops cap run session.v3.attach   Entry — session attach (context + status)"
+    echo "  ops status                      State — unified work status"
+    echo "  ops verify                      Health — infrastructure & engine proof"
+    echo "  ops dispatch local              Work — create/run a local multi-lane dispatch wave"
+    echo
+    echo "Capabilities:"
+    echo "  ops cap <cmd>        Execute governed capabilities (list, run, show)"
+    echo "  ops mcp serve        Start unified spine MCP gateway (stdio)"
+    echo
+    echo "Internal / surgery:"
+    echo "  ops terminal launch  Transport — open governed terminal (Hammerspoon picker)"
+    echo "  ops context          [deprecated] use: ops status --context"
+    echo "  ops ready            [deprecated] use: ops verify --full"
+    echo "  ops preflight        [deprecated] use: ops verify --preflight"
+    echo "  ops wave <cmd>       Surgery — manual wave lifecycle"
+    echo "  ops loops <cmd>      Surgery — manual loop lifecycle"
+    echo "  ops run [opts]       Mailroom — enqueue work"
+    echo "  ops hooks <cmd>      Git hooks helper"
+    echo "  ops pr [...args]     PR workflow"
+    echo
+    echo "Current directory resolved to: $SCRIPT_DIR"
+    if [[ "$COMMAND" == "help" || "$COMMAND" == "-h" || "$COMMAND" == "--help" ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+esac

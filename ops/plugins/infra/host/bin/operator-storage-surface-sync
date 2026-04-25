@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/plugins/infra/host/lib/operator-storage-surface-common.sh"
+
+RCLONE_BIN="${OPERATOR_STORAGE_SYNC_RCLONE_BIN:-${RCLONE_BIN:-rclone}}"
+
+usage() {
+  cat <<'EOF'
+operator.storage.surface.sync
+
+Usage:
+  operator-storage-surface-sync [run-once|status] [--brief|--json]
+
+The v1 sync model is a watched outbox, not a bidirectional retained mirror:
+top-level directories placed into the configured local sync roots are uploaded
+to their canonical remote destinations, journaled, and then cleaned up through
+the existing assisted-move surfaces. Name collisions are quarantined locally.
+EOF
+}
+
+fail() {
+  echo "operator.storage.surface.sync FAIL: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"
+}
+
+sync_root_field() {
+  local surface="$1"
+  local field="$2"
+  operator_storage_contract_scalar ".surfaces.${surface}.watched_outbox_surface.${field}" ""
+}
+
+sync_root_path() {
+  local surface="$1"
+  operator_storage_expand_path "$(sync_root_field "$surface" 'local_root')"
+}
+
+sync_quarantine_root() {
+  local surface="$1"
+  operator_storage_expand_path "$(sync_root_field "$surface" 'conflicts_root')"
+}
+
+sync_journal_root() {
+  local surface="$1"
+  operator_storage_expand_path "$(sync_root_field "$surface" 'journal_root')"
+}
+
+sync_helper_bin() {
+  local surface="$1"
+  local default_path=""
+  case "$surface" in
+    mintfiles) default_path="$ROOT/ops/plugins/domains/mint/bin/mint-operator-drop-assist" ;;
+    archives) default_path="$ROOT/ops/plugins/infra/host/bin/archive-operator-drop-assist" ;;
+  esac
+  operator_storage_expand_path "$(operator_storage_contract_scalar ".surfaces.${surface}.watched_outbox_surface.sync_command_path" "$default_path")"
+}
+
+sync_enabled() {
+  local surface="$1"
+  [[ "$(sync_root_field "$surface" 'enabled')" == "true" ]]
+}
+
+sync_launchagent_label() {
+  operator_storage_sync_label
+}
+
+sync_remote_exists() {
+  local remote_path="$1"
+  "$RCLONE_BIN" lsf "$remote_path" --max-depth 1 >/dev/null 2>&1
+}
+
+write_sync_receipt() {
+  local surface="$1"
+  local route="$2"
+  local state="$3"
+  local source="$4"
+  local destination="$5"
+  local detail="$6"
+  local linked_receipt="${7:-}"
+  local journal_root receipt_id receipt_dir
+  journal_root="$(sync_journal_root "$surface")"
+  operator_storage_ensure_dir "$journal_root"
+  receipt_id="$(operator_storage_journal_id "OPERATOR-SYNC")"
+  receipt_dir="${journal_root}/${receipt_id}"
+  mkdir -p "$receipt_dir"
+  cat > "${receipt_dir}/receipt.yaml" <<EOF
+receipt_id: ${receipt_id}
+generated_at: $(operator_storage_timestamp)
+surface: ${surface}
+route: ${route}
+state: ${state}
+source_path: ${source}
+destination_remote: ${destination}
+detail: ${detail}
+linked_receipt: ${linked_receipt}
+EOF
+}
+
+quarantine_entry() {
+  local surface="$1"
+  local route="$2"
+  local source="$3"
+  local destination="$4"
+  local reason="$5"
+  local conflicts_root target_dir target
+  conflicts_root="$(sync_quarantine_root "$surface")"
+  operator_storage_ensure_dir "$conflicts_root"
+  target_dir="${conflicts_root}/${route}"
+  operator_storage_ensure_dir "$target_dir"
+  target="$(operator_storage_unique_path "${target_dir}/$(basename "$source")")"
+  mv "$source" "$target"
+  write_sync_receipt "$surface" "$route" "conflict" "$target" "$destination" "$reason"
+}
+
+process_mint_item() {
+  local source="$1"
+  local helper remote_root destination output linked_receipt
+  helper="$(sync_helper_bin mintfiles)"
+  [[ -x "$helper" ]] || fail "missing Mint helper: $helper"
+  remote_root="$(sync_root_field mintfiles 'remote_root')"
+  destination="${remote_root}/$(basename "$source")"
+  if sync_remote_exists "$destination"; then
+    quarantine_entry mintfiles operator-drop "$source" "$destination" "destination already exists"
+    return 0
+  fi
+  if ! output="$("$helper" move "$source" 2>&1)"; then
+    write_sync_receipt mintfiles operator-drop "failed" "$source" "$destination" "$output"
+    return 1
+  fi
+  linked_receipt="$(printf '%s\n' "$output" | sed -n 's/^receipt: //p' | tail -n 1)"
+  write_sync_receipt mintfiles operator-drop "synced" "$source" "$destination" "assistant move completed" "$linked_receipt"
+}
+
+process_archive_item() {
+  local route="$1"
+  local source="$2"
+  local helper remote_root destination output linked_receipt
+  helper="$(sync_helper_bin archives)"
+  [[ -x "$helper" ]] || fail "missing Archive helper: $helper"
+  remote_root="$(operator_storage_contract_scalar ".surfaces.archives.watched_outbox_surface.routes[] | select(.id == \"${route}\") | .remote_root" "")"
+  destination="${remote_root}/$(basename "$source")"
+  if sync_remote_exists "$destination"; then
+    quarantine_entry archives "$route" "$source" "$destination" "destination already exists"
+    return 0
+  fi
+  if ! output="$("$helper" move --family "$route" "$source" 2>&1)"; then
+    write_sync_receipt archives "$route" "failed" "$source" "$destination" "$output"
+    return 1
+  fi
+  linked_receipt="$(printf '%s\n' "$output" | sed -n 's/^receipt: //p' | tail -n 1)"
+  write_sync_receipt archives "$route" "synced" "$source" "$destination" "assistant move completed" "$linked_receipt"
+}
+
+run_mint_sync() {
+  [[ "$(sync_root_field mintfiles 'mode')" == "watched_outbox_sync" ]] || return 0
+  local root entry
+  root="$(sync_root_path mintfiles)"
+  operator_storage_ensure_dir "$root"
+  while IFS= read -r entry; do
+    [[ -d "$entry" ]] || { quarantine_entry mintfiles operator-drop "$entry" "$(sync_root_field mintfiles 'remote_root')" "unsupported entry kind"; continue; }
+    process_mint_item "$entry" || true
+  done < <(operator_storage_list_top_level_entries "$root")
+}
+
+archive_sync_routes_json() {
+  operator_storage_contract_json '.surfaces.archives.watched_outbox_surface.routes // []'
+}
+
+run_archive_sync() {
+  [[ "$(sync_root_field archives 'mode')" == "watched_outbox_sync" ]] || return 0
+  local routes_json
+  routes_json="$(archive_sync_routes_json)"
+  printf '%s' "$routes_json" | "$OPERATOR_STORAGE_JQ_BIN" -c '.[]' | while IFS= read -r route_json; do
+    local route_id local_root entry
+    route_id="$(printf '%s' "$route_json" | "$OPERATOR_STORAGE_JQ_BIN" -r '.id')"
+    local_root="$(printf '%s' "$route_json" | "$OPERATOR_STORAGE_JQ_BIN" -r '.local_root')"
+    local_root="$(operator_storage_expand_path "$local_root")"
+    operator_storage_ensure_dir "$local_root"
+    while IFS= read -r entry; do
+      [[ -d "$entry" ]] || { quarantine_entry archives "$route_id" "$entry" "$(printf '%s' "$route_json" | "$OPERATOR_STORAGE_JQ_BIN" -r '.remote_root')" "unsupported entry kind"; continue; }
+      process_archive_item "$route_id" "$entry" || true
+    done < <(operator_storage_list_top_level_entries "$local_root")
+  done
+}
+
+sync_status_json() {
+  local label agent_state mint_root mint_conflicts mint_pending archive_conflicts archive_pending archive_routes_json archive_route_json route_root total_pending total_conflicts enabled_count
+  label="$(sync_launchagent_label)"
+  agent_state="$(operator_storage_launchagent_state "$label")"
+  mint_root="$(sync_root_path mintfiles)"
+  mint_conflicts="$(operator_storage_count_entries "$(sync_quarantine_root mintfiles)")"
+  mint_pending="$(operator_storage_count_entries "$mint_root")"
+  archive_pending=0
+  archive_routes_json="$(archive_sync_routes_json)"
+  archive_conflicts="$(operator_storage_count_entries "$(sync_quarantine_root archives)")"
+  enabled_count=0
+  [[ "$(sync_root_field mintfiles 'enabled')" == "true" ]] && enabled_count=$((enabled_count + 1))
+  [[ "$(sync_root_field archives 'enabled')" == "true" ]] && enabled_count=$((enabled_count + 1))
+  while IFS= read -r archive_route_json; do
+    route_root="$(printf '%s' "$archive_route_json" | "$OPERATOR_STORAGE_JQ_BIN" -r '.local_root')"
+    route_root="$(operator_storage_expand_path "$route_root")"
+    archive_pending=$((archive_pending + $(operator_storage_count_entries "$route_root")))
+  done < <(printf '%s' "$archive_routes_json" | "$OPERATOR_STORAGE_JQ_BIN" -c '.[]')
+
+  total_pending=$((mint_pending + archive_pending))
+  total_conflicts=$((mint_conflicts + archive_conflicts))
+
+  local status="ok"
+  if [[ "$enabled_count" -eq 0 ]]; then
+    agent_state="not_applicable"
+  elif [[ "$agent_state" == "missing" ]]; then
+    status="warn"
+  elif [[ "$total_conflicts" -gt 0 ]]; then
+    status="warn"
+  fi
+
+  "$OPERATOR_STORAGE_JQ_BIN" -n \
+    --arg status "$status" \
+    --arg label "$label" \
+    --arg agent_state "$agent_state" \
+    --arg enabled_count "$enabled_count" \
+    --arg mint_root "$mint_root" \
+    --arg mint_mode "$(sync_root_field mintfiles 'mode')" \
+    --arg mint_pending "$mint_pending" \
+    --arg mint_conflicts "$mint_conflicts" \
+    --arg archives_mode "$(sync_root_field archives 'mode')" \
+    --arg archives_pending "$archive_pending" \
+    --arg archives_conflicts "$archive_conflicts" \
+    '{
+      status: $status,
+      launch_agent: {
+        label: $label,
+        state: $agent_state
+      },
+      enabled_surfaces: ($enabled_count | tonumber),
+      surfaces: {
+        mintfiles: {
+          mode: $mint_mode,
+          local_root: $mint_root,
+          pending: ($mint_pending | tonumber),
+          conflicts: ($mint_conflicts | tonumber)
+        },
+        archives: {
+          mode: $archives_mode,
+          pending: ($archives_pending | tonumber),
+          conflicts: ($archives_conflicts | tonumber)
+        }
+      }
+    }'
+}
+
+main() {
+  local command="run-once"
+  local brief=0
+  local json_mode=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      run-once|status)
+        command="$1"
+        shift
+        ;;
+      --brief)
+        brief=1
+        shift
+        ;;
+      --json)
+        json_mode=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "unknown argument: $1"
+        ;;
+    esac
+  done
+
+  operator_storage_load_contract
+  need_cmd "$RCLONE_BIN"
+
+  if [[ "$command" == "run-once" ]]; then
+    run_mint_sync
+    run_archive_sync
+  fi
+
+  local json
+  json="$(sync_status_json)"
+  if [[ "$json_mode" -eq 1 ]]; then
+    printf '%s\n' "$json"
+    exit 0
+  fi
+  if [[ "$brief" -eq 1 ]]; then
+    printf '%s\n' "$json" | "$OPERATOR_STORAGE_JQ_BIN" -r '"status=\(.status) sync_agent=\(.launch_agent.state) mint_pending=\(.surfaces.mintfiles.pending) mint_conflicts=\(.surfaces.mintfiles.conflicts) archives_pending=\(.surfaces.archives.pending) archives_conflicts=\(.surfaces.archives.conflicts)"'
+    exit 0
+  fi
+  echo "operator.storage.surface.sync"
+  printf '%s\n' "$json" | "$OPERATOR_STORAGE_JQ_BIN" -r '
+    "status: \(.status)\nlaunch_agent_label: \(.launch_agent.label)\nlaunch_agent_state: \(.launch_agent.state)\nmint_pending: \(.surfaces.mintfiles.pending)\nmint_conflicts: \(.surfaces.mintfiles.conflicts)\narchives_pending: \(.surfaces.archives.pending)\narchives_conflicts: \(.surfaces.archives.conflicts)"'
+}
+
+main "$@"

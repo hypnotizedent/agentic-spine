@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# github.status — repo health (read-only)
+# Exit codes: 0 OK, 2 STOP (missing deps / not in git repo), 1 FAIL
+
+command -v git >/dev/null 2>&1 || { echo "STOP: git not found"; exit 2; }
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "STOP: not a git repo"; exit 2; }
+
+BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
+HEAD_SHA="$(git rev-parse --short HEAD)"
+CLEAN="yes"
+if [ -n "$(git status --porcelain=v1)" ]; then CLEAN="no"; fi
+
+# Local tag best-effort
+LATEST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo none)"
+
+# Remote/upstream best-effort
+UPSTREAM="none"
+AHEAD_BEHIND="n/a"
+if git remote get-url origin >/dev/null 2>&1; then
+  UPSTREAM="$(git remote get-url origin 2>/dev/null || echo origin)"
+  if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
+    # ahead/behind requires remote refs to be present
+    git fetch -q origin >/dev/null 2>&1 || true
+    AB="$(git rev-list --left-right --count HEAD...@{u} 2>/dev/null || echo "n/a n/a")"
+    # format: behind ahead
+    BEHIND="$(echo "$AB" | awk '{print $1}')"
+    AHEAD="$(echo "$AB" | awk '{print $2}')"
+    AHEAD_BEHIND="ahead=$AHEAD behind=$BEHIND"
+  fi
+fi
+
+# If gh is available, enrich with repo slug and latest release tag (still read-only)
+REPO_SLUG="unknown"
+GH_LATEST_RELEASE_TAG="n/a"
+if command -v gh >/dev/null 2>&1; then
+  # repo slug
+  REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo unknown)"
+  # latest release tag (if any)
+  GH_LATEST_RELEASE_TAG="$(gh release view --json tagName -q .tagName 2>/dev/null || echo n/a)"
+fi
+
+echo "github.status"
+echo "repo: ${REPO_SLUG}"
+echo "branch: ${BRANCH}"
+echo "head: ${HEAD_SHA}"
+echo "clean: ${CLEAN}"
+echo "latest_tag_local: ${LATEST_TAG}"
+echo "latest_release_tag: ${GH_LATEST_RELEASE_TAG}"
+echo "origin: ${UPSTREAM}"
+echo "upstream: ${AHEAD_BEHIND}"

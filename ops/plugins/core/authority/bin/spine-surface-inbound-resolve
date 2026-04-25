@@ -1,0 +1,568 @@
+#!/usr/bin/env python3
+"""spine.surface.inbound.resolve — v1 read-only joining reader.
+
+Takes one repo-relative path and returns:
+  - inferred class
+  - class evidence
+  - inbound refs (literal substring scan over existing surfaces)
+  - contradictions (explicit, not collapsed into prose)
+  - safe_to_delete_or_relabel verdict
+
+Implementation rules (v1):
+  - no new bindings, no new gates, no new metadata fields
+  - literal substring match is the primary scan strategy
+  - honest `unknown` is preferred over overclaiming
+  - stdlib + yaml only
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    print("FATAL: PyYAML required", file=sys.stderr)
+    sys.exit(3)
+
+
+SCAN_EXTS = {".yaml", ".yml", ".md", ".sh", ".py", ".json", ".txt"}
+MAX_SCAN_FILE_BYTES = 512 * 1024
+MAX_HITS = 600
+
+# (family_dir, family_label, authority_level)
+CORE_FAMILIES = [
+    ("ops/bindings", "binding", "high"),
+    ("surfaces/verify", "gate_surface", "high"),
+    ("ops/plugins", "plugin", "medium"),
+    ("docs/governance", "governance_doc", "medium"),
+    ("ops/capabilities.yaml", "capability_registry", "high"),
+]
+OPTIONAL_DOC_FAMILY = ("docs/reference", "reference_doc", "low")
+
+RUNTIME_SNAPSHOT_PREFIX = "runtime/domain-state/snapshots/"
+
+
+def resolve_root() -> Path:
+    env = os.environ.get("SPINE_CODE")
+    if env:
+        p = Path(env).expanduser().resolve()
+        if (p / "ops" / "capabilities.yaml").exists():
+            return p
+    here = Path(__file__).resolve()
+    # .../agentic-spine/ops/plugins/core/authority/bin/<this>
+    for cand in here.parents:
+        if (cand / "ops" / "capabilities.yaml").exists():
+            return cand
+    return Path.cwd()
+
+
+def normalize_path(path: str) -> str:
+    p = (path or "").strip()
+    if p.startswith("./"):
+        p = p[2:]
+    if p.startswith("agentic-spine/"):
+        p = p[len("agentic-spine/"):]
+    return p
+
+
+def path_variants(rel: str) -> list[str]:
+    return [rel, f"agentic-spine/{rel}", f"./{rel}"]
+
+
+def load_yaml(path: Path) -> dict:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            doc = yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def read_file_head(path: Path, max_lines: int = 80) -> str:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            out = []
+            for i, line in enumerate(f):
+                if i >= max_lines:
+                    break
+                out.append(line)
+            return "".join(out)
+    except Exception:
+        return ""
+
+
+def resolve_structured(root: Path, rel: str) -> dict:
+    """Look up path in the known structured L1 surfaces."""
+    variants = set(path_variants(rel))
+
+    concerns_doc = load_yaml(root / "ops/bindings/authority.concerns.yaml")
+    master_doc = load_yaml(root / "ops/bindings/master.inventory.registry.yaml")
+    projection_doc = load_yaml(root / "ops/bindings/domain.projection.contract.yaml")
+    closeout_doc = load_yaml(root / "ops/bindings/nightly.closeout.contract.yaml")
+
+    out: dict = {
+        "concern_hits": [],
+        "master_authority_hits": [],
+        "master_evidence_hits": [],
+        "projection_entries": [],
+        "tracked_projection_binding": False,
+        "tracked_dirty_allowlist": False,
+        "tombstoned": False,
+    }
+
+    # authority.concerns.yaml
+    for concern_id, payload in (concerns_doc.get("concerns") or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        for src in payload.get("sources") or []:
+            if not isinstance(src, dict):
+                continue
+            spath = str(src.get("path", "")).strip()
+            if spath in variants:
+                state = str(src.get("state", "")).strip()
+                marker = str(src.get("required_marker", "")).strip()
+                out["concern_hits"].append(
+                    {"concern": concern_id, "state": state, "required_marker": marker}
+                )
+                if state == "tombstoned":
+                    out["tombstoned"] = True
+
+    # master.inventory.registry.yaml
+    for row in master_doc.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        row_id = str(row.get("id", "")).strip()
+        authority = row.get("authority") or {}
+        apath = str((authority or {}).get("path", "")).strip()
+        if apath in variants:
+            out["master_authority_hits"].append({"row_id": row_id, "field": "authority.path"})
+        for ev in row.get("evidence_refs") or []:
+            ev_s = str(ev).strip()
+            if ev_s in variants:
+                out["master_evidence_hits"].append({"row_id": row_id, "evidence_ref": ev_s})
+
+    # domain.projection.contract.yaml
+    for entry in projection_doc.get("projections") or []:
+        if not isinstance(entry, dict):
+            continue
+        op = str(entry.get("output_path", "")).strip()
+        if op in variants:
+            out["projection_entries"].append(
+                {
+                    "projection_id": entry.get("id"),
+                    "generator_capability": entry.get("generator_capability"),
+                    "source_master_rows": entry.get("source_master_rows"),
+                    "generated_only": bool(entry.get("generated_only", False)),
+                }
+            )
+    policy = projection_doc.get("policy") or {}
+    snap_policy = (policy or {}).get("snapshot_writepath_policy") or {}
+    for b in snap_policy.get("tracked_projection_bindings") or []:
+        if str(b).strip() in variants:
+            out["tracked_projection_binding"] = True
+
+    # nightly.closeout.contract.yaml
+    clean_root_guard = closeout_doc.get("clean_root_guard") or {}
+    for b in clean_root_guard.get("tracked_dirty_allowlist") or []:
+        if str(b).strip() in variants:
+            out["tracked_dirty_allowlist"] = True
+
+    return out
+
+
+def classify_edge(family: str, line: str) -> str:
+    low = line.lower()
+    if family == "binding":
+        if "projection_of" in low:
+            return "projection_source_pointer"
+        if "tracked_projection_bindings" in low:
+            return "tracked_projection_binding"
+        if "tracked_dirty_allowlist" in low:
+            return "tracked_dirty_allowlist"
+        if "output_path" in low:
+            return "projection_output_path"
+        if "evidence_refs" in low:
+            return "master_evidence_ref"
+        if "authority:" in low and "path" in low:
+            return "master_authority_path"
+        if "path:" in low:
+            return "concern_source_path"
+        if "fix_hint" in low:
+            return "gate_fix_hint"
+        return "binding_ref"
+    if family == "gate_surface":
+        return "gate_surface_ref"
+    if family == "plugin":
+        return "plugin_ref"
+    if family == "governance_doc":
+        return "governance_doc_ref"
+    if family == "reference_doc":
+        return "reference_doc_ref"
+    if family == "capability_registry":
+        return "capability_registry_ref"
+    return "unknown"
+
+
+def _plugin_exec_scannable(p: Path, root: Path) -> bool:
+    """Include extensionless shebang scripts under ops/plugins/** in content scan.
+
+    Blind-spot fix: the resolver's own family `ops/plugins` has an extensive
+    surface of extensionless bash/python wrappers (e.g. internet-asset-
+    registry-build, domain-inventory-refresh) that are invisible to a
+    SCAN_EXTS-based content scan. Include them iff they live under
+    ops/plugins/** and their first line starts with `#!`.
+    """
+    if p.suffix:
+        return False
+    try:
+        rel = p.relative_to(root)
+    except ValueError:
+        return False
+    parts = rel.parts
+    if len(parts) < 2 or parts[0] != "ops" or parts[1] != "plugins":
+        return False
+    try:
+        with p.open("rb") as f:
+            head = f.read(2)
+    except OSError:
+        return False
+    return head == b"#!"
+
+
+def literal_scan(root: Path, rel: str, include_docs: bool) -> list[dict]:
+    variants = path_variants(rel)
+    basename = Path(rel).name
+    # Only enable basename-only detection if the basename is meaningfully
+    # different from the full rel path (avoid duplicate low hits when rel
+    # already IS just the basename, e.g. a top-level file with no subdir).
+    basename_enabled = bool(basename) and basename != rel
+    families = list(CORE_FAMILIES)
+    if include_docs:
+        families.append(OPTIONAL_DOC_FAMILY)
+    self_abs = (root / rel).resolve()
+    hits: list[dict] = []
+
+    def scan_file(p: Path, family: str, authority: str) -> None:
+        try:
+            if p.resolve() == self_abs:
+                return
+        except OSError:
+            return
+        if p.suffix.lower() not in SCAN_EXTS and p.name != "capabilities.yaml":
+            if not _plugin_exec_scannable(p, root):
+                return
+        try:
+            st = p.stat()
+        except OSError:
+            return
+        if st.st_size > MAX_SCAN_FILE_BYTES:
+            return
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return
+        try:
+            rel_from = str(p.relative_to(root))
+        except ValueError:
+            return
+        for line_no, line in enumerate(text.splitlines(), 1):
+            matched_full = False
+            for v in variants:
+                if v in line:
+                    hits.append(
+                        {
+                            "edge_type": classify_edge(family, line),
+                            "from_path": rel_from,
+                            "line": line_no,
+                            "authority_level": authority,
+                            "evidence": line.strip()[:240],
+                        }
+                    )
+                    matched_full = True
+                    break
+            # Basename-only fallback: dedup against full-path hit on the same
+            # (from_path, line) by only emitting when no full-path match fired.
+            # Always authority_level=low regardless of family — basenames are
+            # ambiguous and must not change verdict thresholds on their own.
+            if (
+                not matched_full
+                and basename_enabled
+                and basename in line
+            ):
+                hits.append(
+                    {
+                        "edge_type": classify_edge(family, line),
+                        "from_path": rel_from,
+                        "line": line_no,
+                        "authority_level": "low",
+                        "evidence": line.strip()[:240],
+                    }
+                )
+            if len(hits) >= MAX_HITS:
+                return
+
+    for family_rel, family, authority in families:
+        abs_start = root / family_rel
+        if not abs_start.exists():
+            continue
+        if abs_start.is_file():
+            scan_file(abs_start, family, authority)
+            continue
+        for dirpath, dirnames, filenames in os.walk(abs_start):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            for fn in filenames:
+                scan_file(Path(dirpath) / fn, family, authority)
+                if len(hits) >= MAX_HITS:
+                    return hits
+    return hits
+
+
+def marker_signals(head: str, rel: str) -> list[tuple[str, str, str, str]]:
+    """(class, why, confidence, source) — source is always 'marker' here."""
+    sigs: list[tuple[str, str, str, str]] = []
+    low = head.lower()
+    if "authority_state: authoritative" in low or "status: authoritative" in low:
+        sigs.append(("authoritative_source", "file marker: status/authority_state: authoritative", "medium", "marker"))
+    if "spine-authoritative" in low:
+        sigs.append(("authoritative_source", "file banner: SPINE-AUTHORITATIVE", "low", "marker"))
+    if "projection_of:" in low or "authority_state: projection" in low:
+        sigs.append(("tracked_projection", "file marker: projection_of / authority_state: projection", "medium", "marker"))
+    if "status: tombstoned" in low or "do_not_use_for_runtime: true" in low:
+        sigs.append(("compat_or_tombstone", "file marker: tombstoned / do_not_use_for_runtime", "high", "marker"))
+    if "compatibility projection" in low or "do not edit here" in low:
+        sigs.append(("compat_or_tombstone", "file banner: compatibility/do-not-edit", "medium", "marker"))
+    if "superseded_by" in low:
+        sigs.append(("compat_or_tombstone", "file marker: superseded_by", "medium", "marker"))
+    if rel.startswith(RUNTIME_SNAPSHOT_PREFIX):
+        sigs.append(("runtime_snapshot", f"path under {RUNTIME_SNAPSHOT_PREFIX}", "high", "marker"))
+    if "source_capability:" in low and ("generated_at" in low or "freshness_policy" in low):
+        sigs.append(("runtime_snapshot", "snapshot shape: source_capability + generated_at/freshness", "low", "marker"))
+    return sigs
+
+
+def structured_signals(struct: dict) -> list[tuple[str, str, str, str]]:
+    sigs: list[tuple[str, str, str, str]] = []
+    for hit in struct["concern_hits"]:
+        state = hit.get("state")
+        cid = hit.get("concern")
+        if state == "authoritative":
+            sigs.append(("authoritative_source", f"authority.concerns[{cid}].state=authoritative", "high", "structured"))
+        elif state == "projection":
+            sigs.append(("tracked_projection", f"authority.concerns[{cid}].state=projection", "high", "structured"))
+        elif state == "tombstoned":
+            sigs.append(("compat_or_tombstone", f"authority.concerns[{cid}].state=tombstoned", "high", "structured"))
+    for hit in struct["master_authority_hits"]:
+        sigs.append(
+            ("authoritative_source", f"master.inventory.rows[{hit['row_id']}].authority.path", "high", "structured")
+        )
+    for entry in struct["projection_entries"]:
+        sigs.append(
+            (
+                "tracked_projection",
+                f"domain.projection.contract.projections[{entry.get('projection_id')}].output_path",
+                "high",
+                "structured",
+            )
+        )
+    if struct["tracked_projection_binding"]:
+        sigs.append(
+            (
+                "tracked_projection",
+                "domain.projection.contract.policy.snapshot_writepath_policy.tracked_projection_bindings",
+                "medium",
+                "structured",
+            )
+        )
+    if struct["tracked_dirty_allowlist"]:
+        sigs.append(
+            (
+                "runtime_snapshot",
+                "nightly.closeout.contract.clean_root_guard.tracked_dirty_allowlist",
+                "medium",
+                "structured",
+            )
+        )
+    return sigs
+
+
+def choose_class(signals: list[tuple[str, str, str, str]]) -> str:
+    if not signals:
+        return "unknown"
+    high_classes = {cls for cls, _, conf, _ in signals if conf == "high"}
+    if len(high_classes) == 1:
+        return next(iter(high_classes))
+    if len(high_classes) > 1:
+        return "unknown"
+    tally: dict[str, int] = {}
+    for cls, _, _, _ in signals:
+        tally[cls] = tally.get(cls, 0) + 1
+    classes_sorted = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+    top_count = classes_sorted[0][1]
+    top_classes = [c for c, n in classes_sorted if n == top_count]
+    if len(top_classes) == 1:
+        return top_classes[0]
+    return "unknown"
+
+
+def build_contradictions(
+    signals: list[tuple[str, str, str, str]],
+) -> tuple[list[dict], list[dict]]:
+    """Return (contradictions, marker_only_contradictions).
+
+    A contradiction is marker-only iff none of its contributing evidence lines
+    came from a structured surface or an external file content-scan hit. Since
+    `signals` is built exclusively from marker + structured sources (inbound
+    content-scan hits do not feed classification here), marker-only reduces to
+    "no signal in the disagreement has source == 'structured'".
+    """
+    seen = {cls for cls, _, _, _ in signals}
+    if len(seen) <= 1:
+        return [], []
+    grouped: dict[str, list[str]] = {}
+    has_structured = False
+    for cls, why, conf, source in signals:
+        grouped.setdefault(cls, []).append(f"[{conf}] {why}")
+        if source == "structured":
+            has_structured = True
+    entry = {
+        "kind": "class_signal_disagreement",
+        "classes": sorted(seen),
+        "evidence_by_class": grouped,
+    }
+    if has_structured:
+        return [entry], []
+    return [], [entry]
+
+
+def verdict(
+    exists: bool,
+    chosen_class: str,
+    struct: dict,
+    inbound_refs: list[dict],
+) -> tuple[str, str, list[str]]:
+    unknowns: list[str] = []
+    if not exists:
+        return "likely_yes", "file does not exist on disk", unknowns
+
+    has_structured_ref = bool(
+        struct["concern_hits"]
+        or struct["master_authority_hits"]
+        or struct["master_evidence_hits"]
+        or struct["projection_entries"]
+        or struct["tracked_projection_binding"]
+        or struct["tracked_dirty_allowlist"]
+    )
+    high_inbound = [r for r in inbound_refs if r.get("authority_level") == "high"]
+    plugin_inbound = [
+        r for r in inbound_refs
+        if str(r.get("from_path", "")).startswith("ops/plugins/")
+    ]
+
+    if has_structured_ref:
+        return "no", "file is referenced by engine L1 structured surfaces", unknowns
+    if high_inbound:
+        return "no", f"{len(high_inbound)} high-authority inbound ref(s) found by literal scan", unknowns
+    if plugin_inbound:
+        return (
+            "no",
+            f"{len(plugin_inbound)} plugin-consumer inbound ref(s) found under ops/plugins/**",
+            unknowns,
+        )
+    if chosen_class == "authoritative_source":
+        unknowns.append("file self-declares authoritative but has no structured L1 registration")
+        return "unknown", "marker says authoritative but no structured registration", unknowns
+    if not inbound_refs:
+        unknowns.append("no inbound refs found by literal scan (coverage is narrow)")
+        return "unknown", "no references found anywhere", unknowns
+    unknowns.append("only medium/low-authority inbound refs found")
+    return "unknown", "only medium/low-authority inbound refs found", unknowns
+
+
+def resolve(root: Path, rel: str, include_docs: bool) -> dict:
+    abs_path = root / rel
+    exists = abs_path.exists() and abs_path.is_file()
+    head = read_file_head(abs_path) if exists else ""
+
+    struct = resolve_structured(root, rel)
+    inbound_refs = literal_scan(root, rel, include_docs)
+
+    signals: list[tuple[str, str, str, str]] = []
+    signals.extend(structured_signals(struct))
+    signals.extend(marker_signals(head, rel))
+
+    chosen = choose_class(signals)
+    contradictions, marker_only_contradictions = build_contradictions(signals)
+    v_verdict, v_reason, unknowns = verdict(exists, chosen, struct, inbound_refs)
+
+    class_evidence = [
+        {"class": cls, "why": why, "confidence": conf} for (cls, why, conf, _) in signals
+    ]
+
+    return {
+        "path": rel,
+        "exists": exists,
+        "class": chosen,
+        "class_evidence": class_evidence,
+        "inbound_refs": inbound_refs,
+        "inbound_ref_counts": {
+            "total": len(inbound_refs),
+            "high": sum(1 for r in inbound_refs if r["authority_level"] == "high"),
+            "medium": sum(1 for r in inbound_refs if r["authority_level"] == "medium"),
+            "low": sum(1 for r in inbound_refs if r["authority_level"] == "low"),
+        },
+        "structured_refs": struct,
+        "contradictions": contradictions,
+        "marker_only_contradictions": marker_only_contradictions,
+        "safe_to_delete_or_relabel": v_verdict,
+        "verdict_reason": v_reason,
+        "unknowns": unknowns,
+        "scan_strategy": "literal_substring_v1",
+        "include_docs": include_docs,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="spine.surface.inbound.resolve",
+        description="Resolve class, inbound refs, contradictions, and delete/relabel posture for one file path.",
+    )
+    ap.add_argument("path", help="Repo-relative path to resolve")
+    ap.add_argument("--format", choices=["json", "human"], default="json")
+    ap.add_argument("--include-docs", action="store_true", help="Also scan docs/reference/**")
+    ap.add_argument("--json-output", metavar="FILE", help="Write JSON result to FILE")
+    args = ap.parse_args()
+
+    root = resolve_root()
+    rel = normalize_path(args.path)
+    result = resolve(root, rel, include_docs=args.include_docs)
+
+    payload = json.dumps(result, indent=2, sort_keys=False)
+    if args.json_output:
+        Path(args.json_output).write_text(payload + "\n", encoding="utf-8")
+
+    if args.format == "json":
+        print(payload)
+    else:
+        print(f"path: {result['path']}")
+        print(f"exists: {result['exists']}")
+        print(f"class: {result['class']}")
+        print(f"safe_to_delete_or_relabel: {result['safe_to_delete_or_relabel']}")
+        print(f"verdict_reason: {result['verdict_reason']}")
+        print(f"inbound_refs: {result['inbound_ref_counts']}")
+        if result["contradictions"]:
+            print(f"contradictions: {len(result['contradictions'])}")
+        if result["unknowns"]:
+            for u in result["unknowns"]:
+                print(f"unknown: {u}")
+
+    if not result["exists"]:
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

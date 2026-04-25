@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""Bridge an in-band agent result into a wave EXEC_RECEIPT artifact."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def _state_paths(root: Path, wave_id: str) -> tuple[Path, Path]:
+    state_root = Path(os.environ.get("SPINE_STATE", root.parent / ".runtime" / "spine" / "state"))
+    waves_root = Path(os.environ.get("SPINE_RUNTIME_ROOT", state_root.parent / "runtime")).joinpath("waves")
+    wave_dir = waves_root / wave_id
+    return wave_dir / "state.json", wave_dir / "evidence"
+
+
+def _usage() -> str:
+    return (
+        "Usage: wave-emit-agent-receipt <WAVE_ID> --lane <lane>|--dispatch D<N> --result \"<text>\" "
+        "[--file-read <path>]... [--run-key <key>]... [--commit-ref <sha>]... "
+        "[--loop-id <LOOP_ID>] [--completion-level <level>] [--task-id <id>]"
+    )
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+    return ordered
+
+
+def _parse_args(argv: list[str]) -> tuple[str, str, str, str, list[str], list[str], list[str], str, str, str]:
+    wave_id = ""
+    lane = ""
+    dispatch_id = ""
+    result = ""
+    task_id_override = ""
+    file_reads: list[str] = []
+    run_keys: list[str] = []
+    commit_refs: list[str] = []
+    loop_id_override = ""
+    completion_level = ""
+    args = list(argv[1:])
+    while args:
+        token = args.pop(0)
+        if token == "--lane":
+            lane = args.pop(0)
+        elif token == "--dispatch":
+            dispatch_id = args.pop(0)
+        elif token == "--result":
+            result = args.pop(0)
+        elif token == "--file-read":
+            file_reads.append(args.pop(0))
+        elif token == "--run-key":
+            run_keys.append(args.pop(0))
+        elif token == "--commit-ref":
+            commit_refs.append(args.pop(0))
+        elif token == "--loop-id":
+            loop_id_override = args.pop(0)
+        elif token == "--completion-level":
+            completion_level = args.pop(0)
+        elif token == "--task-id":
+            task_id_override = args.pop(0)
+        elif token.startswith("-"):
+            raise SystemExit(f"Unknown flag: {token}")
+        elif not wave_id:
+            wave_id = token
+        else:
+            raise SystemExit(f"Unexpected extra argument: {token}")
+    if not wave_id:
+        raise SystemExit(_usage())
+    if not lane and not dispatch_id:
+        raise SystemExit("ERROR: --lane <lane> or --dispatch D<N> is required.")
+    return (
+        wave_id,
+        lane,
+        dispatch_id,
+        result,
+        _dedupe(file_reads),
+        _dedupe(run_keys),
+        _dedupe(commit_refs),
+        loop_id_override.strip(),
+        completion_level.strip(),
+        task_id_override,
+    )
+
+
+def main(argv: list[str]) -> int:
+    try:
+        (
+            wave_id,
+            lane,
+            dispatch_id,
+            result,
+            file_reads,
+            run_keys,
+            commit_refs,
+            loop_id_override,
+            completion_level,
+            task_id_override,
+        ) = _parse_args(argv)
+    except IndexError:
+        print("ERROR: missing value for flag", file=sys.stderr)
+        return 1
+    except SystemExit as exc:
+        message = str(exc)
+        print(message, file=sys.stderr)
+        return 1
+
+    root = _repo_root()
+    state_file, evidence_dir = _state_paths(root, wave_id)
+    if not state_file.is_file():
+        print(f"Wave '{wave_id}' does not exist. Create with: ops wave start {wave_id} --objective \"...\"", file=sys.stderr)
+        return 1
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+    dispatches = state.get("dispatches", [])
+    if not isinstance(dispatches, list):
+        dispatches = []
+
+    selected = None
+    if dispatch_id and dispatch_id.startswith("D"):
+        if not dispatches:
+            print("ERROR: --dispatch requires existing dispatches; use --lane for subagent lanes", file=sys.stderr)
+            return 1
+        try:
+            index = int(dispatch_id[1:]) - 1
+        except ValueError:
+            index = -1
+        if 0 <= index < len(dispatches):
+            selected = dispatches[index]
+    elif lane:
+        # Look for existing dispatch on this lane first.
+        for dispatch in dispatches:
+            if dispatch.get("lane") == lane:
+                selected = dispatch
+        if selected is None:
+            # Subagent bridge: no dispatch ceremony occurred. Synthesize a
+            # dispatch entry so the receipt pipeline works. Real evidence
+            # (commit refs, run keys) is still required — this is a bridge,
+            # not a bypass.
+            #
+            # The read-modify-write must happen inside one locked section to
+            # avoid overwriting concurrent mutations from collect/status/close.
+            lock_path = state_file.parent / "wave.lock"
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                # Reload state under lock — the pre-lock read may be stale.
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+                packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+                dispatches = state.get("dispatches", [])
+                if not isinstance(dispatches, list):
+                    dispatches = []
+
+                # Re-check: another process may have created the dispatch
+                # for this lane while we waited for the lock.
+                for dispatch in dispatches:
+                    if dispatch.get("lane") == lane:
+                        selected = dispatch
+                        break
+
+                if selected is None:
+                    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    idx = len(dispatches) + 1
+                    synth_task_id = task_id_override.strip() or f"D{idx}"
+                    selected = {
+                        "task_id": synth_task_id,
+                        "lane": lane,
+                        "task": f"subagent-bridged lane ({lane})",
+                        "from_role": "researcher",
+                        "to_role": "worker",
+                        "transition_gate": "subagent_bridge",
+                        "input_refs": {},
+                        "expected_output_refs": {},
+                        "status": "done",
+                        "dispatched_at": now,
+                        "dispatched_by_terminal": os.environ.get(
+                            "OPS_TERMINAL_ROLE",
+                            os.environ.get("SPINE_TERMINAL_ROLE", "SPINE-CONTROL-01"),
+                        ),
+                        "completed_at": now,
+                        "result": "subagent_bridged",
+                        "run_key": None,
+                        "receipt_validated": False,
+                        "synthetic": True,
+                    }
+                    dispatches.append(selected)
+                    state["dispatches"] = dispatches
+                    # Atomic write while still holding the lock.
+                    fd, tmp_path = tempfile.mkstemp(
+                        prefix=".state-", suffix=".tmp", dir=str(state_file.parent),
+                    )
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                            json.dump(state, fh, indent=2, default=str)
+                            fh.write("\n")
+                            fh.flush()
+                            os.fsync(fh.fileno())
+                        os.replace(tmp_path, str(state_file))
+                    except BaseException:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                        raise
+                    print(f"Synthesized subagent-bridge dispatch {synth_task_id} on lane '{lane}'", file=sys.stderr)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+
+    if selected is None:
+        print(f"ERROR: dispatch {dispatch_id} not found", file=sys.stderr)
+        return 1
+
+    task_id = task_id_override.strip() or str(selected.get("task_id") or "").strip()
+    if not task_id:
+        print("ERROR: unable to resolve task_id from dispatch; pass --task-id", file=sys.stderr)
+        return 1
+
+    selected_lane = str(selected.get("lane") or lane or "execution").strip()
+    resolved_loop_id = loop_id_override or str(packet.get("loop_id") or "").strip()
+    resolved_run_keys = list(run_keys)
+    selected_run_key = str(selected.get("run_key") or "").strip()
+    if not resolved_run_keys and selected_run_key:
+        resolved_run_keys = [selected_run_key]
+    terminal_id = (
+        os.environ.get("OPS_TERMINAL_ROLE")
+        or os.environ.get("SPINE_TERMINAL_ROLE")
+        or os.environ.get("SPINE_TERMINAL_NAME")
+        or os.environ.get("SPINE_TERMINAL_ID")
+        or "SPINE-CONTROL-01"
+    )
+    receipt = {
+        "task_id": task_id,
+        "terminal_id": terminal_id,
+        "lane": selected_lane,
+        "status": "done",
+        "files_changed": [],
+        "run_keys": resolved_run_keys,
+        "blockers": [],
+        "ready_for_verify": True,
+        "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "wave_id": wave_id,
+        "commit_hashes": commit_refs,
+        "evidence_refs": {
+            "run_key_refs": resolved_run_keys,
+            "file_refs": file_reads,
+            "commit_refs": commit_refs,
+            "blocker_class": "none",
+        },
+    }
+    if resolved_loop_id:
+        receipt["loop_id"] = resolved_loop_id
+    if completion_level:
+        receipt["completion_level"] = completion_level
+
+    receipt_path = evidence_dir / f"{task_id}.exec_receipt.json"
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+
+    validator = root / "ops" / "plugins" / "core" / "orchestration" / "bin" / "wave-receipt-validate"
+    subprocess.run([str(validator), str(receipt_path)], check=True)
+
+    print(f"Emitted agent-bridged EXEC_RECEIPT: {receipt_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

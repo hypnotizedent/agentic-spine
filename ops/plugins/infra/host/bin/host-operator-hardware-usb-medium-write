@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-usb-medium-write
+# Explicit destructive writer for reusable USB/SSD installer media.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-usb-medium-write - Write installer medium with optional embedded autoinstall
+
+Usage:
+  host-operator-hardware-usb-medium-write --plan <usb-medium-plan.json> --disk <disk> [--apply] [--json]
+
+Options:
+  --plan <path>      Medium plan from host.operator-hardware.usb-medium.render
+  --disk <disk>      Target whole-disk identifier, for example /dev/disk4
+  --apply            Perform the destructive write (default: dry-run only)
+  --json             Machine-readable JSON output
+
+Supported write strategies:
+  stock_iso_raw_write        Raw dd of ISO only (legacy)
+  iso_plus_cidata_partition  ISO dd + CIDATA partition with autoinstall payload
+
+This capability mutates the selected medium when --apply is provided.
+It does not mutate the target salvage device.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+PLAN_PATH=""
+DISK=""
+APPLY=false
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --plan) PLAN_PATH="${2:-}"; shift 2 ;;
+        --disk) DISK="${2:-}"; shift 2 ;;
+        --apply) APPLY=true; shift ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$PLAN_PATH" ]] || fail "--plan is required"
+[[ -f "$PLAN_PATH" ]] || fail "plan not found: $PLAN_PATH"
+[[ -n "$DISK" ]] || fail "--disk is required"
+
+need jq
+
+iso_source=$(jq -r '.iso_source // ""' "$PLAN_PATH")
+iso_resolution_status=$(jq -r '.iso_resolution_status // ""' "$PLAN_PATH")
+device_id=$(jq -r '.device_id' "$PLAN_PATH")
+medium_type=$(jq -r '.medium_type' "$PLAN_PATH")
+write_strategy=$(jq -r '.write_strategy' "$PLAN_PATH")
+autoinstall_payload_path=$(jq -r '.autoinstall_payload_path // ""' "$PLAN_PATH")
+autoinstall_meta_data_path=$(jq -r '.autoinstall_meta_data_path // ""' "$PLAN_PATH")
+enrollment_policy=$(jq -r '.enrollment_policy // ""' "$PLAN_PATH")
+
+case "$write_strategy" in
+    stock_iso_raw_write|iso_plus_cidata_partition) ;;
+    *) fail "unsupported write strategy: $write_strategy" ;;
+esac
+
+[[ -n "$iso_source" ]] || fail "plan missing iso_source"
+[[ "$iso_resolution_status" == "local_path_resolved" ]] || fail "plan does not have a resolved local ISO path"
+[[ -f "$iso_source" ]] || fail "local ISO path not found: $iso_source"
+
+if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then
+    [[ -n "$autoinstall_payload_path" && -f "$autoinstall_payload_path" ]] || fail "iso_plus_cidata_partition requires autoinstall payload at: $autoinstall_payload_path"
+fi
+
+raw_disk="$DISK"
+if [[ "$DISK" =~ ^/dev/disk[0-9]+$ ]] && [[ "$(uname -s)" == "Darwin" ]]; then
+    raw_disk="/dev/r${DISK#/dev/}"
+fi
+
+# Build command list based on strategy
+if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then
+    commands_json=$(jq -n \
+        --arg unmount "diskutil unmountDisk $DISK" \
+        --arg write_iso "sudo dd if='$iso_source' of='$raw_disk' bs=4m status=progress conv=sync" \
+        --arg wait_settle "sleep 2" \
+        --arg add_cidata "diskutil addPartition $DISK MS-DOS CIDATA 100M" \
+        --arg copy_userdata "cp '$autoinstall_payload_path' /Volumes/CIDATA/user-data" \
+        --arg copy_metadata "cp '${autoinstall_meta_data_path}' /Volumes/CIDATA/meta-data" \
+        --arg unmount_cidata "diskutil unmount /Volumes/CIDATA" \
+        --arg eject "diskutil eject $DISK" \
+        '[$unmount, $write_iso, $wait_settle, $add_cidata, $copy_userdata, $copy_metadata, $unmount_cidata, $eject]')
+else
+    commands_json=$(jq -n \
+        --arg unmount "diskutil unmountDisk $DISK" \
+        --arg write "sudo dd if='$iso_source' of='$raw_disk' bs=4m status=progress conv=sync" \
+        --arg eject "diskutil eject $DISK" \
+        '[$unmount, $write, $eject]')
+fi
+
+write_performed=false
+cidata_created=false
+if $APPLY; then
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        fail "--apply is currently implemented for macOS diskutil/dd path only"
+    fi
+
+    # Step 1: Write ISO
+    diskutil unmountDisk "$DISK" >/dev/null
+    sudo dd if="$iso_source" of="$raw_disk" bs=4m status=progress conv=sync
+    sync
+    write_performed=true
+
+    # Step 2: Add CIDATA partition if using embedded strategy
+    if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then
+        sleep 2  # let the disk settle after dd
+        # Add a small CIDATA partition in the free space after the ISO.
+        # This MUST succeed — no silent downgrade to stock ISO.
+        diskutil addPartition "$DISK" MS-DOS CIDATA 100M \
+            || fail "CIDATA partition creation failed on $DISK — medium is not embedded. Re-run with stock_iso_raw_write or use a larger medium."
+        [[ -d "/Volumes/CIDATA" ]] \
+            || fail "CIDATA partition created but not mounted at /Volumes/CIDATA — cannot copy autoinstall payload"
+        cp "$autoinstall_payload_path" /Volumes/CIDATA/user-data
+        if [[ -n "$autoinstall_meta_data_path" && -f "$autoinstall_meta_data_path" ]]; then
+            cp "$autoinstall_meta_data_path" /Volumes/CIDATA/meta-data
+        fi
+        cidata_created=true
+        diskutil unmount /Volumes/CIDATA 2>/dev/null || true
+    fi
+
+    diskutil eject "$DISK" >/dev/null || true
+fi
+
+if $JSON_MODE; then
+    jq -n \
+        --arg capability "host.operator-hardware.usb-medium.write" \
+        --arg device "$device_id" \
+        --arg medium_type "$medium_type" \
+        --arg disk "$DISK" \
+        --arg raw_disk "$raw_disk" \
+        --arg iso_source "$iso_source" \
+        --arg write_strategy "$write_strategy" \
+        --arg enrollment_policy "$enrollment_policy" \
+        --argjson apply_requested "$APPLY" \
+        --argjson write_performed "$write_performed" \
+        --argjson cidata_created "$cidata_created" \
+        --argjson commands "$commands_json" \
+        '{
+            capability: $capability,
+            device: $device,
+            medium_type: $medium_type,
+            disk: $disk,
+            raw_disk: $raw_disk,
+            iso_source: $iso_source,
+            write_strategy: $write_strategy,
+            enrollment_policy: (if $enrollment_policy == "" then null else $enrollment_policy end),
+            apply_requested: $apply_requested,
+            write_performed: $write_performed,
+            cidata_created: $cidata_created,
+            payload_embedded: $cidata_created,
+            commands: $commands,
+            note: "Writes installer medium. Target salvage device is untouched."
+        }'
+else
+    echo "host.operator-hardware.usb-medium.write"
+    echo "======================================"
+    echo "device:              $device_id"
+    echo "medium type:         $medium_type"
+    echo "write strategy:      $write_strategy"
+    echo "enrollment policy:   ${enrollment_policy:-not set}"
+    echo "disk:                $DISK"
+    echo "raw disk:            $raw_disk"
+    echo "iso source:          $iso_source"
+    echo "apply requested:     $APPLY"
+    echo "write performed:     $write_performed"
+    echo "cidata created:      $cidata_created"
+    echo
+    if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then
+        echo "NOTE: Writes ISO + CIDATA partition with embedded autoinstall payload."
+    else
+        echo "NOTE: Writes stock installer ISO to reusable medium only."
+    fi
+fi

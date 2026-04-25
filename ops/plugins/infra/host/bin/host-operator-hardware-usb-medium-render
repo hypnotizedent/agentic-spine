@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-usb-medium-render
+# Render a reusable first-touch USB/SSD delivery plan from existing Stage 0 artifacts.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
+MEDIUM_CONTRACT="${SPINE_REPO}/ops/bindings/operator.hardware.bootstrap.usb.medium.contract.yaml"
+SHELF_CONTRACT="${SPINE_REPO}/ops/bindings/operator.hardware.bootstrap.artifact.shelf.yaml"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-usb-medium-render - Render a reusable first-touch USB/SSD medium plan
+
+Usage:
+  host-operator-hardware-usb-medium-render --device <device_id> [options] [--json]
+
+Options:
+  --device <device_id>          Device ID from operator.hardware.inventory.yaml
+  --kit <path>                  Bootstrap kit manifest path
+  --autoinstall-dir <path>      Autoinstall payload directory
+  --iso-path <path>             Local installer ISO path
+  --medium-type <usb|external_ssd>
+  --output-dir <path>           Output directory for generated medium plan
+  --json                        Machine-readable JSON output
+
+This capability renders a medium plan only. It does not mutate any medium or target device.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+DEVICE=""
+KIT_PATH=""
+AUTOINSTALL_DIR=""
+ISO_PATH=""
+MEDIUM_TYPE=""
+OUTPUT_DIR=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device) DEVICE="${2:-}"; shift 2 ;;
+        --kit) KIT_PATH="${2:-}"; shift 2 ;;
+        --autoinstall-dir) AUTOINSTALL_DIR="${2:-}"; shift 2 ;;
+        --iso-path) ISO_PATH="${2:-}"; shift 2 ;;
+        --medium-type) MEDIUM_TYPE="${2:-}"; shift 2 ;;
+        --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$DEVICE" ]] || fail "--device is required"
+
+need yq
+need jq
+
+[[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
+[[ -f "$MEDIUM_CONTRACT" ]] || fail "medium contract not found: $MEDIUM_CONTRACT"
+[[ -f "$SHELF_CONTRACT" ]] || fail "artifact shelf contract not found: $SHELF_CONTRACT"
+
+device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null)
+[[ -n "$device_json" && "$device_json" != "null" ]] || fail "device not found in inventory: $DEVICE"
+
+source_platform=$(echo "$device_json" | jq -r '.platform')
+tailscale_identity=$(echo "$device_json" | jq -r '.tailscale_identity // empty')
+
+if [[ -z "$KIT_PATH" ]]; then
+    KIT_PATH="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}/bootstrap-kit.${DEVICE}.json"
+fi
+[[ -f "$KIT_PATH" ]] || fail "bootstrap kit manifest not found: $KIT_PATH"
+
+if [[ -z "$AUTOINSTALL_DIR" ]]; then
+    AUTOINSTALL_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}/autoinstall"
+fi
+[[ -d "$AUTOINSTALL_DIR" ]] || fail "autoinstall directory not found: $AUTOINSTALL_DIR"
+
+if [[ -z "$MEDIUM_TYPE" ]]; then
+    MEDIUM_TYPE="usb"
+fi
+
+case "$MEDIUM_TYPE" in
+    usb|external_ssd) ;;
+    *) fail "invalid medium type: $MEDIUM_TYPE" ;;
+esac
+
+if [[ -z "$OUTPUT_DIR" ]]; then
+    OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}/medium"
+fi
+mkdir -p "$OUTPUT_DIR"
+
+kit_json="$(cat "$KIT_PATH")"
+hostname=$(echo "$kit_json" | jq -r '.hostname')
+target_platform=$(echo "$kit_json" | jq -r '.target_platform')
+bootstrap_method=$(echo "$kit_json" | jq -r '.bootstrap_method')
+boot_medium=$(echo "$kit_json" | jq -r '.boot_medium // empty')
+target_distro=$(echo "$kit_json" | jq -r '.target_distro')
+target_distro_version=$(echo "$kit_json" | jq -r '.target_distro_version')
+operator_user=$(echo "$kit_json" | jq -r '.operator_user')
+local_hands_required=$(echo "$kit_json" | jq -r '.local_hands_required')
+device_class_from_kit=$(echo "$kit_json" | jq -r '.device_class // empty')
+chosen_network_method=$(echo "$kit_json" | jq -r '.chosen_network_method // empty')
+fallback_network_method=$(echo "$kit_json" | jq -r '.fallback_network_method // empty')
+connectivity_preflight_result=$(echo "$kit_json" | jq -r '.connectivity_preflight.result // empty')
+
+iso_library_ref=$(yq e -r '.artifact_shelf.iso_library_ref // ""' "$SHELF_CONTRACT")
+
+# Determine write strategy: require both user-data AND meta-data for embedded CIDATA
+enrollment_policy=$(echo "$kit_json" | jq -r '.enrollment_policy // "ssh_first_tailscale_later"')
+enrollment_policy_lineage=$(echo "$kit_json" | jq -r '.enrollment_policy_lineage // ""')
+autoinstall_user_data_check="${AUTOINSTALL_DIR}/autoinstall.user-data.yaml"
+autoinstall_meta_data_check="${AUTOINSTALL_DIR}/autoinstall.meta-data"
+if [[ -f "$autoinstall_user_data_check" && -f "$autoinstall_meta_data_check" ]]; then
+    write_strategy="iso_plus_cidata_partition"
+else
+    write_strategy="stock_iso_raw_write"
+fi
+
+device_class="salvage_laptop"
+if [[ -n "$device_class_from_kit" && "$device_class_from_kit" != "null" ]]; then
+    device_class="$device_class_from_kit"
+elif [[ "$source_platform" == "mac" ]]; then
+    device_class="old_intel_macbook"
+fi
+
+if [[ "$device_class" == "salvage_laptop" || "$device_class" == "old_intel_macbook" ]]; then
+    [[ -n "$chosen_network_method" ]] || fail "salvage-laptop medium render requires a declared approved network method from bootstrap-kit.render"
+    [[ "$connectivity_preflight_result" == "ready_for_reprovision" ]] || fail "salvage-laptop medium render requires connectivity preflight result ready_for_reprovision"
+fi
+
+boot_ritual='["Insert reusable medium","Select the installer medium in firmware/boot picker","Let Linux installer start","After first boot, run Stage 0 claim"]'
+if [[ "$device_class" == "old_intel_macbook" ]]; then
+    case "$chosen_network_method" in
+        rtl8153_ethernet|known_good_usb_nic)
+            boot_ritual='["Use the laptop built-in screen and keyboard only","Attach the approved wired NIC before power-on","Insert the reusable Ubuntu USB/SSD","Power on while holding Option","Select EFI/Ubuntu installer from the Apple boot picker","Keep the single wired network path attached through first boot and claim"]'
+            ;;
+        approved_usb_tether_fallback)
+            boot_ritual='["Use the laptop built-in screen and keyboard only","Attach the approved USB tether directly to the laptop","Insert the reusable Ubuntu USB/SSD","Power on while holding Option","Select EFI/Ubuntu installer from the Apple boot picker","Keep the single tether path attached through first boot and claim"]'
+            ;;
+        *)
+            boot_ritual='["Use the laptop built-in screen and keyboard only","Insert the reusable Ubuntu USB/SSD","Power on while holding Option","Select EFI/Ubuntu installer from the Apple boot picker","Keep the declared single first-boot network path attached through claim"]'
+            ;;
+    esac
+elif [[ "$device_class" == "salvage_laptop" ]]; then
+    boot_ritual='["Use the device built-in screen and keyboard only","Attach the declared approved first-boot network path","Insert the reusable installer medium","Select the installer medium in the firmware boot picker","Keep the same network path attached through first boot and claim"]'
+fi
+
+iso_resolution_status="artifact_reference_only"
+if [[ -n "$ISO_PATH" ]]; then
+    [[ -f "$ISO_PATH" ]] || fail "iso path not found: $ISO_PATH"
+    iso_resolution_status="local_path_resolved"
+fi
+
+autoinstall_user_data="${AUTOINSTALL_DIR}/autoinstall.user-data.yaml"
+autoinstall_meta_data="${AUTOINSTALL_DIR}/autoinstall.meta-data"
+device_notes="${AUTOINSTALL_DIR}/device-class-notes.json"
+claim_handoff_ref="ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml"
+rendered_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+plan_path="${OUTPUT_DIR}/usb-medium-plan.${DEVICE}.json"
+summary_path="${OUTPUT_DIR}/usb-medium-plan.${DEVICE}.summary.txt"
+
+jq -n \
+    --arg device_id "$DEVICE" \
+    --arg device_class "$device_class" \
+    --arg source_platform "$source_platform" \
+    --arg target_platform "$target_platform" \
+    --arg hostname "$hostname" \
+    --arg operator_user "$operator_user" \
+    --arg medium_type "$MEDIUM_TYPE" \
+    --arg write_strategy "$write_strategy" \
+    --arg boot_medium "$boot_medium" \
+    --arg iso_source "${ISO_PATH:-$iso_library_ref}" \
+    --arg iso_resolution_status "$iso_resolution_status" \
+    --arg iso_library_ref "$iso_library_ref" \
+    --arg kit_manifest_path "$KIT_PATH" \
+    --arg autoinstall_payload_path "$autoinstall_user_data" \
+    --arg autoinstall_meta_data_path "$autoinstall_meta_data" \
+    --arg device_notes_path "$device_notes" \
+    --arg claim_handoff_ref "$claim_handoff_ref" \
+    --arg bootstrap_method "$bootstrap_method" \
+    --arg chosen_network_method "$chosen_network_method" \
+    --arg fallback_network_method "$fallback_network_method" \
+    --arg connectivity_preflight_result "$connectivity_preflight_result" \
+    --arg target_distro "$target_distro" \
+    --arg target_distro_version "$target_distro_version" \
+    --arg tailscale_identity "$tailscale_identity" \
+    --arg enrollment_policy "$enrollment_policy" \
+    --arg enrollment_policy_lineage "$enrollment_policy_lineage" \
+    --arg rendered_at "$rendered_at" \
+    --argjson local_hands_required "$local_hands_required" \
+    --argjson local_operator_steps "$boot_ritual" \
+    '{
+        device_id: $device_id,
+        device_class: $device_class,
+        source_platform: $source_platform,
+        target_platform: $target_platform,
+        hostname: $hostname,
+        operator_user: $operator_user,
+        medium_type: $medium_type,
+        write_strategy: $write_strategy,
+        boot_medium: (if $boot_medium == "" then null else $boot_medium end),
+        iso_source: $iso_source,
+        iso_resolution_status: $iso_resolution_status,
+        iso_library_ref: (if $iso_library_ref == "" then null else $iso_library_ref end),
+        kit_manifest_path: $kit_manifest_path,
+        autoinstall_payload_path: $autoinstall_payload_path,
+        autoinstall_meta_data_path: (if ($autoinstall_meta_data_path | length) == 0 then null else $autoinstall_meta_data_path end),
+        device_notes_path: $device_notes_path,
+        claim_handoff_ref: $claim_handoff_ref,
+        bootstrap_method: $bootstrap_method,
+        enrollment_policy: $enrollment_policy,
+        enrollment_policy_lineage: (if $enrollment_policy_lineage == "" then null else $enrollment_policy_lineage end),
+        chosen_network_method: (if $chosen_network_method == "" then null else $chosen_network_method end),
+        fallback_network_method: (if $fallback_network_method == "" then null else $fallback_network_method end),
+        connectivity_preflight_result: (if $connectivity_preflight_result == "" then null else $connectivity_preflight_result end),
+        target_distro: $target_distro,
+        target_distro_version: $target_distro_version,
+        tailscale_identity: (if $tailscale_identity == "" then null else $tailscale_identity end),
+        local_hands_required: $local_hands_required,
+        local_operator_steps: $local_operator_steps,
+        embedding: (if $write_strategy == "iso_plus_cidata_partition" then {
+            mechanism: "cloud-init NoCloud datasource via labeled CIDATA partition",
+            cidata_contents: (
+                ["user-data (autoinstall)"]
+                + (if ($autoinstall_meta_data_path | length) > 0 then ["meta-data"] else [] end)
+            ),
+            payload_embedded: true,
+            note: "Embedding is planned. Actual success depends on medium write — if CIDATA partition creation fails, the write will fail hard."
+        } else {
+            mechanism: "stock ISO only — autoinstall payload is a sidecar artifact (user-data or meta-data missing)",
+            payload_embedded: false
+        } end),
+        current_limitations: [
+          "Old MacBooks still require local boot selection via Apple boot picker.",
+          "CIDATA partition creation requires free space beyond the ISO on the medium."
+        ],
+        rendered_at: $rendered_at
+    }' >"$plan_path"
+
+cat >"$summary_path" <<EOF
+device_id: $DEVICE
+medium_type: $MEDIUM_TYPE
+write_strategy: $write_strategy
+enrollment_policy: $enrollment_policy
+device_class: $device_class
+network_method: ${chosen_network_method:-not declared}
+iso_source: ${ISO_PATH:-$iso_library_ref}
+iso_resolution_status: $iso_resolution_status
+kit_manifest_path: $KIT_PATH
+autoinstall_payload_path: $autoinstall_user_data
+plan_path: $plan_path
+EOF
+
+if $JSON_MODE; then
+    jq -n \
+        --arg capability "host.operator-hardware.usb-medium.render" \
+        --arg device "$DEVICE" \
+        --arg medium_type "$MEDIUM_TYPE" \
+        --arg plan_path "$plan_path" \
+        --arg summary_path "$summary_path" \
+        --arg device_class "$device_class" \
+        --arg network_method "$chosen_network_method" \
+        --arg iso_source "${ISO_PATH:-$iso_library_ref}" \
+        --arg iso_resolution_status "$iso_resolution_status" \
+        --arg write_strategy "$write_strategy" \
+        --arg enrollment_policy "$enrollment_policy" \
+        '{
+            capability: $capability,
+            device: $device,
+            medium_type: $medium_type,
+            device_class: $device_class,
+            write_strategy: $write_strategy,
+            enrollment_policy: $enrollment_policy,
+            payload_embedded: ($write_strategy == "iso_plus_cidata_partition"),
+            chosen_first_network_method: (if $network_method == "" then null else $network_method end),
+            iso_source: $iso_source,
+            iso_resolution_status: $iso_resolution_status,
+            generated_artifacts: [$plan_path, $summary_path],
+            note: "Medium plan only. No medium or target device was mutated."
+        }'
+else
+    echo "host.operator-hardware.usb-medium.render"
+    echo "======================================="
+    echo "device:               $DEVICE"
+    echo "medium type:          $MEDIUM_TYPE"
+    echo "iso source:           ${ISO_PATH:-$iso_library_ref}"
+    echo "iso resolution:       $iso_resolution_status"
+    echo "plan path:            $plan_path"
+    echo
+    echo "NOTE: Medium plan only. No medium or target device was mutated."
+fi

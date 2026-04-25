@@ -1,0 +1,160 @@
+# CORE_LOCK v1.1
+
+**Locked:** 2026-02-10
+**Last verified:** 2026-02-13
+**Status:** ACTIVE
+**Gate Version:** drift-gate.sh v2.6
+
+---
+
+## Core SSOT Paths
+
+| Surface | Canonical Path | Notes |
+|---------|---------------|-------|
+| Repo source | `bin/`, `ops/`, `surfaces/`, `docs/`, `fixtures/` | Authored control-plane only |
+| Runtime | `~/code/.runtime/spine/` | Mutable execution state, loop scopes, logs, agent context |
+| Evidence | `~/code/.evidence/spine/` | Receipts, verify history/indexes, cap-run evidence |
+| Data | `~/code/.data/` | Externalized domain/runtime truth |
+| Backups | `~/code/.backups/` | Historical/tombstoned artifacts |
+| Foundation | archived to `~/code/.backups/foundation/repo-tombstones/` | Merged into workbench (2026-04-09) |
+
+## Runtime Model
+
+**Single boring split**
+
+- `agentic-spine` contains authored control-plane source only.
+- `.runtime/spine` carries mutable execution state and workflow machinery.
+- `.evidence/spine` carries receipts, verify outputs, and cap-run evidence.
+- `origin` on Gitea is canonical; GitHub is mirror-only and must not block normal work.
+
+## Identity System
+
+**Single identity: run_key**
+
+Watcher format: `<session>__<slug>__R<id>`  
+Capability format: `CAP-<timestamp>__<capability>__R<id>`
+
+This key is used everywhere:
+- Outbox result: `<run_key>__RESULT.md`
+- Receipt folder: `~/code/.evidence/spine/sessions/R<run_key>/`
+- Ledger row: `run_id` column (latest row per run_id is authoritative state)
+
+## Entry Points
+
+| Entry | Path | Purpose |
+|-------|------|---------|
+| CLI | `bin/ops` | Canonical operator and agent entrypoint |
+| Startup status | `./bin/ops status --json` | Canonical state snapshot at session start |
+| Startup verify | `./bin/ops verify` | Canonical spine/object truth snapshot at session start |
+| Capability surface | `./bin/ops cap list` | Canonical capability discovery surface |
+| Spine verify | `./bin/ops cap run spine.verify` | Canonical spine/object truth verify entrypoint |
+| Estate verify | `./bin/ops cap run verify.infra.run` | Canonical estate/workload health verify entrypoint |
+| Worktree lifecycle | `ops/plugins/core/lifecycle/bin/worktree-lifecycle-*` | Workspace/worktree control surfaces |
+| Repo bootstrap | `ops/plugins/core/authority/bin/project-governance-bootstrap` | API-first Gitea repo ensure + remote alignment |
+
+## Drift Gates
+
+All must PASS for core to be healthy.
+
+| Gate | Enforces |
+|------|----------|
+| D1 | Top-level dirs bounded (allowlist enforced) |
+| D2 | No `runs/` directory |
+| D3 | Entrypoint smoke (`bin/ops` + `cap list`) |
+| D4 | Watcher running (warn only) |
+| D5 | No legacy coupling (`~/agent`, `ronny-ops`) |
+| D6 | Receipts exist for recent sessions |
+| D7 | Executables only in allowed zones |
+| D8 | No backup clutter |
+| D10 | Logs under mailroom only |
+| D11 | `~/agent` is symlink to mailroom |
+| D12 | This file exists |
+| D13 | API capability secrets preconditions |
+| D14 | Cloudflare surface drift (no legacy smells) |
+| D15 | GitHub Actions surface drift (read-only, no leaks) |
+| D16 | Docs quarantine (no competing truths) |
+| D17 | Root allowlist (no drift magnets at root) |
+| D18 | Docker compose surface drift (read-only) |
+| D19 | Backup surface drift (read-only, no secret printing) |
+| D22 | Nodes surface drift (read-only SSH, no credentials) |
+| D23 | Services health surface drift (no verbose curl) |
+| D24 | GitHub labels surface drift (read-only, no mutations) |
+| D27 | Fact duplication lock for startup/governance read docs |
+| D28 | Archive runway lock (active legacy absolute paths + extraction queue contract) |
+| D29 | Active entrypoint lock (launchd/cron ronny namespace cannot execute from ronny-ops without valid exception) |
+| D30 | Active config lock (legacy refs + plaintext secret patterns) |
+| D31 | Home output sink lock (home-root logs/out/err not allowlisted) |
+| D33 | Extraction pause lock (`ops/bindings/extraction.mode.yaml` mode must be `paused` or `active`) |
+| D34 | Loop ledger integrity lock (summary counts must match deduped reducer output) |
+| D35 | Infra relocation parity lock (cross-SSOT consistency for service moves during cutover/cleanup) |
+| D36 | Legacy exception hygiene lock (stale/near-expiry exception enforcement) |
+| D38 | Extraction hygiene lock (EXTRACTION_PROTOCOL enforcement) |
+| D40 | Maker tools drift lock (binding validity, script hygiene, no debug/secret/tmp leaks) |
+| D41 | Hidden-root governance lock (home-root inventory + forbidden pattern enforcement) |
+| D42 | Code path case lock (runtime scripts must use `$HOME/code` not `$HOME/Code`) |
+| D43 | Secrets namespace policy lock (freeze legacy root-path debt + enforce /spine namespace wiring) |
+| D44 | CLI tools discovery lock (inventory + cross-refs + probes) |
+| D45 | Naming consistency lock (cross-file identity surface verification) |
+| D47 | Brain surface path lock (no `.brain/` references in runtime scripts) |
+| D49 | Agent discovery lock (agents registry + contract coverage) |
+| D50 | Gitea CI workflow lock (workflow + drift-gate reference) |
+| D51 | Caddy proto lock (X-Forwarded-Proto on Authentik upstreams) |
+| D52 | router-primary gateway assertion (shop docs reference 192.168.x.x/24) |
+| D53 | Change pack integrity lock (template + sequencing + companion files) |
+| D54 | SSOT IP parity lock (device identity ↔ shop server ↔ bindings) |
+| D55 | Secrets runtime readiness lock (composite: D20 + D25) |
+| D56 | Agent entry surface lock (composite: D26 + D32 + D46) |
+| D57 | Infra identity cohesion lock (composite: D37 + D39) |
+| D58 | SSOT freshness lock (last_reviewed dates within threshold) |
+| D59 | Cross-registry completeness lock (bidirectional host coverage) |
+| D60 | Deprecation sweeper (known deprecated terms blocked from governance docs) |
+| D61 | Session-loop traceability lock (agent.session.closeout freshness + loop TTL) |
+| D62 | Git remote authority advisory (origin canonical; GitHub publication status advisory) |
+| D63 | Capabilities metadata lock (registry completeness + dependency typos + executable checks) |
+| D64 | Git remote authority WARN (GitHub merges/PRs) |
+| D65 | Agent briefing sync lock (AGENTS.md + CLAUDE.md match canonical governance brief) |
+| D66 | MCP server parity gate |
+| D67 | Capability map lock (capability_map covers capabilities.yaml) |
+| D68 | RAG canonical-only gate |
+| D69 | VM creation governance lock |
+| D70 | Secrets deprecated alias lock |
+| D71 | Deprecated ref allowlist lock |
+| D72 | MacBook hotkey SSOT lock |
+| D73 | OpenCode governed entry lock |
+| D74 | Billing/provider lane lock |
+| D75 | Gap registry mutation lock |
+| D76 | Home-surface hygiene lock |
+| D80 | Workbench authority-trace lock |
+| D81 | Plugin test regression lock |
+| D84 | Docs index registration lock (every governance .md must be in _index.yaml) |
+
+### Verbose Mode (Subchecks)
+
+To run the original subchecks individually (more verbose STOP output):
+
+```bash
+DRIFT_VERBOSE=1 ./bin/ops cap run spine.verify
+```
+
+Verbose mode runs: D20, D25, D26, D32, D37, D39, D46 instead of D55, D56, D57.
+
+## Rules
+
+1. **No new runtime surfaces outside mailroom**
+2. **If gates pass, core is healthy**
+3. **Legacy is archived, never deleted** (`.archive/`)
+4. **All work produces receipts** (no exceptions)
+5. **Provider/model recorded in every receipt**
+
+## Archived Legacy
+
+Located in `.archive/` (excluded from gates, recoverable):
+- `legacy-root/runs/` - old CLI run traces
+- `legacy-root/examples/` - old CLI examples
+- `legacy-root/tasks/` - old CLI tasks
+- `surfaces/quarantine/` - deprecated scripts
+- `bin/ops-import-info-only.sh` - one-time import tool
+
+---
+
+_If this file is missing, the repo is not a valid spine core._

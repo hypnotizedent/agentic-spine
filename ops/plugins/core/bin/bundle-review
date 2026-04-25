@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# Non-authoritative review engine for human operator bundles.
+# Two modes:
+#   --gather   : read bundle + repo surfaces, emit structured review material
+#   --write-report : accept completed classification, write governed report
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+CAPABILITY="bundle.review"
+
+# Governed runtime paths
+EVIDENCE_ROOT="${SPINE_EVIDENCE_ROOT:-$HOME/code/.evidence/spine}"
+
+JSON=0
+MODE=""
+BUNDLE_PATH=""
+CONTEXT_DOMAIN=""
+REPORT_FILE=""
+OPERATOR_NOTE=""
+
+usage() {
+  cat <<'USAGE'
+bundle.review - non-authoritative review engine for human operator bundles.
+
+Usage:
+  bundle-review --gather --bundle-path <path> [options]
+  bundle-review --write-report --bundle-path <path> --report-file <path> [options]
+
+Modes (exactly one required):
+  --gather                         read bundle + repo surfaces, emit structured material
+  --write-report                   write completed classification to governed evidence
+
+Required:
+  --bundle-path <path>             path to evidence bundle (directory)
+
+Options:
+  --context-domain <id>            broad domain context (e.g. core, mint, media)
+  --operator-note <text>           why this bundle matters
+  --report-file <path>             completed report file (required for --write-report)
+  --json                           machine-readable output
+
+Notes:
+  - Bundle path should be under governed evidence ($SPINE_EVIDENCE_ROOT).
+  - Output report is explicitly non-authoritative.
+  - The agent does classification between --gather and --write-report.
+USAGE
+}
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --gather) MODE="gather"; shift ;;
+    --write-report) MODE="write-report"; shift ;;
+    --bundle-path) BUNDLE_PATH="${2:?--bundle-path requires value}"; shift 2 ;;
+    --context-domain) CONTEXT_DOMAIN="${2:?--context-domain requires value}"; shift 2 ;;
+    --operator-note) OPERATOR_NOTE="${2:?--operator-note requires value}"; shift 2 ;;
+    --report-file) REPORT_FILE="${2:?--report-file requires value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+# --- Validate common args ---
+[[ -n "$MODE" ]] || fail "must specify --gather or --write-report"
+[[ -n "$BUNDLE_PATH" ]] || fail "--bundle-path required"
+[[ -d "$BUNDLE_PATH" ]] || fail "bundle path is not a directory: $BUNDLE_PATH"
+
+BUNDLE_ABS="$(cd "$BUNDLE_PATH" && pwd)"
+
+# --- Compute review output path ---
+NOW_UTC="$(TZ=UTC date -u +%Y%m%dT%H%M%SZ)"
+DATE_STAMP="$(TZ=UTC date -u +%Y%m%d)"
+BUNDLE_SLUG="$(basename "$BUNDLE_ABS" | tr ' ' '-' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g')"
+REVIEW_DIR="$EVIDENCE_ROOT/reviews/${BUNDLE_SLUG}-${DATE_STAMP}"
+REPORT_OUT="$REVIEW_DIR/review-report.md"
+REPORT_META="$REVIEW_DIR/review-meta.yaml"
+
+# ===== GATHER MODE =====
+if [[ "$MODE" == "gather" ]]; then
+
+  # List bundle files
+  file_list=()
+  while IFS= read -r f; do
+    file_list+=("$f")
+  done < <(find "$BUNDLE_ABS" -type f -name '*.md' | sort)
+
+  file_count="${#file_list[@]}"
+  [[ "$file_count" -gt 0 ]] || fail "no markdown files found in bundle"
+
+  # Identify relevant repo authority surfaces based on context domain
+  repo_surfaces=()
+  if [[ -n "$CONTEXT_DOMAIN" ]]; then
+    # Gather authority paths from master registry for this domain
+    while IFS= read -r path; do
+      [[ -n "$path" && "$path" != "null" ]] && repo_surfaces+=("$path")
+    done < <(yq e -r ".rows[] | select(.domain_id == \"$CONTEXT_DOMAIN\") | .authority.path" "$ROOT/ops/bindings/master.inventory.registry.yaml" 2>/dev/null || true)
+
+    # Also gather governance docs for context
+    case "$CONTEXT_DOMAIN" in
+      core)
+        repo_surfaces+=("docs/governance/SPINE.md")
+        ;;
+    esac
+  fi
+
+  if [[ "$JSON" -eq 1 ]]; then
+    files_json="$(printf '%s\n' "${file_list[@]}" | jq -R . | jq -s .)"
+    surfaces_json="$(printf '%s\n' "${repo_surfaces[@]+"${repo_surfaces[@]}"}" | jq -R . | jq -s .)"
+    jq -n \
+      --arg capability "$CAPABILITY" \
+      --arg mode "gather" \
+      --arg bundle_path "$BUNDLE_ABS" \
+      --arg bundle_slug "$BUNDLE_SLUG" \
+      --argjson file_count "$file_count" \
+      --argjson files "$files_json" \
+      --argjson repo_surfaces "$surfaces_json" \
+      --arg context_domain "${CONTEXT_DOMAIN:-}" \
+      --arg review_dir "$REVIEW_DIR" \
+      --arg operator_note "${OPERATOR_NOTE:-}" \
+      '{capability:$capability,mode:$mode,bundle_path:$bundle_path,bundle_slug:$bundle_slug,file_count:$file_count,files:$files,repo_surfaces:$repo_surfaces,context_domain:$context_domain,review_dir:$review_dir,operator_note:$operator_note}'
+  else
+    echo "$CAPABILITY"
+    echo "mode: gather"
+    echo "bundle_path: $BUNDLE_ABS"
+    echo "bundle_slug: $BUNDLE_SLUG"
+    echo "file_count: $file_count"
+    echo "review_dir: $REVIEW_DIR"
+    echo "context_domain: ${CONTEXT_DOMAIN:-(none)}"
+    [[ -z "$OPERATOR_NOTE" ]] || echo "operator_note: $OPERATOR_NOTE"
+    echo "---"
+    echo "files:"
+    for f in "${file_list[@]}"; do
+      echo "  - $f"
+    done
+    if [[ "${#repo_surfaces[@]}" -gt 0 ]]; then
+      echo "repo_surfaces:"
+      for s in "${repo_surfaces[@]}"; do
+        echo "  - $s"
+      done
+    else
+      echo "repo_surfaces: (none — supply --context-domain for targeted surface lookup)"
+    fi
+    echo "---"
+    echo "next: agent reads files above, classifies claims, writes report, then runs:"
+    echo "  bundle-review --write-report --bundle-path '$BUNDLE_PATH' --report-file <report.md>"
+  fi
+  exit 0
+fi
+
+# ===== WRITE-REPORT MODE =====
+if [[ "$MODE" == "write-report" ]]; then
+
+  [[ -n "$REPORT_FILE" ]] || fail "--report-file required for --write-report"
+  [[ -f "$REPORT_FILE" ]] || fail "report file not found: $REPORT_FILE"
+
+  # Create review directory
+  mkdir -p "$REVIEW_DIR"
+
+  # Copy the report
+  cp "$REPORT_FILE" "$REPORT_OUT"
+
+  # Count bundle files for metadata
+  file_count="$(find "$BUNDLE_ABS" -type f -name '*.md' | wc -l | tr -d ' ')"
+
+  # Write review metadata
+  NOW_ISO="$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)"
+  cat >"$REPORT_META" <<META
+review_id: REVIEW-${DATE_STAMP}-${BUNDLE_SLUG}
+status: non-authoritative
+bundle_path: '$BUNDLE_ABS'
+bundle_slug: $BUNDLE_SLUG
+bundle_file_count: $file_count
+context_domain: '${CONTEXT_DOMAIN:-}'
+operator_note: '${OPERATOR_NOTE:-}'
+report_path: '$REPORT_OUT'
+created_at: '$NOW_ISO'
+created_by: $CAPABILITY
+authority_level: none
+note: This is a non-authoritative review artifact. No claims are promoted by its existence.
+META
+
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n \
+      --arg capability "$CAPABILITY" \
+      --arg mode "write-report" \
+      --arg review_dir "$REVIEW_DIR" \
+      --arg report_path "$REPORT_OUT" \
+      --arg meta_path "$REPORT_META" \
+      --arg bundle_path "$BUNDLE_ABS" \
+      --argjson file_count "$file_count" \
+      '{capability:$capability,mode:$mode,review_dir:$review_dir,report_path:$report_path,meta_path:$meta_path,bundle_path:$bundle_path,bundle_file_count:$file_count,status:"OK"}'
+  else
+    echo "$CAPABILITY"
+    echo "mode: write-report"
+    echo "review_dir: $REVIEW_DIR"
+    echo "report_path: $REPORT_OUT"
+    echo "meta_path: $REPORT_META"
+    echo "bundle_path: $BUNDLE_ABS"
+    echo "bundle_file_count: $file_count"
+    echo "status: OK"
+  fi
+  exit 0
+fi
+
+fail "unknown mode: $MODE"

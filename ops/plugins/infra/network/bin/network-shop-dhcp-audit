@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# network.shop.dhcp.audit — Audit shop UniFi DHCP reservations against device registry
+# Uses UNIFI_SHOP_API_KEY via X-API-KEY header (no cookie auth needed).
+# Proxied through PVE SSH (router-primary is LAN-only).
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../../core/snapshot/lib/snapshot-surface-common.sh"
+
+snapshot_surface_init "ops/bindings/shop.dhcp.audit.yaml" "$@"
+
+SPINE_ROOT="$SNAPSHOT_SURFACE_ROOT"
+REGISTRY="$SPINE_ROOT/ops/bindings/shop.device.registry.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+INFISICAL_AGENT="$SPINE_ROOT/ops/plugins/providers/bin/infisical-agent.sh"
+TRACKED_SUMMARY_FILE="$SNAPSHOT_SURFACE_TRACKED_OUTPUT"
+SUMMARY_FILE="$SNAPSHOT_SURFACE_OUTPUT"
+MODE="$SNAPSHOT_SURFACE_MODE"
+TMPDIR_WORK=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+
+usage() {
+  cat <<'USAGE'
+network-shop-dhcp-audit
+
+Usage:
+  ./bin/ops cap run network.shop.dhcp.audit
+  ./bin/ops cap run network.shop.dhcp.audit -- --apply
+
+Flags:
+  --apply               Write tracked projection binding.
+  --check               Read-only mode (default): write runtime state only.
+  --state-path <path>   Override output path (defaults to runtime state path).
+USAGE
+}
+
+if [[ "${#SNAPSHOT_SURFACE_REMAINING_ARGS[@]}" -gt 0 ]]; then
+  echo "network-shop-dhcp-audit FAIL: unknown arg '${SNAPSHOT_SURFACE_REMAINING_ARGS[0]}'" >&2
+  usage >&2
+  exit 1
+fi
+
+if [[ -z "$SUMMARY_FILE" ]]; then
+  echo "network-shop-dhcp-audit FAIL: summary path cannot be empty" >&2
+  exit 1
+fi
+
+echo "network.shop.dhcp.audit"
+echo
+
+# ── Dependencies ──
+command -v yq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: yq"; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: jq"; exit 2; }
+[[ -f "$REGISTRY" ]] || { echo "STOP (2): shop.device.registry.yaml not found"; exit 2; }
+
+# ── Resolve API key ──
+API_KEY="${UNIFI_SHOP_API_KEY:-}"
+if [[ -z "$API_KEY" && -f "$INFISICAL_AGENT" ]]; then
+  API_KEY="$("$INFISICAL_AGENT" get-cached infrastructure prod UNIFI_SHOP_API_KEY 2>/dev/null || true)"
+fi
+if [[ -z "$API_KEY" ]]; then
+  echo "STOP (2): UNIFI_SHOP_API_KEY not available (check Infisical infrastructure/prod)"
+  exit 2
+fi
+
+# ── Resolve SSH proxy ──
+PROXY_HOST="$(yq -r '.ssh.targets[] | select(.id == "pve") | .host' "$SSH_BINDING")"
+PROXY_USER="$(yq -r '.ssh.targets[] | select(.id == "pve") | .user // "root"' "$SSH_BINDING")"
+UDR_HOST="$(yq -r '.ssh.targets[] | select(.id == "udr-shop") | .host' "$SSH_BINDING")"
+
+SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+
+# ── Query UniFi API for all configured clients ──
+api_b64="$(printf '%s' "$API_KEY" | base64)"
+
+ssh $SSH_OPTS "${PROXY_USER}@${PROXY_HOST}" "bash -s" <<SSHEOF > "$TMPDIR_WORK/clients_raw.json" 2>/dev/null
+set -euo pipefail
+api_key="\$(echo '$api_b64' | base64 -d)"
+curl -sk "https://${UDR_HOST}/proxy/network/api/s/default/rest/user" \
+  -H "X-API-KEY: \${api_key}" \
+  -H "Accept: application/json" 2>/dev/null
+SSHEOF
+
+[[ -s "$TMPDIR_WORK/clients_raw.json" ]] || { echo "STOP (2): UniFi API query failed or returned empty"; exit 2; }
+
+jq -r '.data' "$TMPDIR_WORK/clients_raw.json" > "$TMPDIR_WORK/clients.json"
+[[ -s "$TMPDIR_WORK/clients.json" ]] || { echo "STOP (2): UniFi API response missing .data field"; exit 2; }
+
+# ── Extract DHCP reservations (clients with fixed_ip) ──
+jq '[.[] | select(.fixed_ip != null) | {
+  mac: .mac,
+  ip: .fixed_ip,
+  hostname: (.hostname // .name // "unknown"),
+  use_fixedip: (.use_fixedip // false)
+}]' "$TMPDIR_WORK/clients.json" > "$TMPDIR_WORK/reservations.json"
+
+RESERVATION_COUNT=$(jq 'length' "$TMPDIR_WORK/reservations.json")
+
+echo "Found $RESERVATION_COUNT DHCP reservations on shop router-primary"
+echo
+
+# ── Build summary ──
+cat > "$SUMMARY_FILE" <<YAML
+# Shop DHCP Audit
+# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Source: router-primary UniFi API via PVE SSH proxy
+# Mode: $MODE
+
+summary:
+  total_reservations: $RESERVATION_COUNT
+  last_audit: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+reservations:
+YAML
+
+jq -r '.[] | "  - mac: \(.mac)\n    ip: \(.ip)\n    hostname: \(.hostname)\n    enabled: \(.use_fixedip)"' \
+  "$TMPDIR_WORK/reservations.json" >> "$SUMMARY_FILE"
+
+echo "Audit complete. Results written to: $SUMMARY_FILE"
+
+if [[ "$MODE" == "apply" ]]; then
+  cp "$SUMMARY_FILE" "$TRACKED_SUMMARY_FILE"
+  echo "Tracked binding updated: $TRACKED_SUMMARY_FILE"
+fi

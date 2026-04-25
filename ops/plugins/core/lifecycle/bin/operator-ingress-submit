@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""operator-ingress-submit — CLI for operator_ingress.submit capability."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.parse
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Raise HTTPError on redirects so we can extract Location header."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code, msg, headers, fp
+        )
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import operator_ingress as oi
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="operator-ingress-submit",
+        description="Create a non-authoritative operator ingress object.",
+    )
+    parser.add_argument(
+        "--content-type",
+        required=True,
+        choices=sorted(oi.ALLOWED_CONTENT_TYPES),
+        help="Ingress content type.",
+    )
+    parser.add_argument(
+        "--raw-content",
+        default="",
+        help="Raw operator content. Use --stdin for multiline input.",
+    )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read raw content from stdin.",
+    )
+    parser.add_argument(
+        "--hint",
+        default="",
+        help="Optional one-line operator hint.",
+    )
+    parser.add_argument(
+        "--source-device",
+        default="desktop",
+        help="Source device label (default: desktop).",
+    )
+    parser.add_argument(
+        "--source-app",
+        default="manual",
+        help="Source app label (default: manual).",
+    )
+    parser.add_argument(
+        "--operator-id",
+        default="ronny",
+        help="Operator ID (default: ronny).",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit JSON output.",
+    )
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="POST to execution host via operator surface server instead of local write.",
+    )
+    parser.add_argument(
+        "--remote-url",
+        default="https://spine.example.com/submit",
+        help="Remote submit endpoint URL (default: https://spine.example.com/submit).",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Verify dependencies and exit.",
+    )
+
+    if "--self-check" in sys.argv:
+        try:
+            import yaml  # noqa: F401
+            print("operator.ingress.submit self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"operator.ingress.submit self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    args = parser.parse_args()
+
+    raw_content = sys.stdin.read() if args.stdin else args.raw_content
+
+    # --- Remote submission: POST to execution host operator surface server ---
+    if args.remote:
+        payload = json.dumps({
+            "content_type": args.content_type,
+            "raw_content": raw_content,
+            "operator_hint": args.hint,
+            "source_device": args.source_device,
+            "source_app": args.source_app,
+        }).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "operator-ingress-submit/1.0",
+        }
+        # Cloudflare Access service-token auth when available
+        cf_id = os.environ.get("CF_ACCESS_CLIENT_ID", "")
+        cf_secret = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
+        if cf_id and cf_secret:
+            headers["CF-Access-Client-Id"] = cf_id
+            headers["CF-Access-Client-Secret"] = cf_secret
+
+        req = urllib.request.Request(
+            args.remote_url,
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        opener = urllib.request.build_opener(_NoRedirectHandler)
+        try:
+            with opener.open(req, timeout=30) as resp:
+                body = resp.read().decode("utf-8")
+                ctype = resp.headers.get("Content-Type", "")
+                if "application/json" in ctype and body.strip():
+                    result = json.loads(body)
+                else:
+                    result = {"status": "ok", "ingress_id": "submitted (non-JSON response)"}
+        except urllib.error.HTTPError as exc:
+            # 303 redirect means success — extract ingress_id from Location header
+            if exc.code == 303:
+                location = exc.headers.get("Location", "")
+                ingress_id = "unknown"
+                if "submitted=" in location:
+                    ingress_id = location.split("submitted=")[-1].split("&")[0]
+                result = {
+                    "status": "ok",
+                    "ingress_id": urllib.parse.unquote(ingress_id),
+                    "lifecycle_state": "submitted",
+                    "disposition": "awaiting_classification",
+                }
+            else:
+                body = exc.read().decode("utf-8", errors="replace")
+                try:
+                    err_data = json.loads(body)
+                    msg = err_data.get("error", body)
+                except Exception:
+                    msg = body
+                if args.json_output:
+                    print(json.dumps({"status": "error", "error": msg}, indent=2))
+                else:
+                    print(f"operator.ingress.submit FAIL (remote): {msg}", file=sys.stderr)
+                return 1
+        except Exception as exc:
+            if args.json_output:
+                print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+            else:
+                print(f"operator.ingress.submit FAIL (remote): {exc}", file=sys.stderr)
+            return 1
+
+        if args.json_output:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"CREATED (remote): {result.get('ingress_id', '?')}")
+            print(f"  state: {result.get('lifecycle_state', '?')}")
+            print(f"  disposition: {result.get('disposition', '?')}")
+        return 0
+
+    # --- Local submission: write directly to SPINE_STATE ---
+    state_root = os.environ.get("SPINE_STATE", "")
+    if not state_root:
+        msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": msg}, indent=2))
+        else:
+            print(f"operator.ingress.submit FAIL: {msg}", file=sys.stderr)
+        return 1
+
+    try:
+        result = oi.create_operator_ingress(
+            state_root=state_root,
+            raw_content=raw_content,
+            content_type=args.content_type,
+            operator_hint=args.hint,
+            operator_id=args.operator_id,
+            source_device=args.source_device,
+            source_app=args.source_app,
+            submitted_via="operator_ingress.submit",
+        )
+    except oi.OperatorIngressError as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"operator.ingress.submit FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"CREATED: {result['ingress_id']}")
+        print(f"  path: {result['path']}")
+        print(f"  state: {result['lifecycle_state']}")
+        print(f"  disposition: {result['disposition']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

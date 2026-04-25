@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-autoinstall-render
+# Render installer payload artifacts from a Stage 0 bootstrap kit manifest.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-autoinstall-render - Render installer payload artifacts
+
+Usage:
+  host-operator-hardware-autoinstall-render --kit <bootstrap-kit.json> [options] [--json]
+
+Options:
+  --kit <path>               Bootstrap kit manifest from bootstrap-kit.render
+  --method <method>          Override method: usb_autoinstall | pxe | iventoy | manual_console_install
+  --enrollment-policy <p>   Override enrollment policy from kit manifest
+  --tailscale-authkey <key>  Tailscale auth key (for tailscale_auto_enroll_authkey policy)
+  --output-dir <dir>         Output directory for generated installer artifacts
+  --json                     Machine-readable JSON output
+
+This capability renders installer payload artifacts only. No device is modified.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+KIT_PATH=""
+METHOD_OVERRIDE=""
+ENROLLMENT_POLICY_OVERRIDE=""
+TAILSCALE_AUTHKEY=""
+OUTPUT_DIR=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --kit) KIT_PATH="${2:-}"; shift 2 ;;
+        --method) METHOD_OVERRIDE="${2:-}"; shift 2 ;;
+        --enrollment-policy) ENROLLMENT_POLICY_OVERRIDE="${2:-}"; shift 2 ;;
+        --tailscale-authkey) TAILSCALE_AUTHKEY="${2:-}"; shift 2 ;;
+        --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$KIT_PATH" ]] || fail "--kit is required"
+[[ -f "$KIT_PATH" ]] || fail "kit manifest not found: $KIT_PATH"
+
+need jq
+
+device_id=$(jq -r '.device_id' "$KIT_PATH")
+source_platform=$(jq -r '.source_platform' "$KIT_PATH")
+target_platform=$(jq -r '.target_platform' "$KIT_PATH")
+hostname=$(jq -r '.hostname' "$KIT_PATH")
+operator_user=$(jq -r '.operator_user' "$KIT_PATH")
+ssh_public_key_ref=$(jq -r '.ssh_public_key_ref' "$KIT_PATH")
+bootstrap_method=$(jq -r '.bootstrap_method' "$KIT_PATH")
+target_distro=$(jq -r '.target_distro' "$KIT_PATH")
+target_distro_version=$(jq -r '.target_distro_version' "$KIT_PATH")
+disk_partition_shape=$(jq -r '.disk_partition_shape' "$KIT_PATH")
+tailscale_mode=$(jq -r '.tailscale_enrollment_mode' "$KIT_PATH")
+enrollment_policy=$(jq -r '.enrollment_policy // "ssh_first_tailscale_later"' "$KIT_PATH")
+kit_authkey_present=$(jq -r '.tailscale_authkey_present // false' "$KIT_PATH")
+package_baseline_json=$(jq -c '.package_baseline' "$KIT_PATH")
+
+# Allow override from command line
+if [[ -n "$ENROLLMENT_POLICY_OVERRIDE" ]]; then
+    enrollment_policy="$ENROLLMENT_POLICY_OVERRIDE"
+fi
+
+# Validate enrollment policy
+case "$enrollment_policy" in
+    ssh_first_tailscale_later|tailscale_installed_login_manual|tailscale_auto_enroll_authkey) ;;
+    *) fail "invalid enrollment policy: $enrollment_policy" ;;
+esac
+
+# Gate: tailscale_auto_enroll_authkey requires the actual auth key at render time.
+# Checking kit_authkey_present alone is not sufficient — the renderer must have
+# the secret value to produce a payload that actually auto-enrolls.
+if [[ "$enrollment_policy" == "tailscale_auto_enroll_authkey" && -z "$TAILSCALE_AUTHKEY" ]]; then
+    fail "enrollment policy tailscale_auto_enroll_authkey requires --tailscale-authkey with the actual secret value at render time"
+fi
+
+# Adjust package baseline based on enrollment policy
+if [[ "$enrollment_policy" == "ssh_first_tailscale_later" ]]; then
+    # Remove tailscale from packages — intentionally absent at first boot
+    package_baseline_json=$(echo "$package_baseline_json" | jq '[.[] | select(. != "tailscale")]')
+fi
+
+[[ "$target_platform" == "linux" ]] || fail "autoinstall renderer currently supports linux target only"
+
+if [[ -n "$METHOD_OVERRIDE" ]]; then
+    bootstrap_method="$METHOD_OVERRIDE"
+fi
+
+case "$bootstrap_method" in
+    usb_autoinstall|pxe|iventoy|manual_console_install) ;;
+    *) fail "invalid bootstrap method: $bootstrap_method" ;;
+esac
+
+if [[ -z "$OUTPUT_DIR" ]]; then
+    OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${device_id}/autoinstall"
+fi
+mkdir -p "$OUTPUT_DIR"
+
+generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+autoinstall_path="${OUTPUT_DIR}/autoinstall.user-data.yaml"
+meta_data_path="${OUTPUT_DIR}/autoinstall.meta-data"
+notes_path="${OUTPUT_DIR}/device-class-notes.json"
+
+package_yaml=$(echo "$package_baseline_json" | jq -r '.[] | "  - " + .')
+ssh_key_contents=""
+if [[ -f "$ssh_public_key_ref" ]]; then
+    ssh_key_contents=$(<"$ssh_public_key_ref")
+fi
+
+[[ -n "$ssh_key_contents" ]] || fail "SSH public key is empty or missing at: $ssh_public_key_ref — first-touch medium requires a real operator key"
+
+cat >"$autoinstall_path" <<EOF
+#cloud-config
+autoinstall:
+  version: 1
+  identity:
+    hostname: ${hostname}
+    username: ${operator_user}
+    password: "*"
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+      - ${ssh_key_contents}
+  packages:
+${package_yaml}
+  late-commands:
+    - curtin in-target --target=/target mkdir -p /etc/spine
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${device_id}' > /etc/spine/operator-hardware-device-id"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${bootstrap_method}' > /etc/spine/bootstrap-method"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${target_distro} ${target_distro_version}' > /etc/spine/bootstrap-target-distro"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${tailscale_mode}' > /etc/spine/tailscale-enrollment-mode"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${enrollment_policy}' > /etc/spine/enrollment-policy"
+EOF
+
+# Enrollment-policy-specific late-commands
+if [[ "$enrollment_policy" == "tailscale_installed_login_manual" || "$enrollment_policy" == "tailscale_auto_enroll_authkey" ]]; then
+    cat >>"$autoinstall_path" <<'TAILSCALE_REPO_EOF'
+    - curtin in-target --target=/target bash -lc "curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null"
+    - curtin in-target --target=/target bash -lc "curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list >/dev/null"
+    - curtin in-target --target=/target bash -lc "apt-get update && apt-get install -y tailscale"
+    - curtin in-target --target=/target bash -lc "systemctl enable tailscaled"
+TAILSCALE_REPO_EOF
+fi
+
+if [[ "$enrollment_policy" == "tailscale_auto_enroll_authkey" && -n "$TAILSCALE_AUTHKEY" ]]; then
+    # Trust-sensitive: write auth key to a file and create a first-boot systemd
+    # oneshot that runs tailscale up AFTER the real OS boots (not in the installer
+    # chroot where tailscaled cannot run and network may not be ready).
+    cat >>"$autoinstall_path" <<AUTHKEY_EOF
+    - curtin in-target --target=/target bash -lc "printf '%s\n' 'trust_material=authkey_supplied' > /etc/spine/enrollment-policy-lineage"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${TAILSCALE_AUTHKEY}' > /etc/spine/tailscale-authkey && chmod 600 /etc/spine/tailscale-authkey"
+    - curtin in-target --target=/target bash -lc "cat > /etc/systemd/system/spine-tailscale-enroll.service <<'UNIT'
+[Unit]
+Description=Spine first-boot Tailscale enrollment
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+ConditionPathExists=/etc/spine/tailscale-authkey
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'tailscale up --authkey=\$(cat /etc/spine/tailscale-authkey) && rm -f /etc/spine/tailscale-authkey && systemctl disable spine-tailscale-enroll.service'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT"
+    - curtin in-target --target=/target bash -lc "systemctl enable spine-tailscale-enroll.service"
+AUTHKEY_EOF
+elif [[ "$enrollment_policy" == "tailscale_installed_login_manual" ]]; then
+    cat >>"$autoinstall_path" <<MANUAL_EOF
+    - curtin in-target --target=/target bash -lc "printf '%s\n' 'tailscale_installed_not_enrolled' > /etc/spine/enrollment-policy-lineage"
+MANUAL_EOF
+else
+    cat >>"$autoinstall_path" <<SSHONLY_EOF
+    - curtin in-target --target=/target bash -lc "printf '%s\n' 'ssh_only_no_tailscale' > /etc/spine/enrollment-policy-lineage"
+SSHONLY_EOF
+fi
+
+cat >"$meta_data_path" <<EOF
+instance-id: ${device_id}-${generated_at}
+local-hostname: ${hostname}
+EOF
+
+case "$source_platform" in
+    mac)
+        device_class_notes='{"device_class":"old-macbook","notes":["Use Apple boot picker for USB path","Do not assume zero-touch first boot","Capture any driver or Wi-Fi quirks as entropy markers"],"likely_trust_boundary":"local hands required at wipe and boot path"}'
+        ;;
+    windows)
+        device_class_notes='{"device_class":"old-windows-laptop","notes":["Use BIOS/UEFI boot menu or standardized USB path","Do not treat previous Windows state as trusted bootstrap evidence"],"likely_trust_boundary":"local hands likely required unless netboot is already standardized"}'
+        ;;
+    *)
+        device_class_notes='{"device_class":"generic-linux-target","notes":["Installer payload is generic Linux Stage 0 kernel"],"likely_trust_boundary":"depends on existing boot control"}'
+        ;;
+esac
+
+if [[ "$bootstrap_method" == "pxe" || "$bootstrap_method" == "iventoy" ]]; then
+    device_class_notes=$(echo "$device_class_notes" | jq '.batchability = "high"')
+else
+    device_class_notes=$(echo "$device_class_notes" | jq '.batchability = "medium"')
+fi
+echo "$device_class_notes" >"$notes_path"
+
+if [[ "$bootstrap_method" == "manual_console_install" ]]; then
+    rm -f "$meta_data_path"
+fi
+
+generated_artifacts_json=$(jq -n --arg user_data "$autoinstall_path" --arg meta_data "$meta_data_path" --arg notes "$notes_path" --arg method "$bootstrap_method" '
+    [
+      {kind: "autoinstall_user_data", path: $user_data},
+      (if $method == "manual_console_install" then empty else {kind: "autoinstall_meta_data", path: $meta_data} end),
+      {kind: "device_class_notes", path: $notes}
+    ]')
+
+operator_steps_json=$(case "$bootstrap_method" in
+    usb_autoinstall)
+        echo '["Write rendered autoinstall payload to USB installer media","Attach media to target device","Select installer in local boot picker"]'
+        ;;
+    pxe)
+        echo '["Expose rendered autoinstall payload to PXE environment","Ensure target is set to netboot","Observe first boot claim after installer completes"]'
+        ;;
+    iventoy)
+        echo '["Expose rendered installer image through iVentoy","Select image from network boot menu","Observe first boot claim after installer completes"]'
+        ;;
+    manual_console_install)
+        echo '["Follow rendered payload values during manual console install","Seed operator key and bootstrap markers exactly as rendered"]'
+        ;;
+esac)
+
+if $JSON_MODE; then
+    jq -n \
+        --arg capability "host.operator-hardware.autoinstall.render" \
+        --arg device "$device_id" \
+        --arg method "$bootstrap_method" \
+        --arg enrollment_policy "$enrollment_policy" \
+        --arg target_platform "$target_platform" \
+        --arg installer_provenance "rendered:${bootstrap_method}:${target_distro}-${target_distro_version}:${generated_at}" \
+        --arg output_dir "$OUTPUT_DIR" \
+        --argjson generated_artifacts "$generated_artifacts_json" \
+        --argjson operator_steps "$operator_steps_json" \
+        --argjson device_class_notes "$(cat "$notes_path")" \
+        '{
+            capability: $capability,
+            device: $device,
+            target_platform: $target_platform,
+            bootstrap_method: $method,
+            enrollment_policy: $enrollment_policy,
+            installer_provenance: $installer_provenance,
+            generated_artifacts: $generated_artifacts,
+            output_dir: $output_dir,
+            operator_local_hands_steps: $operator_steps,
+            device_class_notes: $device_class_notes,
+            note: "Installer payload rendering only. No device mutation performed."
+        }'
+else
+    echo "host.operator-hardware.autoinstall.render"
+    echo "========================================"
+    echo "device:               $device_id"
+    echo "target platform:      $target_platform"
+    echo "bootstrap method:     $bootstrap_method"
+    echo "output dir:           $OUTPUT_DIR"
+    echo "autoinstall payload:  $autoinstall_path"
+    if [[ -f "$meta_data_path" ]]; then
+        echo "meta-data:            $meta_data_path"
+    fi
+    echo "device-class notes:   $notes_path"
+    echo
+    echo "NOTE: Installer payload rendering only. No device mutation performed."
+fi

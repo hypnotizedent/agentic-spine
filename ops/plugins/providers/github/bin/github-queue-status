@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Read-only queue counts (no titles, no bodies, no URLs)
+
+# Hard deps
+command -v gh >/dev/null 2>&1 || { echo "FAIL: gh not installed"; exit 1; }
+command -v git >/dev/null 2>&1 || { echo "FAIL: git not installed"; exit 1; }
+
+# Determine repo from git remote (origin)
+ORIGIN_URL="$(git remote get-url origin 2>/dev/null || true)"
+if [[ -z "${ORIGIN_URL}" ]]; then
+  echo "FAIL: no git remote 'origin' found"
+  exit 1
+fi
+
+# Parse owner/repo from SSH or HTTPS forms
+# git@github.com:owner/repo.git
+# https://github.com/owner/repo.git
+REPO_SLUG="$(
+  echo "$ORIGIN_URL" \
+  | sed -E 's#^git@github.com:##; s#^https?://github.com/##; s#\.git$##'
+)"
+if [[ ! "$REPO_SLUG" =~ ^[^/]+/[^/]+$ ]]; then
+  echo "FAIL: could not parse repo from origin: $ORIGIN_URL"
+  exit 1
+fi
+
+# Counts only
+PRS_OPEN="$(gh pr list -R "$REPO_SLUG" --state open --json number -q 'length' 2>/dev/null || echo "n/a")"
+ISSUES_OPEN="$(gh issue list -R "$REPO_SLUG" --state open --json number -q 'length' 2>/dev/null || echo "n/a")"
+
+echo "repo: $REPO_SLUG"
+echo "prs_open: $PRS_OPEN"
+echo "issues_open: $ISSUES_OPEN"
+echo "note: counts only (no titles/bodies/urls)"

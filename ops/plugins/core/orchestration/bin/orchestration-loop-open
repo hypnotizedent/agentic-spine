@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# Internal orchestration plumbing. Not a standalone operator entry point.
+# For bounded work, use: ops dispatch local
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+source "$(orchestration_root)/ops/lib/git-lock.sh"
+acquire_git_lock orchestration
+
+usage() {
+  cat <<'USAGE'
+orchestration-loop-open - Create orchestration manifest for a loop
+
+Usage:
+  orchestration-loop-open \
+    --loop-id <id> \
+    --apply-owner <owner> \
+    [--repo <path>] \
+    [--related-repo <path>]... \
+    [--base-sha <sha>] \
+    [--lanes <lane1,lane2,...>] \
+    [--sequence <lane1,lane2,...>] \
+    [--lane-agent <lane:value>]... \
+    [--lane-worker <lane:value>]... \
+    [--lane-route-target <lane:value>]... \
+    [--lane-branch <lane:value>]... \
+    [--allow <lane:glob>]... \
+    [--forbid <glob>]... \
+    [--check <lane:command>]... \
+    [--force]
+USAGE
+}
+
+ROOT="$(orchestration_root)"
+LOOP_ID=""
+APPLY_OWNER=""
+REPO_PATH=""
+BASE_SHA=""
+LANES_CSV=""
+SEQUENCE_CSV=""
+SEQUENCE_MODE="strict"
+FORCE=0
+
+allow_items=()
+forbid_items=()
+check_items=()
+related_repos=()
+lane_agent_items=()
+lane_worker_items=()
+lane_route_target_items=()
+lane_branch_items=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --apply-owner) APPLY_OWNER="${2:-}"; shift 2 ;;
+    --repo) REPO_PATH="${2:-}"; shift 2 ;;
+    --related-repo) related_repos+=("${2:-}"); shift 2 ;;
+    --base-sha) BASE_SHA="${2:-}"; shift 2 ;;
+    --lanes) LANES_CSV="${2:-}"; shift 2 ;;
+    --sequence) SEQUENCE_CSV="${2:-}"; shift 2 ;;
+    --sequence-mode) SEQUENCE_MODE="${2:-strict}"; shift 2 ;;
+    --lane-agent) lane_agent_items+=("${2:-}"); shift 2 ;;
+    --lane-worker) lane_worker_items+=("${2:-}"); shift 2 ;;
+    --lane-route-target) lane_route_target_items+=("${2:-}"); shift 2 ;;
+    --lane-branch) lane_branch_items+=("${2:-}"); shift 2 ;;
+    --allow) allow_items+=("${2:-}"); shift 2 ;;
+    --forbid) forbid_items+=("${2:-}"); shift 2 ;;
+    --check) check_items+=("${2:-}"); shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) orchestration_fail "unknown argument: $1" ;;
+  esac
+done
+
+LOOP_ID="${LOOP_ID:-${SPINE_ORCH_LOOP_ID:-${SPINE_LOOP_ID:-}}}"
+APPLY_OWNER="${APPLY_OWNER:-${OPS_TERMINAL_ROLE:-}}"
+[[ -n "$LOOP_ID" ]] || orchestration_fail "--loop-id is required"
+[[ -n "$APPLY_OWNER" ]] || orchestration_fail "--apply-owner is required"
+
+orchestration_assert_id "$LOOP_ID" "loop id"
+[[ "$LOOP_ID" =~ ^LOOP- ]] || orchestration_fail "loop id must start with LOOP-"
+
+case "$SEQUENCE_MODE" in
+  strict|depends_only) ;;
+  *) orchestration_fail "--sequence-mode must be 'strict' or 'depends_only'" ;;
+esac
+
+orchestration_need yq
+orchestration_need git
+
+REPO_PATH="${REPO_PATH:-$ROOT}"
+if [[ "$REPO_PATH" != /* ]]; then
+  REPO_PATH="$ROOT/$REPO_PATH"
+fi
+orchestration_assert_git_repo "$REPO_PATH"
+
+BASE_SHA="${BASE_SHA:-$(git -C "$REPO_PATH" rev-parse HEAD)}"
+git -C "$REPO_PATH" cat-file -e "$BASE_SHA^{commit}" >/dev/null 2>&1 || orchestration_fail "base sha not found: $BASE_SHA"
+
+loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
+
+if [[ -f "$manifest" && "$FORCE" -ne 1 ]]; then
+  orchestration_fail "manifest already exists (use --force): $manifest"
+fi
+
+mkdir -p "$loop_dir/tickets" "$loop_dir/validations" "$loop_dir/integrations" "$loop_dir/artifacts"
+
+created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+cat > "$manifest" <<YAML
+loop_id: $LOOP_ID
+repo: "$REPO_PATH"
+related_repos: []
+base_sha: $BASE_SHA
+apply_owner: "$APPLY_OWNER"
+status: open
+lanes: {}
+allow: {}
+forbid: []
+checks: {}
+sequence: []
+sequence_mode: $SEQUENCE_MODE
+created_at: $created_at
+updated_at: $created_at
+YAML
+
+for rp in "${related_repos[@]+"${related_repos[@]}"}"; do
+  [[ -n "$rp" ]] || orchestration_fail "--related-repo requires a path"
+  if [[ "$rp" != /* ]]; then
+    rp="$ROOT/$rp"
+  fi
+  orchestration_assert_git_repo "$rp"
+  yq e -i ".related_repos += [\"$rp\"]" "$manifest"
+done
+
+IFS=',' read -r -a lanes <<< "$LANES_CSV"
+for lane in "${lanes[@]:-}"; do
+  lane="${lane// /}"
+  [[ -z "$lane" ]] && continue
+  orchestration_assert_id "$lane" "lane"
+  yq e -i ".lanes.\"$lane\".id = \"$lane\"" "$manifest"
+  yq e -i ".lanes.\"$lane\".status = \"open\"" "$manifest"
+  yq e -i ".lanes.\"$lane\".depends_on = (.lanes.\"$lane\".depends_on // [])" "$manifest"
+  yq e -i ".lanes.\"$lane\".worker = (.lanes.\"$lane\".worker // \"\")" "$manifest"
+  yq e -i ".lanes.\"$lane\".branch = (.lanes.\"$lane\".branch // \"\")" "$manifest"
+  yq e -i ".lanes.\"$lane\".agent = (.lanes.\"$lane\".agent // \"\")" "$manifest"
+  yq e -i ".lanes.\"$lane\".route_target = (.lanes.\"$lane\".route_target // \"\")" "$manifest"
+  yq e -i ".lanes.\"$lane\".produces = (.lanes.\"$lane\".produces // [])" "$manifest"
+  yq e -i ".lanes.\"$lane\".consumes = (.lanes.\"$lane\".consumes // [])" "$manifest"
+done
+
+if [[ -n "$SEQUENCE_CSV" ]]; then
+  IFS=',' read -r -a seq_lanes <<< "$SEQUENCE_CSV"
+  yq e -i '.sequence = []' "$manifest"
+  for lane in "${seq_lanes[@]}"; do
+    lane="${lane// /}"
+    [[ -z "$lane" ]] && continue
+    orchestration_assert_id "$lane" "sequence lane"
+    yq e -i ".sequence += [\"$lane\"]" "$manifest"
+  done
+elif [[ -n "$LANES_CSV" ]]; then
+  yq e -i '.sequence = []' "$manifest"
+  for lane in "${lanes[@]:-}"; do
+    lane="${lane// /}"
+    [[ -z "$lane" ]] && continue
+    yq e -i ".sequence += [\"$lane\"]" "$manifest"
+  done
+fi
+
+for item in "${lane_agent_items[@]}"; do
+  lane="${item%%:*}"
+  value="${item#*:}"
+  [[ -n "$lane" && -n "$value" && "$lane" != "$value" ]] || orchestration_fail "--lane-agent must be lane:value"
+  orchestration_assert_id "$lane" "lane-agent lane"
+  yq e -e ".lanes | has(\"$lane\")" "$manifest" >/dev/null || orchestration_fail "lane-agent references unknown lane: $lane"
+  LANE_KEY="$lane" VALUE="$value" yq e -i '.lanes[strenv(LANE_KEY)].agent = strenv(VALUE)' "$manifest"
+done
+
+for item in "${lane_worker_items[@]}"; do
+  lane="${item%%:*}"
+  value="${item#*:}"
+  [[ -n "$lane" && -n "$value" && "$lane" != "$value" ]] || orchestration_fail "--lane-worker must be lane:value"
+  orchestration_assert_id "$lane" "lane-worker lane"
+  yq e -e ".lanes | has(\"$lane\")" "$manifest" >/dev/null || orchestration_fail "lane-worker references unknown lane: $lane"
+  LANE_KEY="$lane" VALUE="$value" yq e -i '.lanes[strenv(LANE_KEY)].worker = strenv(VALUE)' "$manifest"
+done
+
+for item in "${lane_route_target_items[@]}"; do
+  lane="${item%%:*}"
+  value="${item#*:}"
+  [[ -n "$lane" && -n "$value" && "$lane" != "$value" ]] || orchestration_fail "--lane-route-target must be lane:value"
+  orchestration_assert_id "$lane" "lane-route-target lane"
+  yq e -e ".lanes | has(\"$lane\")" "$manifest" >/dev/null || orchestration_fail "lane-route-target references unknown lane: $lane"
+  LANE_KEY="$lane" VALUE="$value" yq e -i '.lanes[strenv(LANE_KEY)].route_target = strenv(VALUE)' "$manifest"
+done
+
+for item in "${lane_branch_items[@]}"; do
+  lane="${item%%:*}"
+  value="${item#*:}"
+  [[ -n "$lane" && -n "$value" && "$lane" != "$value" ]] || orchestration_fail "--lane-branch must be lane:value"
+  orchestration_assert_id "$lane" "lane-branch lane"
+  yq e -e ".lanes | has(\"$lane\")" "$manifest" >/dev/null || orchestration_fail "lane-branch references unknown lane: $lane"
+  LANE_KEY="$lane" VALUE="$value" yq e -i '.lanes[strenv(LANE_KEY)].branch = strenv(VALUE)' "$manifest"
+done
+
+for item in "${allow_items[@]}"; do
+  lane="${item%%:*}"
+  pattern="${item#*:}"
+  [[ -n "$lane" && -n "$pattern" && "$lane" != "$pattern" ]] || orchestration_fail "--allow must be lane:glob"
+  orchestration_assert_id "$lane" "allow lane"
+  yq e -i ".allow.\"$lane\" += [\"$pattern\"]" "$manifest"
+done
+
+for pattern in "${forbid_items[@]}"; do
+  [[ -n "$pattern" ]] || orchestration_fail "--forbid requires a glob"
+  yq e -i ".forbid += [\"$pattern\"]" "$manifest"
+done
+
+for item in "${check_items[@]}"; do
+  lane="${item%%:*}"
+  command="${item#*:}"
+  [[ -n "$lane" && -n "$command" && "$lane" != "$command" ]] || orchestration_fail "--check must be lane:command"
+  orchestration_assert_id "$lane" "check lane"
+  yq e -i ".checks.\"$lane\" += [\"$command\"]" "$manifest"
+done
+
+yq e -i ".updated_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$manifest"
+
+echo "orchestration.loop.open"
+echo "loop_id: $LOOP_ID"
+echo "manifest: $manifest"
+echo "status: OPEN"

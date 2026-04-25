@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# github.actions.status — workflow run counts + latest conclusion (read-only)
+# No workflow names, titles, branches, actors, or URLs
+
+# Check gh exists
+command -v gh >/dev/null 2>&1 || { echo "STOP: gh not installed"; exit 2; }
+
+# Check gh is authenticated
+gh auth status >/dev/null 2>&1 || { echo "STOP: gh not authenticated"; exit 2; }
+
+# Get repo slug
+REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+if [[ -z "$REPO_SLUG" ]] || [[ ! "$REPO_SLUG" =~ ^[^/]+/[^/]+$ ]]; then
+  echo "STOP: could not determine repo from gh repo view"
+  exit 2
+fi
+
+# Default window: 7 days
+DAYS="${1:-7}"
+
+# Fetch runs (limit 50 for aggregation)
+RUNS_JSON="$(gh run list -R "$REPO_SLUG" --limit 50 --json status,conclusion,createdAt 2>/dev/null || echo '[]')"
+
+# Export for Python
+export GH_ACTIONS_DAYS="$DAYS"
+export GH_ACTIONS_RUNS_JSON="$RUNS_JSON"
+export GH_ACTIONS_REPO="$REPO_SLUG"
+
+# Use python3 for date filtering and aggregation
+python3 <<'PYEOF'
+import json, sys, os
+from datetime import datetime, timedelta, timezone
+
+days = int(os.environ.get('GH_ACTIONS_DAYS', '7'))
+runs_json = os.environ.get('GH_ACTIONS_RUNS_JSON', '[]')
+repo_slug = os.environ.get('GH_ACTIONS_REPO', 'unknown')
+
+data = json.loads(runs_json)
+if not data:
+    print(f'repo: {repo_slug}')
+    print(f'window: last_{days}_days')
+    print('runs_total: 0')
+    print('conclusion_success: 0')
+    print('conclusion_failure: 0')
+    print('conclusion_cancelled: 0')
+    print('conclusion_other: 0')
+    print('latest_run:')
+    print('  status: n/a')
+    print('  conclusion: n/a')
+    sys.exit(0)
+
+# Filter by date window (use timezone-aware cutoff)
+cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+filtered = []
+for run in data:
+    created = datetime.fromisoformat(run['createdAt'].replace('Z', '+00:00'))
+    if created >= cutoff:
+        filtered.append(run)
+
+total = len(filtered)
+success = sum(1 for r in filtered if r.get('conclusion') == 'success')
+failure = sum(1 for r in filtered if r.get('conclusion') == 'failure')
+cancelled = sum(1 for r in filtered if r.get('conclusion') == 'cancelled')
+other = total - success - failure - cancelled
+
+# Latest run (first in list is most recent)
+latest = filtered[0] if filtered else None
+latest_status = latest.get('status', 'n/a') if latest else 'n/a'
+latest_conclusion = latest.get('conclusion', 'n/a') if latest else 'n/a'
+
+print(f'repo: {repo_slug}')
+print(f'window: last_{days}_days')
+print(f'runs_total: {total}')
+print(f'conclusion_success: {success}')
+print(f'conclusion_failure: {failure}')
+print(f'conclusion_cancelled: {cancelled}')
+print(f'conclusion_other: {other}')
+print('latest_run:')
+print(f'  status: {latest_status}')
+print(f'  conclusion: {latest_conclusion}')
+PYEOF

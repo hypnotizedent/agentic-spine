@@ -1,0 +1,409 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BINDING_FILE="${BINDING_FILE:-ops/bindings/domains/backup/backup.inventory.yaml}"
+SSH_TARGETS_FILE="${SSH_TARGETS_FILE:-ops/bindings/ssh.targets.yaml}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+
+_need yq
+_need ssh
+_need date
+
+if [[ ! -f "$BINDING_FILE" ]]; then
+  echo "STOP: missing binding file: $BINDING_FILE" >&2
+  exit 2
+fi
+if [[ ! -f "$SSH_TARGETS_FILE" ]]; then
+  echo "STOP: missing ssh targets binding: $SSH_TARGETS_FILE" >&2
+  exit 2
+fi
+
+DEFAULT_STALE="$(yq -r '.defaults.stale_after_hours // 26' "$BINDING_FILE")"
+DEFAULT_SSH_TIMEOUT="$(yq -r '.defaults.ssh_timeout_sec // 6' "$BINDING_FILE")"
+TZ_NAME="$(yq -r '.defaults.timezone // "America/New_York"' "$BINDING_FILE")"
+TAILSCALE_PROBE_MODE="${VERIFY_TAILSCALE_PROBE_MODE:-passive}"
+
+# enabled targets only
+TARGET_LINES="$(
+  yq -r '
+    .targets[]
+    | select((.enabled // false) == true)
+    | select(.kind == "file_glob")
+    | [
+        .name,
+        .host,
+        .base_path,
+        .glob,
+        ((.stale_after_hours // '"$DEFAULT_STALE"')|tostring),
+        ((.ssh_timeout_sec // '"$DEFAULT_SSH_TIMEOUT"')|tostring)
+      ] | @tsv
+  ' "$BINDING_FILE"
+)"
+
+if [[ -z "${TARGET_LINES//[[:space:]]/}" ]]; then
+  echo "STOP: no enabled file_glob targets in $BINDING_FILE"
+  echo "Hint: set enabled: true on at least one target after you fill host/base_path/glob."
+  exit 2
+fi
+
+# Get list of known SSH target IDs
+KNOWN_TARGETS="$(yq -r '.ssh.targets[].id' "$SSH_TARGETS_FILE" 2>/dev/null || true)"
+
+# SSH defaults (avoid HOME drift: no known_hosts writes)
+DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_TARGETS_FILE")"
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_TARGETS_FILE")"
+DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_TARGETS_FILE")"
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_TARGETS_FILE")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_TARGETS_FILE")"
+
+_now_epoch() {
+  date -u +%s
+}
+
+_fmt_iso_local() {
+  # epoch -> ISO-ish local time (best-effort, no hard dependency on gdate)
+  local epoch="$1"
+  TZ="$TZ_NAME" date -r "$epoch" "+%Y-%m-%d %H:%M:%S %Z" 2>/dev/null || \
+  TZ="$TZ_NAME" date -d "@$epoch" "+%Y-%m-%d %H:%M:%S %Z" 2>/dev/null || \
+  echo "n/a"
+}
+
+_classify_ssh_error() {
+  local stderr="$1"
+  if echo "$stderr" | grep -qi "tailscale ssh requires an additional check"; then echo "tailscale_interactive_auth_required"; return; fi
+  # Seen in sandboxed runtimes where outbound SSH is blocked by policy.
+  if echo "$stderr" | grep -qi "operation not permitted"; then echo "sandbox_blocked"; return; fi
+  if echo "$stderr" | grep -qi "permission denied"; then echo "auth_denied"; return; fi
+  if echo "$stderr" | grep -qi "host key verification failed\|remote host identification has changed"; then echo "host_key_mismatch"; return; fi
+  if echo "$stderr" | grep -qi "connection refused"; then echo "connect_refused"; return; fi
+  if echo "$stderr" | grep -qi "operation timed out\|connection timed out\|timed out"; then echo "connect_timeout"; return; fi
+  if echo "$stderr" | grep -qi "could not resolve hostname\|name or service not known"; then echo "ssh_unreachable"; return; fi
+  echo "auth_or_connect"
+}
+
+_is_private_ipv4() {
+  local ip="$1"
+  [[ "$ip" =~ ^10\. ]] && return 0
+  [[ "$ip" =~ ^192\.168\. ]] && return 0
+  if [[ "$ip" =~ ^172\.([0-9]+)\. ]]; then
+    local o2="${BASH_REMATCH[1]}"
+    [[ "$o2" -ge 16 && "$o2" -le 31 ]] && return 0
+  fi
+  return 1
+}
+
+_local_ipv4_prefixes() {
+  {
+    if command -v ifconfig >/dev/null 2>&1; then
+      ifconfig 2>/dev/null | awk '/inet /{print $2}'
+    fi
+    if command -v ip >/dev/null 2>&1; then
+      ip -4 addr show 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1
+    fi
+  } | awk -F. 'NF==4 {print $1 "." $2 "." $3}' | sort -u
+}
+
+_is_same_local_subnet_24() {
+  local ip="$1"
+  local prefix local_prefix
+  prefix="$(awk -F. 'NF==4 {print $1 "." $2 "." $3}' <<<"$ip")"
+  [[ -n "$prefix" ]] || return 1
+  while read -r local_prefix; do
+    [[ -n "$local_prefix" ]] || continue
+    [[ "$local_prefix" == "$prefix" ]] && return 0
+  done < <(_local_ipv4_prefixes)
+  return 1
+}
+
+_is_off_lan_context_host() {
+  local host="$1"
+  _is_private_ipv4 "$host" || return 1
+  _is_same_local_subnet_24 "$host" && return 1
+  return 0
+}
+
+_is_contextual_off_lan_block() {
+  local host="$1"
+  local reason="$2"
+  case "$reason" in
+    connect_timeout|ssh_unreachable) ;;
+    *) return 1 ;;
+  esac
+  _is_off_lan_context_host "$host"
+}
+
+_resolve_ssh_ref() {
+  local target_id="$1"
+  local ssh_user="$2"
+  local ssh_host="$3"
+  local ssh_port="$4"
+  local ssh_timeout="$5"
+  local tailscale_ip="${6:-}"
+  local -a ssh_opts=(
+    -n
+    -o "ConnectTimeout=$ssh_timeout"
+    -o "StrictHostKeyChecking=$DEF_STRICT"
+    -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+    -o "NumberOfPasswordPrompts=0"
+    -o "LogLevel=ERROR"
+    -p "$ssh_port"
+  )
+  if [[ "$DEF_BATCH" == "true" ]]; then
+    ssh_opts+=(-o "BatchMode=yes")
+  fi
+
+  local -a candidates=("$target_id" "${ssh_user}@${ssh_host}")
+  if [[ -n "$tailscale_ip" && "$tailscale_ip" != "null" && "$tailscale_ip" != "$ssh_host" ]]; then
+    candidates+=("${ssh_user}@${tailscale_ip}")
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if ssh "${ssh_opts[@]}" "$candidate" "true" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+echo "backup.status"
+echo "binding: $BINDING_FILE"
+echo
+
+# Header
+printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+  "target" "host" "base_path" "newest_file" "newest_mtime" "age_hrs" "status" "reason"
+
+TOTAL=0
+OK=0
+DEGRADED=0
+BLOCKED=0
+NOW="$(_now_epoch)"
+
+while IFS=$'\t' read -r NAME HOST BASE_PATH GLOB STALE_HOURS SSH_TIMEOUT; do
+  [[ -z "$NAME" ]] && continue
+  TOTAL=$((TOTAL+1))
+
+  # validate host exists in ssh.targets.yaml names
+  if ! echo "$KNOWN_TARGETS" | grep -qx "$HOST"; then
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "ERROR" "unknown_host_binding"
+    DEGRADED=$((DEGRADED+1))
+    continue
+  fi
+
+  # Resolve SSH target into concrete host/user/port (no alias dependency)
+  SSH_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .host // \"\"" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
+  SSH_USER="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .user // \"\"" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
+  SSH_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .port // ${DEF_PORT}" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
+  TAILSCALE_IP="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .tailscale_ip // \"\"" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
+  TARGET_POLICY="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .access_policy // \"lan_first\"" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
+
+  if [[ -z "$SSH_HOST" || "$SSH_HOST" == "null" ]]; then
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "ERROR" "host_unassigned"
+    DEGRADED=$((DEGRADED+1))
+    continue
+  fi
+  [[ -n "$SSH_USER" && "$SSH_USER" != "null" ]] || SSH_USER="$DEF_USER"
+  [[ -n "$SSH_PORT" && "$SSH_PORT" != "null" ]] || SSH_PORT="$DEF_PORT"
+  [[ -n "$TARGET_POLICY" && "$TARGET_POLICY" != "null" ]] || TARGET_POLICY="lan_first"
+
+  SSH_REF="$(_resolve_ssh_ref "$HOST" "$SSH_USER" "$SSH_HOST" "$SSH_PORT" "$SSH_TIMEOUT" "$TAILSCALE_IP" || true)"
+  if [[ -n "$SSH_REF" ]]; then
+    SSH_USER_AT_HOST="$SSH_REF"
+  else
+    SSH_USER_AT_HOST="${SSH_USER}@${SSH_HOST}"
+  fi
+
+  if [[ -z "$SSH_REF" && "$TARGET_POLICY" == "lan_first" ]] && _is_off_lan_context_host "$SSH_HOST"; then
+    BLOCKED=$((BLOCKED+1))
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "off_lan_connectivity_context"
+    continue
+  fi
+
+  # Passive mode avoids interactive tailscale SSH browser auth popups.
+  if [[ -z "$SSH_REF" && "$TAILSCALE_PROBE_MODE" == "passive" && "$SSH_HOST" =~ ^100\. ]]; then
+    BLOCKED=$((BLOCKED+1))
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "machine_target_is_tailscale_ip"
+    continue
+  fi
+
+  # Remote probe script (read-only: test -d, ls, stat only)
+  REMOTE_SCRIPT='
+set -euo pipefail
+BASE="$1"
+GLOB="$2"
+if [ ! -d "$BASE" ]; then echo "DIR_MISSING"; exit 0; fi
+cd "$BASE"
+F="$(ls -1t -- $GLOB 2>/dev/null | head -n 1 || true)"
+if [ -z "$F" ]; then echo "NO_MATCHES"; exit 0; fi
+MTIME="$(stat -c %Y "$F" 2>/dev/null || stat -f %m "$F" 2>/dev/null || echo "")"
+echo "NEWEST=$F"
+echo "MTIME=$MTIME"
+'
+
+  STDERR_FILE="/tmp/backup_status_${NAME}_stderr.$$"
+  set +e
+  OUT="$(
+    ssh_opts=(
+      -n
+      -o "ConnectTimeout=$SSH_TIMEOUT"
+      -o "StrictHostKeyChecking=$DEF_STRICT"
+      -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+      -o "NumberOfPasswordPrompts=0"
+      -o "LogLevel=ERROR"
+      -p "$SSH_PORT"
+    )
+    if [[ "$DEF_BATCH" == "true" ]]; then
+      ssh_opts+=(-o "BatchMode=yes")
+    fi
+    ssh "${ssh_opts[@]}" \
+      "$SSH_USER_AT_HOST" "bash -c $(printf "%q" "$REMOTE_SCRIPT") -- $(printf "%q" "$BASE_PATH") $(printf "%q" "$GLOB")" \
+      2>"$STDERR_FILE"
+  )"
+  RC=$?
+  ERR="$(cat "$STDERR_FILE" 2>/dev/null || true)"
+  # temp file left in /tmp (unique $$), OS cleanup
+  set -e
+
+  if [[ $RC -ne 0 ]]; then
+    REASON="$(_classify_ssh_error "$ERR")"
+    if [[ "$REASON" == "tailscale_interactive_auth_required" || "$REASON" == "machine_target_is_tailscale_ip" ]]; then
+      BLOCKED=$((BLOCKED+1))
+      printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+        "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "$REASON"
+      continue
+    fi
+    if [[ "$TARGET_POLICY" == "lan_first" ]] && _is_contextual_off_lan_block "$SSH_HOST" "$REASON"; then
+      BLOCKED=$((BLOCKED+1))
+      printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+        "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "off_lan_connectivity_context"
+      continue
+    fi
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "ERROR" "$REASON"
+    DEGRADED=$((DEGRADED+1))
+    continue
+  fi
+
+  if echo "$OUT" | grep -qx "DIR_MISSING"; then
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "MISSING" "path_missing"
+    DEGRADED=$((DEGRADED+1))
+    continue
+  fi
+
+  if echo "$OUT" | grep -qx "NO_MATCHES"; then
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "MISSING" "no_matches"
+    DEGRADED=$((DEGRADED+1))
+    continue
+  fi
+
+  NEWEST="$(echo "$OUT" | sed -n 's/^NEWEST=//p' | head -n1)"
+  MTIME_EPOCH="$(echo "$OUT" | sed -n 's/^MTIME=//p' | head -n1)"
+
+  if [[ -z "${MTIME_EPOCH:-}" ]] || ! echo "$MTIME_EPOCH" | grep -Eq '^[0-9]+$'; then
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "${NEWEST:0:24}" "-" "-" "ERROR" "parse_error"
+    DEGRADED=$((DEGRADED+1))
+    continue
+  fi
+
+  AGE_SEC=$((NOW - MTIME_EPOCH))
+  if [[ $AGE_SEC -lt 0 ]]; then AGE_SEC=0; fi
+  AGE_HRS="$(awk -v s="$AGE_SEC" 'BEGIN{printf "%.1f", s/3600.0}')"
+  MTIME_FMT="$(_fmt_iso_local "$MTIME_EPOCH")"
+
+  STATUS="OK"
+  REASON="ok"
+  if [[ "$HOST" == "pve" && "$BASE_PATH" == "/nas-primary/backups/vm-images/pve" && "$NEWEST" =~ ^vzdump-(qemu|lxc)- ]]; then
+    SIZE_OUT="$(
+      ssh_opts=(
+        -n
+        -o "ConnectTimeout=$SSH_TIMEOUT"
+        -o "StrictHostKeyChecking=$DEF_STRICT"
+        -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+        -o "NumberOfPasswordPrompts=0"
+        -o "LogLevel=ERROR"
+        -p "$SSH_PORT"
+      )
+      if [[ "$DEF_BATCH" == "true" ]]; then
+        ssh_opts+=(-o "BatchMode=yes")
+      fi
+      ssh "${ssh_opts[@]}" "$SSH_USER_AT_HOST" \
+        "dest='$BASE_PATH/$NEWEST'; src='/data/backups/vzdump/dump/$NEWEST'; test -f \"\$src\" || src='/tank/backups/vzdump/dump/$NEWEST'; test -f \"\$dest\" && test -f \"\$src\" && printf 'DEST=%s\nSRC=%s\n' \"\$(stat -c %s \"\$dest\")\" \"\$(stat -c %s \"\$src\")\"" \
+        2>/dev/null || true
+    )"
+    DEST_SIZE="$(echo "$SIZE_OUT" | sed -n 's/^DEST=//p' | head -n1)"
+    SRC_SIZE="$(echo "$SIZE_OUT" | sed -n 's/^SRC=//p' | head -n1)"
+    if [[ "$DEST_SIZE" =~ ^[0-9]+$ && "$SRC_SIZE" =~ ^[0-9]+$ && "$SRC_SIZE" -gt 0 && "$DEST_SIZE" -ne "$SRC_SIZE" ]]; then
+      PREV_OUT="$(
+        ssh_opts=(
+          -n
+          -o "ConnectTimeout=$SSH_TIMEOUT"
+          -o "StrictHostKeyChecking=$DEF_STRICT"
+          -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+          -o "NumberOfPasswordPrompts=0"
+          -o "LogLevel=ERROR"
+          -p "$SSH_PORT"
+        )
+        if [[ "$DEF_BATCH" == "true" ]]; then
+          ssh_opts+=(-o "BatchMode=yes")
+        fi
+        ssh "${ssh_opts[@]}" "$SSH_USER_AT_HOST" \
+          "cd '$BASE_PATH' && prev=\$(ls -1t -- $GLOB 2>/dev/null | awk '\$0 != \"$NEWEST\" {print; exit}'); if [[ -n \"\$prev\" ]]; then printf 'PREV=%s\nPREV_MTIME=%s\n' \"\$prev\" \"\$(stat -c %Y \"\$prev\")\"; fi" \
+          2>/dev/null || true
+      )"
+      PREV_FILE="$(echo "$PREV_OUT" | sed -n 's/^PREV=//p' | head -n1)"
+      PREV_MTIME_EPOCH="$(echo "$PREV_OUT" | sed -n 's/^PREV_MTIME=//p' | head -n1)"
+      if [[ -n "$PREV_FILE" && "$PREV_MTIME_EPOCH" =~ ^[0-9]+$ ]]; then
+        PREV_AGE_SEC=$((NOW - PREV_MTIME_EPOCH))
+        [[ $PREV_AGE_SEC -lt 0 ]] && PREV_AGE_SEC=0
+        PREV_AGE_HRS_INT=$((PREV_AGE_SEC / 3600))
+        if [[ $PREV_AGE_HRS_INT -le $STALE_HOURS ]]; then
+          NEWEST="$PREV_FILE"
+          MTIME_EPOCH="$PREV_MTIME_EPOCH"
+          AGE_SEC="$PREV_AGE_SEC"
+          AGE_HRS="$(awk -v s="$AGE_SEC" 'BEGIN{printf "%.1f", s/3600.0}')"
+          MTIME_FMT="$(_fmt_iso_local "$MTIME_EPOCH")"
+          STATUS="OK"
+          REASON="copy_in_progress_last_good"
+        else
+          STATUS="COPYING"
+          REASON="size_mismatch_copy_in_progress"
+          DEGRADED=$((DEGRADED+1))
+        fi
+      else
+        STATUS="COPYING"
+        REASON="size_mismatch_copy_in_progress"
+        DEGRADED=$((DEGRADED+1))
+      fi
+    fi
+  fi
+  # compare as integers for stale threshold
+  AGE_HRS_INT=$((AGE_SEC / 3600))
+  if [[ "$STATUS" == "OK" && $AGE_HRS_INT -gt $STALE_HOURS ]]; then
+    STATUS="STALE"
+    REASON="stale"
+    DEGRADED=$((DEGRADED+1))
+  elif [[ "$STATUS" == "OK" ]]; then
+    OK=$((OK+1))
+  fi
+
+  printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+    "$NAME" "$HOST" "${BASE_PATH:0:28}" "${NEWEST:0:24}" "${MTIME_FMT:0:22}" "$AGE_HRS" "$STATUS" "$REASON"
+
+done <<< "$TARGET_LINES"
+
+echo
+echo "summary: $TOTAL targets | $OK ok | $DEGRADED degraded | $BLOCKED context_blocked"
+if [[ $BLOCKED -gt 0 ]]; then
+  echo "note: context_blocked targets are present in the canonical inventory, but freshness proof is unavailable from the current network/auth context."
+  echo "hint: rerun from a LAN-eligible host or an approved Tailscale-authenticated context to prove freshness."
+fi

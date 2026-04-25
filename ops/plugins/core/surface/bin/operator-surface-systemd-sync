@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Install or verify the operator-surface systemd stack on a remote host."""
+from __future__ import annotations
+
+import argparse
+import difflib
+import json
+import shlex
+import subprocess
+import tempfile
+from pathlib import Path
+
+
+UNIT_NAMES = (
+    "com.ronny.operator-surface-server.service",
+    "com.ronny.operator-surface-regenerate.service",
+    "com.ronny.operator-surface-watchdog.service",
+    "com.ronny.operator-surface-watchdog.timer",
+)
+SERVER_UNIT = "com.ronny.operator-surface-server.service"
+REGENERATE_UNIT = "com.ronny.operator-surface-regenerate.service"
+WATCHDOG_TIMER = "com.ronny.operator-surface-watchdog.timer"
+STATUS_UNITS = (
+    SERVER_UNIT,
+    WATCHDOG_TIMER,
+)
+
+
+def run(cmd: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        input=input_text,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def ssh(host: str, argv: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    remote_cmd = " ".join(shlex.quote(part) for part in argv)
+    return run(["ssh", host, remote_cmd], input_text=input_text)
+
+
+def read_remote_file(host: str, path: str) -> str | None:
+    proc = ssh(host, ["cat", path])
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def install_remote_file(host: str, target_path: str, content: str) -> None:
+    proc = ssh(host, ["install", "-Dm644", "/dev/stdin", target_path], input_text=content)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "unknown error").strip()
+        raise SystemExit(f"install failed for {target_path}: {detail}")
+
+
+def unified_diff(expected: str, actual: str, name: str) -> str:
+    return "".join(
+        difflib.unified_diff(
+            expected.splitlines(keepends=True),
+            actual.splitlines(keepends=True),
+            fromfile=f"expected/{name}",
+            tofile=f"remote/{name}",
+        )
+    )
+
+
+def materialize_units(
+    root: Path,
+    output_dir: Path,
+    *,
+    repo_path: str,
+    state_root: str,
+    evidence_root: str,
+    python_bin: str,
+    port: int,
+) -> None:
+    cmd = [
+        "python3",
+        str(root / "ops" / "plugins" / "core" / "surface" / "bin" / "operator-surface-systemd-materialize"),
+        "--output-dir",
+        str(output_dir),
+        "--repo-path",
+        repo_path,
+        "--state-root",
+        state_root,
+        "--evidence-root",
+        evidence_root,
+        "--python-bin",
+        python_bin,
+        "--port",
+        str(port),
+    ]
+    proc = run(cmd)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "unknown error").strip()
+        raise SystemExit(f"materialize failed: {detail}")
+
+
+def verify_remote(host: str, target_dir: str, expected_dir: Path) -> tuple[bool, list[str]]:
+    lines: list[str] = []
+    ok = True
+    for name in UNIT_NAMES:
+        expected = (expected_dir / name).read_text(encoding="utf-8")
+        actual = read_remote_file(host, f"{target_dir}/{name}")
+        if actual is None:
+            lines.append(f"missing: {name}")
+            ok = False
+            continue
+        if actual != expected:
+            lines.append(f"mismatch: {name}")
+            diff = unified_diff(expected, actual, name).strip()
+            if diff:
+                lines.append(diff)
+            ok = False
+            continue
+        lines.append(f"verified: {name}")
+    return ok, lines
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Install or verify operator-surface systemd units on a remote host")
+    parser.add_argument("--host", default="ubuntu@100.x.x.x")
+    parser.add_argument("--target-dir", default="/home/ubuntu/.config/systemd/user")
+    parser.add_argument("--repo-path", default="/home/ubuntu/code/agentic-spine")
+    parser.add_argument("--state-root", default="/home/ubuntu/code/.runtime/spine/state")
+    parser.add_argument("--evidence-root", default="/home/ubuntu/code/.evidence/spine")
+    parser.add_argument("--python-bin", default="/usr/bin/python3")
+    parser.add_argument("--port", type=int, default=8900)
+    parser.add_argument("--install", action="store_true", help="write units to the remote host before verification")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    root = Path(__file__).resolve().parents[5]
+
+    with tempfile.TemporaryDirectory(prefix="operator-surface-systemd-") as tmpdir:
+        output_dir = Path(tmpdir)
+        materialize_units(
+            root,
+            output_dir,
+            repo_path=args.repo_path,
+            state_root=args.state_root,
+            evidence_root=args.evidence_root,
+            python_bin=args.python_bin,
+            port=args.port,
+        )
+
+        lines = [
+            "operator-surface.systemd.sync",
+            f"host: {args.host}",
+            f"target_dir: {args.target_dir}",
+            f"materialized_dir: {output_dir}",
+            f"mode: {'install' if args.install else 'check'}",
+        ]
+
+        if args.install:
+            for name in UNIT_NAMES:
+                install_remote_file(
+                    args.host,
+                    f"{args.target_dir}/{name}",
+                    (output_dir / name).read_text(encoding="utf-8"),
+                )
+                lines.append(f"installed: {name}")
+
+            commands = [
+                ["systemctl", "--user", "daemon-reload"],
+                ["systemctl", "--user", "enable", "--now", SERVER_UNIT],
+                ["systemctl", "--user", "enable", "--now", WATCHDOG_TIMER],
+                ["systemctl", "--user", "start", REGENERATE_UNIT],
+            ]
+            for command in commands:
+                proc = ssh(args.host, command)
+                if proc.returncode != 0:
+                    detail = (proc.stderr or proc.stdout or "unknown error").strip()
+                    raise SystemExit(f"remote command failed ({' '.join(command)}): {detail}")
+                lines.append(f"ran: {' '.join(command)}")
+
+        ok, verify_lines = verify_remote(args.host, args.target_dir, output_dir)
+        lines.extend(verify_lines)
+
+        status_proc = ssh(args.host, ["systemctl", "--user", "is-active", *STATUS_UNITS])
+        if status_proc.returncode == 0:
+            states = status_proc.stdout.strip().splitlines()
+            for name, state in zip(STATUS_UNITS, states):
+                lines.append(f"state: {name}={state}")
+        else:
+            ok = False
+            detail = (status_proc.stderr or status_proc.stdout or "unknown error").strip()
+            lines.append(f"state-check-failed: {detail}")
+
+        if args.json:
+            print(json.dumps({"ok": ok, "lines": lines}, indent=2))
+        else:
+            for line in lines:
+                print(line)
+            print(f"status: {'PASS' if ok else 'FAIL'}")
+
+        return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

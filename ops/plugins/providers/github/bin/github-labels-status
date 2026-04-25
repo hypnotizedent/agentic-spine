@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Read-only GitHub label parity: declared (.github/labels.yml) vs live labels.
+# Exit 0 = parity OK, exit 1 = drift, exit 2 = deps missing.
+
+# Hard deps
+command -v gh >/dev/null 2>&1 || { echo "STOP: gh not installed"; exit 2; }
+command -v yq >/dev/null 2>&1 || { echo "STOP: yq not installed"; exit 2; }
+command -v git >/dev/null 2>&1 || { echo "STOP: git not installed"; exit 2; }
+
+# Locate repo root
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$REPO_ROOT" ]]; then
+  echo "STOP: not inside a git repository"
+  exit 2
+fi
+
+LABELS_FILE="$REPO_ROOT/.github/labels.yml"
+if [[ ! -f "$LABELS_FILE" ]]; then
+  echo "STOP: .github/labels.yml not found"
+  exit 2
+fi
+
+# Parse owner/repo from git remote
+ORIGIN_URL="$(git remote get-url origin 2>/dev/null || true)"
+if [[ -z "$ORIGIN_URL" ]]; then
+  echo "STOP: no git remote 'origin' found"
+  exit 2
+fi
+
+REPO_SLUG="$(
+  echo "$ORIGIN_URL" \
+  | sed -E 's#^git@github.com:##; s#^https?://github.com/##; s#\.git$##'
+)"
+if [[ ! "$REPO_SLUG" =~ ^[^/]+/[^/]+$ ]]; then
+  echo "STOP: could not parse repo from origin: $ORIGIN_URL"
+  exit 2
+fi
+
+# Declared labels from YAML
+DECLARED="$(yq -r '.[].name' "$LABELS_FILE" | sort)"
+DECLARED_COUNT="$(echo "$DECLARED" | wc -l | tr -d ' ')"
+
+# Live labels from GitHub
+LIVE="$(gh label list -R "$REPO_SLUG" --json name -q '.[].name' 2>/dev/null | sort)"
+LIVE_COUNT="$(echo "$LIVE" | wc -l | tr -d ' ')"
+
+# Compute deltas
+MISSING="$(comm -23 <(echo "$DECLARED") <(echo "$LIVE") || true)"
+EXTRA="$(comm -13 <(echo "$DECLARED") <(echo "$LIVE") || true)"
+
+MISSING_COUNT=0
+EXTRA_COUNT=0
+[[ -n "$MISSING" ]] && MISSING_COUNT="$(echo "$MISSING" | wc -l | tr -d ' ')"
+[[ -n "$EXTRA" ]] && EXTRA_COUNT="$(echo "$EXTRA" | wc -l | tr -d ' ')"
+
+echo "repo: $REPO_SLUG"
+echo "declared: $DECLARED_COUNT"
+echo "live: $LIVE_COUNT"
+echo "missing: $MISSING_COUNT"
+echo "extra: $EXTRA_COUNT"
+
+if [[ "$MISSING_COUNT" -gt 0 ]]; then
+  echo "missing_labels: $(echo "$MISSING" | tr '\n' ',' | sed 's/,$//')"
+fi
+if [[ "$EXTRA_COUNT" -gt 0 ]]; then
+  echo "extra_labels: $(echo "$EXTRA" | tr '\n' ',' | sed 's/,$//')"
+fi
+
+if [[ "$MISSING_COUNT" -eq 0 ]] && [[ "$EXTRA_COUNT" -eq 0 ]]; then
+  echo "parity: OK"
+  exit 0
+else
+  echo "parity: DRIFT"
+  exit 1
+fi

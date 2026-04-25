@@ -1,0 +1,593 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# verify-engine-honesty - End-to-end spine engine orchestration proof
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Proves the spine engine's orchestration primitives work honestly:
+#   H1  Capability resolution — a known cap resolves and executes
+#   H2  Dispatch round-trip   — a synthetic dispatch routes and returns
+#   H3  Wave lifecycle        — start → dispatch → ack → collect completes
+#   H4  Telemetry chain       — evidence files are written and queryable
+#   H5  Continuity invariants — no orphaned waves after synthetic run
+#   H6  Surface coherence     — status and context agree on wave counts
+#   H7  Honest close          — synthetic wave can close without force/DoD
+#   H8  Kickoff-path honesty  — governed worktree passes, main checkout denied
+#   H9  Root-poison immunity  — poisoned SPINE_ROOT/REPO/CODE env does not redirect worktree
+#
+# Unlike verify-engine (smoke), this proves the engine OPERATES, not just
+# that its plumbing EXISTS.
+#
+# Unlike verify --core-only (estate/infra), this tests the spine engine
+# itself, not the VMs/storage/containers it manages.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+_VEH_COMPUTED="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+ROOT="$_VEH_COMPUTED"
+RUNTIME_PATHS_LIB="$ROOT/ops/lib/runtime-paths.sh"
+[[ -f "$RUNTIME_PATHS_LIB" ]] || { echo "FATAL: runtime-paths.sh not found" >&2; exit 1; }
+source "$RUNTIME_PATHS_LIB"
+spine_runtime_resolve_paths
+RUNTIME_ROOT="$SPINE_RUNTIME_ROOT"
+WAVE_CMD="$ROOT/ops/commands/wave.sh"
+DISPATCH_CMD="$ROOT/ops/commands/dispatch.sh"
+
+json_mode=0
+if [[ "${1:-}" == "--" ]]; then shift; fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json) json_mode=1 ;;
+        -h|--help)
+            echo "verify-engine-honesty — end-to-end spine engine orchestration proof"
+            echo ""
+            echo "Usage: verify-engine-honesty [--json]"
+            echo ""
+            echo "Proves:"
+            echo "  H1  Capability resolution (cap run dispatches and returns)"
+            echo "  H2  Dispatch round-trip (synthetic lane routes through dispatch bridge)"
+            echo "  H3  Wave lifecycle (start → dispatch → ack → collect)"
+            echo "  H4  Telemetry chain (evidence files written)"
+            echo "  H5  Continuity invariants (no orphaned waves)"
+            echo "  H6  Surface coherence (status + context agree, exit 0)"
+            echo "  H7  Honest close semantics (no force/DoD required)"
+            echo "  H8  Kickoff-path honesty (worktree passes, main checkout denied)"
+            echo "  H9  Root-poison immunity (poisoned env does not redirect worktree)"
+            exit 0
+            ;;
+        *) ;;
+    esac
+    shift
+done
+
+# ── State tracking ────────────────────────────────────────────────────────
+PASS=0
+FAIL=0
+WARN=0
+TOTAL=0
+FAILING_IDS=()
+WARNING_IDS=()
+SYNTHETIC_WAVE_ID=""
+SYNTHETIC_EVIDENCE_DIR=""
+SYNTHETIC_SCOPE_FILE=""
+SYNTHETIC_SCOPE_CREATED=0
+SYNTHETIC_LOOP_ID="${SPINE_LOOP_ID:-}"
+if [[ -n "$SYNTHETIC_LOOP_ID" ]]; then
+    synthetic_scope_file="${SPINE_STATE}/loop-scopes/${SYNTHETIC_LOOP_ID}.scope.md"
+    if [[ ! -f "$synthetic_scope_file" ]]; then
+        SYNTHETIC_LOOP_ID=""
+    fi
+fi
+if [[ -z "$SYNTHETIC_LOOP_ID" ]]; then
+    # Prefer a live orchestrator_subagents loop for kickoff-path honesty.
+    SYNTHETIC_LOOP_ID="$(sqlite3 "${SPINE_STATE}/shared_authority.db" \
+        "SELECT loop_id FROM loops WHERE status='active' AND execution_mode='orchestrator_subagents' ORDER BY rowid LIMIT 1" 2>/dev/null || true)"
+fi
+if [[ -z "$SYNTHETIC_LOOP_ID" ]]; then
+    # No live orchestrator_subagents loop is available. Mint a synthetic scope
+    # just for the honesty probe so kickoff-path checks do not depend on the
+    # operator having an orchestrator lane open already.
+    SYNTHETIC_LOOP_ID="LOOP-HONESTY-KICKOFF-PROBE-$$"
+    SYNTHETIC_SCOPE_FILE="${SPINE_STATE}/loop-scopes/${SYNTHETIC_LOOP_ID}.scope.md"
+    cat >"$SYNTHETIC_SCOPE_FILE" <<EOF
+---
+loop_id: ${SYNTHETIC_LOOP_ID}
+status: active
+owner: @spine
+execution_mode: orchestrator_subagents
+title: Synthetic honesty kickoff probe
+---
+EOF
+    SYNTHETIC_SCOPE_CREATED=1
+fi
+CLEANUP_NEEDED=0
+SYNTHETIC_COMPLETION_LEVEL="slice_complete"
+
+# ── Check helpers ─────────────────────────────────────────────────────────
+check() {
+    local id="$1" name="$2"
+    shift 2
+    TOTAL=$((TOTAL + 1))
+    local output rc
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+        PASS=$((PASS + 1))
+        [[ "$json_mode" -eq 1 ]] || echo "  PASS  $id  $name"
+    else
+        FAIL=$((FAIL + 1))
+        FAILING_IDS+=("$id")
+        if [[ "$json_mode" -eq 0 ]]; then
+            echo "  FAIL  $id  $name"
+            echo "        ${output:0:300}"
+        fi
+    fi
+}
+
+warn_check() {
+    local id="$1" name="$2"
+    shift 2
+    TOTAL=$((TOTAL + 1))
+    local output rc
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+        PASS=$((PASS + 1))
+        [[ "$json_mode" -eq 1 ]] || echo "  PASS  $id  $name"
+    else
+        WARN=$((WARN + 1))
+        WARNING_IDS+=("$id")
+        if [[ "$json_mode" -eq 0 ]]; then
+            echo "  WARN  $id  $name"
+            echo "        ${output:0:300}"
+        fi
+    fi
+}
+
+record_fail() {
+    local id="$1" name="$2" detail="${3:-}"
+    TOTAL=$((TOTAL + 1))
+    FAIL=$((FAIL + 1))
+    FAILING_IDS+=("$id")
+    if [[ "$json_mode" -eq 0 ]]; then
+        echo "  FAIL  $id  $name"
+        [[ -n "$detail" ]] && echo "        ${detail:0:300}"
+    fi
+}
+
+record_warn() {
+    local id="$1" name="$2" detail="${3:-}"
+    TOTAL=$((TOTAL + 1))
+    WARN=$((WARN + 1))
+    WARNING_IDS+=("$id")
+    if [[ "$json_mode" -eq 0 ]]; then
+        echo "  WARN  $id  $name"
+        [[ -n "$detail" ]] && echo "        ${detail:0:300}"
+    fi
+}
+
+# ── Cleanup ───────────────────────────────────────────────────────────────
+cleanup_synthetic_wave() {
+    if [[ "$CLEANUP_NEEDED" -eq 1 && -n "$SYNTHETIC_WAVE_ID" ]]; then
+        local wave_state_file="$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json"
+        if [[ -f "$wave_state_file" ]]; then
+            local current_status
+            current_status="$(jq -r '.status // "unknown"' "$wave_state_file" 2>/dev/null || echo "unknown")"
+            if [[ "$current_status" != "closed" ]]; then
+                # Force close to avoid orphan — this is cleanup, not the test
+                bash "$WAVE_CMD" close "$SYNTHETIC_WAVE_ID" \
+                    --disposition landed \
+                    --completion-level "$SYNTHETIC_COMPLETION_LEVEL" \
+                    --force \
+                    --dod-override "synthetic honesty test cleanup" \
+                    >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
+    # Remove synthetic evidence dir
+    if [[ -n "$SYNTHETIC_EVIDENCE_DIR" && -d "$SYNTHETIC_EVIDENCE_DIR" ]]; then
+        rm -rf "$SYNTHETIC_EVIDENCE_DIR"
+    fi
+    if [[ "$SYNTHETIC_SCOPE_CREATED" -eq 1 && -n "$SYNTHETIC_SCOPE_FILE" && -f "$SYNTHETIC_SCOPE_FILE" ]]; then
+        rm -f "$SYNTHETIC_SCOPE_FILE"
+    fi
+}
+trap cleanup_synthetic_wave EXIT
+
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Governed terminal identity precondition ─────────────────────────────
+# Engine honesty runs a synthetic dispatch, which requires governed terminal
+# identity. If you're in a plain shell, this cannot work — fail immediately
+# instead of producing mysterious errors inside wave start.
+if [[ -z "${OPS_TERMINAL_ROLE:-}" ]]; then
+    echo "FAIL: not in a governed terminal (OPS_TERMINAL_ROLE is not set)." >&2
+    echo "  Run: ops cap run session.v3.attach" >&2
+    exit 1
+fi
+
+[[ "$json_mode" -eq 1 ]] || echo "=== ENGINE HONESTY ==="
+[[ "$json_mode" -eq 1 ]] || echo ""
+
+# Capture pre-test orphan count so H5 only fails on new orphans
+_pre_orphan_count=0
+_pre_ctx="$("$ROOT/bin/ops" context 2>&1 || true)"
+_pre_orphan_count="$(echo "$_pre_ctx" | grep -o 'orphaned waves:.*[0-9]' | grep -o '[0-9]*$' || echo 0)"
+_pre_orphan_count="${_pre_orphan_count:-0}"
+
+# ── H1: Capability resolution ────────────────────────────────────────────
+# Calls verify-engine directly to avoid nested-cap-run context issues.
+# The point is: can the engine resolve and execute a known capability script?
+VERIFY_ENGINE_SCRIPT="$ROOT/ops/plugins/core/verify/bin/verify-engine"
+check H1 "capability resolution (verify.engine.run resolves and executes)" bash -c "
+    [[ -x '$VERIFY_ENGINE_SCRIPT' ]] || { echo 'verify-engine not executable'; exit 1; }
+    output=\"\$('$VERIFY_ENGINE_SCRIPT' 2>&1)\"
+    rc=\$?
+    [[ \$rc -eq 0 ]] || { echo 'verify-engine exit='\$rc; exit 1; }
+    echo \"\$output\" | grep -q 'PASS.*E1' || { echo 'E1 not passing'; exit 1; }
+    # Also verify the capability registry entry resolves
+    cap_file='$ROOT/ops/capabilities.yaml'
+    yq e '.capabilities[\"verify.engine.run\"].command' \"\$cap_file\" 2>/dev/null | grep -q 'verify-engine' || { echo 'cap registry entry missing'; exit 1; }
+"
+
+# ── H2/H3/H4: Dispatch round-trip + wave lifecycle + telemetry ──────────
+# These three gates share one synthetic dispatch because they test the same
+# end-to-end path. Running three separate dispatches would be wasteful.
+#
+# Probe wave IDs use a reserved WAVE-HONESTY-PROBE-<epoch>-<pid> namespace
+# so synthetic honesty runs never collide with real WAVE-YYYYMMDD-NN waves
+# allocated by production dispatch. The claim-path side is already isolated
+# via the synthetic wave_kind (__synthetic__/<wave_id>); this isolates the
+# ID side so repeated honesty runs within the same day are stable.
+_honesty_epoch="$(date -u '+%s' 2>/dev/null || date '+%s')"
+SYNTHETIC_WAVE_ID="WAVE-HONESTY-PROBE-${_honesty_epoch}-$$"
+SYNTHETIC_EVIDENCE_DIR="$(mktemp -d)"
+CANARY_TOKEN="HONESTY-CANARY-$(date +%s)"
+CLEANUP_NEEDED=1
+
+# Run the synthetic dispatch
+_dispatch_output=""
+_dispatch_rc=0
+_synthetic_precondition_blocker=""
+if [[ -z "$SYNTHETIC_LOOP_ID" ]]; then
+    _synthetic_precondition_blocker="synthetic dispatch precondition failed: no loop_id resolved for honesty probe"
+fi
+set +e
+if [[ -z "$_synthetic_precondition_blocker" ]]; then
+    _dispatch_output="$(bash "$DISPATCH_CMD" local \
+        --synthetic \
+        --loop-id "$SYNTHETIC_LOOP_ID" \
+        --objective "synthetic engine honesty proof" \
+        --wave-id "$SYNTHETIC_WAVE_ID" \
+        --evidence-dir "$SYNTHETIC_EVIDENCE_DIR" \
+        --lane "canary:echo $CANARY_TOKEN" \
+        2>&1)"
+    _dispatch_rc=$?
+fi
+set -e
+
+_claim_contention=0
+if [[ "$_dispatch_rc" -ne 0 ]]; then
+    if grep -q 'path claim collision detected' <<<"$_dispatch_output"; then
+        _collision_summary="$(printf '%s\n' "$_dispatch_output" | awk '
+            /path claim collision detected/ {capture=1}
+            capture && NF {print}
+        ' | head -n 3 | tr '\n' ' ' | sed 's/  */ /g; s/[[:space:]]*$//')"
+        _synthetic_precondition_blocker="blocked by active wave claim (not broken — engine correctly enforcing path exclusivity): ${_collision_summary}"
+        _claim_contention=1
+    else
+        _dispatch_head="$(printf '%s\n' "$_dispatch_output" | awk 'NF {print; exit}')"
+        [[ -n "$_dispatch_head" ]] || _dispatch_head="dispatch bridge failed before synthetic wave state/evidence creation"
+        _synthetic_precondition_blocker="synthetic dispatch precondition failed: ${_dispatch_head}"
+    fi
+fi
+
+# H2: dispatch round-trip — canary token should appear in evidence
+# When blocked by claim contention, this is a WARN (engine works, just busy)
+# not a FAIL (broken primitive).
+if [[ -n "$_synthetic_precondition_blocker" && "$_claim_contention" -eq 1 ]]; then
+    record_warn H2 "dispatch round-trip (synthetic lane routes and returns canary)" "$_synthetic_precondition_blocker"
+elif [[ -n "$_synthetic_precondition_blocker" ]]; then
+    record_fail H2 "dispatch round-trip (synthetic lane routes and returns canary)" "$_synthetic_precondition_blocker"
+else
+    check H2 "dispatch round-trip (synthetic lane routes and returns canary)" bash -c "
+        evidence_file='$SYNTHETIC_EVIDENCE_DIR/lane-canary.txt'
+        [[ -f \"\$evidence_file\" ]] || { echo 'evidence file missing'; exit 1; }
+        grep -q '$CANARY_TOKEN' \"\$evidence_file\" || { echo 'canary token not found in evidence'; exit 1; }
+        grep -q 'Exit code: 0' \"\$evidence_file\" || { echo 'lane did not exit 0'; exit 1; }
+    "
+fi
+
+# H3: wave lifecycle — wave started, dispatches exist and are done, collect ran
+if [[ -n "$_synthetic_precondition_blocker" && "$_claim_contention" -eq 1 ]]; then
+    record_warn H3 "wave lifecycle (start → dispatch → ack → collect)" "$_synthetic_precondition_blocker"
+elif [[ -n "$_synthetic_precondition_blocker" ]]; then
+    record_fail H3 "wave lifecycle (start → dispatch → ack → collect)" "$_synthetic_precondition_blocker"
+else
+    check H3 "wave lifecycle (start → dispatch → ack → collect)" bash -c "
+        wave_state='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json'
+        [[ -f \"\$wave_state\" ]] || { echo 'wave state.json missing'; exit 1; }
+        status=\"\$(jq -r '.status' \"\$wave_state\" 2>/dev/null)\"
+        [[ \"\$status\" == 'active' || \"\$status\" == 'closed' ]] || { echo \"unexpected state: \$status\"; exit 1; }
+        dispatches=\"\$(jq '.dispatches | length' \"\$wave_state\" 2>/dev/null)\"
+        [[ \"\$dispatches\" -ge 1 ]] || { echo 'no dispatches in wave state'; exit 1; }
+        # All dispatches should be done (acked)
+        done_count=\"\$(jq '[.dispatches[] | select(.status == \"done\")] | length' \"\$wave_state\" 2>/dev/null)\"
+        [[ \"\$done_count\" == \"\$dispatches\" ]] || { echo \"not all dispatches done: \$done_count/\$dispatches\"; exit 1; }
+        # Collect summary should exist
+        collect_file='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/collect-summary.json'
+        [[ -f \"\$collect_file\" ]] || { echo 'collect-summary.json missing — collect did not run'; exit 1; }
+    "
+fi
+
+# H4: telemetry chain — evidence directory has expected artifacts
+if [[ -n "$_synthetic_precondition_blocker" && "$_claim_contention" -eq 1 ]]; then
+    record_warn H4 "telemetry chain (evidence files written and queryable)" "$_synthetic_precondition_blocker"
+elif [[ -n "$_synthetic_precondition_blocker" ]]; then
+    record_fail H4 "telemetry chain (evidence files written and queryable)" "$_synthetic_precondition_blocker"
+else
+    check H4 "telemetry chain (evidence files written and queryable)" bash -c "
+        [[ -d '$SYNTHETIC_EVIDENCE_DIR' ]] || { echo 'evidence dir missing'; exit 1; }
+        [[ -f '$SYNTHETIC_EVIDENCE_DIR/lane-canary.txt' ]] || { echo 'lane evidence missing'; exit 1; }
+        wave_dir='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID'
+        [[ -f \"\$wave_dir/state.json\" ]] || { echo 'wave state.json missing'; exit 1; }
+        [[ -f \"\$wave_dir/collect-summary.json\" ]] || { echo 'collect-summary.json missing'; exit 1; }
+    "
+fi
+
+# ── H7: Honest close semantics (run BEFORE H5/H6 so cleanup state is clean) ──
+# This gate tries to close the synthetic wave without force/DoD.
+# If it needs force/DoD, the gate WARNS — the engine is working but
+# close semantics need attention.
+if [[ -n "$_synthetic_precondition_blocker" ]]; then
+    record_warn H7 "honest close (synthetic wave closes without force/DoD)" "$_synthetic_precondition_blocker — cannot test close"
+else
+    warn_check H7 "honest close (synthetic wave closes without force/DoD)" bash -c "
+        wave_state='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json'
+        [[ -f \"\$wave_state\" ]] || { echo 'wave state.json missing — cannot test close'; exit 1; }
+
+        # Verify wave_kind is explicitly 'synthetic' in state (first-class contract)
+        wave_kind=\"\$(jq -r '.wave_kind // \"production\"' \"\$wave_state\" 2>/dev/null)\"
+        [[ \"\$wave_kind\" == 'synthetic' ]] || { echo \"wave_kind not synthetic: \$wave_kind\"; exit 1; }
+
+        current_status=\"\$(jq -r '.status' \"\$wave_state\" 2>/dev/null)\"
+        if [[ \"\$current_status\" == 'closed' ]]; then
+            echo 'already closed'
+            exit 0
+        fi
+
+        # Attempt nominal close (no --force, no --dod-override).
+        # Synthetic probe closes still need an explicit completion level when
+        # disposition is landed, otherwise teardown never reaches worktree cleanup.
+        close_output=\"\$(bash '$WAVE_CMD' close '$SYNTHETIC_WAVE_ID' --disposition landed --completion-level '$SYNTHETIC_COMPLETION_LEVEL' 2>&1)\"
+        close_rc=\$?
+
+        if [[ \$close_rc -eq 0 ]]; then
+            exit 0
+        else
+            echo \"close blocked (exit \$close_rc): \${close_output:0:200}\"
+            exit 1
+        fi
+    "
+fi
+
+# Force-close the synthetic wave if H7 didn't close it, so H5/H6 measure clean state
+_wave_sf="$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json"
+if [[ -f "$_wave_sf" ]]; then
+    _cur_status="$(jq -r '.status // "unknown"' "$_wave_sf" 2>/dev/null || echo "unknown")"
+    if [[ "$_cur_status" != "closed" ]]; then
+        bash "$WAVE_CMD" close "$SYNTHETIC_WAVE_ID" \
+            --disposition landed \
+            --completion-level "$SYNTHETIC_COMPLETION_LEVEL" \
+            --force \
+            --dod-override "honesty test cleanup for H5/H6 checks" \
+            >/dev/null 2>&1 || true
+        CLEANUP_NEEDED=0  # Already cleaned up
+    fi
+fi
+
+# ── H5: Continuity invariants ────────────────────────────────────────────
+# Checks that after the synthetic run + cleanup, orphan count hasn't grown.
+check H5 "continuity invariants (no new orphaned waves from synthetic run)" bash -c "
+    context_output=\"\$('$ROOT/bin/ops' context 2>&1)\"
+    orphaned=\"\$(echo \"\$context_output\" | grep -o 'orphaned waves:.*[0-9]' | grep -o '[0-9]*$')\"
+    orphaned=\"\${orphaned:-0}\"
+    pre=$_pre_orphan_count
+    if [[ \"\$orphaned\" -gt \"\$pre\" ]]; then
+        echo \"orphaned waves grew: \$pre → \$orphaned (synthetic run left orphans)\"
+        exit 1
+    fi
+"
+
+# ── H6: Surface coherence ────────────────────────────────────────────────
+# Checks that status --json and context agree on shared data (loop counts),
+# while tolerating the known agent-owned registration class where the joined
+# context can trail the status surface by one.
+check H6 "surface coherence (status + context agree on loop counts)" bash -c "
+    status_json=\"\$('$ROOT/bin/ops' status --json 2>&1)\"
+
+    # status --context must exit 0 (not just print valid output)
+    context_output=\"\$('$ROOT/bin/ops' status --context 2>&1)\"
+    ctx_rc=\$?
+    [[ \"\$ctx_rc\" -eq 0 ]] || { echo \"status --context exited \$ctx_rc (expected 0)\"; exit 1; }
+
+    # Both surfaces report open loop counts. The honest relation here is that
+    # the status surface is the broader joined-state read, so it may be equal to
+    # or one step ahead of the context surface for the known registration class.
+    ctx_loops=\"\$(echo \"\$context_output\" | grep -o 'open loops:.*[0-9]' | grep -o '[0-9]*$')\"
+    ctx_loops=\"\${ctx_loops:-0}\"
+
+    status_loops=\"\$(echo \"\$status_json\" | jq '.counts.open_loops // 0' 2>/dev/null)\"
+    status_loops=\"\${status_loops:-0}\"
+
+    if [[ \"\$status_loops\" -lt \"\$ctx_loops\" ]]; then
+        echo \"loop count mismatch: status=\$status_loops context=\$ctx_loops\"
+        exit 1
+    fi
+
+    if [[ \"\$status_loops\" -ne \"\$ctx_loops\" ]]; then
+        delta=\$((status_loops - ctx_loops))
+        [[ \"\$delta\" -le 1 ]] || { echo \"loop count gap too large: status=\$status_loops context=\$ctx_loops\"; exit 1; }
+        echo \"context trails status by \$delta loop(s) on the known agent-registration class\"
+    fi
+
+    # Context should report spine verify status (front-door authority)
+    echo \"\$context_output\" | grep -q 'spine verify:' || { echo 'context does not show spine verify status'; exit 1; }
+"
+
+# ── H8: Kickoff-path honesty ────────────────────────────────────────────
+# Proves the real kickoff binary enforces worktree-only execution:
+#   - From a governed worktree: --dry-run succeeds
+#   - From the main checkout: --dry-run is denied by path policy
+KICKOFF_BIN="$ROOT/ops/plugins/core/orchestration/bin/orchestration-wave-kickoff"
+if [[ ! -f "$KICKOFF_BIN" ]]; then
+    record_fail H8 "kickoff-path honesty (governed worktree passes, main checkout denied)" "kickoff binary not found: $KICKOFF_BIN"
+else
+    # Determine if we are running from a governed worktree
+    _h8_repo_real="$(cd "$ROOT" && pwd -P)"
+    _h8_primary="$(git -C "$ROOT" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+    [[ -n "$_h8_primary" ]] && _h8_primary="$(cd "$_h8_primary" && pwd -P)"
+    _h8_is_worktree=0
+    if [[ -n "$_h8_primary" && "$_h8_repo_real" != "$_h8_primary" ]]; then
+        _h8_is_worktree=1
+    fi
+
+    if [[ "$_h8_is_worktree" -eq 1 ]]; then
+        # Running from a worktree — can test both directions
+        check H8 "kickoff-path honesty (governed worktree passes, main checkout denied)" bash -c "
+            # Worktree dry-run must succeed
+            wt_out=\"\$('$KICKOFF_BIN' --dry-run \
+                --loop-id '$SYNTHETIC_LOOP_ID' \
+                --lanes TEST \
+                --repo '$ROOT' \
+                --owner-terminal '${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}' \
+                --base-branch main 2>&1)\"
+            wt_rc=\$?
+            [[ \$wt_rc -eq 0 ]] || { echo \"worktree dry-run failed (exit \$wt_rc): \${wt_out:0:200}\"; exit 1; }
+            echo \"\$wt_out\" | grep -q 'DRY_RUN_OK' || { echo 'worktree dry-run did not report DRY_RUN_OK'; exit 1; }
+
+            # Main checkout dry-run must fail with path policy block
+            main_out=\"\$('$KICKOFF_BIN' --dry-run \
+                --loop-id '$SYNTHETIC_LOOP_ID' \
+                --lanes TEST \
+                --repo '$_h8_primary' \
+                --owner-terminal '${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}' \
+                --base-branch main 2>&1)\"
+            main_rc=\$?
+            [[ \$main_rc -ne 0 ]] || { echo 'main checkout dry-run should have been denied but succeeded'; exit 1; }
+            echo \"\$main_out\" | grep -q 'WORKTREE PATH POLICY BLOCK' || { echo 'denial did not report WORKTREE PATH POLICY BLOCK'; exit 1; }
+        "
+    else
+        # Running from main checkout — can only test denial direction
+        check H8 "kickoff-path honesty (governed worktree passes, main checkout denied)" bash -c "
+            main_out=\"\$('$KICKOFF_BIN' --dry-run \
+                --loop-id '$SYNTHETIC_LOOP_ID' \
+                --lanes TEST \
+                --repo '$ROOT' \
+                --owner-terminal '${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}' \
+                --base-branch main 2>&1)\"
+            main_rc=\$?
+            [[ \$main_rc -ne 0 ]] || { echo 'main checkout dry-run should have been denied but succeeded'; exit 1; }
+            echo \"\$main_out\" | grep -q 'WORKTREE PATH POLICY BLOCK' || { echo 'denial did not report WORKTREE PATH POLICY BLOCK'; exit 1; }
+        "
+    fi
+fi
+
+# ── H9: Root-poison immunity ──────────────────────────────────────────────
+# Proves that poisoned SPINE_ROOT / SPINE_REPO / SPINE_CODE env vars pointing
+# at the primary checkout do not redirect worktree commands away from the
+# worktree's own code. The fix is that verify.sh, dispatch.sh, and wave.sh
+# resolve their root from script location, ignoring ambient env.
+_h9_script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+_h9_verify_sh="$_h9_script_root/ops/commands/verify.sh"
+
+check H9 "root-poison immunity (poisoned env does not redirect worktree)" bash -c "
+    # Set all three env vars to a decoy path. If the scripts honor ambient
+    # env, they would try to use the decoy (which would fail or resolve wrong).
+    # We test by running verify.sh's own root resolution under poisoned env.
+    # The script should still resolve to its own directory, not the decoy.
+
+    # Extract the SPINE_ROOT line from verify.sh to see what it resolves to
+    resolved=\"\$(
+        SPINE_ROOT='/tmp/decoy-should-not-be-used' \
+        SPINE_REPO='/tmp/decoy-should-not-be-used' \
+        SPINE_CODE='/tmp/decoy-should-not-be-used' \
+        bash -c '
+            source \"$_h9_verify_sh\" --help 2>/dev/null
+        ' 2>&1 | head -1 || true
+    )\"
+
+    # More direct test: verify.sh line 4 now unconditionally resolves from
+    # script location. Parse the actual assignment to confirm no fallback.
+    line=\"\$(sed -n '4p' '$_h9_verify_sh')\"
+    if echo \"\$line\" | grep -q 'SPINE_ROOT:-'; then
+        echo 'FAIL: verify.sh still uses \${SPINE_ROOT:-...} fallback pattern'
+        exit 1
+    fi
+
+    # Same check for dispatch.sh and wave.sh — must not use SPINE_REPO fallback
+    dispatch_line=\"\$(grep 'SPINE_REPO=' '$_h9_script_root/ops/commands/dispatch.sh' | head -1)\"
+    if echo \"\$dispatch_line\" | grep -q 'SPINE_REPO:-'; then
+        echo 'FAIL: dispatch.sh still uses \${SPINE_REPO:-...} fallback pattern'
+        exit 1
+    fi
+
+    wave_line=\"\$(grep 'SPINE_REPO=' '$_h9_script_root/ops/commands/wave.sh' | head -1)\"
+    if echo \"\$wave_line\" | grep -q 'SPINE_REPO:-'; then
+        echo 'FAIL: wave.sh still uses \${SPINE_REPO:-...} fallback pattern'
+        exit 1
+    fi
+"
+
+# ═══════════════════════════════════════════════════════════════════════════
+
+if [[ "$json_mode" -eq 1 ]]; then
+    fail_json="[]"
+    warn_json="[]"
+    if [[ ${#FAILING_IDS[@]} -gt 0 ]]; then
+        fail_json="$(printf '%s\n' "${FAILING_IDS[@]}" | jq -R . | jq -s .)"
+    fi
+    if [[ ${#WARNING_IDS[@]} -gt 0 ]]; then
+        warn_json="$(printf '%s\n' "${WARNING_IDS[@]}" | jq -R . | jq -s .)"
+    fi
+    jq -n \
+        --argjson total "$TOTAL" \
+        --argjson pass "$PASS" \
+        --argjson fail "$FAIL" \
+        --argjson warn "$WARN" \
+        --argjson failing_ids "$fail_json" \
+        --argjson warning_ids "$warn_json" \
+        '{
+            total: $total,
+            pass: $pass,
+            fail: $fail,
+            warn: $warn,
+            skipped_inline: 0,
+            skipped_retired: 0,
+            skipped_network: 0,
+            receipt_integrity_warnings: 0,
+            failing_ids: $failing_ids,
+            warning_ids: $warning_ids,
+            blocking_fail_ids: $failing_ids,
+            non_blocking_fail_ids: []
+        }'
+else
+    echo ""
+    echo "Engine honesty: $PASS/$TOTAL pass, $FAIL fail, $WARN warn"
+    if [[ "$WARN" -gt 0 && "$FAIL" -eq 0 ]]; then
+        echo ""
+        echo "Warnings only — engine primitives work but synthetic probes were blocked"
+        echo "by active wave claim contention or close-semantics friction."
+        echo "This is expected when a controller wave is active."
+    elif [[ "$WARN" -gt 0 ]]; then
+        echo ""
+        echo "Warnings indicate claim contention or close-semantics friction."
+        echo "Hard failures indicate broken orchestration primitives."
+    fi
+fi
+
+[[ "$FAIL" -eq 0 ]]

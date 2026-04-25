@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""representation-audit-summary - Read-only summary of representation audit artifacts."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+
+
+AUDIT_GLOB = "REPRESENTATION-AUDIT-*.md"
+DEFAULT_AUDIT_DIR = Path("$SPINE_RUNTIME/spine/state/domain-state/spine")
+ROW_RE = re.compile(r"^#### Row (?P<number>\d+): (?P<title>.+)$", re.MULTILINE)
+TABLE_ROW_RE = re.compile(r"^\| (?P<field>[^|]+?) \| (?P<value>.+?) \|$")
+FOLLOW_ON_RE = re.compile(r"^\*\*Follow-on seam\*\*: (?P<value>.+)$", re.MULTILINE)
+H2_RE = re.compile(r"^##\s+", re.MULTILINE)
+ORIGINAL_AUDIT_RE = re.compile(r"^original_audit_ref:\s*(?P<value>.+)$", re.MULTILINE)
+PREDECESSOR_RE = re.compile(r"^predecessor:\s*(?P<value>.+)$", re.MULTILINE)
+TYPE_RE = re.compile(r"^type:\s*(?P<value>.+)$", re.MULTILINE)
+SCOPE_RE = re.compile(r"^scope:\s*(?P<value>.+)$", re.MULTILINE)
+TRUE_PREFIX_RE = re.compile(r"^\s*(true|yes|1)\b", re.IGNORECASE)
+MARKDOWN_DECORATION_RE = re.compile(r"[*`]")
+CLASSIFICATION_PATTERNS = (
+    ("insufficient_observation", re.compile(r"insufficient(?:[_ ]observation)?", re.IGNORECASE)),
+    ("duplicated", re.compile(r"\bduplicated\b", re.IGNORECASE)),
+    ("orphaned", re.compile(r"\borphaned\b", re.IGNORECASE)),
+    ("overloaded", re.compile(r"\boverloaded\b", re.IGNORECASE)),
+    ("drift", re.compile(r"\bdrift\b", re.IGNORECASE)),
+    ("clean", re.compile(r"\bclean\b", re.IGNORECASE)),
+)
+
+
+def normalize_markdown(value: str) -> str:
+    return MARKDOWN_DECORATION_RE.sub("", value).strip()
+
+
+def frontmatter_field(text: str, pattern: re.Pattern[str]) -> str | None:
+    match = pattern.search(text)
+    if not match:
+        return None
+    return match.group("value").strip()
+
+
+def artifact_type(text: str) -> str:
+    return (frontmatter_field(text, TYPE_RE) or "").lower()
+
+
+def artifact_scope(text: str) -> str:
+    return (frontmatter_field(text, SCOPE_RE) or "").lower()
+
+
+def artifact_rank(path: Path, text: str) -> int:
+    kind = artifact_type(text)
+    scope = artifact_scope(text)
+    is_row_scoped = path.name.startswith("REPRESENTATION-AUDIT-ROW-") or scope.startswith("row-")
+    if kind in {"audit-artifact", "audit-rerun-artifact"} and not is_row_scoped:
+        return 2
+    if kind in {"audit-artifact", "audit-rerun-artifact"}:
+        return 1
+    return 0
+
+
+def find_latest_audit(override: str | None) -> Path:
+    if override:
+        path = Path(override)
+        if not path.is_file():
+            raise FileNotFoundError(f"audit artifact not found: {path}")
+        return path
+
+    scored_matches: list[tuple[int, float, str, Path]] = []
+    for path in DEFAULT_AUDIT_DIR.glob(AUDIT_GLOB):
+        text = path.read_text(encoding="utf-8")
+        scored_matches.append((artifact_rank(path, text), path.stat().st_mtime, path.name, path))
+
+    if not scored_matches:
+        raise FileNotFoundError(f"no audit artifacts found under {DEFAULT_AUDIT_DIR}")
+
+    scored_matches.sort(reverse=True)
+    return scored_matches[0][3]
+
+
+def parse_bool(value: str) -> bool:
+    return TRUE_PREFIX_RE.search(normalize_markdown(value)) is not None
+
+
+def parse_rows(text: str) -> list[dict[str, object]]:
+    matches = list(ROW_RE.finditer(text))
+    rows: list[dict[str, object]] = []
+    for idx, match in enumerate(matches):
+        start = match.end()
+        next_row_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        next_h2_match = H2_RE.search(text, start)
+        next_h2_start = next_h2_match.start() if next_h2_match else len(text)
+        end = min(next_row_start, next_h2_start)
+
+        block = text[start:end]
+        row: dict[str, object] = {
+            "row_number": int(match.group("number")),
+            "row_title": match.group("title").strip(),
+        }
+        for line in block.splitlines():
+            table_match = TABLE_ROW_RE.match(line.strip())
+            if not table_match:
+                continue
+            field = table_match.group("field").strip()
+            value = table_match.group("value").strip()
+            if field == "Field":
+                continue
+            if field == "on_entry_path":
+                row[field] = parse_bool(value)
+            else:
+                row[field] = value
+        follow_on = FOLLOW_ON_RE.search(block)
+        if follow_on:
+            row["follow_on_seam"] = follow_on.group("value").strip()
+        rows.append(row)
+    return rows
+
+
+def _resolve_linked_artifact(audit_path: Path, text: str) -> Path | None:
+    for pattern in (ORIGINAL_AUDIT_RE, PREDECESSOR_RE):
+        linked_name = frontmatter_field(text, pattern)
+        if not linked_name:
+            continue
+        linked_path = audit_path.parent / linked_name
+        if not linked_path.is_file():
+            raise FileNotFoundError(f"linked audit artifact not found: {linked_path}")
+        return linked_path
+    return None
+
+
+def resolve_rows_source(audit_path: Path, text: str, visited: set[Path] | None = None) -> Path:
+    visited = visited or set()
+    if audit_path in visited:
+        raise ValueError(f"audit artifact chain cycles at {audit_path}")
+    visited.add(audit_path)
+
+    rows = parse_rows(text)
+    if rows:
+        return audit_path
+
+    linked_path = _resolve_linked_artifact(audit_path, text)
+    if not linked_path:
+        raise ValueError(f"no audit rows parsed from {audit_path}")
+
+    linked_text = linked_path.read_text(encoding="utf-8")
+    return resolve_rows_source(linked_path, linked_text, visited)
+
+
+def split_table_line(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        raise ValueError(f"not a markdown table row: {line}")
+    return [cell.strip() for cell in stripped[1:-1].split("|")]
+
+
+def parse_markdown_table(table_lines: list[str]) -> list[dict[str, str]]:
+    if len(table_lines) < 2:
+        return []
+    headers = split_table_line(table_lines[0])
+    rows: list[dict[str, str]] = []
+    for line in table_lines[2:]:
+        if not line.strip().startswith("|"):
+            break
+        values = split_table_line(line)
+        if len(values) < len(headers):
+            values += [""] * (len(headers) - len(values))
+        rows.append(dict(zip(headers, values[: len(headers)])))
+    return rows
+
+
+def extract_table_after_heading(text: str, heading_suffix: str) -> list[dict[str, str]]:
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        heading_text = stripped.lstrip("#").strip()
+        if heading_text != heading_suffix and not heading_text.endswith(heading_suffix):
+            continue
+
+        table_start = idx + 1
+        while table_start < len(lines) and not lines[table_start].strip().startswith("|"):
+            table_start += 1
+        if table_start + 1 >= len(lines):
+            return []
+
+        table_lines: list[str] = []
+        cursor = table_start
+        while cursor < len(lines) and lines[cursor].strip().startswith("|"):
+            table_lines.append(lines[cursor])
+            cursor += 1
+        return parse_markdown_table(table_lines)
+    return []
+
+
+def normalize_classification(value: str) -> str:
+    normalized = normalize_markdown(value)
+    matches: list[tuple[int, str]] = []
+    for key, pattern in CLASSIFICATION_PATTERNS:
+        for match in pattern.finditer(normalized):
+            matches.append((match.start(), key))
+    if not matches:
+        return ""
+    matches.sort()
+    return matches[-1][1]
+
+
+def extract_first_int(value: str) -> int | None:
+    match = re.search(r"(\d+)", value)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def build_summary(rows: list[dict[str, object]], audit_path: Path, rows_source: Path) -> dict[str, object]:
+    counts = Counter(str(row.get("classification", "unknown")).strip() for row in rows)
+    follow_on_seams = []
+    overloaded = []
+    non_clean = []
+    for row in rows:
+        classification = str(row.get("classification", "")).strip()
+        name = str(row.get("declared_name") or row.get("row_title") or "").strip()
+        if seam := row.get("follow_on_seam"):
+            follow_on_seams.append({"name": name, "seam": seam})
+        if classification == "overloaded":
+            overloaded.append(
+                {
+                    "name": name,
+                    "source": row.get("declared_authority_source", ""),
+                    "consequence": row.get("consequence", ""),
+                }
+            )
+        if classification in {"duplicated", "drift", "orphaned"}:
+            non_clean.append(
+                {
+                    "name": name,
+                    "classification": classification,
+                    "consequence": row.get("consequence", ""),
+                }
+            )
+    entry_path_non_clean = [
+        {
+            "name": str(row.get("declared_name") or row.get("row_title") or "").strip(),
+            "classification": str(row.get("classification", "")).strip(),
+            "consequence": row.get("consequence", ""),
+        }
+        for row in rows
+        if row.get("on_entry_path") is True and str(row.get("classification", "")).strip() != "clean"
+    ]
+    return {
+        "artifact_path": str(audit_path),
+        "rows_source_path": str(rows_source),
+        "row_count": len(rows),
+        "count_by_classification": dict(sorted(counts.items())),
+        "overloaded_nouns": overloaded,
+        "duplicated_drift_or_orphaned": non_clean,
+        "entry_path_non_clean": entry_path_non_clean,
+        "follow_on_seams": follow_on_seams,
+        "rows": rows,
+    }
+
+
+def build_rerun_summary(audit_path: Path, text: str) -> dict[str, object]:
+    classification_rows = extract_table_after_heading(text, "Classification Summary — Before and After")
+    if not classification_rows:
+        raise ValueError(f"rerun summary table not found in {audit_path}")
+
+    rerun_header = next((key for key in classification_rows[0] if key.startswith("Rerun")), "")
+    if not rerun_header:
+        raise ValueError(f"rerun count column not found in {audit_path}")
+
+    row_count = extract_first_int(rerun_header)
+    counts: dict[str, int] = {}
+    for row in classification_rows:
+        key = normalize_classification(row.get("Classification", ""))
+        value = extract_first_int(row.get(rerun_header, ""))
+        if key and value is not None:
+            counts[key] = value
+    if row_count is None:
+        row_count = sum(counts.values())
+
+    delta_rows: list[dict[str, str]] = []
+    for heading in (
+        "High-Signal Nouns (minimum revisit set)",
+        "Residue-Driven Nouns (should be resolved)",
+        "Other Nouns With Changed Evidence",
+    ):
+        delta_rows.extend(extract_table_after_heading(text, heading))
+
+    original_rows_by_number: dict[int, dict[str, object]] = {}
+    original_path = _resolve_linked_artifact(audit_path, text)
+    if original_path:
+        original_text = original_path.read_text(encoding="utf-8")
+        original_rows_by_number = {
+            int(row["row_number"]): row
+            for row in parse_rows(original_text)
+            if isinstance(row.get("row_number"), int)
+        }
+
+    rerun_rows: list[dict[str, object]] = []
+    overloaded = []
+    non_clean = []
+    entry_path_non_clean = []
+    for row in delta_rows:
+        row_number = extract_first_int(row.get("Row", ""))
+        if row_number is None:
+            continue
+        classification = normalize_classification(row.get("Rerun", ""))
+        noun = row.get("Noun", "").strip()
+        original_row = original_rows_by_number.get(row_number, {})
+        detail = row.get("Root Cause", "").strip() or row.get("Delta", "").strip()
+        entry = {
+            "row_number": row_number,
+            "declared_name": noun,
+            "classification": classification,
+            "detail": detail,
+            "delta": row.get("Delta", "").strip(),
+            "on_entry_path": bool(original_row.get("on_entry_path")),
+            "declared_authority_source": original_row.get("declared_authority_source", ""),
+        }
+        rerun_rows.append(entry)
+
+        if classification == "overloaded":
+            overloaded.append(
+                {
+                    "name": noun,
+                    "source": original_row.get("declared_authority_source", ""),
+                    "consequence": detail,
+                }
+            )
+        if classification in {"duplicated", "drift", "orphaned"}:
+            payload = {
+                "name": noun,
+                "classification": classification,
+                "consequence": detail,
+            }
+            non_clean.append(payload)
+            if original_row.get("on_entry_path") is True:
+                entry_path_non_clean.append(payload)
+
+    seam_rows = extract_table_after_heading(text, "Narrower Seam List (capped at 5)")
+    follow_on_seams = []
+    for row in seam_rows:
+        noun_name = row.get("Noun(s)", "").strip() or row.get("Noun", "").strip()
+        seam = row.get("Seam", "").strip()
+        note = row.get("Note", "").strip()
+        seam_text = f"{seam} — {note}" if seam and note else seam or note
+        follow_on_seams.append({"name": noun_name, "seam": seam_text})
+
+    summary: dict[str, object] = {
+        "artifact_path": str(audit_path),
+        "rows_source_path": str(audit_path),
+        "row_count": row_count,
+        "count_by_classification": dict(sorted(counts.items())),
+        "overloaded_nouns": overloaded,
+        "duplicated_drift_or_orphaned": non_clean,
+        "entry_path_non_clean": entry_path_non_clean,
+        "follow_on_seams": follow_on_seams,
+        "rows": rerun_rows,
+    }
+    if original_path:
+        summary["entry_path_source_path"] = str(original_path)
+    return summary
+
+
+def render_human(summary: dict[str, object]) -> str:
+    counts = summary["count_by_classification"]
+    lines = [
+        "=== REPRESENTATION AUDIT SUMMARY ===",
+        f"artifact: {summary['artifact_path']}",
+        f"rows_source: {summary['rows_source_path']}",
+        f"rows: {summary['row_count']}",
+        "counts:",
+    ]
+    for key, value in counts.items():
+        lines.append(f"  {key}: {value}")
+
+    overloaded = summary["overloaded_nouns"]
+    lines.append("")
+    lines.append(f"overloaded nouns: {len(overloaded)}")
+    for item in overloaded:
+        lines.append(f"  - {item['name']}: {item['consequence']}")
+
+    non_clean = summary["duplicated_drift_or_orphaned"]
+    lines.append("")
+    lines.append(f"duplicated/drift/orphaned nouns: {len(non_clean)}")
+    for item in non_clean:
+        lines.append(f"  - {item['classification']}: {item['name']} — {item['consequence']}")
+
+    entry_path = summary["entry_path_non_clean"]
+    lines.append("")
+    lines.append(f"entry-path non-clean nouns: {len(entry_path)}")
+    for item in entry_path:
+        lines.append(f"  - {item['classification']}: {item['name']}")
+
+    seams = summary["follow_on_seams"]
+    lines.append("")
+    lines.append(f"follow-on seams: {len(seams)}")
+    for item in seams:
+        lines.append(f"  - {item['name']}: {item['seam']}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="representation-audit-summary",
+        description="Summarize the latest representation audit artifact.",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of human text.")
+    parser.add_argument("--artifact", help="Override audit artifact path.")
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Validate that the latest artifact can be parsed and summarized.",
+    )
+    args = parser.parse_args()
+
+    try:
+        audit_path = find_latest_audit(args.artifact)
+        text = audit_path.read_text(encoding="utf-8")
+        if extract_table_after_heading(text, "Classification Summary — Before and After"):
+            summary = build_rerun_summary(audit_path, text)
+        else:
+            rows_source = resolve_rows_source(audit_path, text)
+            rows_text = rows_source.read_text(encoding="utf-8")
+            rows = parse_rows(rows_text)
+            if not rows:
+                raise ValueError(f"no audit rows parsed from {rows_source}")
+            summary = build_summary(rows, audit_path, rows_source)
+    except Exception as exc:
+        print(f"representation.audit.summary FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.self_check:
+        print("representation.audit.summary self-check PASS")
+        return 0
+
+    if args.json:
+        print(json.dumps(summary, indent=2))
+    else:
+        print(render_human(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

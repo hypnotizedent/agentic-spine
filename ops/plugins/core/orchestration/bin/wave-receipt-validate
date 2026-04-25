@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Validate a wave EXEC_RECEIPT against the orchestration receipt schema."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def _load_allowed_lanes(role_runtime_contract: Path) -> set[str]:
+    allowed = {"control", "execution", "audit", "watcher"}
+    if role_runtime_contract.exists():
+        try:
+            import yaml
+
+            contract = yaml.safe_load(role_runtime_contract.read_text(encoding="utf-8")) or {}
+            lane_compat = contract.get("lane_role_compatibility") if isinstance(contract, dict) else {}
+            by_lane = lane_compat.get("allowed_runtime_roles_by_lane") if isinstance(lane_compat, dict) else {}
+            if isinstance(by_lane, dict) and by_lane:
+                parsed = {str(item).strip() for item in by_lane.keys() if str(item).strip()}
+                if parsed:
+                    allowed = parsed
+        except Exception:
+            pass
+    return allowed
+
+
+def _load_contract_validation(role_runtime_contract: Path) -> tuple[list[re.Pattern[str]], str, set[str], list[str]]:
+    run_key_pattern_texts = [
+        r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"
+    ]
+    commit_ref_pattern = r"^[0-9a-f]{7,40}$"
+    allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
+    required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
+
+    if role_runtime_contract.exists():
+        try:
+            import yaml
+
+            contract = yaml.safe_load(role_runtime_contract.read_text(encoding="utf-8")) or {}
+            evidence = contract.get("evidence") if isinstance(contract, dict) else {}
+            if isinstance(evidence, dict):
+                run_key_regexes = evidence.get("run_key_regexes")
+                if isinstance(run_key_regexes, list) and run_key_regexes:
+                    parsed = [str(x).strip() for x in run_key_regexes if str(x).strip()]
+                    if parsed:
+                        run_key_pattern_texts = parsed
+                elif evidence.get("run_key_regex"):
+                    run_key_pattern_texts = [str(evidence.get("run_key_regex")).strip()]
+                commit_ref_pattern = str(evidence.get("commit_ref_regex", commit_ref_pattern))
+                blockers = evidence.get("blocker_classes")
+                if isinstance(blockers, list) and blockers:
+                    allowed_blocker_classes = {str(x).strip() for x in blockers if str(x).strip()} or allowed_blocker_classes
+                required = evidence.get("required_ref_fields")
+                if isinstance(required, list) and required:
+                    required_evidence_fields = [str(x).strip() for x in required if str(x).strip()] or required_evidence_fields
+        except Exception:
+            pass
+
+    patterns = [re.compile(pattern_text) for pattern_text in run_key_pattern_texts]
+    return patterns, commit_ref_pattern, allowed_blocker_classes, required_evidence_fields
+
+
+def _run_key_matches(value: str, patterns: list[re.Pattern[str]]) -> bool:
+    return any(pattern.match(value) for pattern in patterns)
+
+
+def validate_receipt(
+    receipt: dict,
+    *,
+    allowed_lanes: set[str],
+    run_key_patterns: list[re.Pattern[str]],
+    commit_ref_pattern: str,
+    allowed_blocker_classes: set[str],
+    required_evidence_fields: list[str],
+    expected_wave_id: str = "",
+) -> list[str]:
+    errors: list[str] = []
+    required = [
+        "task_id",
+        "terminal_id",
+        "lane",
+        "status",
+        "files_changed",
+        "run_keys",
+        "blockers",
+        "ready_for_verify",
+        "timestamp_utc",
+    ]
+    for field in required:
+        if field not in receipt:
+            errors.append(f"Missing required field: {field}")
+
+    for field in ["task_id", "terminal_id", "lane", "status", "timestamp_utc"]:
+        if field in receipt and not isinstance(receipt[field], str):
+            errors.append(f"Field '{field}' must be a string, got {type(receipt[field]).__name__}")
+
+    for field in ["files_changed", "run_keys", "blockers"]:
+        if field in receipt and not isinstance(receipt[field], list):
+            errors.append(f"Field '{field}' must be an array, got {type(receipt[field]).__name__}")
+
+    if "ready_for_verify" in receipt and not isinstance(receipt["ready_for_verify"], bool):
+        errors.append("Field 'ready_for_verify' must be a boolean")
+
+    if receipt.get("lane") and receipt["lane"] not in allowed_lanes:
+        errors.append(f"Invalid lane: '{receipt['lane']}' (must be {'|'.join(sorted(allowed_lanes))})")
+    if receipt.get("status") and receipt["status"] not in ("done", "failed", "blocked"):
+        errors.append(f"Invalid status: '{receipt['status']}' (must be done|failed|blocked)")
+
+    if receipt.get("task_id") == "":
+        errors.append("task_id must not be empty")
+    if receipt.get("terminal_id") == "":
+        errors.append("terminal_id must not be empty")
+
+    timestamp = receipt.get("timestamp_utc", "")
+    if timestamp and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", timestamp):
+        errors.append(f"timestamp_utc must match YYYY-MM-DDTHH:MM:SSZ, got '{timestamp}'")
+
+    for index, run_key in enumerate(receipt.get("run_keys", [])):
+        if not isinstance(run_key, str):
+            errors.append(f"run_keys[{index}] must be a string")
+        elif not _run_key_matches(run_key, run_key_patterns):
+            errors.append(f"run_keys[{index}] '{run_key}' does not match any allowed run_key namespace")
+
+    if receipt.get("status") == "blocked" and not receipt.get("blockers"):
+        errors.append("status=blocked requires at least one entry in blockers[]")
+
+    if "wave_id" in receipt:
+        wave_id = receipt["wave_id"]
+        if not isinstance(wave_id, str) or not re.match(r"^WAVE-\d{8}-\d{2}$", wave_id):
+            errors.append(f"wave_id must match WAVE-YYYYMMDD-NN pattern, got '{wave_id}'")
+        elif expected_wave_id and wave_id != expected_wave_id:
+            errors.append(f"wave_id mismatch: receipt={wave_id} expected={expected_wave_id}")
+
+    commit_pattern = re.compile(commit_ref_pattern)
+    if "commit_hashes" in receipt:
+        if not isinstance(receipt["commit_hashes"], list):
+            errors.append("commit_hashes must be an array")
+        else:
+            for index, commit_ref in enumerate(receipt["commit_hashes"]):
+                if not isinstance(commit_ref, str) or not commit_pattern.match(commit_ref):
+                    errors.append(f"commit_hashes[{index}] must be a 7-40 char hex string")
+
+    if "evidence_refs" not in receipt:
+        errors.append("Missing required field: evidence_refs")
+    else:
+        evidence_refs = receipt["evidence_refs"]
+        if not isinstance(evidence_refs, dict):
+            errors.append("evidence_refs must be an object")
+        else:
+            for key in required_evidence_fields:
+                if key not in evidence_refs:
+                    errors.append(f"evidence_refs missing {key}")
+
+            run_key_refs = evidence_refs.get("run_key_refs", [])
+            file_refs = evidence_refs.get("file_refs", [])
+            commit_refs = evidence_refs.get("commit_refs", [])
+            blocker_class = str(evidence_refs.get("blocker_class", "")).strip()
+
+            if not isinstance(run_key_refs, list):
+                errors.append("evidence_refs.run_key_refs must be an array")
+            else:
+                for index, run_key_ref in enumerate(run_key_refs):
+                    if not isinstance(run_key_ref, str) or not _run_key_matches(run_key_ref, run_key_patterns):
+                        errors.append(f"evidence_refs.run_key_refs[{index}] invalid run key")
+
+            if not isinstance(file_refs, list):
+                errors.append("evidence_refs.file_refs must be an array")
+            else:
+                for index, file_ref in enumerate(file_refs):
+                    if not isinstance(file_ref, str) or not file_ref.strip():
+                        errors.append(f"evidence_refs.file_refs[{index}] must be non-empty string")
+
+            if not isinstance(commit_refs, list):
+                errors.append("evidence_refs.commit_refs must be an array")
+            else:
+                for index, commit_ref in enumerate(commit_refs):
+                    if not isinstance(commit_ref, str) or not commit_pattern.match(commit_ref):
+                        errors.append(f"evidence_refs.commit_refs[{index}] invalid commit ref")
+
+            if not blocker_class:
+                errors.append("evidence_refs.blocker_class must be non-empty")
+            elif blocker_class not in allowed_blocker_classes:
+                errors.append(f"evidence_refs.blocker_class invalid: {blocker_class}")
+
+    allowed_keys = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs", "completion_level", "prompt_lineage"])
+    for key in receipt.keys():
+        if key not in allowed_keys:
+            errors.append(f"Unknown field: '{key}' (additionalProperties not allowed)")
+    return errors
+
+
+def main(argv: list[str]) -> int:
+    expected_wave_id = ""
+    args = argv[1:]
+    if "--wave-id" in args:
+        idx = args.index("--wave-id")
+        if idx + 1 < len(args):
+            expected_wave_id = args[idx + 1]
+            args = args[:idx] + args[idx + 2:]
+        else:
+            print("FAIL: --wave-id requires a value", file=sys.stderr)
+            return 1
+
+    if len(args) != 1:
+        print("Usage: wave-receipt-validate [--wave-id WAVE-ID] <path-to-receipt.json>", file=sys.stderr)
+        return 1
+
+    receipt_path = Path(args[0])
+    if not receipt_path.is_file():
+        print(f"FAIL: File not found: {receipt_path}", file=sys.stderr)
+        return 1
+
+    root = _repo_root()
+    role_runtime_contract = root / "ops" / "bindings" / "role.runtime.control.contract.yaml"
+    allowed_lanes = _load_allowed_lanes(role_runtime_contract)
+    run_key_patterns, commit_ref_pattern, allowed_blocker_classes, required_evidence_fields = _load_contract_validation(role_runtime_contract)
+
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"FAIL: Invalid JSON: {exc}")
+        return 1
+
+    if not isinstance(receipt, dict):
+        print("FAIL: Receipt must be a JSON object")
+        return 1
+
+    errors = validate_receipt(
+        receipt,
+        allowed_lanes=allowed_lanes,
+        run_key_patterns=run_key_patterns,
+        commit_ref_pattern=commit_ref_pattern,
+        allowed_blocker_classes=allowed_blocker_classes,
+        required_evidence_fields=required_evidence_fields,
+        expected_wave_id=expected_wave_id,
+    )
+
+    if errors:
+        print(f"FAIL: {len(errors)} validation error(s) in {receipt_path.name}:")
+        for error in errors:
+            print(f"  - {error}")
+        return 1
+
+    print(f"OK: {receipt_path.name} is a valid EXEC_RECEIPT")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

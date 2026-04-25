@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Read-only scanner for parked items with parked_lifecycle blocks."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+
+def spine_state() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_STATE",
+            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+        )
+    )
+
+
+def spine_code() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_CODE",
+            str(Path.home() / "code" / "agentic-spine"),
+        )
+    )
+
+
+def scan_dirs() -> list[Path]:
+    """Directories to scan for parked items."""
+    dirs = [spine_state() / "domain-state"]
+    # Repo planning docs may also contain parked items.
+    repo_planning = spine_code() / "docs" / "planning"
+    if repo_planning.is_dir():
+        dirs.append(repo_planning)
+    return [d for d in dirs if d.is_dir()]
+
+
+_YAML_FENCE = re.compile(
+    r"```ya?ml\s*\n(.*?)```", re.DOTALL | re.IGNORECASE
+)
+
+
+def extract_lifecycle_from_yaml(data: object) -> dict | None:
+    """Return parked_lifecycle dict if present at any level."""
+    if not isinstance(data, dict):
+        return None
+    if "parked_lifecycle" in data:
+        return data["parked_lifecycle"]
+    for value in data.values():
+        if isinstance(value, dict):
+            result = extract_lifecycle_from_yaml(value)
+            if result is not None:
+                return result
+    return None
+
+
+def extract_lifecycle_from_md(text: str) -> dict | None:
+    """Parse YAML code fences in markdown looking for parked_lifecycle."""
+    for match in _YAML_FENCE.finditer(text):
+        try:
+            parsed = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            continue
+        lc = extract_lifecycle_from_yaml(parsed)
+        if lc is not None:
+            return lc
+    return None
+
+
+def extract_lifecycle(path: Path) -> dict | None:
+    """Extract parked_lifecycle from a file, handling YAML and markdown."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+
+    if path.suffix == ".yaml" or path.suffix == ".yml":
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError:
+            return None
+        return extract_lifecycle_from_yaml(data)
+
+    if path.suffix == ".md":
+        return extract_lifecycle_from_md(text)
+
+    return None
+
+
+def item_name(path: Path) -> str:
+    """Derive a short human name from the file path."""
+    return path.stem
+
+
+def item_location(path: Path) -> str:
+    """Classify where the item lives."""
+    s = str(path)
+    if "/domain-state/spine/" in s:
+        return "runtime/spine"
+    if "/domain-state/mint/" in s:
+        return "runtime/mint"
+    if "/domain-state/" in s:
+        return "runtime/domain-state"
+    if "/docs/planning/" in s:
+        return "repo/planning"
+    return "other"
+
+
+def scan_all() -> list[dict]:
+    """Walk scan dirs and collect all parked items with lifecycle blocks."""
+    items = []
+    seen = set()
+    for base in scan_dirs():
+        for path in sorted(base.rglob("*")):
+            if path.is_dir():
+                continue
+            if path.suffix not in (".yaml", ".yml", ".md"):
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            lc = extract_lifecycle(path)
+            if lc is None:
+                continue
+            triggers = lc.get("activation_trigger", [])
+            if isinstance(triggers, str):
+                triggers = [triggers]
+            items.append({
+                "name": item_name(path),
+                "path": str(path),
+                "location": item_location(path),
+                "status": lc.get("status", "parked"),
+                "parked_reason": lc.get("parked_reason", ""),
+                "activation_trigger": triggers,
+                "trigger_count": len(triggers),
+                "next_review": lc.get("next_review"),
+                "activation_destination": lc.get("activation_destination", ""),
+                "retire_if": lc.get("retire_if", ""),
+                "superseded_by": lc.get("superseded_by", []),
+            })
+    return items
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    items = scan_all()
+    if args.json:
+        print(json.dumps({
+            "capability": "parked.list",
+            "status": "ok",
+            "count": len(items),
+            "items": items,
+        }, indent=2))
+    else:
+        if not items:
+            print("No parked items with parked_lifecycle found.")
+            return 0
+        for i, item in enumerate(items, 1):
+            print(f"\n{'─' * 60}")
+            print(f"  [{i}/{len(items)}] {item['name']}")
+            print(f"  location:    {item['location']}")
+            print(f"  status:      {item['status']}")
+            print(f"  reason:      {item['parked_reason']}")
+            print(f"  triggers:    {item['trigger_count']} defined")
+            for t in item["activation_trigger"]:
+                print(f"               - {t}")
+            print(f"  next_review: {item['next_review'] or '(none)'}")
+            print(f"  destination: {item['activation_destination']}")
+            print(f"  retire_if:   {item['retire_if']}")
+            sup = item["superseded_by"]
+            if sup:
+                print(f"  superseded:  {', '.join(sup)}")
+            print(f"  path:        {item['path']}")
+        print(f"\n{'─' * 60}")
+        print(f"\nTotal: {len(items)} parked item(s) with lifecycle.\n")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Read-only scanner for parked items with parked_lifecycle blocks."
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p_list = sub.add_parser("list", help="List all parked items with lifecycle metadata.")
+    p_list.add_argument("--json", action="store_true", help="Output as JSON.")
+    args = parser.parse_args()
+    if args.cmd == "list":
+        return cmd_list(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

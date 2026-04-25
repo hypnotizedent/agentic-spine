@@ -1,0 +1,656 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# session.v3.attach - Canonical session entry point
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Single entry capability for a new terminal session.
+# Composes the birth banner (context) and work summary (status --brief)
+# into one screen so the operator lands oriented.
+#
+# Called by: ops terminal launch (internally, after env setup)
+# Also callable directly: ops cap run session.v3.attach
+#
+# Does NOT:
+#   - Mutate state
+#   - Attach loops (use --loop on terminal launch for that)
+#   - Run verify (ops verify is a separate health surface)
+#   - Dispatch work (ops dispatch local is a separate work surface)
+#
+# ═══════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+RUNTIME_PATHS_LIB="$SPINE_ROOT/ops/lib/runtime-paths.sh"
+if [[ -f "$RUNTIME_PATHS_LIB" ]]; then
+    # shellcheck source=/dev/null
+    . "$RUNTIME_PATHS_LIB"
+    spine_runtime_resolve_paths
+fi
+
+# ── Flag parsing (bounded, forward-compatible) ─────────────────────────────
+EMIT_ENV=0
+EMIT_ASSIGNMENT=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --emit-env)
+            EMIT_ENV=1
+            shift
+            ;;
+        --emit-assignment)
+            EMIT_ASSIGNMENT=1
+            shift
+            ;;
+        --allow-no-loop)
+            # accepted and ignored (packet proof compatibility)
+            shift
+            ;;
+        -h|--help)
+            echo "usage: session-v3-attach [--emit-env] [--emit-assignment] [--allow-no-loop] [-h|--help]"
+            exit 0
+            ;;
+        *)
+            # unknown flags: accept and ignore (forward compat)
+            shift
+            ;;
+    esac
+done
+
+# ── Source posture helper (best-effort) ────────────────────────────────────
+POSTURE_HELPER="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/session_posture.sh"
+# shellcheck source=/dev/null
+[[ -f "$POSTURE_HELPER" ]] && . "$POSTURE_HELPER" 2>/dev/null || true
+
+# ── Context banner ─────────────────────────────────────────────────────────
+# Best-effort: never block terminal birth
+"$SPINE_ROOT/bin/ops" status --context 2>/dev/null || true
+
+# ── Status one-liner ───────────────────────────────────────────────────────
+echo ""
+"$SPINE_ROOT/bin/ops" status --brief 2>/dev/null || true
+echo ""
+
+# ── Repo hygiene snapshot (best-effort, non-blocking) ─────────────────────
+WORKTREE_STATUS_BIN="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/worktree-session-status"
+if [[ -x "$WORKTREE_STATUS_BIN" ]]; then
+    WORKTREE_STATUS_BRIEF="$("$WORKTREE_STATUS_BIN" --brief 2>/dev/null || true)"
+    if [[ -n "$WORKTREE_STATUS_BRIEF" ]]; then
+        echo "── repo hygiene ────────────────────────────────────────────────"
+        echo "  $WORKTREE_STATUS_BRIEF"
+        if [[ "$WORKTREE_STATUS_BRIEF" == FAIL* ]]; then
+            echo "  note:            main must be clean and not behind origin before mutation, or work must move to a managed worktree"
+        fi
+        echo ""
+    fi
+fi
+
+# ── Handoff continuity inputs (best-effort, non-blocking) ─────────────────
+HANDOFF_BIN="$SPINE_ROOT/ops/plugins/core/session/bin/session-handoff"
+HANDOFF_STATUS_JSON=""
+HANDOFF_LIST_JSON=""
+CONT_ACTIVE_HANDOFFS=0
+CONT_LIVE_HANDOFFS=0
+CONT_OTHER_HANDOFFS=0
+CONT_PRIMARY_HANDOFF_ID=""
+CONT_PRIMARY_HANDOFF_SUMMARY=""
+CONT_PRIMARY_HANDOFF_LOOPS=""
+CONT_LIVE_LOOP_SET=""
+CONT_MATCH_COUNT=0
+
+if [[ -f "$HANDOFF_BIN" ]]; then
+    HANDOFF_STATUS_JSON="$(python3 "$HANDOFF_BIN" status 2>/dev/null || true)"
+    HANDOFF_LIST_JSON="$(python3 "$HANDOFF_BIN" list --state active 2>/dev/null || true)"
+fi
+
+# ── Compiled entry (best-effort, non-blocking) ───────────────────────────
+# Resolve compiled packet truth before provenance so packet checkpoints are
+# only shown when they match the current compiled packet.
+ENTRY_COMPILE_BIN="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/entry-compile"
+ENTRY_COMPILE_JSON=""
+ENTRY_COMPILE_STATE=""
+ENTRY_COMPILE_LOOP=""
+ENTRY_COMPILE_PACKET=""
+ENTRY_COMPILE_SOURCES=""
+ENTRY_COMPILE_STOP=""
+ENTRY_COMPILE_MUTATION=""
+ENTRY_COMPILE_HANDOFF=""
+
+if [[ -f "$ENTRY_COMPILE_BIN" ]]; then
+    ENTRY_COMPILE_JSON="$(python3 "$ENTRY_COMPILE_BIN" --state-root "${SPINE_STATE:-}" 2>/dev/null || true)"
+    if [[ -n "$ENTRY_COMPILE_JSON" ]]; then
+        eval "$(python3 -c "
+import json, sys, shlex
+d = json.loads(sys.stdin.read())
+print(f'ENTRY_COMPILE_STATE={shlex.quote(str(d.get(\"compilation_state\", \"unknown\")))}')
+print(f'ENTRY_COMPILE_LOOP={shlex.quote(str(d.get(\"loop_id\") or \"<none>\"))}')
+pid = d.get('packet_id')
+pid_display = '<none>' if (not pid or str(pid).lower() == 'none') else str(pid)
+print(f'ENTRY_COMPILE_PACKET={shlex.quote(pid_display)}')
+sources = d.get('context_sources') or []
+print(f'ENTRY_COMPILE_SOURCES={shlex.quote(str(len(sources)) + \" file(s)\")}')
+stop = d.get('stop_condition')
+if isinstance(stop, list):
+    stop = '; '.join(stop)
+print(f'ENTRY_COMPILE_STOP={shlex.quote(str(stop or \"<none>\"))}')
+mg = d.get('mutation_ground') or {}
+mut_str = f'permitted={mg.get(\"mutation_permitted\", \"?\")} role={mg.get(\"runtime_role\", \"?\")}'
+print(f'ENTRY_COMPILE_MUTATION={shlex.quote(mut_str)}')
+print(f'ENTRY_COMPILE_HANDOFF={shlex.quote(str(d.get(\"handoff_target\") or \"<none>\"))}')
+wk = d.get('wave_kind') or ''
+print(f'ENTRY_COMPILE_WAVE_KIND={shlex.quote(wk)}')
+# Ambiguous case: list candidates
+cands = d.get('loop_candidates') or []
+for i, c in enumerate(cands[:5]):
+    print(f'ENTRY_COMPILE_CAND{i}_ID={shlex.quote(str(c.get(\"loop_id\", \"\")))}')
+    print(f'ENTRY_COMPILE_CAND{i}_OBJ={shlex.quote(str(c.get(\"objective\", \"\"))[:80])}')
+print(f'ENTRY_COMPILE_CAND_COUNT={len(cands)}')
+" <<< "$ENTRY_COMPILE_JSON" 2>/dev/null)" || true
+    fi
+fi
+
+# ── Provenance checkpoint (best-effort, non-blocking) ─────────────────────
+PROV_CHECKPOINT_ID=""
+PROV_CHECKPOINT_PACKET=""
+PROV_CHECKPOINT_RECORDED=""
+PROV_CHECKPOINT_PATH=""
+PROV_CURRENT_PACKET=""
+
+if [[ -n "${ENTRY_COMPILE_PACKET:-}" && "${ENTRY_COMPILE_PACKET}" != "<none>" && "${ENTRY_COMPILE_PACKET}" != "none" ]]; then
+    PROV_CURRENT_PACKET="$ENTRY_COMPILE_PACKET"
+fi
+
+PROV_ARTIFACTS_DIR="$SPINE_STATE/controller-prompts/_intake-artifacts"
+if [[ -n "$PROV_CURRENT_PACKET" && -d "$PROV_ARTIFACTS_DIR" ]]; then
+    PROV_LATEST="$(ls -1 "$PROV_ARTIFACTS_DIR"/PACKET-START-PROVENANCE-CHECKPOINT-"$PROV_CURRENT_PACKET"-*.yaml 2>/dev/null | sort | tail -1 || true)"
+    if [[ -n "$PROV_LATEST" && -f "$PROV_LATEST" ]]; then
+        PROV_CHECKPOINT_PATH="$PROV_LATEST"
+        eval "$(python3 - "$PROV_LATEST" <<'PYPROV' 2>/dev/null || true
+import sys, shlex
+try:
+    import yaml
+    data = yaml.safe_load(open(sys.argv[1]))
+    print(f"PROV_CHECKPOINT_ID={shlex.quote(str(data.get('checkpoint_id', '')))}")
+    print(f"PROV_CHECKPOINT_PACKET={shlex.quote(str(data.get('packet_id', '')))}")
+    print(f"PROV_CHECKPOINT_RECORDED={shlex.quote(str(data.get('recorded_at_utc', '')))}")
+except Exception:
+    pass
+PYPROV
+        )"
+    fi
+fi
+
+echo "── provenance ──────────────────────────────────────────────────"
+if [[ -n "$PROV_CURRENT_PACKET" ]]; then
+    if [[ -n "$PROV_CHECKPOINT_ID" ]]; then
+        echo "  checkpoint:      ${PROV_CHECKPOINT_ID}"
+        echo "  packet:          ${PROV_CHECKPOINT_PACKET}"
+        echo "  recorded:        ${PROV_CHECKPOINT_RECORDED}"
+    else
+        echo "  checkpoint:      none"
+        echo "  packet:          ${PROV_CURRENT_PACKET}"
+        echo "  action:          ops cap run session.packet.provenance.capture"
+    fi
+else
+    echo "  checkpoint:      none"
+    echo "  packet:          none"
+    echo "  note:            no current packet in compiled entry"
+fi
+echo ""
+
+# ── Session posture (best-effort, non-blocking) ────────────────────────────
+POSTURE_OK=0
+if command -v session_posture_resolve >/dev/null 2>&1; then
+    if session_posture_resolve "${OPS_TERMINAL_ROLE:-}" "" 2>/dev/null; then
+        POSTURE_OK=1
+        echo "── session posture ─────────────────────────────────────────────"
+        echo "  node type:       ${__SP_NODE_TYPE:-unknown}"
+        echo "  session posture: ${__SP_POSTURE:-unknown}"
+        echo "  posture source:  ${__SP_SOURCE:-unknown}"
+        echo "  runtime role:    ${SPINE_RUNTIME_ROLE:-unset}"
+        echo "  verify cmd:      ./bin/ops verify --spine-lite"
+        echo "  control loop:    ./bin/ops status --control-loop"
+        echo ""
+
+        # Recovery posture (best-effort, non-blocking)
+        if command -v session_recovery_posture_resolve >/dev/null 2>&1; then
+            if session_recovery_posture_resolve 2>/dev/null; then
+                echo "── recovery posture ───────────────────────────────────────────"
+                echo "  operator site:   ${__SP_OPERATOR_SITE:-unknown}"
+                echo "  recovery:        ${__SP_RECOVERY_POSTURE:-unknown}"
+                echo "  safe to mutate:  ${__SP_SAFE_TO_MUTATE:-false}"
+                echo "  detection basis: ${__SP_SITE_DETECTION_BASIS:-unavailable}"
+                echo ""
+            fi
+        fi
+    fi
+fi
+
+# ── Workflow routing (best-effort, non-blocking) ─────────────────────────
+ROUTER_HELPER="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/post_attach_router.py"
+ROUTING_JSON=""
+if [[ -f "$ROUTER_HELPER" ]]; then
+    ROUTING_JSON=$(python3 "$ROUTER_HELPER" \
+        --runtime-root "${SPINE_RUNTIME_ROOT}" \
+        --state-root "${SPINE_STATE}" \
+        2>/dev/null) || true
+fi
+
+if [[ -n "$ROUTING_JSON" ]]; then
+    # Extract fields via python3 (jq may not be available)
+    eval "$(python3 -c "
+import json, sys, shlex
+d = json.loads(sys.stdin.read())
+print(f'_RT_STATE={shlex.quote(d.get(\"routing_state\", \"unknown\"))}')
+print(f'_RT_ACTION={shlex.quote(d.get(\"recommended_next_action\", \"\"))}')
+print(f'_RT_CMD={shlex.quote(d.get(\"recommended_command\", \"\") or \"\")}')
+print(f'_RT_CONTAINER={shlex.quote(d.get(\"recommended_container\", \"\"))}')
+print(f'_RT_WHY={shlex.quote(d.get(\"why\", \"\"))}')
+print(f'_RT_RULES={shlex.quote(d.get(\"container_rules_summary\", \"\"))}')
+# candidates
+cands = d.get(\"open_loop_candidates\", [])[:3]
+for i, c in enumerate(cands):
+    print(f'_RT_CAND{i}_ID={shlex.quote(c.get(\"loop_id\", \"\"))}')
+    print(f'_RT_CAND{i}_OBJ={shlex.quote(c.get(\"objective\", \"\")[:80])}')
+print(f'_RT_CAND_COUNT={len(cands)}')
+" <<< "$ROUTING_JSON" 2>/dev/null)" || true
+
+    if [[ -n "${_RT_STATE:-}" ]]; then
+        echo "── workflow routing ────────────────────────────────────────────"
+        echo "  routing state:   ${_RT_STATE}"
+        echo "  next action:     ${_RT_ACTION}"
+        if [[ -n "${_RT_CMD}" ]]; then
+            echo "  suggested cmd:   ${_RT_CMD}"
+        fi
+        echo "  container:       ${_RT_CONTAINER}"
+        echo "  why:             ${_RT_WHY}"
+        # Show loop candidates if any
+        if [[ "${_RT_CAND_COUNT:-0}" -gt 0 ]]; then
+            echo ""
+            echo "  open loop candidates:"
+            for i in $(seq 0 $((_RT_CAND_COUNT - 1))); do
+                eval "_id=\${_RT_CAND${i}_ID:-}"
+                eval "_obj=\${_RT_CAND${i}_OBJ:-}"
+                echo "    - ${_id}: ${_obj}"
+            done
+        fi
+        echo ""
+        echo "  container rules: ${_RT_RULES}"
+        echo ""
+    fi
+fi
+
+if [[ -n "$ENTRY_COMPILE_STATE" ]]; then
+    echo "── compiled entry ──────────────────────────────────────────────"
+    echo "  compilation:     ${ENTRY_COMPILE_STATE}"
+    echo "  loop:            ${ENTRY_COMPILE_LOOP}"
+    echo "  packet:          ${ENTRY_COMPILE_PACKET}"
+    echo "  context:         ${ENTRY_COMPILE_SOURCES}"
+    echo "  stop:            ${ENTRY_COMPILE_STOP}"
+    echo "  mutation:        ${ENTRY_COMPILE_MUTATION}"
+    echo "  handoff:         ${ENTRY_COMPILE_HANDOFF}"
+    if [[ -n "${ENTRY_COMPILE_WAVE_KIND:-}" && "${ENTRY_COMPILE_WAVE_KIND}" != "production" ]]; then
+        echo "  wave_kind:       ${ENTRY_COMPILE_WAVE_KIND}"
+    fi
+    # Show candidates if ambiguous
+    if [[ "$ENTRY_COMPILE_STATE" == "ambiguous" && "${ENTRY_COMPILE_CAND_COUNT:-0}" -gt 0 ]]; then
+        echo ""
+        echo "  active loop candidates (operator must select):"
+        for i in $(seq 0 $(("${ENTRY_COMPILE_CAND_COUNT}" - 1))); do
+            eval "_cid=\${ENTRY_COMPILE_CAND${i}_ID:-}"
+            eval "_cobj=\${ENTRY_COMPILE_CAND${i}_OBJ:-}"
+            echo "    - ${_cid}: ${_cobj}"
+        done
+    fi
+    # Suggest provenance capture when a packet is identified
+    if [[ "${ENTRY_COMPILE_PACKET}" != "<none>" && "${ENTRY_COMPILE_PACKET}" != "none" ]]; then
+        # Check if provenance checkpoint is stale (different packet or missing)
+        if [[ "${PROV_CHECKPOINT_PACKET:-}" != "${ENTRY_COMPILE_PACKET}" ]]; then
+            echo ""
+            echo "  provenance:      stale or missing for current packet"
+            echo "  action:          ops cap run session.packet.provenance.capture"
+        fi
+    fi
+    echo ""
+fi
+
+# ── Handoff continuity snapshot (best-effort, non-blocking) ───────────────
+CONTINUITY_VARS="$(
+    HANDOFF_STATUS_JSON="$HANDOFF_STATUS_JSON" \
+    HANDOFF_LIST_JSON="$HANDOFF_LIST_JSON" \
+    ROUTING_JSON="${ROUTING_JSON:-}" \
+    ENTRY_COMPILE_JSON="${ENTRY_COMPILE_JSON:-}" \
+    python3 - <<'PY'
+import json
+import os
+import shlex
+
+
+def load_env_json(name: str) -> dict:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def add_live_loop(loop_id: str, seen: set[str], ordered: list[str]) -> None:
+    loop_text = str(loop_id or "").strip()
+    if not loop_text or loop_text.lower() in {"none", "<none>"} or loop_text in seen:
+        return
+    seen.add(loop_text)
+    ordered.append(loop_text)
+
+
+status = load_env_json("HANDOFF_STATUS_JSON")
+listing = load_env_json("HANDOFF_LIST_JSON")
+routing = load_env_json("ROUTING_JSON")
+entry_compile = load_env_json("ENTRY_COMPILE_JSON")
+
+active_handoffs = int(((status.get("counts") or {}).get("active")) or 0)
+items = listing.get("items") or []
+
+live_loop_ids = []
+live_loop_seen = set()
+for candidate in routing.get("open_loop_candidates") or []:
+    if isinstance(candidate, dict):
+        add_live_loop(candidate.get("loop_id"), live_loop_seen, live_loop_ids)
+add_live_loop(entry_compile.get("loop_id"), live_loop_seen, live_loop_ids)
+
+live_items = []
+other_items = []
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    loop_refs = [
+        str(loop).strip()
+        for loop in (item.get("loops") or [])
+        if str(loop).strip()
+    ]
+    rendered = {
+        "id": str(item.get("id") or "").strip(),
+        "summary": str(item.get("summary") or "").strip(),
+        "loops": ", ".join(loop_refs),
+    }
+    if live_loop_seen and any(loop in live_loop_seen for loop in loop_refs):
+        live_items.append(rendered)
+    else:
+        other_items.append(rendered)
+
+primary = live_items[0] if len(live_items) == 1 else {}
+
+print(f"CONT_ACTIVE_HANDOFFS={shlex.quote(str(active_handoffs))}")
+print(f"CONT_LIVE_HANDOFFS={shlex.quote(str(len(live_items)))}")
+print(f"CONT_OTHER_HANDOFFS={shlex.quote(str(max(0, active_handoffs - len(live_items))))}")
+print(f"CONT_LIVE_LOOP_SET={shlex.quote(', '.join(live_loop_ids))}")
+print(f"CONT_PRIMARY_HANDOFF_ID={shlex.quote(str(primary.get('id') or ''))}")
+print(f"CONT_PRIMARY_HANDOFF_SUMMARY={shlex.quote(str(primary.get('summary') or ''))}")
+print(f"CONT_PRIMARY_HANDOFF_LOOPS={shlex.quote(str(primary.get('loops') or ''))}")
+print(f"CONT_MATCH_COUNT={shlex.quote(str(len(live_items)))}")
+for i, item in enumerate(live_items[:3]):
+    print(f"CONT_MATCH{i}_ID={shlex.quote(str(item.get('id') or ''))}")
+    print(f"CONT_MATCH{i}_SUMMARY={shlex.quote(str(item.get('summary') or ''))}")
+    print(f"CONT_MATCH{i}_LOOPS={shlex.quote(str(item.get('loops') or ''))}")
+PY
+)" || true
+
+if [[ -n "$CONTINUITY_VARS" ]]; then
+    eval "$CONTINUITY_VARS"
+fi
+
+if [[ "${CONT_ACTIVE_HANDOFFS:-0}" != "0" ]]; then
+    echo "── handoff continuity ──────────────────────────────────────────"
+    echo "  active handoffs: ${CONT_ACTIVE_HANDOFFS:-0} total"
+    if [[ -n "${CONT_LIVE_LOOP_SET:-}" ]]; then
+        echo "  live loops:      ${CONT_LIVE_LOOP_SET}"
+    fi
+    echo "  live overlap:    ${CONT_LIVE_HANDOFFS:-0}"
+    if [[ "${CONT_OTHER_HANDOFFS:-0}" != "0" ]]; then
+        echo "  other-loop hist: ${CONT_OTHER_HANDOFFS}"
+    fi
+    if [[ "${CONT_MATCH_COUNT:-0}" -eq 1 && -n "${CONT_PRIMARY_HANDOFF_ID:-}" ]]; then
+        echo "  live handoff:    ${CONT_PRIMARY_HANDOFF_ID}: ${CONT_PRIMARY_HANDOFF_SUMMARY:-}"
+        if [[ -n "${CONT_PRIMARY_HANDOFF_LOOPS:-}" ]]; then
+            echo "  loops:           ${CONT_PRIMARY_HANDOFF_LOOPS}"
+        fi
+    elif [[ "${CONT_MATCH_COUNT:-0}" -gt 1 ]]; then
+        echo "  note:            multiple live-loop handoffs remain; keep loop selection ambiguous"
+        for i in $(seq 0 $((CONT_MATCH_COUNT < 3 ? CONT_MATCH_COUNT - 1 : 2))); do
+            eval "_match_id=\${CONT_MATCH${i}_ID:-}"
+            eval "_match_summary=\${CONT_MATCH${i}_SUMMARY:-}"
+            eval "_match_loops=\${CONT_MATCH${i}_LOOPS:-}"
+            echo "  match:           ${_match_id}: ${_match_summary}"
+            if [[ -n "$_match_loops" ]]; then
+                echo "  loops:           ${_match_loops}"
+            fi
+        done
+    else
+        echo "  note:            handoffs are continuity context only; current controller todo comes from live loop routing above"
+    fi
+    echo ""
+fi
+
+# ── --emit-env handling ────────────────────────────────────────────────────
+if [[ "$EMIT_ENV" -eq 1 ]]; then
+    if [[ "$POSTURE_OK" -eq 1 ]] && command -v session_posture_emit_env >/dev/null 2>&1; then
+        echo "# posture env exports"
+        session_posture_emit_env 2>/dev/null || true
+    else
+        echo "# posture env unavailable"
+    fi
+fi
+
+# ── --emit-assignment handling ────────────────────────────────────────────
+# Emits a JSON compiled partial assignment object from already-computed
+# attach-time truth. No new computation — just structured capture of what
+# the banner already knows. Packet-level fields remain null (operator judgment).
+if [[ "$EMIT_ASSIGNMENT" -eq 1 ]]; then
+    echo "── compiled assignment (partial) ────────────────────────────────"
+    SPINE_ROOT_EXPORT="$SPINE_ROOT" ENTRY_COMPILE_JSON="${ENTRY_COMPILE_JSON:-}" python3 - \
+        "${OPS_TERMINAL_ROLE:-}" \
+        "${SPINE_RUNTIME_ROLE:-}" \
+        "${WORKTREE_STATUS_BRIEF:-}" \
+        "${__SP_SAFE_TO_MUTATE:-false}" \
+        "${CONT_ACTIVE_HANDOFFS:-0}" \
+        "${CONT_PRIMARY_HANDOFF_ID:-}" \
+        "${CONT_PRIMARY_HANDOFF_SUMMARY:-}" \
+        "${CONT_PRIMARY_HANDOFF_LOOPS:-}" \
+        "${CONT_LIVE_HANDOFFS:-0}" \
+        "${CONT_OTHER_HANDOFFS:-0}" \
+        "${CONT_LIVE_LOOP_SET:-}" \
+        "${_RT_STATE:-}" \
+        "${_RT_ACTION:-}" \
+        "${SPINE_STATE:-}" \
+        "${ROUTING_JSON:-}" \
+        "${PROV_CHECKPOINT_ID:-}" \
+        "${PROV_CHECKPOINT_PACKET:-}" \
+        "${PROV_CHECKPOINT_RECORDED:-}" \
+        <<'PYASSIGN' 2>/dev/null || true
+import json
+import os
+import sys
+import re
+
+args = sys.argv[1:]
+terminal_id       = args[0] or None
+runtime_role      = args[1] or None
+hygiene_brief     = args[2] or None
+safe_to_mutate    = args[3]
+active_handoffs   = int(args[4]) if args[4] else 0
+latest_handoff_id = args[5] or None
+latest_handoff_summary = args[6] or None
+latest_handoff_loops   = args[7] or None
+continuity_live_handoffs = int(args[8]) if args[8] else 0
+continuity_other_handoffs = int(args[9]) if args[9] else 0
+continuity_live_loops = args[10] or None
+routing_state     = args[11] or None
+routing_action    = args[12] or None
+state_root        = args[13] or ""
+routing_json_raw  = args[14] or ""
+prov_checkpoint_id = args[15] or None
+prov_checkpoint_packet = args[16] or None
+prov_checkpoint_recorded = args[17] or None
+
+# Resolve terminal type and tool from contract (best-effort)
+terminal_type = None
+tool = None
+contract_path = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else ".",
+    "../../../../..", "ops", "bindings", "terminal.role.contract.yaml"
+)
+# __file__ is not set in heredoc mode; use SPINE_ROOT-relative path
+spine_root = os.environ.get("SPINE_ROOT_EXPORT", "")
+if not spine_root:
+    spine_root = os.getcwd()
+contract_path = os.path.join(spine_root, "ops", "bindings", "terminal.role.contract.yaml")
+
+if terminal_id and os.path.isfile(contract_path):
+    try:
+        with open(contract_path, "r") as f:
+            text = f.read()
+        # Minimal YAML parse for roles — avoid yq dependency
+        in_role = False
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("- id:") and terminal_id in stripped:
+                in_role = True
+            elif in_role and stripped.startswith("- id:"):
+                break
+            elif in_role and stripped.startswith("type:"):
+                terminal_type = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+            elif in_role and stripped.startswith("default_tool:"):
+                tool = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+
+# Resolve loop from routing candidates (best-effort)
+loop_id = None
+loop_objective = None
+loop_priority = None
+loop_evidence_refs = []
+loop_exclusions = []
+
+if routing_json_raw:
+    try:
+        rd = json.loads(routing_json_raw)
+        cands = rd.get("open_loop_candidates", [])
+        if len(cands) == 1:
+            loop_id = cands[0].get("loop_id")
+            loop_priority = cands[0].get("priority")
+    except Exception:
+        pass
+
+# If we have a loop_id and state_root, read the scope file for full details
+if loop_id and state_root:
+    scope_dir = os.path.join(state_root, "loop-scopes")
+    for name in sorted(os.listdir(scope_dir)) if os.path.isdir(scope_dir) else []:
+        if not name.endswith(".scope.md"):
+            continue
+        path = os.path.join(scope_dir, name)
+        try:
+            with open(path, "r") as f:
+                text = f.read(16384)
+        except OSError:
+            continue
+        if loop_id not in text:
+            continue
+        # Parse frontmatter
+        lines = text.split("\n")
+        if not lines or lines[0].strip() != "---":
+            continue
+        in_fm = True
+        current_list_key = None
+        for line in lines[1:]:
+            stripped = line.strip()
+            if stripped == "---":
+                break
+            # List item under a key
+            if stripped.startswith("- ") and current_list_key:
+                val = stripped[2:].strip().strip('"').strip("'")
+                if current_list_key == "evidence_refs":
+                    loop_evidence_refs.append(val)
+                elif current_list_key == "exclusions":
+                    loop_exclusions.append(val)
+                continue
+            # Key: value
+            colon = stripped.find(":")
+            if colon < 1:
+                current_list_key = None
+                continue
+            key = stripped[:colon].strip()
+            val = stripped[colon+1:].strip().strip('"').strip("'")
+            current_list_key = None
+            if key == "objective" and val:
+                loop_objective = val
+            elif key == "priority" and val:
+                loop_priority = val
+            elif key == "evidence_refs":
+                current_list_key = "evidence_refs"
+            elif key == "exclusions":
+                current_list_key = "exclusions"
+        break
+
+# Compose the assignment object
+assignment = {
+    "version": "0.1",
+    "type": "entry.assignment.partial",
+    "terminal_id": terminal_id,
+    "terminal_type": terminal_type,
+    "tool": tool,
+    "runtime_role": runtime_role,
+    "loop_id": loop_id,
+    "loop_objective": loop_objective,
+    "loop_priority": loop_priority,
+    "loop_evidence_refs": loop_evidence_refs or None,
+    "loop_exclusions": loop_exclusions or None,
+    "active_handoffs": active_handoffs,
+    "latest_handoff_id": latest_handoff_id,
+    "latest_handoff_summary": latest_handoff_summary,
+    "latest_handoff_loops": latest_handoff_loops,
+    "continuity_live_handoffs": continuity_live_handoffs,
+    "continuity_other_handoffs": continuity_other_handoffs,
+    "continuity_live_loops": continuity_live_loops,
+    "repo_hygiene": hygiene_brief,
+    "safe_to_mutate": safe_to_mutate.lower() == "true",
+    "routing_state": routing_state,
+    "recommended_action": routing_action,
+    # Provenance checkpoint (latest at attach time)
+    "provenance_checkpoint_id": prov_checkpoint_id,
+    "provenance_checkpoint_packet": prov_checkpoint_packet,
+    "provenance_checkpoint_recorded": prov_checkpoint_recorded,
+    # Fields from compiled entry (populated when entry.compile produced a result)
+    "packet_id": None,
+    "stop_condition": None,
+    "context_bundle": None,
+    "forbidden_actions": None,
+    "first_action": None,
+    "handoff_target": None,
+}
+
+# Merge compiled entry fields when available
+entry_compile_json = os.environ.get("ENTRY_COMPILE_JSON", "").strip()
+if entry_compile_json:
+    try:
+        ec = json.loads(entry_compile_json)
+        cs = ec.get("compilation_state", "")
+        if cs in ("compiled", "partial", "loop_only"):
+            if ec.get("packet_id"):
+                assignment["packet_id"] = ec["packet_id"]
+            if ec.get("stop_condition"):
+                assignment["stop_condition"] = ec["stop_condition"]
+            if ec.get("context_sources"):
+                assignment["context_bundle"] = ec["context_sources"]
+            if ec.get("handoff_target"):
+                assignment["handoff_target"] = ec["handoff_target"]
+            if ec.get("wave_kind"):
+                assignment["wave_kind"] = ec["wave_kind"]
+            assignment["compilation_state"] = cs
+    except Exception:
+        pass
+
+print(json.dumps(assignment, indent=2))
+PYASSIGN
+fi
+
+exit 0

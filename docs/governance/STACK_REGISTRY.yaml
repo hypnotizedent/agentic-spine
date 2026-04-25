@@ -1,0 +1,414 @@
+# STACK_REGISTRY.yaml
+# Status: authoritative
+# Last verified: 2026-03-18
+# Updated: 2026-03-18
+#
+# Purpose:
+#   Machine-readable SSOT for "what stacks exist" and "which compose files are authoritative entrypoints".
+#
+# Notes:
+#   - Docs-only. Does not change runtime.
+#   - This registry should match the compose inventory excluding .archive/ and .worktrees/.
+#   - deploy_method values are descriptive; they do not imply automation.
+#   - Compose files live in workbench; this registry lives in spine.
+#
+# External ownership:
+#   Canonical registry lives in spine; config files live in workbench.
+
+source_repo: workbench
+source_root: "~/code/workbench"
+
+version: 1
+
+exclusions:
+  - .archive/**
+  - .worktrees/**
+
+stack_roots:
+  - infra/**
+  - finance/**
+  - media-stack/**
+  - modules/**
+
+stacks:
+  - stack_id: mint-os
+    name: Mint OS (docker-host tombstone)
+    repo: workbench
+    path: infra/compose/mint-os
+    compose_files:
+      - /home/docker-host/stacks/mint-os/docker-compose.yml
+    deploy_method: tombstone_restore_only
+    deploy_notes:
+      runner: docker-host (tombstoned VM 200 only)
+      default_stack_dir: /home/docker-host/stacks/mint-os
+      pattern: no canonical deploys; isolated restore/extraction only
+    status: retired
+    owner: "@operator"
+    notes: >
+      Tombstoned stack on docker-host VM 200 only. Not authoritative for fresh-slate Mint.
+      Canonical Mint runtime is split across mint-apps VM 213, mint-data VM 212,
+      and finance-stack VM 211. Any surviving docker-host files are historical
+      restore surfaces only and must never be treated as an active runtime.
+
+  - stack_id: finance
+    name: Finance
+    repo: workbench
+    path: infra/compose/finance
+    compose_files:
+      - infra/compose/finance/docker-compose.yml
+    deploy_method: manual_vm
+    deploy_target: proxmox:vm-211
+    status: active
+    owner: "@operator"
+    notes: >
+      Live on finance-stack VM 211 (LOOP-FINANCE-VM-SEPARATION-20260211).
+      Services: Firefly III, Paperless-ngx, Ghostfolio, PostgreSQL 16, Redis 7.
+      Compose at /opt/stacks/finance on host.
+      Mail-archiver is migration_source — canonical runtime now on communications-stack VM 214.
+
+  - stack_id: media-stack
+    name: Media Stack (Legacy Monolith)
+    repo: workbench
+    path: media-stack
+    compose_files:
+      - media-stack/docker-compose.yml
+    deploy_method: manual_or_host
+    status: decommissioned
+    owner: "@operator"
+    notes: >
+      DECOMMISSIONED 2026-02-10. VM 201 destroyed (qm destroy --purge),
+      ZFS dataset tank/docker/media-stack removed (24.1G reclaimed).
+      Split into download-stack (VM 209) and streaming-stack (VM 210)
+      per LOOP-MEDIA-STACK-SPLIT-20260208.
+
+  - stack_id: download-stack
+    name: Download Stack
+    path: proxmox:vm-209
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Download services (SABnzbd, *arr, Tdarr, CrowdSec) on VM 209.
+      Compose at /opt/stacks/download-stack on host.
+      Migrated from media-stack (LOOP-MEDIA-STACK-SPLIT-20260208).
+
+  - stack_id: streaming-stack
+    name: Streaming Stack
+    path: proxmox:vm-210
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Streaming services (Jellyfin, Navidrome, Jellyseerr, Bazarr) on VM 210.
+      Compose at /opt/stacks/streaming-stack on host.
+      Migrated from media-stack (LOOP-MEDIA-STACK-SPLIT-20260208).
+
+  - stack_id: immich
+    name: Immich
+    path: proxmox:vm-203
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Photo management (4 containers: server, ML, PostgreSQL, Redis) on VM 203.
+      Compose at ~/immich/docker-compose.yml on host (user: ubuntu).
+      135K+ assets, 3TB library, 4 users. Classified as Stack per
+      LOOP-IMMICH-LEGACY-EXTRACTION-20260211 (upgraded from Utility).
+
+  - stack_id: cloudflare-tunnel
+    name: Cloudflare Tunnel
+    repo: workbench
+    path: infra/cloudflare/tunnel
+    compose_files:
+      - infra/cloudflare/tunnel/docker-compose.yml
+    deploy_method: manual_or_host
+    status: active
+    owner: "@operator"
+    notes: ""
+
+  - stack_id: communications-stack
+    name: Communications Stack
+    repo: workbench
+    path: infra/compose/communications-stack
+    compose_files:
+      - infra/compose/communications-stack/docker-compose.yml
+    deploy_method: manual_vm
+    deploy_target: proxmox:vm-214
+    status: active
+    owner: "@operator"
+    notes: >
+      Stalwart self-hosted mail + mail-archiver on VM 214.
+      Compose at /opt/stacks/communications-stack on host.
+      Services: stalwart-mail, mail-archiver, mail-archiver-db.
+      Mail-archiver canonicalized from finance-stack (LOOP-MAIL-ARCHIVER-COMMS-MIGRATION-20260225).
+
+  - stack_id: surveillance-stack
+    name: Surveillance Stack
+    path: proxmox:vm-215
+    compose_files: []
+    deploy_method: manual_vm
+    deploy_target: proxmox:vm-215
+    status: active
+    owner: "@operator"
+    notes: >
+      Frigate + bundled go2rtc surveillance stack on VM 215.
+      Current live compose authority is /srv/config/surveillance on host.
+      /opt/stacks/surveillance is now a thin entrypoint symlink to the /srv config root.
+      Durable data binds land on /srv/data/surveillance and runtime cache on /srv/runtime/surveillance.
+      Internal-only by design; Home Assistant integration remains on homeassistant VM 100
+      and now uses direct Tailscale with no proxy relay.
+
+  - stack_id: dashy
+    name: Dashy
+    repo: workbench
+    path: infra/compose/dashy
+    compose_files:
+      - infra/compose/dashy/docker-compose.yml
+    deploy_method: manual_vm
+    deploy_target: proxmox:vm-205
+    status: stopped
+    owner: "@operator"
+    notes: "Visual runtime map of spine services. Deployed to observability VM 205 /opt/stacks/dashy/. CF tunnel: dash.example.com. Migrated from docker-host (LOOP-OBSERVABILITY-DOMAIN-ENRICHMENT-20260226). Intentionally stopped due to pathological startup/build cost and connection-refused runtime state; see GAP-OP-1595 and GAP-OP-1616."
+
+  - stack_id: mcpjungle
+    name: MCP Jungle
+    repo: workbench
+    path: infra/compose/mcpjungle
+    compose_files:
+      - infra/compose/mcpjungle/docker-compose.yml
+    deploy_method: manual_or_host
+    status: active
+    owner: "@operator"
+    notes: ""
+
+  - stack_id: n8n
+    name: n8n
+    repo: workbench
+    path: infra/compose/n8n
+    compose_files:
+      - infra/compose/n8n/docker-compose.yml
+    deploy_method: manual_or_host
+    status: active
+    owner: "@operator"
+    notes: ""
+
+  - stack_id: pihole
+    name: Pi-hole
+    path: proxmox:vm-204
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      DNS sinkhole on infra-core VM 204. Compose at /opt/stacks/pihole on host.
+      Part of caddy-auth stack (Caddy fronts pihole with Authentik forward auth).
+
+  - stack_id: secrets
+    name: Secrets (Infisical)
+    path: proxmox:vm-204
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Infisical secrets manager on infra-core VM 204. Compose at /opt/stacks/secrets on host.
+      Part of caddy-auth stack (Caddy fronts infisical with Authentik forward auth).
+
+  - stack_id: storage
+    name: Storage (MinIO standalone)
+    repo: workbench
+    path: infra/compose/storage
+    compose_files:
+      - infra/compose/storage/docker-compose.yml
+    deploy_method: manual_or_host
+    status: reference-only
+    owner: "@operator"
+    notes: >
+      Workbench reference compose for standalone MinIO architecture.
+      NOT deployed. Active Mint MinIO authority is the mint-data stack on VM 212.
+      Any surviving inline docker-host MinIO surface is legacy hold only and is
+      not authoritative for active Mint runtime.
+
+  - stack_id: templates
+    name: Templates (non-deploy)
+    repo: workbench
+    path: infra/templates
+    compose_files:
+      - infra/templates/docker-compose.template.yml
+    deploy_method: none_template_only
+    status: template
+    owner: "@operator"
+    notes: >
+      Template compose file(s) used for reference. Not intended for deployment.
+
+  - stack_id: artwork-module
+    name: Artwork Module (files-api)
+    source: mint-modules/artwork
+    path: proxmox:vm-213
+    compose_files:
+      - /opt/stacks/mint-apps/docker-compose.yml
+    deploy_method: manual_compose
+    status: active
+    owner: "@operator"
+    notes: >
+      Standalone artwork/files API. Seeds intake, asset management, presigned URLs.
+      Source code at ~/code/mint-modules/artwork/. Deployed on mint-apps VM 213.
+      Canonical compose root: /opt/stacks/mint-apps/.
+
+  - stack_id: quote-page
+    name: Quote Page (customer intake)
+    source: mint-modules/quote-page
+    path: proxmox:vm-213
+    compose_files:
+      - /opt/stacks/mint-apps/docker-compose.yml
+    deploy_method: manual_compose
+    status: active
+    owner: "@operator"
+    notes: >
+      Standalone quote intake form at example-shop.com/quote. Posts to files-api seeds
+      API, uploads to MinIO. Source code at ~/code/mint-modules/quote-page/. Deployed
+      on mint-apps VM 213 with canonical compose root /opt/stacks/mint-apps/.
+
+  - stack_id: automation-stack
+    name: Automation Stack
+    path: proxmox:vm-202
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Proxmox VM 202 running n8n, Ollama, and Open WebUI. Not compose-managed via this repo;
+      managed directly on VM. Included for inventory completeness.
+
+  - stack_id: prometheus
+    name: Prometheus
+    path: proxmox:vm-205
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Metrics collection and alerting on observability VM 205.
+      Compose at /opt/stacks/prometheus on host.
+
+  - stack_id: grafana
+    name: Grafana
+    path: proxmox:vm-205
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Monitoring dashboards and visualization on observability VM 205.
+      Compose at /opt/stacks/grafana on host.
+
+  - stack_id: loki
+    name: Loki
+    path: proxmox:vm-205
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Log aggregation on observability VM 205.
+      Compose at /opt/stacks/loki on host.
+
+  - stack_id: uptime-kuma
+    name: Uptime Kuma
+    path: proxmox:vm-205
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Uptime monitoring on observability VM 205.
+      Compose at /opt/stacks/uptime-kuma on host.
+
+  - stack_id: node-exporter
+    name: Node Exporter
+    path: proxmox:vm-205
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Host metrics exporter for Prometheus on observability VM 205.
+      Compose at /opt/stacks/node-exporter on host.
+
+  - stack_id: caddy-auth
+    name: Caddy + Authentik
+    path: proxmox:vm-204
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Reverse proxy (Caddy, host network :80) + SSO (Authentik :9000/:9443) on infra-core VM 204.
+      Compose at /opt/stacks/caddy-auth on host. Includes authentik-server, authentik-worker,
+      authentik-postgres, authentik-redis. Caddy fronts pihole, vaultwarden, infisical with
+      Authentik forward auth.
+
+  - stack_id: vaultwarden
+    name: Vaultwarden
+    path: proxmox:vm-204
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Password vault on infra-core VM 204. Port 8081->80.
+      Compose at /opt/stacks/vaultwarden on host.
+      Migrated from proxmox-home VM 102 (LOOP-INFRA-VM-RESTRUCTURE-20260206).
+
+  - stack_id: gitea
+    name: Gitea
+    repo: workbench
+    path: infra/compose/gitea
+    compose_files:
+      - infra/compose/gitea/docker-compose.yml
+    deploy_method: manual_vm
+    deploy_target: proxmox:vm-206
+    status: active
+    owner: "@operator"
+    notes: >
+      Git forge + PostgreSQL on dev-tools VM 206.
+      Compose at /opt/stacks/gitea on host.
+
+  - stack_id: ai-consolidation
+    name: AI Consolidation
+    path: proxmox:vm-207
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Qdrant vector DB + AnythingLLM RAG on ai-consolidation VM 207.
+      Compose at /opt/stacks/ai-consolidation on host.
+      Migrated off MacBook (LOOP-AI-CONSOLIDATION-20260208).
+
+  - stack_id: mint-data
+    name: Mint Data Plane
+    path: proxmox:vm-212
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      PostgreSQL 16 + MinIO + Redis on mint-data VM 212.
+      Compose at /opt/stacks/mint-data on host.
+      Fresh-slate (LOOP-MINT-FRESH-SLATE-INFRA-BOOTSTRAP-20260212).
+
+  - stack_id: mint-apps
+    name: Mint App Plane
+    path: proxmox:vm-213
+    compose_files: []
+    deploy_method: manual_vm
+    status: active
+    owner: "@operator"
+    notes: >
+      Artwork + quote-page + order-intake on mint-apps VM 213.
+      Compose at /opt/stacks/mint-apps on host.
+      Fresh-slate (LOOP-MINT-FRESH-SLATE-INFRA-BOOTSTRAP-20260212).

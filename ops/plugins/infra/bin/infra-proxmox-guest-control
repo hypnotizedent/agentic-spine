@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-proxmox-guest-control — Start/shutdown/stop a single PVE guest
+# Mutating. Supports KVM VMs and LXC containers.
+#
+# Usage:
+#   infra-proxmox-guest-control <action> <vmid> [--host-id pve] [--timeout 120]
+#
+# Actions: start, shutdown, stop
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+usage() {
+    cat <<'EOF'
+infra-proxmox-guest-control — Single PVE guest control
+
+Usage:
+  infra-proxmox-guest-control start <vmid> [--host-id pve]
+  infra-proxmox-guest-control shutdown <vmid> [--host-id pve] [--timeout 120]
+  infra-proxmox-guest-control stop <vmid> [--host-id pve]
+
+Actions:
+  start       Start a stopped guest
+  shutdown    Graceful shutdown (ACPI)
+  stop        Force stop (immediate)
+EOF
+}
+
+ACTION="${1:-}"
+VMID="${2:-}"
+HOST_ID="pve"
+TIMEOUT=120
+
+shift 2 2>/dev/null || true
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --host-id) HOST_ID="${2:-pve}"; shift 2 ;;
+        --timeout) TIMEOUT="${2:-120}"; shift 2 ;;
+        --) shift; break ;;
+        -h|--help) usage; exit 0 ;;
+        *) shift ;;
+    esac
+done
+
+[[ -n "$ACTION" && -n "$VMID" ]] || { usage >&2; exit 2; }
+[[ "$VMID" =~ ^[0-9]+$ ]] || { echo "FAIL: vmid must be numeric (got '$VMID')" >&2; exit 2; }
+
+case "$ACTION" in
+    start|shutdown|stop) ;;
+    *) echo "FAIL: unknown action '$ACTION' (expected start|shutdown|stop)" >&2; exit 2 ;;
+esac
+
+SSH_HOST="$(ssh_resolve_ssh_host_with_fallback "$HOST_ID" 2>/dev/null | awk '{print $1}')"
+SSH_USER="$(ssh_resolve_user "$HOST_ID")"
+
+if [[ -z "$SSH_HOST" || "$SSH_HOST" == "unreachable" ]]; then
+    echo "FAIL: cannot reach $HOST_ID" >&2
+    exit 1
+fi
+
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+remote() {
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "$@"
+}
+
+# Detect guest type (qm or pct)
+GUEST_TYPE=""
+if remote "qm status $VMID" >/dev/null 2>&1; then
+    GUEST_TYPE="qm"
+elif remote "pct status $VMID" >/dev/null 2>&1; then
+    GUEST_TYPE="pct"
+else
+    echo "FAIL: guest $VMID not found on $HOST_ID" >&2
+    exit 1
+fi
+
+echo "Guest: $VMID (type=$GUEST_TYPE, host=$HOST_ID)"
+
+case "$ACTION" in
+    start)
+        echo "Starting $VMID..."
+        remote "$GUEST_TYPE start $VMID"
+        echo "OK: $VMID started"
+        ;;
+    shutdown)
+        echo "Shutting down $VMID (timeout=${TIMEOUT}s)..."
+        remote "$GUEST_TYPE shutdown $VMID --timeout $TIMEOUT"
+        echo "OK: $VMID shutdown initiated"
+        ;;
+    stop)
+        echo "Force stopping $VMID..."
+        remote "$GUEST_TYPE stop $VMID"
+        echo "OK: $VMID stopped"
+        ;;
+esac

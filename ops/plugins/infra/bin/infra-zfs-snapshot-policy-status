@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# infra-zfs-snapshot-policy-status
+# Read-only: compares authoritative snapshot policy binding against live sanoid config.
+# Does NOT mutate remote state.
+
+BINDING_FILE="${BINDING_FILE:-ops/bindings/infra.zfs.snapshot.policy.yaml}"
+SSH_TARGETS_FILE="${SSH_TARGETS_FILE:-ops/bindings/ssh.targets.yaml}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+_need yq
+_need ssh
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+if [[ ! -f "$BINDING_FILE" ]]; then
+  echo "STOP: missing binding file: $BINDING_FILE" >&2
+  exit 2
+fi
+
+HOST="$(yq -r '.host' "$BINDING_FILE")"
+POLICY_SOURCE="$(yq -r '.policy_source' "$BINDING_FILE")"
+
+# Resolve SSH target via governed resolver
+SSH_HOST="$(ssh_resolve_host "$HOST")"
+SSH_USER="$(ssh_resolve_user "$HOST" "root")"
+IDENTITY_OPTS="$(ssh_resolve_machine_identity_opts "$HOST" 2>/dev/null)" || true
+SSH_TARGET="${SSH_USER}@${SSH_HOST}"
+
+echo "=== ZFS Snapshot Policy Status ==="
+echo "Host: $HOST"
+echo "Policy source: $POLICY_SOURCE"
+echo "Binding: $BINDING_FILE"
+echo ""
+
+PASS=0
+FAIL=0
+WARN=0
+
+check() {
+  local label="$1" status="$2" detail="$3"
+  if [[ "$status" == "PASS" ]]; then
+    ((PASS++))
+    echo "  PASS  $label  $detail"
+  elif [[ "$status" == "FAIL" ]]; then
+    ((FAIL++))
+    echo "  FAIL  $label  $detail"
+  else
+    ((WARN++))
+    echo "  WARN  $label  $detail"
+  fi
+}
+
+# shellcheck disable=SC2086
+# --- Check 1: sanoid.timer active ---
+timer_status="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $IDENTITY_OPTS "$SSH_TARGET" \
+  'systemctl is-active sanoid.timer 2>/dev/null' 2>/dev/null || echo "unknown")"
+
+if [[ "$timer_status" == "active" ]]; then
+  check "S1" "PASS" "sanoid.timer is active"
+else
+  check "S1" "FAIL" "sanoid.timer status: $timer_status"
+fi
+
+# --- Check 2: sanoid.conf exists ---
+# shellcheck disable=SC2086
+conf_exists="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $IDENTITY_OPTS "$SSH_TARGET" \
+  "test -f '$POLICY_SOURCE' && echo yes || echo no" 2>/dev/null || echo "unknown")"
+
+if [[ "$conf_exists" == "yes" ]]; then
+  check "S2" "PASS" "$POLICY_SOURCE exists"
+else
+  check "S2" "FAIL" "$POLICY_SOURCE missing or unreachable"
+  echo ""
+  echo "Summary: $PASS pass, $FAIL fail, $WARN warn"
+  exit 1
+fi
+
+# --- Check 3: compare override datasets ---
+# Pull live sanoid.conf stanzas with autosnap setting
+# shellcheck disable=SC2086
+live_overrides="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $IDENTITY_OPTS "$SSH_TARGET" \
+  "sudo grep -E '^\[|autosnap' '$POLICY_SOURCE'" 2>/dev/null || true)"
+
+override_count="$(yq -r '.overrides | length' "$BINDING_FILE")"
+for ((i=0; i<override_count; i++)); do
+  ds="$(yq -r ".overrides[$i].dataset" "$BINDING_FILE")"
+  expected_autosnap="$(yq -r ".overrides[$i].autosnap" "$BINDING_FILE")"
+
+  # Find this dataset's stanza in live config
+  # Look for [dataset] followed by autosnap line
+  live_autosnap="$(echo "$live_overrides" | awk -v ds="[$ds]" '
+    $0 == ds { found=1; next }
+    found && /^\[/ { found=0 }
+    found && /autosnap/ { gsub(/.*= */, ""); print; found=0 }
+  ')"
+
+  if [[ -z "$live_autosnap" ]]; then
+    check "S3-$ds" "FAIL" "no explicit stanza in live config (inherits parent policy)"
+  else
+    # Normalize: binding uses true/false, sanoid uses yes/no
+    if [[ "$expected_autosnap" == "true" ]]; then expected_sanoid="yes"; else expected_sanoid="no"; fi
+
+    if [[ "$live_autosnap" == "$expected_sanoid" ]]; then
+      check "S3-$ds" "PASS" "autosnap=$live_autosnap (matches binding)"
+    else
+      check "S3-$ds" "FAIL" "autosnap=$live_autosnap (binding expects $expected_sanoid)"
+    fi
+  fi
+done
+
+# --- Check 4: snapshot burden summary ---
+echo ""
+echo "--- Snapshot Burden (usedbysnapshots) ---"
+# shellcheck disable=SC2086
+ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $IDENTITY_OPTS "$SSH_TARGET" \
+  'sudo zfs list -o name,usedbysnapshots -r tank -d 1 2>/dev/null; echo "---"; sudo zfs list -o name,usedbysnapshots -r nas-primary -d 1 2>/dev/null; echo "---"; sudo zfs list -o name,usedbysnapshots -r media -d 1 2>/dev/null' 2>/dev/null || check "S4" "WARN" "could not retrieve burden data"
+
+echo ""
+echo "=== Summary: $PASS pass, $FAIL fail, $WARN warn ==="
+if ((FAIL > 0)); then
+  exit 1
+fi

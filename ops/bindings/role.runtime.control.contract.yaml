@@ -1,0 +1,461 @@
+---
+status: authoritative
+owner: "@operator"
+last_verified: 2026-03-28
+scope: role-runtime-control-plane
+
+version: "1.3"
+updated_at: "2026-04-05"
+
+related_contracts_added_2026_04_05:
+  - contract: ops/bindings/dispatch.envelope.contract.yaml
+    relationship: "Dispatch envelope contract references delegated_receipt_linkage for parent-child completion"
+
+runtime_roles:
+  canonical: [researcher, worker, qc, close, librarian]
+  default_role: researcher
+  close_role_aliases: [close, librarian]
+  read_only_roles: [researcher, qc, close, librarian]
+  mutating_roles: [worker]
+  mutating_capability_allowlist_by_role:
+    researcher:
+      # Friction ingestion — core researcher function
+      - friction.ingest
+      - friction.reconcile
+      - friction.baseline.capture
+      # Close mutators — contract-justified per GAP-OP-1262 (0b43337):
+      # researchers must finalize loop/gap lifecycle after friction reconciliation
+      # without requiring full worker promotion for administrative close operations.
+      - loops.auto.close
+      - gaps.auto.close
+      # Gap/loop lifecycle governance — researchers file findings, claim work,
+      # and create loops as part of normal research flow. These are administrative
+      # governance operations, not domain mutations. Justified by GAP-OP-1329.
+      - gaps.file
+      - gaps.claim
+      - loops.create
+      - loops.continuity.update
+      # Interactive secret setter — inherently manual-gated (read -s prompt).
+      # Researchers need to provision secrets during discovery without full worker
+      # promotion. The interactive nature provides equivalent approval gating.
+      # Justified by GAP-OP-1281.
+      - secrets.set.interactive
+      # Managed infrastructure worktree sync — governed control-plane mutation
+      # for runtime scheduler parity. It only fast-forwards contract-managed
+      # worktrees and fails closed on dirty/non-FF state.
+      - worktree.lifecycle.managed.sync
+      # Authority/projection refresh — capability projection rebuild is a
+      # self-heal control-plane step needed to keep cap discovery aligned with
+      # shared truth during governance repairs.
+      - capability.map.projection.build
+  execution_policy:
+    enforce_read_only_mutation_block: true
+    override_env: SPINE_ROLE_POLICY_OVERRIDE_REF
+    override_reason_env: SPINE_ROLE_POLICY_OVERRIDE_REASON
+  session_role_override_cache:
+    cache_filename: role-override.env
+    ttl_seconds: 14400
+    session_env_var: SPINE_SESSION_ID
+    terminal_role_env_var: OPS_TERMINAL_ROLE
+    require_session_binding: true
+    require_terminal_role_binding: true
+
+lane_role_compatibility:
+  allowed_runtime_roles_by_lane:
+    control: [worker]
+    execution: [worker]
+    audit: [researcher, qc]
+    watcher: [researcher]
+
+launch_role_aliases:
+  canonical_modes:
+    solo:
+      launcher_role: solo
+      description: "No loop attach; local terminal launch mode."
+    control:
+      launcher_role: orchestrator
+      description: "Loop-attached control launch mode."
+    lane-worker:
+      launcher_role: worker
+      description: "Loop-attached lane worker launch mode."
+  compatibility_aliases:
+    orchestrator:
+      canonical_mode: control
+      launcher_role: orchestrator
+      warning: "legacy launch alias; prefer --role control"
+    worker:
+      canonical_mode: lane-worker
+      launcher_role: worker
+      warning: "legacy launch alias; prefer --role lane-worker"
+  required_warning_on_alias_use: [orchestrator, worker]
+
+handoff_boundaries:
+  researcher_to_worker:
+    from_role: researcher
+    to_role: worker
+    required_input_refs:
+      - research_brief_ref
+      - scope_ref
+    required_output_refs:
+      - execution_plan_ref
+      - acceptance_criteria_ref
+  researcher_to_qc:
+    from_role: researcher
+    to_role: qc
+    required_input_refs:
+      - research_brief_ref
+      - scope_ref
+    required_output_refs: []
+  worker_to_qc:
+    from_role: worker
+    to_role: qc
+    required_input_refs:
+      - execution_plan_ref
+      - acceptance_criteria_ref
+    required_output_refs:
+      - implementation_ref
+      - verify_ref
+      - cleanup_ref
+  worker_to_close:
+    from_role: worker
+    to_role: close
+    required_input_refs:
+      - implementation_ref
+      - verify_ref
+      - cleanup_ref
+    required_output_refs:
+      - closeout_ref
+      - linkage_ref
+  qc_to_close:
+    from_role: qc
+    to_role: close
+    required_input_refs:
+      - implementation_ref
+      - verify_ref
+      - cleanup_ref
+    required_output_refs:
+      - closeout_ref
+      - linkage_ref
+
+handoff_ref_semantics:
+  default_kind: file_ref
+  kinds:
+    file_ref:
+      regex: "^(/|\\./|\\.\\./)?[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*(#[A-Za-z0-9._:-]+|:[0-9]+(:[0-9]+)?)?$"
+      description: "Repo/absolute file reference with optional #anchor or :line[:col]."
+    run_key_ref:
+      regex: "^(CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"
+      description: "Governed run key namespace (capability or session inline/fixture)."
+    commit_ref:
+      regex: "^[0-9a-f]{7,40}$"
+      description: "Git commit SHA reference."
+  by_ref_key:
+    research_brief_ref: file_ref
+    scope_ref: file_ref
+    execution_plan_ref: file_ref
+    acceptance_criteria_ref: file_ref
+    implementation_ref: file_ref
+    verify_ref: run_key_ref
+    cleanup_ref: file_ref
+    closeout_ref: file_ref
+    linkage_ref: file_ref
+
+promotion_gates:
+  enforce: true
+  transitions:
+    - from: researcher
+      to: worker
+      gate: researcher_to_worker
+    - from: researcher
+      to: qc
+      gate: researcher_to_qc
+    - from: worker
+      to: qc
+      gate: worker_to_qc
+    - from: worker
+      to: close
+      gate: worker_to_close
+    - from: worker
+      to: librarian
+      gate: worker_to_close
+    - from: qc
+      to: close
+      gate: qc_to_close
+    - from: qc
+      to: librarian
+      gate: qc_to_close
+
+wave_packet:
+  enforce_at_start: true
+  enforce_at_dispatch: true
+  required_fields:
+    - wave_id
+    - loop_id
+    - owner_terminal
+    - current_role
+    - next_role
+    - deadline_utc
+    - horizon
+    - execution_readiness
+    - claimed_paths
+  allowed_horizon: [now, later, future]
+  allowed_readiness: [runnable, blocked]
+  default_deadline_hours: 24
+
+dod_guard:
+  enforce_on_close: true
+  required_blocks:
+    - verify_results
+    - blocker_classification
+    - cleanup_proof
+    - linkage
+
+horizon_auto_claim:
+  enforce_now_runnable_only: true
+  allowed_horizon: [now]
+  allowed_readiness: [runnable]
+  override_ref_field: horizon_override_ref
+  override_reason_field: horizon_override_reason
+
+path_claims:
+  state_file: $SPINE_STATE/path.claims.yaml
+  default_ttl_minutes: 180
+  require_non_overlapping_active_claims: true
+
+traffic_index:
+  state_file: $SPINE_STATE/traffic.index.yaml
+  required_fields:
+    - wave_id
+    - owner_terminal
+    - current_role
+    - next_role
+    - deadline
+    - status
+    - claimed_paths
+    - blockers
+
+evidence:
+  run_key_regexes:
+    - "CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+    - "S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+  run_key_regex: "^(CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"
+  run_key_namespaces:
+    capability:
+      regex: "CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+      sources: [capability, wave_receipt, watcher_check, evidence_refs]
+    session_inline:
+      regex: "S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+      sources: [ops_run_inline, fixture, session_receipt, evidence_refs]
+  commit_ref_regex: "^[0-9a-f]{7,40}$"
+  blocker_classes: [none, deterministic, freshness, dependency, cleanup, policy, external]
+  required_ref_fields:
+    - run_key_refs
+    - file_refs
+    - commit_refs
+    - blocker_class
+
+closeout_state_machine:
+  state_field: lifecycle_state
+  states:
+    active:
+      transitions: [implemented]
+    implemented:
+      transitions: [validated, closed]
+    validated:
+      transitions: [closed]
+    closed:
+      transitions: []
+
+# ── Delegated Receipt Linkage ────────────────────────────────────────────────
+# Added 2026-04-05: Defines parent-child receipt relationships for delegated work.
+# Used by dispatch.envelope.contract.yaml to determine when delegated work is complete.
+
+delegated_receipt_linkage:
+  description: >
+    When work is delegated (parent capability spawns child work via dispatch envelope),
+    receipts must link back to parent. Parent closeout waits for all child receipts
+    or explicitly documents incomplete delegation.
+
+  parent_child_schema:
+    parent_envelope_id:
+      type: string
+      description: "Dispatch envelope ID that delegated work to child"
+      format: "ENV-YYYYMMDD-HHMMSS-<hash>"
+
+    parent_run_key:
+      type: string
+      description: "Run key from parent capability execution that delegated work"
+      format: "CAP-* or S-*"
+
+    child_envelope_ids:
+      type: list
+      description: "List of child envelope IDs created by parent delegation"
+
+    child_run_keys:
+      type: list
+      description: "List of run keys from child execution (expected and actual)"
+      schema:
+        expected: ["CAP-* run keys parent expects to receive"]
+        actual: ["CAP-* run keys actually received"]
+        missing: ["CAP-* run keys expected but not yet received"]
+
+    delegation_context:
+      type: object
+      description: "Additional context for delegation (wave_id, gap_ids, etc.)"
+
+  linkage_validation:
+    rules:
+      - "Child receipts must reference parent via parent_envelope_id or parent_run_key"
+      - "Parent closeout must wait for all child receipts or explicitly document missing receipts"
+      - "Missing child receipts must be classified: blocked, timeout, or abandoned"
+
+  linkage_artifact:
+    description: "Parent work must produce linkage artifact before closeout"
+    required_fields:
+      - parent_run_key
+      - child_envelope_ids
+      - child_run_keys_expected
+      - child_run_keys_actual
+      - child_run_keys_missing
+      - completion_status  # complete | awaiting_delegated_receipt | blocked_delegated
+      - linkage_updated_at_utc
+    storage: "$SPINE_STATE/dispatch/linkage/<parent_run_key>.linkage.yaml"
+
+# ── Completion Determination ─────────────────────────────────────────────────
+
+completion_determination:
+  description: >
+    Defines when delegated work is considered "complete" vs "awaiting child receipts".
+    Used by wave closeout and receipt aggregation to determine disposition.
+
+  completion_states:
+    complete:
+      description: "All expected child receipts received and validated"
+      criteria:
+        - all_child_run_keys_received: true
+        - no_awaiting_delegated_receipt_flag: true
+        - all_child_receipts_validated: true
+      next_actions:
+        - "Parent can close with disposition: landed"
+        - "Receipt aggregation marks parent as complete"
+
+    awaiting_delegated_receipt:
+      description: "Parent work delegated to child, waiting for completion"
+      criteria:
+        - delegation_recorded: true
+        - child_run_keys_missing_count_gt_zero: true
+        - timeout_not_exceeded: true
+      next_actions:
+        - "Parent closeout blocked until child receipts arrive or timeout"
+        - "Control lane monitors delegation status"
+
+    blocked_delegated:
+      description: "Child execution blocked or failed, parent cannot complete"
+      criteria:
+        - child_rejection_received: true
+        - or_child_timeout_exceeded: true
+        - or_child_reported_failure: true
+      next_actions:
+        - "Parent must close with disposition: blocked or deferred"
+        - "Gap filed for child failure"
+        - "Parent documents blocked child in closeout"
+
+    timeout_delegated:
+      description: "Child execution timeout exceeded, parent disposition decision required"
+      criteria:
+        - timeout_exceeded: true
+        - child_receipts_missing: true
+      next_actions:
+        - "Operator decides: abandon child and close parent, or extend timeout"
+        - "Gap filed for missing child receipt"
+
+  timeout_policy:
+    default_timeout_hours: 24
+    timeout_source: "dispatch_envelope.receipt_expectation.timeout_utc"
+    timeout_extension_allowed: true
+    timeout_extension_approval: manual
+
+  completion_artifact:
+    description: "Parent closeout must produce completion artifact"
+    required_fields:
+      - parent_run_key
+      - completion_status
+      - child_run_keys_expected_count
+      - child_run_keys_actual_count
+      - child_run_keys_missing_count
+      - completion_determined_at_utc
+      - disposition  # if closing despite missing receipts
+    storage: "$SPINE_STATE/dispatch/completion/<parent_run_key>.completion.yaml"
+
+# ── Receipt Aggregation ──────────────────────────────────────────────────────
+
+receipt_aggregation:
+  description: >
+    Multi-lane or multi-node work (e.g., wave with multiple lane dispatches) requires
+    aggregating receipts to determine overall completion. This section defines how
+    aggregation works and when a wave/loop is considered complete.
+
+  wave_receipt_aggregation:
+    description: "Wave dispatches to multiple lanes, each produces run_key receipt"
+
+    aggregation_schema:
+      wave_id: string
+      lane_dispatches:
+        type: list
+        items:
+          lane_id: string
+          envelope_id: string
+          expected_run_key: string  # or null if not yet known
+          actual_run_key: string    # or null if not yet received
+          lane_status: string       # dispatched | executing | complete | failed | rejected
+
+      aggregation_status:
+        enum: [incomplete, complete, blocked, partial]
+
+      completion_criteria:
+        all_lanes_complete:
+          description: "All lanes finished with receipts"
+        all_lanes_done_or_rejected:
+          description: "All lanes finished (some may have failed/rejected)"
+        timeout_with_partial:
+          description: "Timeout exceeded, some lanes complete, some missing"
+
+    aggregation_rules:
+      - "Wave complete when all lane_status in [complete, failed, rejected]"
+      - "Wave blocked when any lane_status is blocked and cannot progress"
+      - "Wave incomplete when any lane_status in [dispatched, executing]"
+      - "Wave partial when timeout exceeded and some lanes still incomplete"
+
+  loop_receipt_aggregation:
+    description: "Loop may span multiple waves, each wave aggregates receipts"
+
+    aggregation_schema:
+      loop_id: string
+      wave_ids: list
+      wave_completion_status:
+        type: list
+        items:
+          wave_id: string
+          aggregation_status: string  # complete | blocked | partial
+          receipt_count: number
+          missing_receipt_count: number
+
+      loop_aggregation_status:
+        enum: [in_progress, complete, blocked]
+
+    aggregation_rules:
+      - "Loop complete when all waves complete"
+      - "Loop blocked when any wave blocked"
+      - "Loop in_progress when any wave incomplete"
+
+  aggregation_artifact:
+    description: "Wave/loop closeout must produce aggregation artifact"
+    required_fields:
+      - wave_id_or_loop_id
+      - aggregation_type  # wave | loop
+      - aggregation_status
+      - total_expected_receipts
+      - total_actual_receipts
+      - total_missing_receipts
+      - aggregation_completed_at_utc
+    storage: "$SPINE_STATE/dispatch/aggregation/<wave_id_or_loop_id>.aggregation.yaml"

@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-bootstrap-prereq
+# Read-only: assess whether a specific inventoried machine is ready
+# for reprovision/bootstrap by checking pre-bootstrap prerequisites.
+#
+# This capability does NOT wipe, reimage, or modify anything.
+# It only reports what is present and what is missing.
+#
+# Authority sources:
+#   - ops/bindings/operator.hardware.inventory.yaml
+#   - ops/bindings/operator.hardware.readiness.profiles.yaml
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
+PROFILES="${SPINE_REPO}/ops/bindings/operator.hardware.readiness.profiles.yaml"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-bootstrap-prereq - Pre-bootstrap prerequisite check
+
+Usage:
+  host-operator-hardware-bootstrap-prereq --device <device_id> [--target-platform <linux|mac|windows>] [--json]
+
+Options:
+  --device <device_id>            Device ID from operator.hardware.inventory.yaml
+  --target-platform <platform>    Target platform after reprovision (default: current platform)
+  --json                          Machine-readable JSON output
+
+This capability is READ-ONLY. No wipe or reimage is performed.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+DEVICE=""
+TARGET_PLATFORM=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device) DEVICE="${2:-}"; shift 2 ;;
+        --target-platform) TARGET_PLATFORM="${2:-}"; shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$DEVICE" ]] || fail "--device is required"
+
+need yq
+need jq
+
+[[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
+[[ -f "$PROFILES" ]] || fail "profiles not found: $PROFILES"
+
+# Look up device in inventory
+device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null)
+[[ -n "$device_json" && "$device_json" != "null" ]] || fail "device not found in inventory: $DEVICE"
+
+current_platform=$(echo "$device_json" | jq -r '.platform')
+model=$(echo "$device_json" | jq -r '.model // "unknown"')
+eligibility=$(echo "$device_json" | jq -r '.eligibility_state')
+
+# Determine target platform
+if [[ -z "$TARGET_PLATFORM" ]]; then
+    TARGET_PLATFORM="$current_platform"
+fi
+case "$TARGET_PLATFORM" in
+    mac|windows|linux) ;;
+    *) fail "invalid target platform: $TARGET_PLATFORM (must be mac, windows, or linux)" ;;
+esac
+
+# Load shared pre-bootstrap prerequisites
+shared_prereqs=$(yq e -o=json '.pre_bootstrap_prerequisites.shared' "$PROFILES" 2>/dev/null)
+[[ -n "$shared_prereqs" && "$shared_prereqs" != "null" ]] || fail "no pre_bootstrap_prerequisites.shared found in profiles"
+
+# Load platform-specific pre-bootstrap prerequisites
+platform_prereqs=$(yq e -o=json ".pre_bootstrap_prerequisites.platform_specific.$TARGET_PLATFORM // []" "$PROFILES" 2>/dev/null)
+
+# Combine all prerequisites
+all_prereqs=$(echo "$shared_prereqs" "$platform_prereqs" | jq -s 'add')
+prereq_count=$(echo "$all_prereqs" | jq 'length')
+
+# For each prerequisite, status is "not_verified" since these are
+# operator declarations that cannot be machine-checked
+prereq_results=()
+met_count=0
+not_verified_count=0
+
+for i in $(seq 0 $((prereq_count - 1))); do
+    prereq_id=$(echo "$all_prereqs" | jq -r ".[$i].id")
+    prereq_desc=$(echo "$all_prereqs" | jq -r ".[$i].description")
+    prereq_type=$(echo "$all_prereqs" | jq -r ".[$i].evidence_type")
+
+    # All operator_declaration prerequisites are not_verified by default
+    # They require explicit operator confirmation outside this tool
+    status="not_verified"
+    not_verified_count=$((not_verified_count + 1))
+
+    prereq_results+=("$(jq -n \
+        --arg id "$prereq_id" \
+        --arg description "$prereq_desc" \
+        --arg evidence_type "$prereq_type" \
+        --arg status "$status" \
+        '{id: $id, description: $description, evidence_type: $evidence_type, status: $status}')")
+done
+
+# Determine overall result
+if [[ $not_verified_count -gt 0 ]]; then
+    overall="needs_operator_intervention"
+else
+    overall="ready_to_reprovision"
+fi
+
+# Build prerequisites JSON
+prereqs_json="["
+for idx in "${!prereq_results[@]}"; do
+    [[ $idx -gt 0 ]] && prereqs_json+=","
+    prereqs_json+="${prereq_results[$idx]}"
+done
+prereqs_json+="]"
+
+if $JSON_MODE; then
+    jq -n \
+        --arg device "$DEVICE" \
+        --arg current_platform "$current_platform" \
+        --arg target_platform "$TARGET_PLATFORM" \
+        --arg model "$model" \
+        --arg eligibility "$eligibility" \
+        --arg overall "$overall" \
+        --argjson total "$prereq_count" \
+        --argjson met "$met_count" \
+        --argjson not_verified "$not_verified_count" \
+        --argjson prerequisites "$prereqs_json" \
+        '{
+            device: $device,
+            current_platform: $current_platform,
+            target_platform: $target_platform,
+            model: $model,
+            current_eligibility: $eligibility,
+            result: $overall,
+            summary: {total: $total, met: $met, not_verified: $not_verified},
+            prerequisites: $prerequisites,
+            wipe_performed: false,
+            reimage_performed: false,
+            note: "Read-only prerequisite check. No wipe or reimage was performed. Operator must confirm each prerequisite before proceeding."
+        }'
+else
+    echo "host.operator-hardware.bootstrap-prereq"
+    echo "========================================"
+    echo "device:           $DEVICE"
+    echo "current platform: $current_platform"
+    echo "target platform:  $TARGET_PLATFORM"
+    echo "model:            $model"
+    echo "eligibility:      $eligibility"
+    echo "result:           $overall"
+    echo
+    echo "PREREQUISITES: ($prereq_count total, $met_count met, $not_verified_count not verified)"
+    echo "$prereqs_json" | jq -r '.[] | "  [\(.status)] \(.id): \(.description)"'
+    echo
+    echo "IMPORTANT: No wipe or reimage was performed."
+    echo "Operator must confirm each prerequisite before proceeding."
+fi

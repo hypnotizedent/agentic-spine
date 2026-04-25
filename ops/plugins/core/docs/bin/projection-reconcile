@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+
+MODE="apply"
+if [[ "${1:-}" == "--check" ]]; then
+  MODE="check"
+  shift
+fi
+if [[ "${1:-}" == "--json" ]]; then
+  JSON=1
+else
+  JSON=0
+fi
+
+run_and_capture() {
+  local cmd=("$@")
+  local out rc
+  set +e
+  out="$("${cmd[@]}" 2>&1)"
+  rc=$?
+  set -e
+  printf '%s\n' "$rc"
+  printf '%s\n' "$out"
+}
+
+if [[ "$MODE" == "check" ]]; then
+  mapfile -t service_check < <(run_and_capture python3 "$ROOT/ops/plugins/core/authority/bin/service-registry-projection-build" --check --verify)
+else
+  mapfile -t service_check < <(run_and_capture python3 "$ROOT/ops/plugins/core/authority/bin/service-registry-projection-build")
+fi
+service_rc="${service_check[0]}"
+service_out="$(printf '%s\n' "${service_check[@]:1}")"
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n --arg capability "projection.reconcile" --arg mode "$MODE" --argjson service_rc "$service_rc" --arg service_out "$service_out" --arg status "$([[ "$service_rc" -eq 0 ]] && echo ok || echo fail)" '{capability:$capability,mode:$mode,status:$status,service_registry_projection:{exit_code:$service_rc,output:$service_out}}'
+else
+  echo "projection.reconcile"
+  echo "mode: $MODE"
+  echo "status: $([[ "$service_rc" -eq 0 ]] && echo ok || echo fail)"
+  echo "service_registry_projection_exit: $service_rc"
+fi
+
+exit "$service_rc"

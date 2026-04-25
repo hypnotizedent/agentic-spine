@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# loops.preflight — Validate loop state before a controller takes a seam.
+#
+# Usage: loops-preflight --loop-id LOOP-ID
+#
+# Checks:
+# 1. Loop scope file exists
+# 2. Loop is still active (not closed, superseded, deferred, completed)
+# 3. No other terminal currently holds a lease on the loop
+#
+# Exit codes:
+#   0 — loop is available and active
+#   1 — loop is not available (closed, superseded, missing)
+#   2 — usage error
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+SCOPES_DIR="$SPINE_STATE/loop-scopes"
+ARCHIVE_DIR="$SPINE_STATE/archive/closed-loop-scopes"
+
+LOOP_ID=""
+JSON_OUTPUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --loop-id) LOOP_ID="${2:?--loop-id requires a value}"; shift 2 ;;
+    --json)    JSON_OUTPUT=1; shift ;;
+    -h|--help)
+      echo "Usage: loops-preflight --loop-id LOOP-ID [--json]"
+      echo ""
+      echo "Validates that a loop is active and available before a controller takes it."
+      echo "Exits 0 if the loop is available, 1 if not."
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || { echo "FAIL: --loop-id required" >&2; exit 2; }
+
+SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+ARCHIVED_SCOPE_FILE="$ARCHIVE_DIR/${LOOP_ID}.scope.md"
+
+# Check 1a: closed-loop archive takes precedence over live absence.
+if [[ -f "$ARCHIVED_SCOPE_FILE" ]]; then
+  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+    printf '{"loop_id":"%s","available":false,"reason":"loop_closed","status":"closed","archived_scope_file":"%s"}\n' "$LOOP_ID" "$ARCHIVED_SCOPE_FILE"
+  else
+    echo "FAIL: loop is closed (archived): $LOOP_ID"
+    echo "  → Archived scope file found at: $ARCHIVED_SCOPE_FILE"
+    echo "  → Create a new loop instead of reusing a closed identity."
+  fi
+  exit 1
+fi
+
+# Check 1: scope file exists
+if [[ ! -f "$SCOPE_FILE" ]]; then
+  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+    printf '{"loop_id":"%s","available":false,"reason":"scope_file_missing","scope_file":"%s"}\n' "$LOOP_ID" "$SCOPE_FILE"
+  else
+    echo "FAIL: loop scope file not found: $SCOPE_FILE"
+    echo "  → The loop does not exist or was never created."
+    echo "  → Do not acquire a seam for a nonexistent loop."
+  fi
+  exit 1
+fi
+
+# Check 2: loop status is active
+STATUS="$(awk '/^status:/{print $2; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+SUPERSEDED_BY="$(awk '/^superseded_by:/{print $2; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+
+case "$STATUS" in
+  active)
+    # OK — loop is available
+    ;;
+  closed|completed)
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+      printf '{"loop_id":"%s","available":false,"reason":"loop_%s","status":"%s"}\n' "$LOOP_ID" "$STATUS" "$STATUS"
+    else
+      echo "FAIL: loop is $STATUS: $LOOP_ID"
+      echo "  → This loop has already been finished."
+      echo "  → Do not start work on a closed loop."
+    fi
+    exit 1
+    ;;
+  superseded)
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+      printf '{"loop_id":"%s","available":false,"reason":"loop_superseded","status":"superseded","superseded_by":"%s"}\n' "$LOOP_ID" "$SUPERSEDED_BY"
+    else
+      echo "FAIL: loop is superseded: $LOOP_ID"
+      [[ -z "$SUPERSEDED_BY" ]] || echo "  → Superseded by: $SUPERSEDED_BY"
+      echo "  → Work on the superseding loop instead."
+    fi
+    exit 1
+    ;;
+  deferred)
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+      printf '{"loop_id":"%s","available":false,"reason":"loop_deferred","status":"deferred"}\n' "$LOOP_ID"
+    else
+      echo "FAIL: loop is deferred: $LOOP_ID"
+      echo "  → Reactivate with status: active before starting work."
+    fi
+    exit 1
+    ;;
+  planned)
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+      printf '{"loop_id":"%s","available":false,"reason":"loop_planned","status":"planned"}\n' "$LOOP_ID"
+    else
+      echo "FAIL: loop is planned (not yet active): $LOOP_ID"
+      echo "  → Activate with status: active before starting work."
+    fi
+    exit 1
+    ;;
+  ""|*)
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+      printf '{"loop_id":"%s","available":false,"reason":"status_missing_or_unknown","status":"%s"}\n' "$LOOP_ID" "$STATUS"
+    else
+      echo "WARN: loop has no recognized status: $LOOP_ID (status='$STATUS')"
+      echo "  → Assign a status before starting work."
+    fi
+    exit 1
+    ;;
+esac
+
+# Check 3: terminal lease check (advisory)
+HEARTBEAT_DIR="$SPINE_STATE/loop-heartbeats"
+LEASE_FILE="$HEARTBEAT_DIR/${LOOP_ID}.heartbeat"
+LEASE_WARN=""
+if [[ -f "$LEASE_FILE" ]]; then
+  LEASE_TERMINAL="$(awk '/^terminal:/{print $2; exit}' "$LEASE_FILE" 2>/dev/null || true)"
+  LEASE_TS="$(awk '/^timestamp:/{print $2; exit}' "$LEASE_FILE" 2>/dev/null || true)"
+  CURRENT_TERMINAL="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-unknown}}"
+  if [[ -n "$LEASE_TERMINAL" && "$LEASE_TERMINAL" != "$CURRENT_TERMINAL" ]]; then
+    LEASE_WARN="another terminal ($LEASE_TERMINAL) has a heartbeat on this loop (ts=$LEASE_TS)"
+  fi
+fi
+
+if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+  if [[ -n "$LEASE_WARN" ]]; then
+    printf '{"loop_id":"%s","available":true,"status":"active","warning":"%s"}\n' "$LOOP_ID" "$LEASE_WARN"
+  else
+    printf '{"loop_id":"%s","available":true,"status":"active"}\n' "$LOOP_ID"
+  fi
+else
+  echo "OK: loop is active and available: $LOOP_ID"
+  [[ -z "$LEASE_WARN" ]] || echo "  WARN: $LEASE_WARN"
+fi
+exit 0

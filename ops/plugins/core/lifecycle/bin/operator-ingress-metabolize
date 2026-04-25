@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""operator-ingress-metabolize — CLI for operator_ingress.metabolize capability.
+
+Classifies and routes an existing OI-*.yaml ingress object. Moves objects from
+submitted → classified → routed. Does not create packets, promote authority,
+or mutate anything outside the OI-*.yaml file.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import operator_ingress as oi
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="operator-ingress-metabolize",
+        description="Classify and route an operator ingress object.",
+    )
+    parser.add_argument(
+        "--ingress-id",
+        required=True,
+        help="Ingress object ID (e.g. OI-20260417-143000-a1b2) or full path.",
+    )
+    parser.add_argument(
+        "--classification",
+        required=True,
+        choices=sorted(oi.ALLOWED_CLASSIFICATIONS),
+        help="Classification category (reuses operator-vision vocabulary).",
+    )
+    parser.add_argument(
+        "--disposition",
+        required=True,
+        choices=sorted(oi.ALLOWED_DISPOSITIONS),
+        help="Lifecycle disposition.",
+    )
+    parser.add_argument(
+        "--disposition-detail",
+        required=True,
+        help="Human-readable disposition explanation.",
+    )
+    parser.add_argument(
+        "--next-stage",
+        default="",
+        help="Next stage / route target (e.g. loop ID, packet family, design track).",
+    )
+    parser.add_argument(
+        "--downstream-refs",
+        default="",
+        help="Comma-separated downstream reference IDs.",
+    )
+    parser.add_argument(
+        "--activation-conditions",
+        default="",
+        help="Conditions for reactivation when deferred/parked.",
+    )
+    parser.add_argument(
+        "--likely-domains",
+        default="",
+        help="Comma-separated likely domain tags.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit JSON output.",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Verify dependencies and exit.",
+    )
+
+    if "--self-check" in sys.argv:
+        try:
+            import yaml  # noqa: F401
+            print("operator.ingress.metabolize self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"operator.ingress.metabolize self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    args = parser.parse_args()
+
+    state_root = os.environ.get("SPINE_STATE", "")
+    if not state_root:
+        msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": msg}, indent=2))
+        else:
+            print(f"operator.ingress.metabolize FAIL: {msg}", file=sys.stderr)
+        return 1
+
+    downstream = [r.strip() for r in args.downstream_refs.split(",") if r.strip()] if args.downstream_refs else None
+    domains = [d.strip() for d in args.likely_domains.split(",") if d.strip()] if args.likely_domains else None
+
+    try:
+        result = oi.metabolize_operator_ingress(
+            state_root=state_root,
+            ingress_id=args.ingress_id,
+            classification=args.classification,
+            disposition=args.disposition,
+            disposition_detail=args.disposition_detail,
+            next_stage=args.next_stage,
+            downstream_refs=downstream,
+            activation_conditions=args.activation_conditions,
+            likely_domains=domains,
+        )
+    except oi.OperatorIngressError as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"operator.ingress.metabolize FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"METABOLIZED: {result['ingress_id']}")
+        print(f"  state: {result['lifecycle_state']}")
+        print(f"  classification: {result['classification']}")
+        print(f"  disposition: {result['disposition']}")
+        print(f"  detail: {result['disposition_detail']}")
+        if result.get("next_stage"):
+            print(f"  next_stage: {result['next_stage']}")
+        if result.get("downstream_refs"):
+            print(f"  downstream_refs: {', '.join(result['downstream_refs'])}")
+        if result.get("activation_conditions"):
+            print(f"  activation: {result['activation_conditions']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

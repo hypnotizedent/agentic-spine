@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Minimal CLI bridge for loops SQLite authority operations.
+
+Supports: upsert, close, continuity, query, list.
+No governance ceremony — this is the smallest mutation path for loop lifecycle.
+
+Usage:
+  loops-authority-bridge upsert --json '{"loop_id":"LOOP-...",...}'
+  loops-authority-bridge close --id LOOP-... [--status closed]
+  loops-authority-bridge continuity --id LOOP-... [--next-action "..."]
+  loops-authority-bridge query --id LOOP-...
+  loops-authority-bridge list [--status active|closed|all]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+sys.path.insert(0, str(LIB_DIR))
+
+import loops_sql_authority as lsa
+
+
+def resolve_state_root() -> Path:
+    state = os.environ.get("SPINE_STATE", "")
+    if state:
+        return Path(state)
+    return Path.home() / "code" / ".runtime" / "spine" / "state"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Loops SQLite authority bridge")
+    sub = parser.add_subparsers(dest="command")
+
+    p_upsert = sub.add_parser("upsert")
+    p_upsert.add_argument("--json", dest="json_data", required=True)
+    p_upsert.add_argument("--actor", default="bridge")
+
+    p_close = sub.add_parser("close")
+    p_close.add_argument("--id", required=True)
+    p_close.add_argument("--status", default="closed")
+    p_close.add_argument("--disposition", default=None)
+    p_close.add_argument("--completion-level", default=None)
+    p_close.add_argument("--actor", default="bridge")
+    p_close.add_argument("--reason", default=None)
+    p_close.add_argument("--ungoverned-override", action="store_true", default=False)
+
+    p_cont = sub.add_parser("continuity")
+    p_cont.add_argument("--id", required=True)
+    p_cont.add_argument("--next-action", default=None)
+    p_cont.add_argument("--blocked-by", default=None)
+    p_cont.add_argument("--evidence-refs-json", default=None)
+
+    p_query = sub.add_parser("query")
+    p_query.add_argument("--id", required=True)
+
+    p_list = sub.add_parser("list")
+    p_list.add_argument("--status", default="active")
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        return 2
+
+    state_root = resolve_state_root()
+    db_path = Path(os.environ.get("LOOPS_DB_PATH", str(state_root / "shared_authority.db")))
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+
+    try:
+        if args.command == "upsert":
+            data = json.loads(args.json_data)
+            loop_id = data.get("loop_id", "")
+            if not loop_id:
+                print("FAIL: loop_id required in JSON", file=sys.stderr)
+                return 1
+            lsa.upsert_loop(conn, data)
+            conn.commit()
+            print(f"OK: upserted {loop_id}")
+            return 0
+
+        elif args.command == "close":
+            loop_id = args.id
+            row = lsa.get_loop(conn, loop_id)
+            if not row:
+                print(f"FAIL: loop not found: {loop_id}", file=sys.stderr)
+                return 1
+            mutation_source = "governed" if os.environ.get("SPINE_CAP_RUN_KEY", "").strip() else ("override" if args.ungoverned_override else "legacy")
+            lsa.close_loop(
+                conn,
+                loop_id,
+                status=args.status,
+                completion_level=args.completion_level,
+                disposition=args.disposition,
+                actor=args.actor,
+                reason=args.reason,
+                run_key=os.environ.get("SPINE_CAP_RUN_KEY", "").strip() or None,
+                mutation_source=mutation_source,
+            )
+            scopes_dir = Path(os.environ.get("LOOPS_SCOPES_DIR", str(state_root / lsa.DEFAULT_SCOPES_DIR_REL)))
+            lsa.project_to_scope_files(conn, scopes_dir)
+            print(f"OK: closed {loop_id} with status={args.status}")
+            return 0
+
+        elif args.command == "continuity":
+            loop_id = args.id
+            row = lsa.get_loop(conn, loop_id)
+            if not row:
+                print(f"FAIL: loop not found: {loop_id}", file=sys.stderr)
+                return 1
+            updates: dict = {}
+            if args.next_action is not None:
+                updates["next_action"] = args.next_action
+            if args.blocked_by is not None:
+                updates["blocked_by"] = args.blocked_by
+            if args.evidence_refs_json is not None:
+                updates["evidence_refs"] = args.evidence_refs_json
+            if updates:
+                lsa.upsert_loop(conn, {"loop_id": loop_id, **updates})
+                conn.commit()
+            print(f"OK: updated {loop_id}")
+            return 0
+
+        elif args.command == "query":
+            row = lsa.get_loop(conn, args.id)
+            if not row:
+                print(f"FAIL: loop not found: {args.id}", file=sys.stderr)
+                return 1
+            print(json.dumps(dict(row), indent=2, default=str))
+            return 0
+
+        elif args.command == "list":
+            status_filter = args.status
+            if status_filter == "all":
+                rows = conn.execute("SELECT loop_id, status, objective FROM loops ORDER BY created_at_utc DESC").fetchall()
+            else:
+                rows = conn.execute("SELECT loop_id, status, objective FROM loops WHERE status = ? ORDER BY created_at_utc DESC", (status_filter,)).fetchall()
+            for r in rows:
+                print(f"{r['loop_id']}\t{r['status']}\t{r['objective'] or ''}")
+            return 0
+
+    finally:
+        conn.close()
+
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

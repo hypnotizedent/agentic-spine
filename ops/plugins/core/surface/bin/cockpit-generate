@@ -1,0 +1,1179 @@
+#!/usr/bin/env python3
+"""cockpit.generate — desktop-facing dense leaf of the operator overview.
+
+This is a LEAF, not a root. It consumes the shared operator-overview-payload
+and renders a desktop-first dense HTML cockpit with drilldown. Same truth,
+same timestamps, same attention ordering as the mobile surface — different
+density and interaction.
+
+Produces a static HTML snapshot at $SPINE_STATE/domain-state/SPINE_COCKPIT.html.
+No mutation, no server, no auto-refresh.
+
+    ./bin/ops cap run cockpit.generate
+"""
+from __future__ import annotations
+
+import html
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Import the shared payload generator (no .py extension)
+_payload_path = Path(__file__).resolve().parent / "operator-overview-payload"
+_loader = importlib.machinery.SourceFileLoader("operator_overview_payload", str(_payload_path))
+_spec = importlib.util.spec_from_loader("operator_overview_payload", _loader)
+_mod = importlib.util.module_from_spec(_spec)
+_loader.exec_module(_mod)
+build_payload = _mod.build_payload
+
+RUNTIME_STATE = Path(os.environ.get("SPINE_STATE", Path.home() / "code" / ".runtime" / "spine" / "state"))
+OUTPUT = RUNTIME_STATE / "domain-state" / "SPINE_COCKPIT.html"
+
+
+def _h(s: str) -> str:
+    return html.escape(str(s)) if s else ""
+
+
+def _age_label(seconds: int | None) -> str:
+    if seconds is None or seconds < 0:
+        return "unknown"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m ago"
+    return f"{seconds // 86400}d {(seconds % 86400) // 3600}h ago"
+
+
+def _temporal_badge(state: str) -> str:
+    palette = {
+        "now": ("var(--grn)", "NOW"),
+        "recent": ("var(--cyn)", "RECENT"),
+        "stale": ("var(--red)", "STALE"),
+        "parked": ("var(--prp)", "PARKED"),
+        "closed": ("var(--tb)", "CLOSED"),
+        "unknown": ("var(--ylw)", "UNKNOWN"),
+    }
+    color, label = palette.get(state, palette["unknown"])
+    return (
+        f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;'
+        f'border-radius:3px;background:rgba(42,52,68,.75);color:{color}">{label}</span>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section builders — consume the shared payload
+# ---------------------------------------------------------------------------
+
+def engine_posture(payload: dict) -> str:
+    spine = payload["spine_now"]
+    refs = payload["git_refs"]
+    attention = payload["attention"]
+
+    verify = spine["verify_status"]
+    has_anomalies = spine["anomaly_count"] > 0
+
+    if verify != "pass":
+        color, label, css = "red", "Degraded", "red"
+    elif has_anomalies or not refs["github_ok"] or refs["is_dirty"]:
+        color, label, css = "yellow", "Mixed", "ylw"
+    else:
+        color, label, css = "green", "Healthy", "grn"
+
+    reasons = []
+    if verify != "pass":
+        reasons.append(f"verify: {verify}")
+    if has_anomalies:
+        reasons.append(f"{spine['anomaly_count']} anomal{'y' if spine['anomaly_count']==1 else 'ies'}")
+    if not refs["github_ok"]:
+        reasons.append("github mirror diverged/unavailable")
+    if refs["is_dirty"]:
+        reasons.append("repo dirty")
+    if not reasons:
+        reasons.append("all signals nominal")
+
+    return f"""
+    <div class="posture {css}">
+      <div class="p-dot"></div>
+      <div>
+        <div class="p-text">{_h(label)}</div>
+        <div class="p-sub">{_h(' · '.join(reasons))}</div>
+      </div>
+    </div>"""
+
+
+def freshness_card(payload: dict) -> str:
+    f = payload["projection_freshness"]
+    freshness = f["freshness"]
+    age = f["age_seconds"]
+    source = f["source"]
+
+    if freshness == "current":
+        css = "grn"
+    elif freshness == "aging":
+        css = "ylw"
+    elif freshness == "stale":
+        css = "red"
+    else:
+        css = "ylw"
+
+    if age >= 0:
+        if age < 60:
+            age_str = f"{age}s ago"
+        elif age < 3600:
+            age_str = f"{age // 60}m ago"
+        else:
+            age_str = f"{age // 3600}h {(age % 3600) // 60}m ago"
+    else:
+        age_str = "unknown"
+
+    return f"""
+    <div class="posture {css}" style="padding:.6rem .9rem;margin-bottom:.25rem">
+      <div class="p-dot"></div>
+      <div>
+        <div class="p-text" style="font-size:.65rem">Projection: {_h(freshness)}</div>
+        <div class="p-sub">{_h(age_str)} · source: {_h(source)}</div>
+      </div>
+    </div>"""
+
+
+def node_role_card(roles: dict) -> str:
+    local_role = roles.get("local_role") or "unknown"
+    exec_target = roles.get("execution_host_target") or ""
+    exec_count = roles.get("execution_host_workload_count", 0)
+    local_label = local_role.replace("_", " ")
+
+    exec_html = ""
+    if exec_target:
+        exec_html = (
+            f'<div class="nr-row">'
+            f'<div class="nr-label">execution host</div>'
+            f'<div class="nr-value">{_h(exec_target)}'
+            f'<span class="nr-sub">{exec_count} workload{"s" if exec_count != 1 else ""}</span>'
+            f'</div></div>'
+        )
+
+    return f"""
+    <div class="nr">
+      <div class="nr-row">
+        <div class="nr-label">this machine</div>
+        <div class="nr-value">{_h(local_label)}</div>
+      </div>
+      {exec_html}
+    </div>"""
+
+
+def temporal_truth_section(payload: dict) -> str:
+    temporal = payload.get("temporal_truth", {})
+    verify = temporal.get("verify", {}) if isinstance(temporal, dict) else {}
+    comms = temporal.get("comms_queue", {}) if isinstance(temporal, dict) else {}
+    daemons = temporal.get("daemons", {}) if isinstance(temporal, dict) else {}
+    cards: list[str] = []
+
+    verify_class = str(verify.get("temporal_class") or "")
+    if verify_class:
+        verify_css = "ylw" if verify_class == "inherited_still_current" else ("grn" if verify.get("status") == "pass" else "red")
+        gates = list(verify.get("current_blocking_fail_ids") or [])
+        gate_text = ", ".join(gates[:4])
+        if len(gates) > 4:
+            gate_text += ", ..."
+        verify_bits = [verify_class]
+        if verify.get("known_since_utc"):
+            verify_bits.append(f"since {verify['known_since_utc']}")
+        standing = int(verify.get("standing_evidence_count", 0) or 0)
+        if standing:
+            verify_bits.append(f"{standing} corroborating receipt(s)")
+        if gate_text:
+            verify_bits.append(gate_text)
+        cards.append(
+            f"""
+    <div class="posture {verify_css}" style="padding:.6rem .9rem;margin-bottom:.25rem">
+      <div class="p-dot"></div>
+      <div>
+        <div class="p-text" style="font-size:.65rem">Verify Standing</div>
+        <div class="p-sub">{_h(' · '.join(verify_bits))}</div>
+      </div>
+    </div>"""
+        )
+
+    comms_class = str(comms.get("temporal_class") or "")
+    if comms_class:
+        evidence = comms.get("evidence", {}) if isinstance(comms.get("evidence"), dict) else {}
+        comms_bits = [
+            comms_class,
+            f"pending={int(evidence.get('pending', 0) or 0)}",
+            f"oldest={int(evidence.get('oldest_age_seconds', 0) or 0)}s",
+        ]
+        if comms.get("operator_treatment"):
+            comms_bits.append(str(comms.get("operator_treatment")))
+        cards.append(
+            f"""
+    <div class="posture grn" style="padding:.6rem .9rem;margin-bottom:.25rem">
+      <div class="p-dot"></div>
+      <div>
+        <div class="p-text" style="font-size:.65rem">Comms Queue Side Surface</div>
+        <div class="p-sub">{_h(' · '.join(comms_bits))}</div>
+      </div>
+    </div>"""
+        )
+
+    daemon_class = str(daemons.get("temporal_class") or "")
+    if daemon_class:
+        evidence = daemons.get("evidence", {}) if isinstance(daemons.get("evidence"), dict) else {}
+        daemon_bits = [
+            daemon_class,
+            f"non_local={int(evidence.get('non_local_deferred', 0) or 0)}",
+            f"elsewhere={int(evidence.get('active_elsewhere', 0) or 0)}",
+            f"parked={int(evidence.get('parked_required', 0) or 0)}",
+            f"exempt={int(evidence.get('locality_exempt', 0) or 0)}",
+        ]
+        if daemons.get("operator_treatment"):
+            daemon_bits.append(str(daemons.get("operator_treatment")))
+        cards.append(
+            f"""
+    <div class="posture grn" style="padding:.6rem .9rem;margin-bottom:.25rem">
+      <div class="p-dot"></div>
+      <div>
+        <div class="p-text" style="font-size:.65rem">Daemon Locality</div>
+        <div class="p-sub">{_h(' · '.join(daemon_bits))}</div>
+      </div>
+    </div>"""
+        )
+
+    return "".join(cards)
+
+
+def execution_host_section(roles: dict) -> str:
+    exec_target = roles.get("execution_host_target") or ""
+    if not exec_target:
+        return ""
+
+    exec_count = roles.get("execution_host_workload_count", 0)
+    exec_labels = roles.get("execution_host_workload_labels", [])
+    exec_access = roles.get("execution_host_access") or ""
+    exec_purposes = roles.get("execution_host_workload_purposes", {})
+    non_local = roles.get("non_local_deferred", [])
+    breakdown = roles.get("non_local_breakdown", {}) or {}
+    parked = breakdown.get("parked_required", []) if isinstance(breakdown, dict) else []
+    locality_exempt = breakdown.get("locality_exempt", []) if isinstance(breakdown, dict) else []
+    active_elsewhere = breakdown.get("active_elsewhere", []) if isinstance(breakdown, dict) else non_local
+
+    workload_rows = ""
+    for lbl in sorted(exec_labels):
+        short = lbl.replace("com.ronny.", "")
+        purpose = exec_purposes.get(lbl, "")
+        purpose_html = f'<div class="eh-purpose">{_h(purpose)}</div>' if purpose else ""
+        workload_rows += f'<div class="eh-lbl">{_h(short)}{purpose_html}</div>'
+
+    other_rows = ""
+    if active_elsewhere:
+        for lbl in sorted(active_elsewhere):
+            short = lbl.replace("com.ronny.", "")
+            other_rows += f'<div class="eh-lbl eh-other">{_h(short)}</div>'
+        other_rows = (
+            f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;'
+            f'border-top:1px solid var(--b);margin-top:.25rem">active elsewhere ({len(active_elsewhere)})</div>'
+            + other_rows
+        )
+    if parked:
+        parked_rows = ""
+        for lbl in sorted(parked):
+            short = lbl.replace("com.ronny.", "")
+            parked_rows += f'<div class="eh-lbl eh-other">{_h(short)}</div>'
+        other_rows += (
+            f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;'
+            f'border-top:1px solid var(--b);margin-top:.25rem">parked required ({len(parked)})</div>'
+            + parked_rows
+        )
+    if locality_exempt:
+        exempt_rows = ""
+        for lbl in sorted(locality_exempt):
+            short = lbl.replace("com.ronny.", "")
+            exempt_rows += f'<div class="eh-lbl eh-other">{_h(short)}</div>'
+        other_rows += (
+            f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;'
+            f'border-top:1px solid var(--b);margin-top:.25rem">locality exempt ({len(locality_exempt)})</div>'
+            + exempt_rows
+        )
+
+    access_line = f'<div class="eh-access">{_h(exec_access)}</div>' if exec_access else ""
+    detail_bits = [f"{exec_count} workloads"]
+    if active_elsewhere:
+        detail_bits.append(f"{len(active_elsewhere)} elsewhere")
+    if parked:
+        detail_bits.append(f"{len(parked)} parked")
+    if locality_exempt:
+        detail_bits.append(f"{len(locality_exempt)} locality-exempt")
+    detail_summary = " · ".join(detail_bits)
+
+    return f"""
+    <div class="sh">Execution Host</div>
+    <details open>
+      <summary>{_h(exec_target)} <span class="det-count">{_h(detail_summary)}</span></summary>
+      <div class="det-body">
+        {access_line}
+        {workload_rows}
+        {other_rows}
+      </div>
+    </details>"""
+
+
+def comms_incident_card(cq: dict) -> str:
+    slo = cq.get("slo_status", "ok")
+    pending = int(cq.get("pending", 0) or 0)
+    oldest = int(cq.get("oldest_age_seconds", 0) or 0)
+    escalations = int(cq.get("escalations", 0) or 0)
+    if slo == "ok" or (pending == 0 and oldest == 0 and escalations == 0):
+        return ""
+
+    drain_state = cq.get("drain_state", "unknown")
+
+    if oldest >= 86400:
+        age_str = f"{oldest // 86400}d {(oldest % 86400) // 3600}h"
+    elif oldest >= 3600:
+        age_str = f"{oldest // 3600}h {(oldest % 3600) // 60}m"
+    else:
+        age_str = f"{oldest // 60}m"
+
+    state_css = "ylw" if drain_state == "draining" else "red"
+    state_label = drain_state if drain_state in ("draining", "blocked") else "unknown"
+
+    return f"""
+    <div class="cq cq-{state_css}">
+      <div class="cq-head">
+        <span class="cq-title">Comms Queue</span>
+        <span class="cq-state cq-s-{state_css}">{_h(slo)} · {_h(state_label)}</span>
+      </div>
+      <div class="cq-evidence">{pending} pending · oldest {_h(age_str)}</div>
+    </div>"""
+
+
+def attention_section(attention: list[dict]) -> str:
+    if not attention:
+        return ""
+    rows = []
+    for item in attention:
+        color = "r" if item.get("priority") == "high" else "y"
+        text = item.get("summary", "")
+        rows.append(f'<div class="attn-item"><div class="attn-dot {color}"></div>{_h(text)}</div>')
+    return f'<div class="attn">{"".join(rows)}</div>'
+
+
+def timeline_section(log: list[dict]) -> str:
+    if not log:
+        return '<div class="sh">Recent Timeline</div><p style="font-size:.6rem;color:var(--t)">unavailable</p>'
+    days: dict[str, list[dict]] = {}
+    for entry in log:
+        d = entry["date"]
+        days.setdefault(d, []).append(entry)
+
+    rows = []
+    for day, commits in days.items():
+        rows.append(f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;border-top:1px solid var(--b);margin-top:.25rem">{_h(day)}</div>')
+        for c in commits:
+            rows.append(
+                f'<div class="commit">'
+                f'<span class="c-hash">{_h(c["short"])}</span>'
+                f'<span class="c-msg">{_h(c["subject"])}</span>'
+                f'</div>'
+            )
+    body = "\n".join(rows)
+    return f"""
+    <div class="sh">Recent Timeline</div>
+    <details>
+      <summary>Git History <span class="det-count">{len(log)} commits</span></summary>
+      <div class="det-body">{body}</div>
+    </details>"""
+
+
+def capability_atlas(caps_data: dict, invocation_counts: dict[str, int]) -> str:
+    caps = caps_data["caps"]
+    if not caps:
+        return '<div class="sh">Capability Atlas</div><p style="font-size:.6rem;color:var(--t)">unavailable</p>'
+
+    domains = sorted(set(c.get("domain", "unknown") for c in caps.values()))
+    filters = ['<button class="cap-f active" onclick="filterCaps(event,\'all\')">all</button>']
+    for d in domains:
+        filters.append(f'<button class="cap-f" onclick="filterCaps(event,\'{_h(d)}\')">{_h(d)}</button>')
+
+    rows = []
+    for name in sorted(caps.keys()):
+        c = caps[name]
+        safety = c.get("safety", "unknown")
+        domain = c.get("domain", "unknown")
+        desc = c.get("description", "")
+        inv_count = invocation_counts.get(name, 0)
+        safety_cls = "cap-ro" if safety == "read-only" else "cap-mut"
+        safety_label = "RO" if safety == "read-only" else "MUT"
+        rows.append(
+            f'<div class="cap" data-domain="{_h(domain)}">'
+            f'<span class="cap-name">{_h(name)}<span class="cap-count">{inv_count}</span></span>'
+            f'<span class="cap-desc">{_h(desc)}</span>'
+            f'<span class="cap-tag {safety_cls}">{safety_label}</span>'
+            f'</div>'
+        )
+
+    ro_count = sum(1 for c in caps.values() if c.get("safety") == "read-only")
+    mut_count = len(caps) - ro_count
+
+    return f"""
+    <div class="sh">Capability Atlas</div>
+    <details open>
+      <summary>Capabilities <span class="det-count">{len(caps)} total · {ro_count} read-only · {mut_count} mutation</span></summary>
+      <div class="det-body">
+        <div class="cap-filter">{"".join(filters)}</div>
+        {"".join(rows)}
+      </div>
+    </details>"""
+
+
+def gate_watch(gates: dict) -> str:
+    stats = f"""
+    <div class="stats" style="grid-template-columns:repeat(5,1fr)">
+      <div class="stat"><div class="stat-v">{gates['total']}</div><div class="stat-l">Total</div></div>
+      <div class="stat"><div class="stat-v">{gates['active']}</div><div class="stat-l">Active</div></div>
+      <div class="stat"><div class="stat-v">{gates['retired']}</div><div class="stat-l">Retired</div></div>
+      <div class="stat"><div class="stat-v">{gates['blocking']}</div><div class="stat-l">Blocking</div></div>
+      <div class="stat"><div class="stat-v">{gates['report']}</div><div class="stat-l">Report</div></div>
+    </div>"""
+
+    core_ids = set(gates.get("core_ids", []))
+    gate_map = {g["id"]: g for g in gates.get("gates", []) if "id" in g}
+
+    core_rows = []
+    for gid in sorted(core_ids):
+        g = gate_map.get(gid, {})
+        name = g.get("name", "unknown")
+        core_rows.append(
+            f'<div class="gate">'
+            f'<span class="gate-id">{_h(gid)}</span>'
+            f'<span class="gate-name">{_h(name)}</span>'
+            f'<span class="gate-mode gate-enforce">listed</span>'
+            f'</div>'
+        )
+
+    core_body = "".join(core_rows) if core_rows else '<div style="font-size:.6rem;color:var(--t)">no core gates found</div>'
+
+    cat_counts: dict[str, int] = {}
+    for g in gates.get("gates", []):
+        if not g.get("retired", False):
+            cat = g.get("category", "uncategorized")
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+    cat_rows = []
+    for cat, cnt in sorted(cat_counts.items()):
+        cat_rows.append(f'<div class="attn-item"><div class="attn-dot y"></div>{_h(cat)}: {cnt} active</div>')
+
+    return f"""
+    <div class="sh">Gate Watch</div>
+    {stats}
+    <details>
+      <summary>Core Gates <span class="det-count">{len(core_ids)} gates</span></summary>
+      <div class="det-body">{core_body}</div>
+    </details>
+    <details>
+      <summary>Category Summary <span class="det-count">{len(cat_counts)} categories</span></summary>
+      <div class="det-body">{"".join(cat_rows)}</div>
+    </details>"""
+
+
+def authority_explorer(manifest: dict) -> str:
+    if not manifest["available"]:
+        return '<div class="sh">Authority Explorer</div><p style="font-size:.6rem;color:var(--t)">manifest unavailable</p>'
+
+    surfaces = manifest["surfaces"]
+    families = manifest.get("families", [])
+
+    by_kind: dict[str, list[dict]] = {}
+    for s in surfaces:
+        k = s.get("surface_kind", "unknown")
+        by_kind.setdefault(k, []).append(s)
+
+    rows = []
+    for kind in sorted(by_kind.keys()):
+        items = by_kind[kind]
+        rows.append(f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;border-top:1px solid var(--b);margin-top:.25rem">{_h(kind)} ({len(items)})</div>')
+        for s in sorted(items, key=lambda x: x.get("surface_id", "")):
+            sid = s.get("surface_id", "unknown")
+            auth_cls = s.get("authority_class", "")
+            source = s.get("path", "")
+            purpose = ""
+            knowledge = s.get("knowledge", {})
+            if isinstance(knowledge, dict):
+                purpose = knowledge.get("what_it_does", "")
+            regen = s.get("regenerated_by", {}) or {}
+            gen_surface = regen.get("command", "") or regen.get("surface_id", "") or ""
+
+            tag_cls = "surf-auth" if auth_cls == "authoritative" else ("surf-supp" if auth_cls == "supporting" else "surf-hist")
+            tag_label = auth_cls[:4].upper() if auth_cls else "\u2014"
+
+            meta_parts = []
+            if source:
+                meta_parts.append(str(source))
+            if gen_surface:
+                meta_parts.append(f"gen: {gen_surface}")
+
+            rows.append(
+                f'<div class="surf">'
+                f'<div class="surf-top">'
+                f'<span class="surf-name">{_h(sid)}</span>'
+                f'<span class="surf-purpose">{_h(purpose)}</span>'
+                f'<span class="surf-tag {tag_cls}">{_h(tag_label)}</span>'
+                f'</div>'
+                f'<div class="surf-meta">{_h(" · ".join(meta_parts))}</div>'
+                f'</div>'
+            )
+
+    if families:
+        rows.append(f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;border-top:1px solid var(--b);margin-top:.25rem">workflow_families ({len(families)})</div>')
+        for fam in families:
+            fid = fam.get("family_id", "unknown")
+            role = fam.get("container_role", "")
+            home = fam.get("authority_home", "")
+            notes = fam.get("notes", "")
+            rows.append(
+                f'<div class="surf">'
+                f'<div class="surf-top">'
+                f'<span class="surf-name">{_h(fid)}</span>'
+                f'<span class="surf-purpose">{_h(notes or role)}</span>'
+                f'<span class="surf-tag surf-supp">FAM</span>'
+                f'</div>'
+                f'<div class="surf-meta">{_h(home)}</div>'
+                f'</div>'
+            )
+
+    body = "".join(rows)
+    return f"""
+    <div class="sh">Authority Explorer</div>
+    <details>
+      <summary>Surface Manifest <span class="det-count">{len(surfaces)} surfaces · {len(families)} families</span></summary>
+      <div class="det-body">{body}</div>
+    </details>"""
+
+
+def work_state_section(ws: dict) -> str:
+    items = [
+        ("Loops", str(ws["open_loops"]), "open"),
+        ("Gaps", str(ws["open_gaps"]), "open"),
+        ("Waves", str(ws["active_waves"]), f"active · {ws['orphaned_waves']} orphaned"),
+        ("Inbox", str(ws.get("inbox_lanes", {}).get("parked", 0)), f"parked · {ws.get('inbox_lanes', {}).get('done', 0)} done"),
+    ]
+    if ws["inbox_active"] > 0:
+        items.append(("Active", str(ws["inbox_active"]), "inbox active"))
+
+    stat_cards = ""
+    for label, val, sub in items:
+        stat_cards += f'<div class="stat"><div class="stat-v">{_h(val)}</div><div class="stat-l">{_h(label)}</div><div class="stat-sub">{_h(sub)}</div></div>'
+
+    return f"""
+    <div class="sh">Work State</div>
+    <div class="stats">{stat_cards}</div>"""
+
+
+def release_posture(refs: dict) -> str:
+    origin_parity = "in sync" if refs["local_full"] == refs["origin_full"] else "diverged"
+    github_parity = "unavailable"
+    if refs["github_ok"]:
+        github_parity = "in sync" if refs["local_head"] == refs["github_head"] else "diverged"
+
+    origin_dot = "g" if origin_parity == "in sync" else "y"
+    github_dot = "y" if github_parity != "in sync" else "g"
+    dirty_dot = "y" if refs["is_dirty"] else "g"
+
+    return f"""
+    <div class="sh">Release Posture</div>
+    <div class="rel">
+      <div class="rel-c"><div class="rel-l">Local HEAD</div><div class="rel-v" style="font-size:.55rem">{_h(refs['local_head'])}</div></div>
+      <div class="rel-c"><div class="rel-l">Origin</div><div class="rel-v"><span class="sdot {origin_dot}"></span>{_h(origin_parity)}</div></div>
+      <div class="rel-c"><div class="rel-l">GitHub</div><div class="rel-v"><span class="sdot {github_dot}"></span>{_h(github_parity)}</div></div>
+      <div class="rel-c"><div class="rel-l">Tree</div><div class="rel-v"><span class="sdot {dirty_dot}"></span>{"dirty" if refs["is_dirty"] else "clean"}</div></div>
+    </div>
+    <div style="font-size:.5rem;color:var(--t);opacity:.4">Commits: {_h(refs['commit_count'])} · Baseline: {_h(refs['baseline'])} (from AGENTS.md)</div>"""
+
+
+# ---------------------------------------------------------------------------
+# Full page assembly
+# ---------------------------------------------------------------------------
+
+CSS = r"""
+:root{
+  --bg:#06090f;--s:#0d1219;--r:#131a24;--b:#1a2332;--b2:#243044;
+  --t:#5a6a7a;--tm:#8899aa;--tb:#d4dde8;
+  --grn:#34d399;--grn2:rgba(52,211,153,.08);
+  --ylw:#fbbf24;--ylw2:rgba(251,191,36,.08);
+  --red:#f87171;--red2:rgba(248,113,113,.08);
+  --blu:#60a5fa;--blu2:rgba(96,165,250,.08);
+  --prp:#a78bfa;--prp2:rgba(167,139,250,.08);
+  --cyn:#22d3ee;--cyn2:rgba(34,211,238,.08);
+  --org:#fb923c;--org2:rgba(251,146,60,.08);
+  --tl:#2dd4bf;--tl2:rgba(45,212,191,.08);
+  --m:'SF Mono','Fira Code',monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;background:var(--bg);color:var(--t);min-height:100vh;padding:1.5rem}
+.c{max-width:960px;margin:0 auto}
+
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem}
+.top h1{font-size:.65rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--tm)}
+.top span{font-size:.55rem;opacity:.4}
+
+.posture{display:flex;align-items:center;gap:.75rem;padding:.85rem 1.1rem;border-radius:10px;margin-bottom:.5rem}
+.posture.grn{background:var(--grn2);border:1px solid rgba(52,211,153,.2)}
+.posture.ylw{background:var(--ylw2);border:1px solid rgba(251,191,36,.2)}
+.posture.red{background:var(--red2);border:1px solid rgba(248,113,113,.2)}
+.p-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.posture.grn .p-dot{background:var(--grn);box-shadow:0 0 8px rgba(52,211,153,.4)}
+.posture.ylw .p-dot{background:var(--ylw);box-shadow:0 0 8px rgba(251,191,36,.4)}
+.posture.red .p-dot{background:var(--red);box-shadow:0 0 8px rgba(248,113,113,.4)}
+.p-text{font-size:.8rem;font-weight:600;color:var(--tb)}
+.p-sub{font-size:.65rem;color:var(--tm);margin-top:.1rem}
+
+.attn{margin-bottom:1.5rem}
+.attn-item{display:flex;align-items:center;gap:.5rem;padding:.45rem .85rem;background:var(--s);border:1px solid var(--b);border-radius:7px;margin-top:3px;font-size:.65rem;color:var(--tm)}
+.attn-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.attn-dot.y{background:var(--ylw)}
+.attn-dot.r{background:var(--red)}
+
+.sh{font-size:.55rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--t);margin-bottom:.5rem;margin-top:1.5rem;opacity:.6}
+
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:.25rem}
+.stat{background:var(--s);border:1px solid var(--b);border-radius:10px;padding:.75rem .85rem;text-align:center}
+.stat-v{font-family:var(--m);font-size:1.5rem;font-weight:800;color:var(--tb);line-height:1}
+.stat-l{font-size:.5rem;text-transform:uppercase;letter-spacing:.07em;color:var(--t);margin-top:.25rem}
+.stat-sub{font-size:.45rem;color:var(--t);margin-top:.15rem;font-family:var(--m)}
+
+details{background:var(--s);border:1px solid var(--b);border-radius:10px;margin-bottom:.5rem}
+details[open]{border-color:var(--b2)}
+summary{padding:.65rem 1rem;font-size:.7rem;font-weight:600;color:var(--tb);cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center}
+summary::-webkit-details-marker{display:none}
+summary::after{content:'▸';font-size:.6rem;color:var(--t);transition:transform .15s}
+details[open] summary::after{transform:rotate(90deg)}
+.det-count{font-family:var(--m);font-size:.6rem;color:var(--t);font-weight:400}
+.det-body{padding:0 1rem .75rem;max-height:500px;overflow-y:auto}
+
+.commit{display:flex;align-items:baseline;gap:.5rem;padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
+.commit:last-child{border:none}
+.c-hash{font-family:var(--m);font-size:.55rem;color:var(--blu);flex-shrink:0;width:68px}
+.c-msg{font-size:.6rem;color:var(--tm);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.cap{display:flex;align-items:baseline;gap:.4rem;padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
+.cap:last-child{border:none}
+.cap-name{font-family:var(--m);font-size:.55rem;color:var(--tb);flex-shrink:0;min-width:220px;display:flex;align-items:center;gap:.35rem}
+.cap-count{font-size:.45rem;font-weight:600;letter-spacing:.02em;padding:.08rem .3rem;border-radius:999px;background:rgba(42,52,68,.75);color:var(--tm)}
+.cap-desc{font-size:.55rem;color:var(--tm);flex:1}
+.cap-tag{font-size:.45rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:.1rem .35rem;border-radius:3px;flex-shrink:0}
+.cap-ro{background:var(--grn2);color:var(--grn)}
+.cap-mut{background:var(--ylw2);color:var(--ylw)}
+.cap-filter{display:flex;gap:.25rem;padding:0 0 .5rem;flex-wrap:wrap}
+.cap-f{font-size:.5rem;padding:.2rem .45rem;border-radius:4px;border:1px solid var(--b);color:var(--t);cursor:pointer;background:none;transition:all .15s}
+.cap-f:hover,.cap-f.active{color:var(--blu);border-color:rgba(96,165,250,.3);background:var(--blu2)}
+
+.surf{padding:.4rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
+.surf:last-child{border:none}
+.surf-top{display:flex;align-items:baseline;gap:.4rem}
+.surf-name{font-family:var(--m);font-size:.55rem;color:var(--tb);flex-shrink:0;min-width:190px}
+.surf-purpose{font-size:.55rem;color:var(--tm);flex:1}
+.surf-tag{font-size:.45rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:.1rem .3rem;border-radius:3px;flex-shrink:0}
+.surf-auth{background:var(--grn2);color:var(--grn)}
+.surf-supp{background:var(--blu2);color:var(--blu)}
+.surf-hist{background:rgba(42,52,68,.5);color:var(--t)}
+.surf-meta{font-family:var(--m);font-size:.45rem;color:var(--t);margin-top:.15rem;opacity:.6}
+
+.gate{display:flex;align-items:center;gap:.4rem;padding:.25rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
+.gate:last-child{border:none}
+.gate-id{font-family:var(--m);font-size:.5rem;color:var(--t);width:36px;flex-shrink:0}
+.gate-name{font-family:var(--m);font-size:.55rem;color:var(--tm);flex:1}
+.gate-mode{font-size:.45rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:.1rem .3rem;border-radius:3px;flex-shrink:0}
+.gate-enforce{background:var(--blu2);color:var(--blu)}
+
+.rel{display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;margin-bottom:1.5rem}
+.rel-c{background:var(--s);border:1px solid var(--b);border-radius:8px;padding:.5rem .6rem;text-align:center}
+.rel-l{font-size:.45rem;text-transform:uppercase;letter-spacing:.06em;color:var(--t);opacity:.5}
+.rel-v{font-family:var(--m);font-size:.65rem;color:var(--tb);margin-top:.1rem}
+.sdot{display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:.15rem;vertical-align:middle}
+.sdot.g{background:var(--grn);box-shadow:0 0 3px rgba(52,211,153,.4)}
+.sdot.y{background:var(--ylw);box-shadow:0 0 3px rgba(251,191,36,.4)}
+.sdot.r{background:var(--red);box-shadow:0 0 3px rgba(248,113,113,.4)}
+
+.nr{display:flex;gap:.5rem;margin-bottom:.75rem}
+.nr-row{flex:1;background:var(--s);border:1px solid var(--b);border-radius:10px;padding:.65rem .85rem}
+.nr-label{font-size:.45rem;text-transform:uppercase;letter-spacing:.07em;color:var(--t);opacity:.5}
+.nr-value{font-family:var(--m);font-size:.7rem;font-weight:600;color:var(--tb);margin-top:.15rem;display:flex;align-items:center;gap:.5rem}
+.nr-sub{font-size:.5rem;font-weight:400;color:var(--t)}
+
+.eh-lbl{font-family:var(--m);font-size:.55rem;color:var(--tm);padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
+.eh-lbl:last-child{border:none}
+.eh-purpose{font-size:.45rem;color:var(--t);opacity:.55;margin-top:.1rem;font-weight:400}
+.eh-other{color:var(--t);opacity:.6}
+.eh-access{font-family:var(--m);font-size:.5rem;color:var(--t);opacity:.5;padding-bottom:.35rem;border-bottom:1px solid var(--b);margin-bottom:.25rem}
+
+.cq{padding:.65rem 1rem;border-radius:10px;margin-bottom:.75rem}
+.cq-ylw{background:var(--ylw2);border:1px solid rgba(251,191,36,.2)}
+.cq-red{background:var(--red2);border:1px solid rgba(248,113,113,.2)}
+.cq-head{display:flex;justify-content:space-between;align-items:center}
+.cq-title{font-size:.65rem;font-weight:600;color:var(--tb)}
+.cq-state{font-family:var(--m);font-size:.6rem;font-weight:600;padding:.15rem .5rem;border-radius:4px}
+.cq-s-ylw{color:var(--ylw);background:rgba(251,191,36,.12)}
+.cq-s-red{color:var(--red);background:rgba(248,113,113,.12)}
+.cq-evidence{font-family:var(--m);font-size:.55rem;color:var(--tm);margin-top:.3rem}
+
+.foot{font-size:.5rem;color:var(--t);opacity:.25;text-align:center;margin-top:2rem;line-height:1.6}
+"""
+
+JS = r"""
+function filterCaps(e, domain) {
+  var rows = document.querySelectorAll('.cap[data-domain]');
+  var btns = document.querySelectorAll('.cap-f');
+  btns.forEach(function(b) { b.classList.remove('active'); });
+  e.currentTarget.classList.add('active');
+  rows.forEach(function(r) {
+    r.style.display = (domain === 'all' || r.dataset.domain === domain) ? '' : 'none';
+  });
+}
+"""
+
+
+def operator_vision_section(ov: dict, directional_boundary: dict, temporal_standing: dict) -> str:
+    """Build the operator-vision contribution surface — the lead story."""
+    if not ov:
+        return ""
+
+    mhw = ov.get("my_human_work_now", {})
+    chain = ov.get("chain_status", {})
+    traces = ov.get("what_became_of_my_input", [])
+    built = ov.get("what_my_ideas_built", {})
+    waiting = ov.get("what_is_waiting_on_me", {})
+    recent = ov.get("recent_ingress", [])
+    op_to_agents = directional_boundary.get("operator_to_agents", {})
+    agents_to_operator = directional_boundary.get("agents_to_operator", {})
+    temporal_summary = temporal_standing.get("summary", {})
+    temporal_projection = temporal_standing.get("projection", {})
+    temporal_ingress = temporal_standing.get("operator_to_agents", {})
+    temporal_handoffs = temporal_standing.get("agents_to_operator", {})
+    temporal_parked = temporal_standing.get("parked_inventory", {})
+    temporal_completion = temporal_standing.get("completion_snapshot", {})
+
+    # Summary stats
+    total = mhw.get("total_raw_inputs", 0)
+    recent_count = mhw.get("recent_ingress", 0)
+    pending_ingress = mhw.get("pending_ingress", 0)
+    advanced = mhw.get("advanced_to_contract", 0)
+    adj_ev = mhw.get("adjacent_evidence", 0)
+    parked_p = mhw.get("parked_prep", 0)
+    parked_nl = mhw.get("parked_no_lifecycle", 0)
+    oos = mhw.get("out_of_spine", 0)
+    floats = mhw.get("float_risk_count", 0)
+    delivered = mhw.get("delivered_packets", 0)
+    contracts = mhw.get("contracts", 0)
+    derived = mhw.get("derived_conclusions", 0)
+
+    stats = f"""
+    <div class="stats" style="grid-template-columns:repeat(5,1fr)">
+      <div class="stat"><div class="stat-v">{total}</div><div class="stat-l">Raw Inputs</div></div>
+      <div class="stat"><div class="stat-v">{advanced}</div><div class="stat-l">Advanced</div><div class="stat-sub">to contract</div></div>
+      <div class="stat"><div class="stat-v">{adj_ev}</div><div class="stat-l">Adjacent</div><div class="stat-sub">evidence</div></div>
+      <div class="stat"><div class="stat-v">{parked_p}</div><div class="stat-l">Parked</div><div class="stat-sub">prep stubs</div></div>
+      <div class="stat"><div class="stat-v">{oos}</div><div class="stat-l">Out of Spine</div><div class="stat-sub">correctly excluded</div></div>
+    </div>
+    <div class="stats" style="grid-template-columns:repeat(5,1fr);margin-top:.25rem">
+      <div class="stat"><div class="stat-v">{recent_count}</div><div class="stat-l">Recent Ingress</div><div class="stat-sub">live submissions</div></div>
+      <div class="stat"><div class="stat-v">{pending_ingress}</div><div class="stat-l">Pending</div><div class="stat-sub">awaiting membrane</div></div>
+      <div class="stat"><div class="stat-v">{delivered}</div><div class="stat-l">Delivered</div><div class="stat-sub">packets</div></div>
+      <div class="stat"><div class="stat-v">{contracts}</div><div class="stat-l">Contracts</div><div class="stat-sub">live</div></div>
+      <div class="stat{'  style=\"border-color:var(--ylw)\"' if floats > 0 else ''}"><div class="stat-v" style="{'color:var(--ylw)' if floats > 0 else ''}">{floats}</div><div class="stat-l">Float Risk</div><div class="stat-sub">needs lifecycle</div></div>
+    </div>"""
+
+    split_html = f"""
+    <details open>
+      <summary>Traffic Split <span class="det-count">two one-way lanes</span></summary>
+      <div class="det-body">
+        <div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(op_to_agents.get("label", "Ronny -> agents"))}</span>
+            <span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;background:rgba(42,52,68,.75);color:var(--cyn)">{_h(op_to_agents.get("surface", "recent_ingress"))}</span>
+          </div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{op_to_agents.get("count", 0)} visible submissions · {op_to_agents.get("pending_classification", 0)} pending classification</div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(op_to_agents.get("rule", ""))}</div>
+        </div>
+        <div style="padding:.35rem 0">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(agents_to_operator.get("label", "Agents -> Ronny"))}</span>
+            <span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;background:rgba(42,52,68,.75);color:var(--ylw)">{_h(" + ".join(agents_to_operator.get("surfaces", [])) or "handoffs + attention")}</span>
+          </div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{agents_to_operator.get("handoff_count", 0)} active handoff(s) · {agents_to_operator.get("attention_count", 0)} surfaced attention item(s)</div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(agents_to_operator.get("rule", ""))}</div>
+        </div>
+      </div>
+    </details>"""
+
+    parked_review = temporal_parked.get("review_summary", {})
+    parked_items = temporal_parked.get("items", [])[:5]
+    parked_rows = ""
+    for item in parked_items:
+        review_state = item.get("review_state", "unknown")
+        due = item.get("next_review") or item.get("time_evidence_at") or "unscheduled"
+        parked_rows += (
+            f'<div style="padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.35)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.52rem;color:var(--tb);flex:1">{_h(item.get("name", ""))}</span>'
+            f'{_temporal_badge(review_state)}'
+            f'</div>'
+            f'<div style="font-size:.48rem;color:var(--tm);margin-top:.1rem">{_h(due)}</div>'
+            f'</div>'
+        )
+    if not parked_rows:
+        parked_rows = '<div style="font-size:.55rem;color:var(--tm)">no parked runtime items found</div>'
+
+    handoff_rows = ""
+    for item in temporal_handoffs.get("items", [])[:3]:
+        created_age = _age_label(item.get("time_age_seconds"))
+        handoff_rows += (
+            f'<div style="padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.35)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.52rem;color:var(--tb);flex:1">{_h(item.get("id", ""))}</span>'
+            f'{_temporal_badge(item.get("temporal_state", "unknown"))}'
+            f'</div>'
+            f'<div style="font-size:.48rem;color:var(--tm);margin-top:.1rem">{_h(item.get("summary", ""))}</div>'
+            f'<div style="font-size:.48rem;color:var(--tm);margin-top:.1rem">{_h(str(item.get("created_at_utc", "") or created_age))}</div>'
+            f'</div>'
+        )
+    if not handoff_rows:
+        handoff_rows = '<div style="font-size:.55rem;color:var(--tm)">no active handoffs</div>'
+
+    temporal_html = f"""
+    <details open>
+      <summary>Temporal Standing <span class="det-count">same root across cockpit + mobile</span></summary>
+      <div class="det-body">
+        <div class="stats" style="grid-template-columns:repeat(6,1fr);margin-bottom:.35rem">
+          <div class="stat"><div class="stat-v">{temporal_summary.get("now", 0)}</div><div class="stat-l">Now</div></div>
+          <div class="stat"><div class="stat-v">{temporal_summary.get("recent", 0)}</div><div class="stat-l">Recent</div></div>
+          <div class="stat"><div class="stat-v">{temporal_summary.get("stale", 0)}</div><div class="stat-l">Stale</div></div>
+          <div class="stat"><div class="stat-v">{temporal_summary.get("parked", 0)}</div><div class="stat-l">Parked</div></div>
+          <div class="stat"><div class="stat-v">{temporal_summary.get("closed", 0)}</div><div class="stat-l">Closed</div></div>
+          <div class="stat"><div class="stat-v">{temporal_summary.get("unknown", 0)}</div><div class="stat-l">Unknown</div></div>
+        </div>
+        <div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">Projection freshness</span>
+            {_temporal_badge(temporal_projection.get("temporal_state", "unknown"))}
+          </div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(temporal_projection.get("source", "unknown"))} · {_h(_age_label(temporal_projection.get("age_seconds")))}</div>
+        </div>
+        <div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">Ronny -&gt; agents</span>
+            <span style="font-size:.48rem;color:var(--tm)">{temporal_ingress.get("summary", {}).get("now", 0)} now · {temporal_ingress.get("summary", {}).get("recent", 0)} recent · {temporal_ingress.get("summary", {}).get("stale", 0)} stale</span>
+          </div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{temporal_ingress.get("summary", {}).get("unknown", 0)} unknown timestamps</div>
+        </div>
+        <div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">Agents -&gt; Ronny</span>
+            <span style="font-size:.48rem;color:var(--tm)">{temporal_handoffs.get("summary", {}).get("now", 0)} now · {temporal_handoffs.get("summary", {}).get("recent", 0)} recent · {temporal_handoffs.get("summary", {}).get("stale", 0)} stale</span>
+          </div>
+          <div style="margin-top:.15rem">{handoff_rows}</div>
+        </div>
+        <div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">Parked runtime inventory</span>
+            <span style="font-size:.48rem;color:var(--tm)">{temporal_parked.get("count", 0)} parked · {parked_review.get("stale", 0)} overdue · {parked_review.get("unknown", 0)} unscheduled</span>
+          </div>
+          <div style="margin-top:.15rem">{parked_rows}</div>
+        </div>
+        <div style="padding:.35rem 0">
+          <div style="display:flex;align-items:baseline;gap:.4rem">
+            <span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">Completion snapshot</span>
+            {_temporal_badge(temporal_completion.get("temporal_state", "unknown"))}
+          </div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{temporal_completion.get("closed_count", 0)} closed · {temporal_completion.get("open_count", 0)} open · {temporal_completion.get("parked_count", 0)} parked</div>
+          <div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(temporal_completion.get("snapshot_timestamp", "") or "unknown snapshot")} · {_h(_age_label(temporal_completion.get("snapshot_age_seconds")))}</div>
+        </div>
+      </div>
+    </details>"""
+
+    # Chain status
+    chain_rows = ""
+    chain_labels = {
+        "ronny_drops": "Ronny drops",
+        "translated_to_machine": "Translated",
+        "organized_sorted": "Organized/sorted",
+        "moved_to_next_stage": "Moved to next stage",
+        "visible_trace": "Visible trace",
+        "readback_surface": "Readback surface",
+    }
+    for key, label in chain_labels.items():
+        val = chain.get(key, "unknown")
+        if val == "standing":
+            dot, css = "g", "var(--grn)"
+        elif val == "partial":
+            dot, css = "y", "var(--ylw)"
+        elif val == "this_surface":
+            dot, css = "g", "var(--cyn)"
+        else:
+            dot, css = "r", "var(--red)"
+        chain_rows += (
+            f'<div style="display:flex;align-items:center;gap:.5rem;padding:.25rem 0">'
+            f'<span class="sdot {dot}"></span>'
+            f'<span style="font-size:.6rem;color:var(--tm);min-width:130px">{_h(label)}</span>'
+            f'<span style="font-family:var(--m);font-size:.55rem;color:{css}">{_h(val)}</span>'
+            f'</div>'
+        )
+    chain_html = f"""
+    <details open>
+      <summary>Contribution Chain <span class="det-count">5-step operator → spine</span></summary>
+      <div class="det-body">{chain_rows}</div>
+    </details>"""
+
+    recent_rows = ""
+    state_colors = {
+        "submitted": "var(--ylw)",
+        "classified": "var(--blu)",
+        "routed": "var(--grn)",
+    }
+    for item in recent:
+        hint = item.get("operator_hint", "")
+        detail = item.get("disposition_detail", "")
+        ts = item.get("submitted_at", "")
+        ctype = item.get("content_type", "")
+        lstate = item.get("lifecycle_state", "submitted")
+        lcolor = state_colors.get(lstate, "var(--ylw)")
+        classification = item.get("classification", "")
+        next_stage = item.get("next_stage", "")
+        downstream = item.get("downstream_refs", [])
+        activation = item.get("activation_conditions", "")
+
+        # Metabolization detail line
+        meta_parts = []
+        if classification:
+            meta_parts.append(classification)
+        if next_stage:
+            meta_parts.append(f"→ {next_stage}")
+        meta_line = ""
+        if meta_parts:
+            meta_line = (
+                f'<div style="font-family:var(--m);font-size:.45rem;color:var(--cyn);margin-top:.1rem">'
+                f'{_h(" · ".join(meta_parts))}</div>'
+            )
+        downstream_line = ""
+        if downstream:
+            ds_items = " → ".join(_h(str(d)) for d in downstream)
+            downstream_line = f'<div style="font-family:var(--m);font-size:.45rem;color:var(--cyn);margin-top:.1rem;opacity:.7">↳ {ds_items}</div>'
+        activation_line = ""
+        if activation:
+            activation_line = f'<div style="font-size:.45rem;color:var(--prp);margin-top:.1rem">⏳ {_h(activation)}</div>'
+
+        recent_rows += (
+            f'<div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(item["ingress_id"])}</span>'
+            f'{_temporal_badge(item.get("temporal_state", "unknown"))}'
+            f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;'
+            f'background:rgba(42,52,68,.75);color:{lcolor}">{_h(lstate)}</span>'
+            f'</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(ctype)} · {_h(ts)}</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(hint or detail)}</div>'
+            f'{meta_line}{downstream_line}{activation_line}'
+            f'</div>'
+        )
+    if not recent_rows:
+        recent_rows = '<div style="font-size:.6rem;color:var(--t)">no live operator ingress objects yet</div>'
+    recent_html = f"""
+    <details open>
+      <summary>Recent Ingress <span class="det-count">{len(recent)} visible</span></summary>
+      <div class="det-body">{recent_rows}</div>
+    </details>"""
+
+    # Per-input lineage
+    disp_colors = {
+        "advanced_to_contract": ("var(--grn)", "ADV"),
+        "adjacent_evidence": ("var(--blu)", "ADJ"),
+        "parked_prep": ("var(--prp)", "PREP"),
+        "parked_no_lifecycle": ("var(--ylw)", "PARK"),
+        "out_of_spine": ("var(--t)", "OUT"),
+        "staged": ("var(--t)", "STG"),
+    }
+
+    trace_rows = ""
+    current_batch = ""
+    for t in traces:
+        batch = t.get("batch", "")
+        if batch != current_batch:
+            current_batch = batch
+            trace_rows += (
+                f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;'
+                f'color:var(--t);opacity:.5;border-top:1px solid var(--b);margin-top:.25rem">'
+                f'Batch {_h(batch)}</div>'
+            )
+        disp = t.get("disposition", "staged")
+        color, tag = disp_colors.get(disp, ("var(--t)", "?"))
+        detail = t.get("detail", "")
+        downstream = t.get("downstream", [])
+        downstream_html = ""
+        if downstream:
+            ds_items = " → ".join(_h(str(d)) for d in downstream)
+            downstream_html = f'<div style="font-family:var(--m);font-size:.45rem;color:var(--cyn);margin-top:.1rem;opacity:.7">↳ {ds_items}</div>'
+
+        trace_rows += (
+            f'<div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(t["file"])}</span>'
+            f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;'
+            f'background:rgba(42,52,68,.75);color:{color}">{tag}</span>'
+            f'</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(detail)}</div>'
+            f'{downstream_html}'
+            f'</div>'
+        )
+
+    trace_html = f"""
+    <details open>
+      <summary>What Became of My Input <span class="det-count">{len(traces)} inputs traced</span></summary>
+      <div class="det-body">{trace_rows}</div>
+    </details>"""
+
+    # What my ideas built
+    built_rows = ""
+    for c in built.get("contracts", []):
+        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--grn)"></div>Contract: {_h(c)}</div>'
+    for p in built.get("delivered_packets", []):
+        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--blu)"></div>{_h(p)}</div>'
+    for r in built.get("retired_packets", []):
+        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--t)"></div>{_h(r)}</div>'
+    for d in built.get("derived_conclusions", []):
+        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--prp)"></div>Derived: {_h(d)}</div>'
+
+    built_html = ""
+    if built_rows:
+        built_html = f"""
+    <details>
+      <summary>What My Ideas Built <span class="det-count">{delivered} packets · {contracts} contracts</span></summary>
+      <div class="det-body">{built_rows}</div>
+    </details>"""
+
+    # What is waiting on me
+    waiting_html = ""
+    wait_items = waiting.get("items", [])
+    waiting_total = floats + pending_ingress
+    if wait_items or waiting_total > 0:
+        wait_rows = ""
+        for w in wait_items:
+            dot_cls = "y" if w.get("disposition") == "awaiting_classification" else "y"
+            wait_rows += (
+                f'<div class="attn-item"><div class="attn-dot {dot_cls}"></div>'
+                f'{_h(w["file"])} — {_h(w["detail"])}</div>'
+            )
+        if not wait_rows:
+            wait_rows = f'<div style="font-size:.6rem;color:var(--t)">{waiting_total} waiting item(s)</div>'
+        waiting_html = f"""
+    <details open>
+      <summary>Waiting on Operator <span class="det-count">{waiting_total} waiting</span></summary>
+      <div class="det-body">{wait_rows}</div>
+    </details>"""
+
+    return f"""
+    <div class="sh" style="color:var(--cyn)">Ronny ↔ Agents</div>
+    {stats}
+    {split_html}
+    {temporal_html}
+    {chain_html}
+    {recent_html}
+    {trace_html}
+    {built_html}
+    {waiting_html}"""
+
+
+def generate() -> str:
+    p = build_payload(compact=False)
+
+    caps_data = p.get("capabilities", {"caps": {}, "count": 0})
+    inv_counts = p.get("invocation_counts", {})
+    gates_data = p.get("gates", {})
+    manifest_data = p.get("manifest", {"available": False, "surfaces": [], "count": 0, "families": []})
+    git_log = p.get("git_log", [])
+
+    source_stamps = [
+        f"shared payload v{p['version']}",
+        f"git log: {len(git_log)} entries",
+        f"capabilities: {caps_data.get('count', 0)} caps",
+        f"gates: {gates_data.get('total', 0)} gates",
+        f"manifest: {'ok' if manifest_data.get('available') else 'unavailable'}",
+        f"github: {'ok' if p['git_refs']['github_ok'] else 'unavailable'}",
+        f"freshness: {p['projection_freshness']['freshness']}",
+    ]
+
+    # Lead story: operator vision contribution
+    sec_vision = operator_vision_section(
+        p.get("operator_vision", {}),
+        p.get("directional_boundary", {}),
+        p.get("temporal_standing", {}),
+    )
+    sec_posture = engine_posture(p)
+    sec_temporal = temporal_truth_section(p)
+    sec_fresh = freshness_card(p)
+    sec_roles = node_role_card(p["node_roles"])
+    sec_exec = execution_host_section(p["node_roles"])
+    sec_comms = comms_incident_card(p["work_state"]["comms_queue"])
+    sec_attn = attention_section(p["attention"])
+    sec_timeline = timeline_section(git_log)
+    sec_caps = capability_atlas(caps_data, inv_counts)
+    sec_gates = gate_watch(gates_data)
+    sec_auth = authority_explorer(manifest_data)
+    sec_work = work_state_section(p["work_state"])
+    sec_release = release_posture(p["git_refs"])
+    stamps_str = _h(" · ".join(source_stamps))
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spine Cockpit</title>
+<style>{CSS}</style>
+</head>
+<body>
+<div class="c">
+  <div class="top">
+    <h1>Spine Cockpit</h1>
+    <span>generated {_h(p['generated_utc'])}</span>
+  </div>
+
+  {sec_vision}
+  {sec_posture}
+  {sec_temporal}
+  {sec_fresh}
+  {sec_comms}
+  {sec_attn}
+  {sec_work}
+  {sec_roles}
+  {sec_exec}
+  {sec_timeline}
+  {sec_caps}
+  {sec_gates}
+  {sec_auth}
+  {sec_release}
+
+  <div class="foot">
+    cockpit.generate v3 · shared operator-overview-payload · static snapshot<br>
+    sources: {stamps_str}
+  </div>
+</div>
+<script>{JS}</script>
+</body>
+</html>"""
+
+
+def main() -> int:
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    content = generate()
+    OUTPUT.write_text(content, encoding="utf-8")
+    print(f"cockpit generated → {OUTPUT}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

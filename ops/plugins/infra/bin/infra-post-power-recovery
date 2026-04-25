@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+# infra-post-power-recovery - Orchestrated post-power-cycle service recovery
+#
+# Brings all declared stacks back up in dependency order and verifies health.
+# Follows the sequencing declared in ops/bindings/startup.sequencing.yaml.
+#
+# Modes:
+#   --mode status    : (read-only) check what's down, report recovery plan
+#   --mode recover   : (mutating) bring down stacks up, verify health
+#
+# Usage:
+#   infra-post-power-recovery --mode status
+#   infra-post-power-recovery --mode recover
+#   infra-post-power-recovery --mode recover --phase 4   # only phase 4
+#   infra-post-power-recovery --mode recover --target docker-host  # single host
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+# ── AOF policy integration ──────────────────────────────────────────────
+POLICY_LIB="$SPINE_ROOT/ops/lib/resolve-policy.sh"
+if [[ -f "$POLICY_LIB" ]]; then
+  # shellcheck source=ops/lib/resolve-policy.sh
+  source "$POLICY_LIB"
+  resolve_policy_knobs
+fi
+
+COMPOSE_BINDING="$SPINE_ROOT/ops/bindings/docker.compose.targets.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SEQ_BINDING="$SPINE_ROOT/ops/bindings/startup.sequencing.yaml"
+COMPOSE_UP="$SPINE_ROOT/ops/plugins/infra/docker/bin/docker-compose-up"
+COMPOSE_STATUS="$SPINE_ROOT/ops/plugins/infra/docker/bin/docker-compose-status"
+
+# Source shared SSH resolver for LAN->Tailscale fallback (D321 policy)
+# shellcheck source=../../../lib/ssh-resolve.sh
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+[[ -f "$SEQ_BINDING" ]] || stop "missing binding: $SEQ_BINDING"
+[[ -f "$COMPOSE_BINDING" ]] || stop "missing binding: $COMPOSE_BINDING"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+
+MODE=""
+PHASE_FILTER=""
+TARGET_FILTER=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --mode) MODE="${2:-}"; shift 2 ;;
+    --phase) PHASE_FILTER="${2:-}"; shift 2 ;;
+    --target) TARGET_FILTER="${2:-}"; shift 2 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# //'; exit 0 ;;
+    *) stop "unknown arg: $1" ;;
+  esac
+done
+
+[[ -n "$MODE" ]] || stop "--mode required (status|recover)"
+
+# ─── SSH helpers ──────────────────────────────────────────────────────────
+# Uses shared ssh-resolve.sh (sourced above) for LAN->Tailscale fallback.
+# The startup.sequencing.yaml references compose target IDs (e.g. "infra-core"),
+# which map to ssh_target IDs in docker.compose.targets.yaml. We resolve that
+# indirection, then use the shared resolver for actual host resolution.
+
+DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
+
+# Map a compose target id to its ssh_target id
+_compose_to_ssh_target() {
+  local target_id="$1"
+  local ssh_target_id
+  ssh_target_id="$(yq -r ".targets.\"$target_id\".ssh_target // \"\"" "$COMPOSE_BINDING")"
+  if [[ -n "$ssh_target_id" && "$ssh_target_id" != "null" ]]; then
+    echo "$ssh_target_id"
+  else
+    # If no compose binding entry, assume target_id IS the ssh_target_id
+    # (handles targets like "nas", "proxmox-home" listed directly in startup.sequencing)
+    echo "$target_id"
+  fi
+}
+
+# Resolve SSH connection details with LAN->Tailscale fallback.
+# Returns: "user host port path_used" (space-separated)
+resolve_ssh() {
+  local target_id="$1"
+  local ssh_target_id
+  ssh_target_id="$(_compose_to_ssh_target "$target_id")"
+
+  local user port
+  user="$(ssh_resolve_user "$ssh_target_id" "$DEF_USER")"
+  port="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .port // $DEF_PORT" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+  [[ -n "$port" && "$port" != "null" ]] || port="$DEF_PORT"
+
+  # Resolve host with LAN->Tailscale fallback (TCP/22 probe)
+  local resolve_result resolved_host path_used
+  resolve_result="$(ssh_resolve_ssh_host_with_fallback "$ssh_target_id" "$DEF_TO")" || true
+  resolved_host="$(echo "$resolve_result" | awk '{print $1}')"
+  path_used="$(echo "$resolve_result" | awk '{print $2}')"
+  [[ -n "$resolved_host" ]] || resolved_host="$(ssh_resolve_host "$ssh_target_id")"
+  [[ -n "$path_used" ]] || path_used="unknown"
+
+  echo "$user $resolved_host $port $path_used"
+}
+
+ssh_check() {
+  local target_id="$1"
+  local parts
+  parts="$(resolve_ssh "$target_id")"
+  [[ -n "$parts" ]] || return 1
+  local user host port path_used
+  user="$(echo "$parts" | awk '{print $1}')"
+  host="$(echo "$parts" | awk '{print $2}')"
+  port="$(echo "$parts" | awk '{print $3}')"
+  path_used="$(echo "$parts" | awk '{print $4}')"
+
+  [[ "$path_used" != "unreachable" ]] || return 1
+
+  ssh -o "ConnectTimeout=$DEF_TO" -o "StrictHostKeyChecking=$DEF_STRICT" \
+      -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS" -o "BatchMode=yes" \
+      -o "NumberOfPasswordPrompts=0" -o "LogLevel=ERROR" \
+      -p "$port" "${user}@${host}" "true" 2>/dev/null
+}
+
+# ─── Check container state on a host ─────────────────────────────────────
+
+check_host_containers() {
+  local target_id="$1"
+  local parts
+  parts="$(resolve_ssh "$target_id")"
+  [[ -n "$parts" ]] || { echo "unreachable"; return; }
+  local user host port path_used
+  user="$(echo "$parts" | awk '{print $1}')"
+  host="$(echo "$parts" | awk '{print $2}')"
+  port="$(echo "$parts" | awk '{print $3}')"
+  path_used="$(echo "$parts" | awk '{print $4}')"
+
+  [[ "$path_used" != "unreachable" ]] || { echo "unreachable"; return; }
+
+  local out
+  out="$(ssh -o "ConnectTimeout=$DEF_TO" -o "StrictHostKeyChecking=$DEF_STRICT" \
+      -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS" -o "BatchMode=yes" \
+      -o "NumberOfPasswordPrompts=0" -o "LogLevel=ERROR" \
+      -p "$port" "${user}@${host}" \
+      "docker ps -a --format '{{.Names}} {{.Status}}' 2>/dev/null || sudo -n docker ps -a --format '{{.Names}} {{.Status}}' 2>/dev/null || echo 'docker_unreachable'" 2>/dev/null)" || {
+    echo "ssh_failed"
+    return
+  }
+  echo "$out"
+}
+
+# ─── Compose down + up for a target/stack (handles exit-128 containers) ──
+
+recover_stack() {
+  local target_id="$1"
+  local stack="$2"
+  local parts
+  parts="$(resolve_ssh "$target_id")"
+  [[ -n "$parts" ]] || { echo "FAIL: cannot resolve SSH for $target_id"; return 1; }
+  local user host port path_used
+  user="$(echo "$parts" | awk '{print $1}')"
+  host="$(echo "$parts" | awk '{print $2}')"
+  port="$(echo "$parts" | awk '{print $3}')"
+  path_used="$(echo "$parts" | awk '{print $4}')"
+
+  [[ "$path_used" != "unreachable" ]] || { echo "FAIL: SSH unreachable for $target_id (tried LAN + Tailscale)"; return 1; }
+
+  local stack_path
+  stack_path="$(yq -r ".targets.\"$target_id\".stacks[] | select(.name == \"$stack\") | .path" "$COMPOSE_BINDING" 2>/dev/null | head -n1 || true)"
+  [[ -n "$stack_path" && "$stack_path" != "null" ]] || { echo "FAIL: stack '$stack' not in binding for $target_id"; return 1; }
+
+  # Remote: compose down --remove-orphans, then compose up -d
+  local remote_script
+  remote_script="$(cat <<'EOS'
+set -euo pipefail
+PATHX="$1"
+case "$PATHX" in "~/"*) PATHX="$HOME/${PATHX:2}" ;; "~") PATHX="$HOME" ;; esac
+[[ -d "$PATHX" ]] || { echo "FAIL: dir missing: $PATHX"; exit 2; }
+cd "$PATHX"
+FILE=""
+[[ -f docker-compose.yml ]] && FILE="docker-compose.yml"
+[[ -z "$FILE" && -f compose.yml ]] && FILE="compose.yml"
+[[ -n "$FILE" ]] || { echo "FAIL: no compose file in $PATHX"; exit 2; }
+DOCKER_CMD=(docker)
+if ! docker info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    DOCKER_CMD=(sudo -n docker)
+  else
+    echo "FAIL: docker unreachable"; exit 1
+  fi
+fi
+# Check if any containers are in Exited state — if so, down first to clean up
+exited="$("${DOCKER_CMD[@]}" compose -f "$FILE" ps -a --format json 2>/dev/null | python3 -c "
+import json,sys
+count=0
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try:
+        obj=json.loads(line)
+        if (obj.get('State','').lower()=='exited'): count+=1
+    except: pass
+print(count)
+" 2>/dev/null || echo "0")"
+if [[ "$exited" -gt 0 ]]; then
+  echo "cleanup: $exited exited containers — running compose down first"
+  "${DOCKER_CMD[@]}" compose -f "$FILE" down --remove-orphans 2>&1 || true
+fi
+echo "starting: compose up -d"
+"${DOCKER_CMD[@]}" compose -f "$FILE" up -d 2>&1
+EOS
+)"
+
+  ssh -o "ConnectTimeout=$DEF_TO" -o "StrictHostKeyChecking=$DEF_STRICT" \
+      -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS" -o "BatchMode=yes" \
+      -o "NumberOfPasswordPrompts=0" -o "LogLevel=ERROR" \
+      -p "$port" "${user}@${host}" \
+      "bash -lc $(printf "%q" "$remote_script") -- $(printf "%q" "$stack_path")" 2>&1
+}
+
+# ─── Main ────────────────────────────────────────────────────────────────
+
+echo "infra.post_power.recovery"
+echo "mode: $MODE"
+echo "policy: ${RESOLVED_POLICY_PRESET:-balanced} (approval_default=${RESOLVED_APPROVAL_DEFAULT:-auto})"
+[[ -n "$PHASE_FILTER" ]] && echo "phase_filter: $PHASE_FILTER"
+[[ -n "$TARGET_FILTER" ]] && echo "target_filter: $TARGET_FILTER"
+echo
+
+phase_count="$(yq -r '.phases | length' "$SEQ_BINDING")"
+total_stacks=0
+total_recovered=0
+total_failed=0
+total_skipped=0
+total_already_ok=0
+
+for pi in $(seq 0 $((phase_count - 1))); do
+  phase_num="$(yq -r ".phases[$pi].phase" "$SEQ_BINDING")"
+  phase_label="$(yq -r ".phases[$pi].label" "$SEQ_BINDING")"
+
+  if [[ -n "$PHASE_FILTER" && "$phase_num" != "$PHASE_FILTER" ]]; then
+    continue
+  fi
+
+  echo "═══ Phase $phase_num: $phase_label ═══"
+
+  host_count="$(yq -r ".phases[$pi].hosts | length" "$SEQ_BINDING")"
+  for hi in $(seq 0 $((host_count - 1))); do
+    target="$(yq -r ".phases[$pi].hosts[$hi].target" "$SEQ_BINDING")"
+    wait_sec="$(yq -r ".phases[$pi].hosts[$hi].wait_after_sec // 5" "$SEQ_BINDING")"
+
+    if [[ -n "$TARGET_FILTER" && "$target" != "$TARGET_FILTER" ]]; then
+      continue
+    fi
+
+    echo
+    echo "── $target ──"
+
+    # Check SSH reachability (with LAN->Tailscale fallback)
+    if ! ssh_check "$target" 2>/dev/null; then
+      echo "  STATUS: UNREACHABLE (SSH failed — tried LAN + Tailscale)"
+      stack_count="$(yq -r ".phases[$pi].hosts[$hi].stacks | length" "$SEQ_BINDING")"
+      total_stacks=$((total_stacks + stack_count))
+      total_failed=$((total_failed + stack_count))
+      continue
+    fi
+    # Show path used for diagnostics
+    _parts="$(resolve_ssh "$target")"
+    _path_used="$(echo "$_parts" | awk '{print $4}')"
+    echo "  ssh: OK (path=${_path_used:-direct})"
+
+    # Get current container state
+    container_state="$(check_host_containers "$target")"
+    exited_count="$(echo "$container_state" | grep -c "Exited" || true)"
+    running_count="$(echo "$container_state" | grep -c "Up" || true)"
+    echo "  containers: $running_count running, $exited_count exited"
+
+    # Process stacks
+    stack_count="$(yq -r ".phases[$pi].hosts[$hi].stacks | length" "$SEQ_BINDING")"
+    for si in $(seq 0 $((stack_count - 1))); do
+      stack="$(yq -r ".phases[$pi].hosts[$hi].stacks[$si]" "$SEQ_BINDING")"
+      total_stacks=$((total_stacks + 1))
+
+      if [[ "$MODE" == "status" ]]; then
+        if [[ "$exited_count" -gt 0 ]]; then
+          echo "  [$stack] NEEDS_RECOVERY ($exited_count exited containers on host)"
+          total_failed=$((total_failed + 1))
+        else
+          echo "  [$stack] OK"
+          total_already_ok=$((total_already_ok + 1))
+        fi
+      elif [[ "$MODE" == "recover" ]]; then
+        echo "  [$stack] recovering..."
+        set +e
+        out="$(recover_stack "$target" "$stack" 2>&1)"
+        rc=$?
+        set -e
+        if [[ $rc -eq 0 ]]; then
+          echo "  [$stack] OK"
+          total_recovered=$((total_recovered + 1))
+        else
+          echo "  [$stack] FAIL (rc=$rc)"
+          echo "$out" | sed 's/^/    /'
+          total_failed=$((total_failed + 1))
+        fi
+      fi
+    done
+
+    # Wait between hosts for service stabilization
+    if [[ "$MODE" == "recover" && "$wait_sec" -gt 0 ]]; then
+      echo "  waiting ${wait_sec}s for service stabilization..."
+      sleep "$wait_sec"
+    fi
+  done
+  echo
+done
+
+# ─── Summary ─────────────────────────────────────────────────────────────
+
+echo "═══ Summary ═══"
+echo "total_stacks: $total_stacks"
+if [[ "$MODE" == "status" ]]; then
+  echo "ok: $total_already_ok"
+  echo "needs_recovery: $total_failed"
+  if [[ "$total_failed" -gt 0 ]]; then
+    echo
+    echo "action: run with --mode recover to bring stacks up"
+    echo "status: NEEDS_RECOVERY"
+  else
+    echo "status: ALL_HEALTHY"
+  fi
+elif [[ "$MODE" == "recover" ]]; then
+  echo "recovered: $total_recovered"
+  echo "failed: $total_failed"
+  echo "already_ok: $total_already_ok"
+  if [[ "$total_failed" -gt 0 ]]; then
+    echo "status: PARTIAL_RECOVERY"
+  else
+    echo "status: RECOVERED"
+  fi
+  echo
+  echo "postchecks:"
+  echo "  ./bin/ops cap run docker.compose.status"
+  echo "  ./bin/ops cap run services.health.status"
+  echo "  ./bin/ops cap run verify.infra.run"
+fi
+echo

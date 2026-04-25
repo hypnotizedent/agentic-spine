@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+
+def state_root() -> Path:
+    env = os.environ.get("SPINE_STATE", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+
+    root = Path(__file__).resolve().parents[5]
+    runtime_paths = root / "ops" / "lib" / "runtime-paths.sh"
+    if runtime_paths.exists():
+        proc = subprocess.run(
+            [
+                "bash",
+                "-lc",
+                (
+                    f"source {runtime_paths!s} >/dev/null 2>&1 && "
+                    "spine_runtime_resolve_paths >/dev/null 2>&1 && "
+                    "printf '%s' \"$SPINE_STATE\""
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=os.environ.copy(),
+        )
+        resolved = proc.stdout.strip()
+        if proc.returncode == 0 and resolved:
+            return Path(resolved).expanduser().resolve()
+
+    return root.parent / ".runtime" / "spine" / "state"
+
+
+def main() -> int:
+    mode = "text"
+    args = sys.argv[1:]
+    if args and args[0] == "--json":
+        mode = "json"
+
+    db = state_root() / "shared_authority.db"
+    payload = {
+        "capability": "gaps.status",
+        "status": "ok",
+        "total": 0,
+        "open": 0,
+        "closed": 0,
+        "projected_yaml": str(state_root() / "operational.gaps.yaml"),
+    }
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM gaps")
+        payload["total"] = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(*) FROM gaps WHERE LOWER(status) IN ('open','active','pending')")
+        payload["open"] = int(cur.fetchone()[0] or 0)
+        payload["closed"] = payload["total"] - payload["open"]
+        conn.close()
+    except Exception as exc:
+        payload["status"] = "fail"
+        payload["error"] = str(exc)
+
+    if mode == "json":
+        print(json.dumps(payload, indent=2))
+    else:
+        print("gaps.status")
+        print(f"status: {payload['status']}")
+        print(f"total: {payload['total']}")
+        print(f"open: {payload['open']}")
+        print(f"closed: {payload['closed']}")
+        print(f"projected_yaml: {payload['projected_yaml']}")
+        if payload.get("error"):
+            print(f"error: {payload['error']}")
+    return 0 if payload["status"] == "ok" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

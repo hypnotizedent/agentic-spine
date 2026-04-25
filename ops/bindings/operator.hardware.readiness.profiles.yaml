@@ -1,0 +1,514 @@
+---
+status: authoritative
+owner: "@operator"
+scope: operator-hardware-platform-readiness-profiles-with-prereqs
+version: 1
+updated_at: "2026-04-13"
+last_verified: "2026-04-13"
+
+# Operator Hardware Readiness Profiles
+# Platform-scoped readiness evidence, prerequisite checks, and
+# pre-bootstrap prerequisite modeling for operator-owned Mac,
+# Windows, and Linux hardware.
+#
+# Scope: evidence collection and readiness evaluation only.
+# This surface does NOT perform bootstrap mutation, activation,
+# or role assignment.
+#
+# Scope-widening authority:
+#   Approved 2026-04-13 under bounded operator-hardware eligibility
+#   assessment. Activation and role assignment remain separately gated.
+#
+# Pattern source: ops/bindings/infra.vm.profiles.yaml (readiness blocks)
+
+subordinate_to: ops/bindings/root.authority.contract.yaml
+
+related_contracts:
+  - contract: ops/bindings/operator.hardware.inventory.yaml
+    relationship: "Inventory surface that references these profiles during eligibility assessment."
+  - contract: ops/bindings/infra.vm.profiles.yaml
+    relationship: "Pattern source for readiness block structure (Linux VM profiles)."
+  - contract: ops/bindings/runtime.bootstrap.contract.yaml
+    relationship: "Source for required tool prerequisites."
+
+# ── Shared prerequisites ────────────────────────────────────────────────────
+# These apply to both mac and windows. Platform-specific profiles
+# inherit these and add platform-specific requirements.
+
+shared_prerequisites:
+  network:
+    require_tailscale_enrolled: true
+    require_tailscale_connected: true
+    require_stable_internet: true
+  tools:
+    # From runtime.bootstrap.contract.yaml bootstrap_preconditions
+    required_binaries:
+      - bash
+      - git
+      - jq
+      - yq
+      - python3
+      - rg
+  identity:
+    require_device_id_in_inventory: true
+    require_hardware_model_known: true
+
+# ── Pre-bootstrap prerequisites ───────────────────────────────────────────
+# These model what must be true BEFORE wipe/reimage can proceed.
+# They are not proof that bootstrap happened — they are gate checks
+# for operator readiness to begin the reprovision process.
+#
+# Shared prerequisites apply to any platform being reprovisioned.
+# Platform-specific additions are listed within each profile.
+
+pre_bootstrap_prerequisites:
+  shared:
+    - id: bootstrap_console_path_known
+      description: "Console path for first touch is decided (built-in screen/keyboard for salvage laptops unless explicitly proven otherwise)."
+      evidence_type: operator_declaration
+    - id: data_retention_decision
+      description: "Operator has recorded what data to keep, migrate, or discard from the prior OS."
+      evidence_type: operator_declaration
+    - id: wipe_reimage_intent
+      description: "Operator has acknowledged that the target machine will be wiped and reimaged."
+      evidence_type: operator_declaration
+    - id: firmware_boot_path_known
+      description: "Boot mode (UEFI/Legacy), firmware version, and any quirks (e.g., T1/T2 chip, Secure Boot) are documented."
+      evidence_type: operator_declaration
+    - id: installer_media_path_known
+      description: "Installation media (USB, netboot, PXE) is prepared and tested."
+      evidence_type: operator_declaration
+    - id: bootstrap_network_method_selected
+      description: "Exactly one first-boot network method is selected and treated as the intended bootstrap path."
+      evidence_type: operator_declaration
+    - id: bootstrap_network_device_class_known
+      description: "The intended first-boot network adapter or tether class is known to be Linux-expected for this device class."
+      evidence_type: operator_declaration
+    - id: bootstrap_transport_handoff_plan
+      description: "The operator-reachable handoff path after first boot is decided (for example SSH over LAN or Tailscale enrollment then SSH)."
+      evidence_type: operator_declaration
+    - id: operator_user_plan
+      description: "Target OS username, sudo policy, and initial credentials plan are decided."
+      evidence_type: operator_declaration
+    - id: ssh_public_key_selected
+      description: "Operator SSH public key is chosen and ready to deploy to the new OS."
+      evidence_type: operator_declaration
+    - id: tailscale_enrollment_plan
+      description: "Tailscale auth key or enrollment method is prepared for post-install join."
+      evidence_type: operator_declaration
+    - id: remote_access_plan
+      description: "Post-install remote access method is planned (SSH via Tailscale, physical console fallback)."
+      evidence_type: operator_declaration
+    - id: package_tool_baseline
+      description: "Expected package manager and initial tool set are decided for the target OS."
+      evidence_type: operator_declaration
+
+  platform_specific:
+    linux:
+      - id: target_distro_selected
+        description: "Target Linux distribution and version are chosen (e.g., Ubuntu 24.04 LTS)."
+        evidence_type: operator_declaration
+      - id: disk_partition_plan
+        description: "Disk partitioning scheme is decided (e.g., single root, separate /home)."
+        evidence_type: operator_declaration
+      - id: bootstrap_network_expectation_known
+        description: "Expected first-boot network behavior is decided (DHCP, DNS, and internet requirement before claim)."
+        evidence_type: operator_declaration
+    mac:
+      - id: macos_target_version
+        description: "Target macOS version is chosen and compatible with hardware."
+        evidence_type: operator_declaration
+    windows:
+      - id: windows_target_version
+        description: "Target Windows version and edition are chosen."
+        evidence_type: operator_declaration
+      - id: tool_delivery_method
+        description: "Tool delivery decided: WSL2 with Ubuntu (preferred) or native scoop/chocolatey."
+        evidence_type: operator_declaration
+
+# ── Mac readiness profile ───────────────────────────────────────────────────
+
+stage0_gate_model:
+  hardware_preflight_gate:
+    description: "The operator has a usable first-touch console and trusted installer medium before reprovision."
+    required_prerequisites:
+      - bootstrap_console_path_known
+      - firmware_boot_path_known
+      - installer_media_path_known
+
+  connectivity_gate:
+    description: "Exactly one deterministic first-boot network path is chosen and validated for the device class."
+    required_prerequisites:
+      - bootstrap_network_method_selected
+      - bootstrap_network_device_class_known
+      - bootstrap_network_expectation_known
+
+  bootstrap_gate:
+    description: "The bootstrap delivery plan is complete enough to seed access and identity after first boot."
+    required_prerequisites:
+      - operator_user_plan
+      - ssh_public_key_selected
+      - tailscale_enrollment_plan
+      - package_tool_baseline
+
+  claim_gate:
+    description: "The post-bootstrap handoff plan is explicit before reprovision begins."
+    required_prerequisites:
+      - remote_access_plan
+      - bootstrap_transport_handoff_plan
+
+stage0_bootstrap_stance:
+  salvage_laptop:
+    description: "Boring first-touch posture for salvage laptops. Minimize entropy by constraining console and network assumptions."
+    built_in_console_required: true
+    preferred_installer_medium: reusable_ubuntu_usb
+    approved_primary_network_methods:
+      - rtl8153_ethernet
+      - known_good_usb_nic
+    approved_fallback_network_methods:
+      - approved_usb_tether_fallback
+    disallowed_defaults:
+      - arbitrary_dock_nic
+      - built_in_wifi_primary
+      - multi_transport_stage0
+    notes:
+      - "Use the laptop's built-in screen and keyboard for first touch."
+      - "Do not assume a random dock NIC or monitor path is Linux-expected."
+      - "Use exactly one first-boot network path at a time."
+
+  device_classes:
+    old_intel_macbook:
+      stance: salvage_laptop
+      platform: mac
+      wifi_primary_allowed: false
+      internet_required_before_claim: true
+      dhcp_expected: true
+      dns_expected: true
+      default_enrollment_policy: ssh_first_tailscale_later
+      allowed_enrollment_policies:
+        - ssh_first_tailscale_later
+        - tailscale_installed_login_manual
+        - tailscale_auto_enroll_authkey
+      notes:
+        - "Old Intel MacBooks should not trust built-in Wi-Fi as the primary Stage 0 path."
+        - "A known-good wired NIC is preferred; approved USB tether is fallback."
+
+# ── First-boot enrollment policies ──────────────────────────────────────────
+#
+# Governs the first-boot enrollment stance after a Stage 0 medium boots.
+# Each policy defines what remote-control path is available at first boot
+# and what trust material is required at medium-render time.
+#
+# These policies are chosen per-device at bootstrap-kit.render time and
+# threaded through autoinstall rendering and medium embedding.
+
+enrollment_policies:
+  ssh_first_tailscale_later:
+    purpose: >
+      Minimal first-boot remote access. SSH is the only remote-control path.
+      Tailscale is intentionally absent from the first-boot payload.
+      Operator enrolls Tailscale manually after first SSH claim.
+    first_boot_behavior:
+      ssh_server: installed_and_enabled
+      tailscale_package: absent
+      tailscale_login: not_applicable
+      remote_claim_path: lan_ssh
+    required_trust_material: []
+    admissible_use_cases:
+      - "Salvage laptop where Tailscale enrollment is a post-claim operator step."
+      - "Device where operator wants to inspect first boot before Tailscale join."
+      - "Minimal-trust baseline with no secrets baked into the medium."
+    must_not_infer:
+      - "Tailscale is deferred, not forgotten. Operator must enroll manually."
+      - "LAN SSH is the only first-boot control path. No Tailscale SSH."
+
+  tailscale_installed_login_manual:
+    purpose: >
+      Tailscale package is installed and ready during first boot, but login
+      is deferred to explicit operator action. SSH is available immediately.
+      The machine is prepared for operator-approved 'tailscale up'.
+    first_boot_behavior:
+      ssh_server: installed_and_enabled
+      tailscale_package: installed
+      tailscale_login: deferred_to_operator
+      remote_claim_path: lan_ssh
+    required_trust_material: []
+    admissible_use_cases:
+      - "Operator wants Tailscale ready but controls the exact enrollment moment."
+      - "Device where LAN SSH is sufficient for first claim."
+    must_not_infer:
+      - "Tailscale is installed but NOT logged in. No hidden login assumptions."
+      - "Operator must run 'tailscale up' explicitly after first SSH access."
+
+  tailscale_auto_enroll_authkey:
+    purpose: >
+      Tailscale package is installed and automatically enrolled using an
+      operator-supplied auth key during first boot. SSH is also available.
+      This is the most turnkey policy but requires trust-sensitive material.
+    first_boot_behavior:
+      ssh_server: installed_and_enabled
+      tailscale_package: installed
+      tailscale_login: automatic_via_authkey
+      remote_claim_path: lan_ssh_or_tailscale_ssh
+    required_trust_material:
+      - tailscale_authkey
+    trust_material_handling:
+      tailscale_authkey:
+        sensitivity: trust_sensitive
+        lineage_required: true
+        must_be_ephemeral: true
+        description: >
+          A Tailscale auth key (preferably ephemeral, single-use) supplied
+          at medium-render time. Baked into the autoinstall payload.
+          Lineage must record that trust-sensitive enrollment was used.
+        must_not_infer:
+          - "Auth key reuse across devices."
+          - "Long-lived auth keys without explicit operator decision."
+    admissible_use_cases:
+      - "Operator wants first boot to be immediately reachable via Tailscale."
+      - "Device where LAN access may not be available after physical setup."
+    must_not_infer:
+      - "Auth key presence does not imply the device is trusted or activated."
+      - "Enrollment is network join only, not role or host assignment."
+
+profiles:
+  mac:
+    description: "Readiness profile for operator-owned macOS machines as dedicated node candidates."
+
+    prerequisites:
+      inherit: shared_prerequisites
+      platform_specific:
+        require_homebrew: true
+        require_macos_version_supported: true
+        minimum_macos_version_note: >
+          The minimum supported macOS version is determined by whether
+          required tool binaries (bash 5+, yq, rg, etc.) can be installed
+          via Homebrew on that version. Machines on unsupported macOS
+          versions that cannot update are classified ineligible.
+
+    health_evidence:
+      battery:
+        applicable: true
+        evidence_type: read-only
+        description: "Battery cycle count and maximum capacity percentage."
+        hard_fail_condition: "Battery health below 60% or unable to hold charge for always-on duty."
+        collection_method: "system_profiler SPPowerDataType"
+        note: "Desktop Macs and always-plugged laptops may skip battery as non-blocking."
+      storage:
+        applicable: true
+        evidence_type: read-only
+        description: "APFS volume health and available capacity."
+        hard_fail_condition: "SMART errors, volume corruption, or less than 20GB free."
+        collection_method: "diskutil info / smartctl"
+      thermal:
+        applicable: true
+        evidence_type: read-only
+        description: "Thermal throttling or fan failure indicators."
+        hard_fail_condition: "Persistent thermal throttling under sustained workload."
+        collection_method: "powermetrics or pmset -g thermlog"
+      os_version:
+        applicable: true
+        evidence_type: read-only
+        description: "macOS version and security update status."
+        hard_fail_condition: "macOS version no longer receiving security updates."
+        collection_method: "sw_vers"
+
+    posture_evidence:
+      always_on:
+        applicable: true
+        evidence_type: read-only
+        description: "Machine configured for always-on operation (sleep disabled, power adapter connected)."
+        collection_method: "pmset -g"
+      network_reliability:
+        applicable: true
+        evidence_type: read-only
+        description: "Stable wired or wireless connection. Wired preferred for dedicated node duty."
+        collection_method: "networksetup -listallhardwareports / ifconfig"
+      remote_access:
+        applicable: true
+        evidence_type: read-only
+        description: "SSH enabled and reachable via Tailscale."
+        collection_method: "systemsetup -getremotelogin / tailscale status"
+
+    readiness:
+      require_tailscale_connected: true
+      require_ssh_reachable_via_tailscale: true
+      require_tool_prerequisites_met: true
+      require_homebrew_installed: true
+      require_macos_security_updates_current: true
+      require_storage_healthy: true
+      require_always_on_posture: true
+
+  # ── Windows readiness profile ───────────────────────────────────────────────
+
+  windows:
+    description: "Readiness profile for operator-owned Windows machines as dedicated node candidates."
+
+    prerequisites:
+      inherit: shared_prerequisites
+      platform_specific:
+        require_tool_delivery_method: true
+        tool_delivery_options:
+          - "WSL2 with Ubuntu (preferred — closest to Linux execution model)"
+          - "Native Windows with scoop/chocolatey/winget"
+        require_windows_version_supported: true
+        minimum_windows_version_note: >
+          Windows 10 22H2+ or Windows 11. WSL2 requires Windows 10
+          version 1903+ with KB4566116. Older versions are classified
+          ineligible.
+
+    health_evidence:
+      storage:
+        applicable: true
+        evidence_type: read-only
+        description: "Disk health and available capacity."
+        hard_fail_condition: "SMART errors or less than 20GB free on system drive."
+        collection_method: "wmic diskdrive get status / Get-PhysicalDisk (PowerShell)"
+      os_version:
+        applicable: true
+        evidence_type: read-only
+        description: "Windows version and update status."
+        hard_fail_condition: "Windows version no longer receiving security updates."
+        collection_method: "winver / systeminfo"
+      windows_update:
+        applicable: true
+        evidence_type: read-only
+        description: "Windows Update status and pending reboot state."
+        hard_fail_condition: "Pending reboot that would interrupt always-on duty."
+        collection_method: "Get-WindowsUpdate (PowerShell)"
+
+    posture_evidence:
+      always_on:
+        applicable: true
+        evidence_type: read-only
+        description: "Machine configured for always-on operation (sleep disabled, power plan set to high performance)."
+        collection_method: "powercfg /query"
+      network_reliability:
+        applicable: true
+        evidence_type: read-only
+        description: "Stable wired or wireless connection."
+        collection_method: "ipconfig / netsh interface show interface"
+      remote_access:
+        applicable: true
+        evidence_type: read-only
+        description: "SSH or WinRM reachable via Tailscale. SSH via WSL2 preferred."
+        collection_method: "tailscale status / Test-NetConnection"
+
+    readiness:
+      require_tailscale_connected: true
+      require_remote_access_reachable: true
+      require_tool_prerequisites_met: true
+      require_tool_delivery_method_confirmed: true
+      require_windows_security_updates_current: true
+      require_storage_healthy: true
+      require_always_on_posture: true
+
+  # ── Linux readiness profile ──────────────────────────────────────────────
+
+  linux:
+    description: "Readiness profile for operator-owned hardware reprovisioned to Linux as dedicated node candidates."
+
+    prerequisites:
+      inherit: shared_prerequisites
+      platform_specific:
+        require_openssh_server: true
+        require_linux_distro_supported: true
+        supported_distros_note: >
+          Ubuntu 22.04+ LTS or Debian 12+ are preferred. Other distributions
+          must provide equivalent package availability for required tools.
+        require_package_manager: true
+        package_manager_note: "apt (Debian/Ubuntu) or equivalent."
+
+    health_evidence:
+      os_identity:
+        applicable: true
+        evidence_type: read-only
+        description: "Distribution name, version, kernel version, architecture."
+        collection_method: "lsb_release -a / uname -r / uname -m"
+      storage:
+        applicable: true
+        evidence_type: read-only
+        description: "Filesystem health, mount points, available capacity."
+        hard_fail_condition: "Filesystem errors or less than 20GB free on root."
+        collection_method: "df -h / lsblk / smartctl (if available)"
+      memory:
+        applicable: true
+        evidence_type: read-only
+        description: "Total and available RAM."
+        hard_fail_condition: "Less than 2GB total RAM."
+        collection_method: "free -h"
+      cpu:
+        applicable: true
+        evidence_type: read-only
+        description: "CPU model, core count, architecture."
+        collection_method: "lscpu"
+      thermal:
+        applicable: true
+        evidence_type: read-only
+        description: "Thermal sensor readings if available (laptop hardware)."
+        hard_fail_condition: "Persistent thermal throttling."
+        collection_method: "sensors (lm-sensors) if available"
+        note: "Not all hardware exposes thermal data. Absence is not a failure."
+      battery:
+        applicable: conditional
+        evidence_type: read-only
+        description: "Battery health for laptop hardware."
+        hard_fail_condition: "Battery below 60% design capacity."
+        collection_method: "upower -i /org/freedesktop/UPower/devices/battery_BAT0"
+        note: "Only applicable to laptops. Desktop/server hardware skips this."
+
+    posture_evidence:
+      ssh_reachability:
+        applicable: true
+        evidence_type: read-only
+        description: "SSH daemon running and reachable via Tailscale."
+        collection_method: "systemctl is-active sshd / tailscale status"
+      tailscale_presence:
+        applicable: true
+        evidence_type: read-only
+        description: "Tailscale installed, connected, and reporting an IP."
+        collection_method: "tailscale status --self"
+      network_reliability:
+        applicable: true
+        evidence_type: read-only
+        description: "Wired vs wireless, connection stability."
+        collection_method: "ip link / nmcli / iwconfig"
+      always_on:
+        applicable: true
+        evidence_type: read-only
+        description: "Suspend/sleep disabled for always-on operation."
+        collection_method: "systemctl status sleep.target / logind.conf"
+      package_hygiene:
+        applicable: true
+        evidence_type: read-only
+        description: "Pending updates, unattended-upgrades status, last update timestamp."
+        collection_method: "apt list --upgradable / systemctl status unattended-upgrades"
+
+    tool_prerequisites:
+      required_binaries:
+        - bash
+        - git
+        - jq
+        - yq
+        - python3
+        - rg
+        - rsync
+        - curl
+        - openssh-server
+      note: "openssh-server is Linux-specific; mac and windows use platform-native SSH."
+
+    readiness:
+      require_tailscale_connected: true
+      require_ssh_reachable_via_tailscale: true
+      require_tool_prerequisites_met: true
+      require_openssh_server_running: true
+      require_linux_security_updates_current: true
+      require_storage_healthy: true
+      require_always_on_posture: true
+
+non_activation:
+  statement: >
+    These profiles define read-only evidence collection and readiness
+    evaluation criteria only. They do not perform bootstrap mutation,
+    activate any machine, or assign node roles. Activation requires
+    separate explicit Ronny approval.

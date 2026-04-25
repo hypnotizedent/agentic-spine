@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-proxmox-power-control — Out-of-band power control via iDRAC
+# Mutating. Power on/off/cycle a governed Proxmox host via its recovery target.
+#
+# Usage:
+#   infra-proxmox-power-control status [--host-id <id>]
+#   infra-proxmox-power-control on [--host-id <id>] [--execute]
+#   infra-proxmox-power-control off [--host-id <id>] [--execute]
+#   infra-proxmox-power-control cycle [--host-id <id>] [--execute]
+#
+# Dry-run by default. Pass --execute to actually send the IPMI command.
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+SSH_BINDING="${SPINE_ROOT}/ops/bindings/ssh.targets.yaml"
+HW_BINDING="${SPINE_ROOT}/ops/bindings/hardware.inventory.yaml"
+
+usage() {
+    cat <<'EOF'
+infra-proxmox-power-control — iDRAC power control
+
+Usage:
+  infra-proxmox-power-control status [--host-id <id>]
+  infra-proxmox-power-control on [--host-id <id>] [--execute]
+  infra-proxmox-power-control off [--host-id <id>] [--execute]
+  infra-proxmox-power-control cycle [--host-id <id>] [--execute]
+
+Dry-run by default. Pass --execute to send the IPMI command.
+Defaults to host-id `pve`.
+Uses the governed recovery target declared for the selected host.
+When on the same LAN as the iDRAC, uses direct IPMI. When off-LAN
+and a governed probe_via host is available, falls back to that jump host.
+EOF
+}
+
+ACTION="${1:-}"
+shift || true
+EXECUTE=0
+HOST_ID="pve"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --host-id)
+            HOST_ID="${2:-}"
+            shift 2
+            ;;
+        --execute) EXECUTE=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "FAIL: unknown arg '$1'" >&2; exit 2 ;;
+    esac
+done
+
+[[ -n "$ACTION" ]] || { usage >&2; exit 2; }
+
+case "$ACTION" in
+    on|off|cycle|status) ;;
+    *) echo "FAIL: unknown action '$ACTION' (expected on|off|cycle|status)" >&2; exit 2 ;;
+esac
+
+[[ -f "$SSH_BINDING" ]] || { echo "FAIL: missing ssh binding: $SSH_BINDING" >&2; exit 1; }
+[[ -f "$HW_BINDING" ]] || { echo "FAIL: missing hardware binding: $HW_BINDING" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "FAIL: yq is required" >&2; exit 1; }
+
+resolve_recovery_target_id() {
+    local host_id="$1"
+    local recovery_target
+    recovery_target="$(yq -r ".ssh.targets[] | select(.id == \"$host_id\") | .recovery_target_id // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1)"
+    if [[ -n "$recovery_target" && "$recovery_target" != "null" ]]; then
+        printf '%s\n' "$recovery_target"
+        return 0
+    fi
+
+    recovery_target="$(yq -r ".machines[] | select(.machine_id == \"$host_id\") | .recovery_substrate.target_id // \"\"" "$HW_BINDING" 2>/dev/null | head -n1)"
+    if [[ -n "$recovery_target" && "$recovery_target" != "null" ]]; then
+        printf '%s\n' "$recovery_target"
+        return 0
+    fi
+
+    if yq -r ".ssh.targets[] | select(.id == \"$host_id\") | .id" "$SSH_BINDING" 2>/dev/null | grep -qx "$host_id"; then
+        printf '%s\n' "$host_id"
+        return 0
+    fi
+
+    return 1
+}
+
+RECOVERY_TARGET_ID="$(resolve_recovery_target_id "$HOST_ID" || true)"
+[[ -n "$RECOVERY_TARGET_ID" ]] || {
+    echo "FAIL: host-id '$HOST_ID' does not resolve to a governed recovery target" >&2
+    exit 1
+}
+
+resolve_secret_key_name() {
+    local target_id="$1"
+    local field="$2"
+    local key_name
+    key_name="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .secret_keys.${field} // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1)"
+    if [[ -n "$key_name" && "$key_name" != "null" ]]; then
+        printf '%s\n' "$key_name"
+        return 0
+    fi
+
+    case "$field" in
+        user) printf '%s\n' "IDRAC_ADMIN_USER" ;;
+        password) printf '%s\n' "IDRAC_ADMIN_PASSWORD" ;;
+        *) return 1 ;;
+    esac
+}
+
+read_env_var() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || return 0
+    if [[ -n "${!name+x}" ]]; then
+        printf '%s\n' "${!name}"
+    fi
+}
+
+IDRAC_IP="$(yq -r ".ssh.targets[] | select(.id == \"$RECOVERY_TARGET_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1)"
+JUMP_HOST_ID="$(yq -r ".ssh.targets[] | select(.id == \"$RECOVERY_TARGET_ID\") | .probe_via // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1)"
+RECOVERY_ACCESS="$(yq -r ".ssh.targets[] | select(.id == \"$RECOVERY_TARGET_ID\") | .recovery_access // \"direct_lan_only\"" "$SSH_BINDING" 2>/dev/null | head -n1)"
+[[ -n "$IDRAC_IP" && "$IDRAC_IP" != "null" ]] || {
+    echo "FAIL: recovery target '$RECOVERY_TARGET_ID' has no governed host/IP" >&2
+    exit 1
+}
+
+# Resolve credentials via Infisical agent (same pattern as idrac-health-status)
+INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
+IDRAC_USER_SECRET_KEY="$(resolve_secret_key_name "$RECOVERY_TARGET_ID" user)"
+IDRAC_PASS_SECRET_KEY="$(resolve_secret_key_name "$RECOVERY_TARGET_ID" password)"
+IDRAC_USER="$(read_env_var "$IDRAC_USER_SECRET_KEY")"
+IDRAC_PASS="$(read_env_var "$IDRAC_PASS_SECRET_KEY")"
+
+# Generic shared overrides remain valid for operator emergency use.
+if [[ -z "$IDRAC_USER" && "$IDRAC_USER_SECRET_KEY" != "IDRAC_ADMIN_USER" ]]; then
+    IDRAC_USER="$(read_env_var "IDRAC_ADMIN_USER")"
+fi
+if [[ -z "$IDRAC_PASS" && "$IDRAC_PASS_SECRET_KEY" != "IDRAC_ADMIN_PASSWORD" ]]; then
+    IDRAC_PASS="$(read_env_var "IDRAC_ADMIN_PASSWORD")"
+fi
+
+# Fallback to Infisical only when the operator did not supply an override.
+if [[ -x "$INFISICAL_AGENT" ]]; then
+    if [[ -z "$IDRAC_USER" ]]; then
+        IDRAC_USER=$("$INFISICAL_AGENT" get infrastructure prod "$IDRAC_USER_SECRET_KEY" 2>/dev/null) || true
+    fi
+    if [[ -z "$IDRAC_PASS" ]]; then
+        IDRAC_PASS=$("$INFISICAL_AGENT" get infrastructure prod "$IDRAC_PASS_SECRET_KEY" 2>/dev/null) || true
+    fi
+fi
+IDRAC_USER="${IDRAC_USER:-root}"
+
+if [[ -z "$IDRAC_PASS" ]]; then
+    echo "FAIL: iDRAC password not available for secret key '$IDRAC_PASS_SECRET_KEY'. Set the env var or configure Infisical." >&2
+    exit 1
+fi
+
+# Resolve access path: direct LAN first (recovery path), jump host fallback (convenience)
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+USE_DIRECT=false
+SSH_HOST=""
+SSH_USER=""
+ACCESS_PATH=""
+
+# Try direct LAN first (the truthful recovery path)
+if ping -c 1 -W 2 "$IDRAC_IP" >/dev/null 2>&1; then
+    USE_DIRECT=true
+    ACCESS_PATH="direct_lan"
+elif [[ -n "$JUMP_HOST_ID" && "$JUMP_HOST_ID" != "null" ]]; then
+    SSH_HOST="$(ssh_resolve_ssh_host_with_fallback "$JUMP_HOST_ID" 2>/dev/null | awk '{print $1}' || true)"
+    SSH_USER="$(ssh_resolve_user "$JUMP_HOST_ID" 2>/dev/null || echo root)"
+    if [[ -n "$SSH_HOST" && "$SSH_HOST" != "unreachable" ]]; then
+        ACCESS_PATH="jump_via_${JUMP_HOST_ID}"
+    else
+        ACCESS_PATH="unreachable"
+    fi
+else
+    ACCESS_PATH="unreachable"
+fi
+
+run_redfish_power_status() {
+    # Redfish power status — works without ipmitool
+    local url="https://${IDRAC_IP}/redfish/v1/Systems/System.Embedded.1"
+    local json
+    if $USE_DIRECT; then
+        json=$(curl -sk -u "${IDRAC_USER}:${IDRAC_PASS}" --connect-timeout 8 --max-time 15 "$url" 2>/dev/null) || return 1
+    elif [[ -n "$SSH_HOST" && "$SSH_HOST" != "unreachable" ]]; then
+        json=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+            "curl -sk -u '${IDRAC_USER}:${IDRAC_PASS}' --connect-timeout 8 --max-time 15 '$url'" 2>/dev/null) || return 1
+    else
+        return 1
+    fi
+    local power_state
+    power_state=$(echo "$json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('PowerState','unknown'))" 2>/dev/null) || return 1
+    echo "Chassis Power is ${power_state}"
+}
+
+run_ipmi() {
+    local ipmi_cmd="$1"
+    if $USE_DIRECT; then
+        # Direct LAN (recovery path)
+        ipmitool -I lanplus -H "$IDRAC_IP" -U "$IDRAC_USER" -P "$IDRAC_PASS" $ipmi_cmd 2>&1
+    elif [[ -n "$SSH_HOST" && "$SSH_HOST" != "unreachable" ]]; then
+        # Via jump host (convenience path)
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+            "ipmitool -I lanplus -H $IDRAC_IP -U $(printf '%q' "$IDRAC_USER") -P $(printf '%q' "$IDRAC_PASS") $ipmi_cmd" 2>&1
+    else
+        echo "FAIL: iDRAC unreachable — direct LAN failed, no jump host available" >&2
+        return 1
+    fi
+}
+
+run_racadm_power() {
+    local action="$1"
+    local racadm_cmd=""
+    local pass_q user_q host_q cmd_q
+
+    case "$action" in
+        status) racadm_cmd="racadm serveraction powerstatus" ;;
+        on) racadm_cmd="racadm serveraction powerup" ;;
+        off) racadm_cmd="racadm serveraction powerdown" ;;
+        cycle) racadm_cmd="racadm serveraction powercycle" ;;
+        *) echo "FAIL: unsupported racadm action '$action'" >&2; return 1 ;;
+    esac
+
+    if $USE_DIRECT; then
+        command -v sshpass >/dev/null 2>&1 || {
+            echo "FAIL: sshpass is required for direct racadm access" >&2
+            return 1
+        }
+        sshpass -p "$IDRAC_PASS" ssh \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR \
+            "${IDRAC_USER}@${IDRAC_IP}" "$racadm_cmd" 2>&1
+    elif [[ -n "$SSH_HOST" && "$SSH_HOST" != "unreachable" ]]; then
+        pass_q="$(printf '%q' "$IDRAC_PASS")"
+        user_q="$(printf '%q' "$IDRAC_USER")"
+        host_q="$(printf '%q' "$IDRAC_IP")"
+        cmd_q="$(printf '%q' "$racadm_cmd")"
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" \
+            "command -v sshpass >/dev/null 2>&1 && sshpass -p $pass_q ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR ${user_q}@${host_q} $cmd_q" 2>&1
+    else
+        echo "FAIL: iDRAC unreachable — direct LAN failed, no jump host available" >&2
+        return 1
+    fi
+}
+
+echo "=== PVE POWER CONTROL ==="
+echo "host_id: $HOST_ID"
+echo "recovery_target_id: $RECOVERY_TARGET_ID"
+echo "iDRAC: $IDRAC_IP"
+echo "access_path: ${ACCESS_PATH}"
+echo "recovery_access: ${RECOVERY_ACCESS}"
+echo ""
+
+case "$ACTION" in
+    status)
+        echo "-- Power Status --"
+        if [[ "$RECOVERY_TARGET_ID" == "idrac-r620" ]]; then
+            run_racadm_power status || echo "FAIL: racadm power status unreachable"
+        elif ! run_ipmi "power status"; then
+            run_redfish_power_status || echo "FAIL: Redfish power status unreachable"
+        fi
+        ;;
+    on)
+        if [[ "$EXECUTE" -eq 0 ]]; then
+            echo "DRY RUN: would send 'power on' via IPMI"
+            echo "Pass --execute to actually power on."
+        else
+            echo "Sending power on..."
+            if [[ "$RECOVERY_TARGET_ID" == "idrac-r620" ]]; then
+                run_racadm_power on
+            else
+                run_ipmi "power on"
+            fi
+        fi
+        ;;
+    off)
+        if [[ "$EXECUTE" -eq 0 ]]; then
+            echo "DRY RUN: would send 'power off' via IPMI"
+            echo "Pass --execute to actually power off."
+            echo "WARNING: This is a hard power off. Use host.control for graceful shutdown."
+        else
+            echo "Sending power off..."
+            if [[ "$RECOVERY_TARGET_ID" == "idrac-r620" ]]; then
+                run_racadm_power off
+            else
+                run_ipmi "power off"
+            fi
+        fi
+        ;;
+    cycle)
+        if [[ "$EXECUTE" -eq 0 ]]; then
+            echo "DRY RUN: would send 'power cycle' via IPMI"
+            echo "Pass --execute to actually power cycle."
+        else
+            echo "Sending power cycle..."
+            if [[ "$RECOVERY_TARGET_ID" == "idrac-r620" ]]; then
+                run_racadm_power cycle
+            else
+                run_ipmi "power cycle"
+            fi
+        fi
+        ;;
+esac

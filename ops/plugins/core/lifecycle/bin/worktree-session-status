@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ACTIVE_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "$ACTIVE_ROOT" && -f "$ACTIVE_ROOT/ops/capabilities.yaml" ]]; then
+  ROOT="$ACTIVE_ROOT"
+else
+  ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+fi
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+CONTRACT="$ROOT/ops/bindings/worktree.session.isolation.yaml"
+
+ENFORCE=0
+BRIEF=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enforce) ENFORCE=1; shift ;;
+    --brief) BRIEF=1; shift ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+enabled=true
+main_branch="main"
+main_upstream_ref="origin/main"
+managed_prefix="$SPINE_RUNTIME/spine/tmp/worktrees/agentic-spine/"
+require_non_main_in_managed=true
+require_identity=true
+require_clean_main=false
+require_main_not_behind_upstream=false
+identity_env_var="OPS_WORKTREE_IDENTITY"
+bypass_env_var="OPS_WORKTREE_ISOLATION_BYPASS"
+bypass_allowed_value="1"
+bypass_ref_env_var="OPS_WORKTREE_ISOLATION_BYPASS_REF"
+bypass_friction_ref_env_var="OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF"
+bypass_reason_env_var="OPS_WORKTREE_ISOLATION_BYPASS_REASON"
+allow_detached=false
+remediation="Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>."
+bypass_warning="Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1"
+identity_patterns=()
+contract_loaded=false
+
+identity_matches_patterns() {
+  local candidate="${1:-}"
+  if [[ ${#identity_patterns[@]} -eq 0 ]]; then
+    return 0
+  fi
+  local pat
+  for pat in "${identity_patterns[@]}"; do
+    if [[ "$candidate" =~ $pat ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+  contract_loaded=true
+  enabled="$(yq e -r '.policy.enabled // true' "$CONTRACT" 2>/dev/null || echo true)"
+  main_branch="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
+  main_upstream_ref="$(yq e -r '.policy.main_upstream_ref // "origin/main"' "$CONTRACT" 2>/dev/null || echo origin/main)"
+  managed_prefix="$(yq e -r '.policy.managed_worktree_prefix // "$SPINE_RUNTIME/spine/tmp/worktrees/agentic-spine/"' "$CONTRACT" 2>/dev/null || echo '$SPINE_RUNTIME/spine/tmp/worktrees/agentic-spine/')"
+  require_non_main_in_managed="$(yq e -r '.policy.require_non_main_in_managed_worktree // true' "$CONTRACT" 2>/dev/null || echo true)"
+  require_identity="$(yq e -r '.policy.require_explicit_identity_on_non_main // true' "$CONTRACT" 2>/dev/null || echo true)"
+  require_clean_main="$(yq e -r '.policy.require_clean_main // false' "$CONTRACT" 2>/dev/null || echo false)"
+  require_main_not_behind_upstream="$(yq e -r '.policy.require_main_not_behind_upstream // false' "$CONTRACT" 2>/dev/null || echo false)"
+  identity_env_var="$(yq e -r '.policy.identity_env_var // "OPS_WORKTREE_IDENTITY"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_IDENTITY)"
+  bypass_env_var="$(yq e -r '.policy.bypass_env_var // "OPS_WORKTREE_ISOLATION_BYPASS"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS)"
+  bypass_allowed_value="$(yq e -r '.policy.bypass_allowed_value // "1"' "$CONTRACT" 2>/dev/null || echo 1)"
+  bypass_ref_env_var="$(yq e -r '.policy.bypass_ref_env_var // "OPS_WORKTREE_ISOLATION_BYPASS_REF"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS_REF)"
+  bypass_friction_ref_env_var="$(yq e -r '.policy.bypass_friction_ref_env_var // "OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF)"
+  bypass_reason_env_var="$(yq e -r '.policy.bypass_reason_env_var // "OPS_WORKTREE_ISOLATION_BYPASS_REASON"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS_REASON)"
+  allow_detached="$(yq e -r '.policy.allow_detached_head // false' "$CONTRACT" 2>/dev/null || echo false)"
+  remediation="$(yq e -r '.messages.remediation // "Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>."' "$CONTRACT" 2>/dev/null || echo "Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>.")"
+  bypass_warning="$(yq e -r '.messages.bypass_warning // "Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1"' "$CONTRACT" 2>/dev/null || echo "Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1")"
+  while IFS= read -r pat; do
+    [[ -n "$pat" && "$pat" != "null" ]] && identity_patterns+=("$pat")
+  done < <(yq e -r '.policy.identity_patterns[]?' "$CONTRACT" 2>/dev/null || true)
+fi
+
+expand_home_prefix() {
+  local raw="${1:-}"
+  case "$raw" in
+    "~") printf '%s\n' "$HOME" ;;
+    "~/"*) printf '%s\n' "$HOME/${raw#"~/"}" ;;
+    *) printf '%s\n' "$raw" ;;
+  esac
+}
+
+managed_prefix="$(expand_home_prefix "$managed_prefix")"
+managed_prefix="${managed_prefix%/}/"
+
+repo_root="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
+branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+main_dirty_paths="unknown"
+main_dirty_path_list=""
+main_behind="unknown"
+main_ahead="unknown"
+branch_identity_hint=""
+
+bypass_value="${!bypass_env_var-}"
+bypass_ref_value="${!bypass_ref_env_var-}"
+bypass_friction_ref_value="${!bypass_friction_ref_env_var-}"
+bypass_reason_value="${!bypass_reason_env_var-}"
+identity_value="${!identity_env_var-}"
+
+branch_leaf="${branch##*/}"
+if [[ -n "$branch_leaf" ]] && identity_matches_patterns "$branch_leaf"; then
+  branch_identity_hint="$branch_leaf"
+fi
+
+issues=()
+warnings=()
+
+if [[ "$enabled" != "true" ]]; then
+  warnings+=("isolation policy disabled by contract")
+fi
+
+if [[ "$branch" == "HEAD" && "$allow_detached" != "true" ]]; then
+  issues+=("detached HEAD is not allowed by isolation policy")
+fi
+
+if [[ "$enabled" == "true" && "$branch" == "$main_branch" ]]; then
+  if [[ "$require_clean_main" == "true" ]]; then
+    if status_lines="$(git -C "$ROOT" status --porcelain --untracked-files=all 2>/dev/null)"; then
+      if [[ -n "$status_lines" ]]; then
+        main_dirty_paths="$(printf '%s\n' "$status_lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+        main_dirty_path_list="$(printf '%s\n' "$status_lines" | sed '/^$/d' | sed -E 's/^.. //' | paste -sd ',' -)"
+        issues+=("main branch is dirty ($main_dirty_paths paths: $main_dirty_path_list); mutate from a clean main or managed worktree")
+      else
+        main_dirty_paths="0"
+      fi
+    else
+      issues+=("unable to determine main branch cleanliness")
+    fi
+  fi
+
+  if [[ "$require_main_not_behind_upstream" == "true" ]]; then
+    if git -C "$ROOT" rev-parse --verify "$main_upstream_ref" >/dev/null 2>&1; then
+      counts="$(git -C "$ROOT" rev-list --left-right --count "${main_upstream_ref}...HEAD" 2>/dev/null || true)"
+      if [[ -n "$counts" ]]; then
+        main_behind="${counts%%$'\t'*}"
+        main_ahead="${counts##*$'\t'}"
+        if [[ "$main_behind" =~ ^[0-9]+$ ]] && (( main_behind > 0 )); then
+          issues+=("main branch is behind '$main_upstream_ref' by $main_behind commits; integrate before mutating")
+        fi
+      else
+        issues+=("unable to compare main branch to '$main_upstream_ref'")
+      fi
+    else
+      issues+=("main upstream ref '$main_upstream_ref' is missing")
+    fi
+  fi
+fi
+
+if [[ "$enabled" == "true" && "$branch" != "$main_branch" && "$branch" != "unknown" ]]; then
+  if [[ -n "$bypass_value" && "$bypass_value" == "$bypass_allowed_value" ]]; then
+    if [[ -z "$bypass_ref_value" && -z "$bypass_friction_ref_value" && -z "$bypass_reason_value" ]]; then
+      issues+=("bypass '$bypass_env_var=$bypass_value' requires '$bypass_ref_env_var', '$bypass_friction_ref_env_var', and '$bypass_reason_env_var'")
+    elif [[ -z "$bypass_ref_value" ]]; then
+      issues+=("bypass '$bypass_env_var=$bypass_value' missing '$bypass_ref_env_var'")
+    elif [[ -z "$bypass_friction_ref_value" ]]; then
+      issues+=("bypass '$bypass_env_var=$bypass_value' missing '$bypass_friction_ref_env_var'")
+    elif [[ -z "$bypass_reason_value" ]]; then
+      issues+=("bypass '$bypass_env_var=$bypass_value' missing '$bypass_reason_env_var'")
+    fi
+    warnings+=("bypass active via $bypass_env_var=$bypass_value")
+  else
+    if [[ "$require_non_main_in_managed" == "true" ]]; then
+      case "$repo_root/" in
+        "$managed_prefix"*) ;;
+        *) issues+=("non-main branch '$branch' is outside managed worktree prefix '$managed_prefix'") ;;
+      esac
+    fi
+
+    if [[ "$require_identity" == "true" ]]; then
+      if [[ -z "$identity_value" ]]; then
+        if [[ -n "$branch_identity_hint" ]]; then
+          issues+=("non-main branch '$branch' requires explicit identity env '$identity_env_var' (suggested: export $identity_env_var=$branch_identity_hint)")
+        else
+          issues+=("non-main branch '$branch' requires explicit identity env '$identity_env_var'")
+        fi
+      elif [[ ${#identity_patterns[@]} -gt 0 ]] && ! identity_matches_patterns "$identity_value"; then
+        if [[ -n "$branch_identity_hint" ]]; then
+          issues+=("$identity_env_var='$identity_value' does not match allowed identity_patterns (branch-derived allowed value: $branch_identity_hint)")
+        else
+          issues+=("$identity_env_var='$identity_value' does not match allowed identity_patterns")
+        fi
+      fi
+    fi
+  fi
+fi
+
+if [[ "$BRIEF" -eq 1 ]]; then
+  if [[ ${#issues[@]} -eq 0 ]]; then
+    printf "PASS branch=%s repo=%s identity_var=%s identity=%s\n" "$branch" "$repo_root" "$identity_env_var" "${identity_value:-<unset>}"
+    [[ "$ENFORCE" -eq 1 ]] && exit 0
+  else
+    printf "FAIL branch=%s repo=%s issues=%s\n" "$branch" "$repo_root" "${issues[*]}"
+    [[ "$ENFORCE" -eq 1 ]] && exit 1
+  fi
+  exit 0
+fi
+
+echo "worktree.session.status"
+echo "repo: $repo_root"
+echo "branch: $branch"
+echo "main_upstream_ref: $main_upstream_ref"
+echo "main_dirty_paths: $main_dirty_paths"
+echo "main_behind: $main_behind"
+echo "main_ahead: $main_ahead"
+echo "contract: $CONTRACT"
+if [[ "$contract_loaded" == "true" ]]; then
+  echo "contract_loaded: yes"
+else
+  echo "contract_loaded: no (using defaults; install yq + contract for canonical policy)"
+fi
+echo "identity_env_var: $identity_env_var"
+echo "identity_value: ${identity_value:-<unset>}"
+echo "bypass_env_var: $bypass_env_var"
+echo "bypass_value: ${bypass_value:-<unset>}"
+echo "bypass_ref_env_var: $bypass_ref_env_var"
+echo "bypass_ref_value: ${bypass_ref_value:-<unset>}"
+echo "bypass_friction_ref_env_var: $bypass_friction_ref_env_var"
+echo "bypass_friction_ref_value: ${bypass_friction_ref_value:-<unset>}"
+echo "bypass_reason_env_var: $bypass_reason_env_var"
+echo "bypass_reason_value: ${bypass_reason_value:-<unset>}"
+
+echo "worktrees:"
+git -C "$ROOT" worktree list | sed 's/^/  - /'
+
+if [[ -d "$SPINE_STATE/sessions" ]]; then
+  echo "sessions:"
+  ls -1 "$SPINE_STATE/sessions" 2>/dev/null | LC_ALL=C sort | sed 's/^/  - /' || true
+fi
+
+if [[ ${#warnings[@]} -gt 0 ]]; then
+  echo "warnings:"
+  for w in "${warnings[@]}"; do
+    echo "  - $w"
+  done
+fi
+
+if [[ ${#issues[@]} -gt 0 ]]; then
+  echo "issues:"
+  for i in "${issues[@]}"; do
+    echo "  - $i"
+  done
+  echo "remediation: $remediation"
+  echo "bypass: $bypass_warning"
+  echo "overall: FAIL"
+  [[ "$ENFORCE" -eq 1 ]] && exit 1
+else
+  echo "overall: PASS"
+  [[ "$ENFORCE" -eq 1 ]] && exit 0
+fi
+
+exit 0

@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# infra.media.capacity.guard.reconcile
+# Runtime-only media capacity status surface for spine-lite.
+set -euo pipefail
+
+ROOT_DEFAULT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+ROOT="${SPINE_CODE:-$ROOT_DEFAULT}"
+MEDIA_BINDINGS_HOME="${MEDIA_BINDINGS_HOME:-$HOME/code/workbench/agents/media/bindings}"
+POLICY_FILE="${MEDIA_CAPACITY_GUARD_POLICY:-$MEDIA_BINDINGS_HOME/infra.capacity.guard.policy.yaml}"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+
+MODE="reconcile"
+DRY_RUN=0
+
+usage() {
+  cat <<'USAGE'
+Usage: infra-media-capacity-guard-reconcile [--brief] [--check-only] [--dry-run]
+
+Modes:
+  --brief       Emit hardware brief line only
+  --check-only  Emit runtime-only capacity report
+  --dry-run     Accepted for compatibility; no mutation occurs in spine-lite
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --brief)
+      MODE="brief"
+      shift
+      ;;
+    --check-only)
+      MODE="check"
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "infra.media.capacity.guard.reconcile FAIL: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$POLICY_FILE" ]] || { echo "infra.media.capacity.guard.reconcile FAIL: missing $POLICY_FILE" >&2; exit 1; }
+[[ -f "$SSH_BINDING" ]] || { echo "infra.media.capacity.guard.reconcile FAIL: missing $SSH_BINDING" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "infra.media.capacity.guard.reconcile FAIL: yq missing" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "infra.media.capacity.guard.reconcile FAIL: python3 missing" >&2; exit 1; }
+command -v ssh >/dev/null 2>&1 || { echo "infra.media.capacity.guard.reconcile FAIL: ssh missing" >&2; exit 1; }
+
+source "$ROOT/ops/lib/ssh-resolve.sh"
+
+WARN_PCT="$(yq -r '.thresholds.media_warn_pct // 80' "$POLICY_FILE")"
+FAIL_PCT="$(yq -r '.thresholds.media_fail_pct // 85' "$POLICY_FILE")"
+STORAGE_HOST_ID="$(yq -r '.target.storage_host_id // "pve"' "$POLICY_FILE")"
+MEDIA_POOL="$(yq -r '.target.pool_name // "media"' "$POLICY_FILE")"
+MD_POOL="$(yq -r '.target.sibling_pool_name // "nas-primary"' "$POLICY_FILE")"
+SNAPSHOT_REL_PATH="$(yq -r '.runway.snapshot_path // "ops/bindings/domains/media/media.capacity.snapshot.yaml"' "$POLICY_FILE")"
+
+if [[ -n "${MEDIA_CAPACITY_SNAPSHOT_PATH:-}" ]]; then
+  SNAPSHOT_PATH="$MEDIA_CAPACITY_SNAPSHOT_PATH"
+elif [[ "$SNAPSHOT_REL_PATH" = /* ]]; then
+  SNAPSHOT_PATH="$SNAPSHOT_REL_PATH"
+else
+  SNAPSHOT_PATH="$ROOT/${SNAPSHOT_REL_PATH#./}"
+fi
+
+USE_SNAPSHOT_ONLY=0
+if [[ "$STORAGE_HOST_ID" == "media-home" ]]; then
+  USE_SNAPSHOT_ONLY=1
+fi
+
+ssh_host="$(ssh_resolve_host "$STORAGE_HOST_ID")"
+ssh_user="$(ssh_resolve_user "$STORAGE_HOST_ID" "ubuntu")"
+[[ -n "$ssh_host" ]] || { echo "infra.media.capacity.guard.reconcile FAIL: missing ssh target id='$STORAGE_HOST_ID'" >&2; exit 1; }
+REF="$ssh_user@$ssh_host"
+identity_opts="$(ssh_resolve_machine_identity_opts "$STORAGE_HOST_ID" 2>/dev/null)" || true
+# shellcheck disable=SC2206
+SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+[[ -n "$identity_opts" ]] && SSH_OPTS+=($identity_opts)
+
+get_pool_pct() {
+  local pool="$1"
+  local raw pct
+  raw="$(ssh "${SSH_OPTS[@]}" "$REF" "zpool list -Hp -o capacity '$pool' 2>/dev/null | head -1" 2>/dev/null || true)"
+  if [[ -z "$raw" ]]; then
+    raw="$(ssh "${SSH_OPTS[@]}" "$REF" "zpool list '$pool' -H 2>/dev/null | awk '{print \$5}' | head -1" 2>/dev/null || true)"
+  fi
+  pct="$(python3 - "$raw" <<'PY'
+import re, sys
+m = re.search(r'(\d+(\.\d+)?)', (sys.argv[1] or '').strip())
+print(int(float(m.group(1)))) if m else print('')
+PY
+)"
+  printf '%s' "$pct"
+}
+
+SNAPSHOT_STATUS="missing"
+SNAPSHOT_DAYS_TO_FAIL="none"
+SNAPSHOT_GENERATED_AT=""
+SNAPSHOT_USAGE_PCT=""
+if [[ -f "$SNAPSHOT_PATH" ]]; then
+  SNAPSHOT_STATUS="$(yq -r '.runway_status // "unknown"' "$SNAPSHOT_PATH" 2>/dev/null || echo unknown)"
+  SNAPSHOT_DAYS_TO_FAIL="$(yq -r '.projection.days_to_fail // "none"' "$SNAPSHOT_PATH" 2>/dev/null || echo none)"
+  SNAPSHOT_GENERATED_AT="$(yq -r '.generated_at_utc // ""' "$SNAPSHOT_PATH" 2>/dev/null || true)"
+  SNAPSHOT_USAGE_PCT="$(yq -r '.pool.usage_pct // ""' "$SNAPSHOT_PATH" 2>/dev/null || true)"
+fi
+
+if [[ "$USE_SNAPSHOT_ONLY" -eq 1 ]]; then
+  MEDIA_PCT="$SNAPSHOT_USAGE_PCT"
+  MD_PCT="n/a"
+else
+  MEDIA_PCT="$(get_pool_pct "$MEDIA_POOL")"
+  MD_PCT="$(get_pool_pct "$MD_POOL")"
+fi
+
+if [[ -z "$MEDIA_PCT" ]]; then
+  if [[ "$MODE" == "brief" ]]; then
+    echo "HW: UNKNOWN (pool probe failed for $MEDIA_POOL on $STORAGE_HOST_ID)"
+    exit 0
+  fi
+  echo "infra.media.capacity.guard.reconcile FAIL: unable to read media pool capacity" >&2
+  exit 1
+fi
+
+STATE="OK"
+if (( MEDIA_PCT >= FAIL_PCT )); then
+  STATE="FAIL"
+elif (( MEDIA_PCT >= WARN_PCT )); then
+  STATE="WARN"
+fi
+
+HW_BRIEF="HW: media=${MEDIA_PCT}% ${STATE} | nas-primary=${MD_PCT:-unknown}% | capacity_gap=none | age=none"
+if [[ -n "$SNAPSHOT_GENERATED_AT" ]]; then
+  HW_BRIEF="${HW_BRIEF} | runway=${SNAPSHOT_STATUS} | days_to_fail=${SNAPSHOT_DAYS_TO_FAIL} | snapshot=${SNAPSHOT_GENERATED_AT}"
+fi
+
+if [[ "$MODE" == "brief" ]]; then
+  echo "$HW_BRIEF"
+  exit 0
+fi
+
+echo "infra.media.capacity.guard.reconcile"
+echo "mode: $MODE"
+echo "$HW_BRIEF"
+echo "snapshot_path: $SNAPSHOT_PATH"
+echo "dry_run: $DRY_RUN"
+
+if [[ ! -f "$SNAPSHOT_PATH" ]]; then
+  echo "status: FAIL"
+  echo "reason: missing capacity snapshot"
+  exit 1
+fi
+
+if [[ "$STATE" == "OK" ]]; then
+  echo "status: PASS"
+  echo "mutation: none"
+  exit 0
+fi
+
+if [[ "$STATE" == "WARN" ]]; then
+  echo "status: WARN"
+  echo "reason: media usage above warn threshold (${MEDIA_PCT}% >= ${WARN_PCT}%)"
+else
+  echo "status: FAIL"
+  echo "reason: media usage above fail threshold (${MEDIA_PCT}% >= ${FAIL_PCT}%)"
+fi
+echo "mutation: removed_in_spine_lite"
+exit 1

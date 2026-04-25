@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Scheduled runner: refresh media capacity runway snapshot projection.
+# LaunchAgent: com.ronny.media-capacity-snapshot-daily
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)}"
+CAP_RUNNER="${SPINE_ROOT}/bin/ops"
+source "${SPINE_ROOT}/ops/lib/job-wrapper.sh"
+
+echo "[media-capacity-snapshot-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+if [[ -n "${MEDIA_CAPACITY_SNAPSHOT_BUILD_BIN:-}" ]]; then
+  spine_job_run \
+    "media-capacity-snapshot-daily:media.capacity.snapshot.build" \
+    "$MEDIA_CAPACITY_SNAPSHOT_BUILD_BIN"
+else
+  spine_job_run \
+    "media-capacity-snapshot-daily:media.capacity.snapshot.build" \
+    "$CAP_RUNNER" cap run media.capacity.snapshot.build
+fi
+
+echo "[media-capacity-snapshot-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

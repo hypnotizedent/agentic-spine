@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Internal orchestration plumbing. Not a standalone operator entry point.
+# For operator-facing state, use: ops status
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+
+usage() {
+  cat <<'USAGE'
+orchestration-status - Show orchestration loop status
+
+Usage:
+  orchestration-status [--loop-id <id>]
+USAGE
+}
+
+ROOT="$(orchestration_root)"
+LOOP_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) orchestration_fail "unknown argument: $1" ;;
+  esac
+done
+
+orchestration_need yq
+state_root="$(orchestration_state_root)"
+[[ -d "$state_root" ]] || {
+  echo "orchestration.status"
+  echo "loops: 0"
+  exit 0
+}
+
+lane_status() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    yq e -r '.status // "present"' "$file"
+  else
+    echo "missing"
+  fi
+}
+
+manifest_read() {
+  local manifest="$1"
+  local expr="$2"
+  local field="$3"
+  local value
+
+  if ! value="$(yq e -r "$expr" "$manifest")"; then
+    orchestration_fail "unable to read $field from manifest: $manifest"
+  fi
+
+  printf '%s\n' "$value"
+}
+
+manifest_lane_status() {
+  local manifest="$1"
+  local lane="$2"
+  manifest_read "$manifest" ".lanes.\"$lane\".status // \"\"" "lanes.$lane.status"
+}
+
+resolve_validation_state() {
+  local artifact_file="$1"
+  local manifest="$2"
+  local lane="$3"
+  local artifact_state
+  artifact_state="$(lane_status "$artifact_file")"
+  if [[ "$artifact_state" != "missing" ]]; then
+    echo "$artifact_state"
+    return
+  fi
+  local manifest_status
+  manifest_status="$(manifest_lane_status "$manifest" "$lane")"
+  if [[ "$manifest_status" == "validated" || "$manifest_status" == "integrated" ]]; then
+    echo "validated"
+  else
+    echo "missing"
+  fi
+}
+
+resolve_integration_state() {
+  local artifact_file="$1"
+  local manifest="$2"
+  local lane="$3"
+  local artifact_state
+  artifact_state="$(lane_status "$artifact_file")"
+  if [[ "$artifact_state" != "missing" ]]; then
+    echo "$artifact_state"
+    return
+  fi
+  local manifest_status
+  manifest_status="$(manifest_lane_status "$manifest" "$lane")"
+  if [[ "$manifest_status" == "integrated" ]]; then
+    echo "applied"
+  else
+    echo "missing"
+  fi
+}
+
+print_one() {
+  local loop_dir="$1"
+  local manifest="$loop_dir/manifest.yaml"
+  [[ -f "$manifest" ]] || return 0
+
+  local id base_sha apply_owner loop_status seq_count related_count
+  id="$(manifest_read "$manifest" '.loop_id // "unknown"' 'loop_id')"
+  base_sha="$(manifest_read "$manifest" '.base_sha // ""' 'base_sha')"
+  apply_owner="$(manifest_read "$manifest" '.apply_owner // ""' 'apply_owner')"
+  loop_status="$(manifest_read "$manifest" '.status // "open"' 'status')"
+  seq_count="$(manifest_read "$manifest" '(.sequence // []) | length' 'sequence')"
+  related_count="$(manifest_read "$manifest" '(.related_repos // []) | length' 'related_repos')"
+
+  echo "loop_id: $id"
+  echo "  status: $loop_status"
+  echo "  base_sha: $base_sha"
+  echo "  apply_owner: $apply_owner"
+  echo "  sequence: $seq_count"
+  if [[ "$related_count" -gt 0 ]]; then
+    echo "  related_repos: $related_count"
+    while IFS= read -r rr; do
+      [[ -z "$rr" || "$rr" == "null" ]] && continue
+      echo "    - $rr"
+    done < <(yq e -r '.related_repos[]?' "$manifest")
+  fi
+
+  while IFS= read -r lane; do
+    [[ -z "$lane" || "$lane" == "null" ]] && continue
+    ticket_state="$(lane_status "$loop_dir/tickets/$lane.yaml")"
+    validation_state="$(resolve_validation_state "$loop_dir/validations/$lane.yaml" "$manifest" "$lane")"
+    integration_state="$(resolve_integration_state "$loop_dir/integrations/$lane.yaml" "$manifest" "$lane")"
+    echo "  lane[$lane]: ticket=$ticket_state validate=$validation_state integrate=$integration_state"
+  done < <(yq e -r '.sequence[]?' "$manifest")
+
+  if [[ -f "$loop_dir/closed.yaml" ]]; then
+    close_state="$(manifest_read "$loop_dir/closed.yaml" '.status // ""' 'closed.status')"
+    close_at="$(manifest_read "$loop_dir/closed.yaml" '.closed_at // ""' 'closed.closed_at')"
+    close_by="$(manifest_read "$loop_dir/closed.yaml" '.closed_by // ""' 'closed.closed_by')"
+    echo "  close: $close_state at $close_at by $close_by"
+  fi
+}
+
+echo "orchestration.status"
+
+if [[ -n "$LOOP_ID" ]]; then
+  orchestration_assert_id "$LOOP_ID" "loop id"
+  print_one "$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+  exit 0
+fi
+
+count=0
+for loop_dir in "$state_root"/*; do
+  [[ -d "$loop_dir" ]] || continue
+  print_one "$loop_dir"
+  count=$((count + 1))
+done
+
+echo "loops: $count"

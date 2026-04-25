@@ -1,0 +1,183 @@
+schema_version: "1.0"
+status: authoritative
+owner: "@operator"
+updated_at: "2026-03-05T23:35:00Z"
+description: "Canonical provider orchestration across spine engine and managed coding surfaces, with native Codex and Claude subscription auth restored as the default managed terminal paths."
+
+defaults:
+  review_date: "2026-04-01"
+  infisical_project: infrastructure
+  infisical_environment: prod
+  engine_surface: spine_engine
+  local_lmstudio_model_env: SPINE_LOCAL_LMSTUDIO_MODEL
+  local_lmstudio_model_default: qwen3-coder-30b-a3b-instruct
+  codex_local_provider: lmstudio
+  claude_code_router_port: 3456
+
+providers:
+  codex_native:
+    display_name: Codex Native Login
+    engine_backend: native_account
+    env_keys: []
+    auth_required: false
+    codex:
+      model: gpt-5.4
+    surface_support: [codex]
+
+  claude_native:
+    display_name: Claude Native Subscription
+    engine_backend: native_account
+    env_keys: []
+    auth_required: false
+    models:
+      claude_code: claude-sonnet-4-5-20250929
+    surface_support: [claude_code]
+
+  anthropic:
+    display_name: Anthropic
+    engine_backend: anthropic
+    env_keys: [ANTHROPIC_API_KEY]
+    auth_required: true
+    endpoint:
+      base_url: https://api.anthropic.com
+      api_path: /v1/messages
+    models:
+      spine_engine: claude-sonnet-4-5-20250929
+      claude_code: claude-sonnet-4-5-20250929
+      claude_desktop: claude-sonnet-4-5-20250929
+    surface_support: [spine_engine, claude_code, claude_desktop]
+
+  openai:
+    display_name: OpenAI
+    engine_backend: openai_compatible
+    env_keys: [OPENAI_API_KEY]
+    auth_required: true
+    endpoint:
+      base_url: https://api.openai.com/v1
+      chat_path: /chat/completions
+    opencode:
+      model: gpt-5.4
+      small_model: gpt-5.4-mini
+    spine_engine:
+      model: gpt-4.1-mini
+    surface_support: [spine_engine, opencode]
+
+  zai:
+    display_name: z.ai
+    engine_backend: openai_compatible
+    env_keys: [ZAI_API_KEY, Z_AI_API_KEY]
+    auth_required: true
+    endpoint:
+      base_url: https://api.z.ai/api/paas/v4
+      chat_path: /chat/completions
+    opencode:
+      provider_id: zai-coding-plan
+      base_url: https://api.z.ai/api/coding/paas/v4
+      model: glm-5
+      small_model: glm-4.5-flash
+      catalog_models:
+        - glm-5
+        - glm-5-air
+        - glm-4.5
+        - glm-4.5-air
+        - glm-4.5-flash
+    spine_engine:
+      model: glm-5
+    surface_support: [spine_engine, opencode]
+
+  openrouter:
+    display_name: OpenRouter
+    engine_backend: openai_compatible
+    env_keys: [OPENROUTER_API_KEY]
+    auth_required: true
+    endpoint:
+      base_url: https://openrouter.ai/api/v1
+      chat_path: /chat/completions
+      headers:
+        HTTP-Referer: https://example-shop.com
+        X-Title: agentic-spine
+    opencode:
+      model: openai/gpt-4.1-mini
+      small_model: openai/gpt-4.1-mini
+    spine_engine:
+      model: openai/gpt-4.1-mini
+    claude_code_router:
+      model: anthropic/claude-3.7-sonnet
+    surface_support: [spine_engine, opencode, claude_code]
+    router_required_surfaces: [claude_code]
+
+  nvidia_nim:
+    display_name: NVIDIA NIM
+    engine_backend: openai_compatible
+    env_keys: [NVIDIA_NIM_API_KEY, NVIDIA_API_KEY]
+    auth_required: true
+    endpoint:
+      base_url: https://integrate.api.nvidia.com/v1
+      chat_path: /chat/completions
+    opencode:
+      provider_id: nvidia-nim
+      base_url: https://integrate.api.nvidia.com/v1
+      model: moonshotai/kimi-k2.5
+      small_model: moonshotai/kimi-k2.5
+      catalog_models:
+        - moonshotai/kimi-k2.5
+    spine_engine:
+      model: moonshotai/kimi-k2.5
+    claude_code_router:
+      model: moonshotai/kimi-k2.5
+    surface_support: [spine_engine, opencode, claude_code]
+    router_required_surfaces: [claude_code]
+
+  local_lmstudio:
+    display_name: LM Studio (local)
+    engine_backend: openai_compatible
+    env_keys: []
+    auth_required: false
+    endpoint:
+      base_url: http://127.0.0.1:1234/v1
+      chat_path: /chat/completions
+      models_path: /models
+    codex:
+      provider_id: oss
+      local_provider: lmstudio
+      model_env: SPINE_LOCAL_LMSTUDIO_MODEL
+    opencode:
+      model_env: SPINE_LOCAL_LMSTUDIO_MODEL
+      small_model_env: SPINE_LOCAL_LMSTUDIO_MODEL
+    spine_engine:
+      model_env: SPINE_LOCAL_LMSTUDIO_MODEL
+    claude_code_router:
+      model_env: SPINE_LOCAL_LMSTUDIO_MODEL
+    surface_support: [spine_engine, codex, opencode, claude_code]
+    router_required_surfaces: [claude_code]
+
+  local_echo:
+    display_name: Local Echo
+    engine_backend: local_echo
+    env_keys: []
+    auth_required: false
+    surface_support: [spine_engine]
+
+surfaces:
+  spine_engine:
+    default_chain: [zai, anthropic, openrouter, nvidia_nim, openai, local_lmstudio, local_echo]
+    description: "Internal spine engine execution path used by ops/plugins/providers/bin/run.sh."
+
+  claude_code:
+    direct_chain: [claude_native]
+    router_chain: [openrouter, nvidia_nim, local_lmstudio]
+    description: "Native Claude subscription auth by default; alternative providers require explicit selection and claude-code-router when applicable."
+
+  codex:
+    default_chain: [codex_native, local_lmstudio]
+    description: "Native Codex account auth by default, with explicit local OSS fallback via LM Studio. No remote API-billed Codex provider is selected by default."
+
+  opencode:
+    default_chain: [zai, openrouter, nvidia_nim, openai, local_lmstudio]
+    managed_provider_catalog: [zai, nvidia_nim]
+    description: "Managed OpenCode catalog with z.ai GLM as default and Kimi exposed as a secondary non-OpenAI lane."
+
+  claude_desktop:
+    default_chain: [anthropic]
+    mode: fixed_upstream
+    description: "Desktop app remains Anthropic upstream; provider orchestration governs MCP and status visibility only."

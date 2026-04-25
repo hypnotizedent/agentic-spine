@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-proxmox-storage-slot-inventory — Truthful disk inventory
+# Read-only. Reports all disks with best-available physical context.
+#
+# Uses sysfs/by-path/enclosure data when available instead of relying
+# on /dev/sdX names alone. Marks uncertain mappings explicitly.
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+HOST_ID="${1:-pve}"
+
+SSH_HOST="$(ssh_resolve_ssh_host_with_fallback "$HOST_ID" 2>/dev/null | awk '{print $1}')"
+SSH_USER="$(ssh_resolve_user "$HOST_ID")"
+
+if [[ -z "$SSH_HOST" || "$SSH_HOST" == "unreachable" ]]; then
+    echo "FAIL: cannot reach $HOST_ID" >&2
+    exit 1
+fi
+
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+remote() {
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "$@"
+}
+
+echo "=== DISK SLOT INVENTORY ($HOST_ID) ==="
+echo ""
+
+remote 'bash -s' <<'INVENTORY'
+set -euo pipefail
+
+# Collect by-path links for physical topology context
+declare -A DEV_PATH=()
+if [[ -d /dev/disk/by-path/ ]]; then
+    while IFS= read -r link; do
+        target="$(readlink -f "$link" 2>/dev/null || true)"
+        [[ -n "$target" ]] || continue
+        basename_target="$(basename "$target")"
+        # Only track whole-disk links (no partition suffixes)
+        [[ "$basename_target" =~ ^sd[a-z]+$ || "$basename_target" =~ ^nvme[0-9]+n[0-9]+$ ]] || continue
+        DEV_PATH["$basename_target"]="${DEV_PATH[$basename_target]:-}${DEV_PATH[$basename_target]:+, }$(basename "$link")"
+    done < <(find /dev/disk/by-path/ -maxdepth 1 -type l 2>/dev/null)
+fi
+
+# Classify controller path
+classify_path() {
+    local paths="$1"
+    if echo "$paths" | grep -q "pci-0000:03:00.0"; then
+        echo "internal-hba330"
+    elif echo "$paths" | grep -q "pci-0000:82:00.0"; then
+        echo "nas-primary-external"
+    else
+        echo "unknown-controller"
+    fi
+}
+
+# Classify role based on LVM/ZFS membership
+classify_role() {
+    local dev="/dev/$1"
+    # Check if any partition is a PV in VG pve
+    if pvs --noheadings -o pv_name --select vg_name=pve 2>/dev/null | grep -q "$dev"; then
+        echo "boot-lvm"
+        return
+    fi
+    # Check ZFS
+    for pool in $(zpool list -H -o name 2>/dev/null); do
+        if zpool status "$pool" 2>/dev/null | grep -q "$(basename "$dev")"; then
+            echo "zfs:$pool"
+            return
+        fi
+        # Also check by scsi id
+        local by_id=""
+        by_id="$(ls -la /dev/disk/by-id/ 2>/dev/null | grep "$(basename "$dev")$" | awk '{print $9}' | grep -v 'part' | head -1 || true)"
+        if [[ -n "$by_id" ]] && zpool status "$pool" 2>/dev/null | grep -q "$by_id"; then
+            echo "zfs:$pool"
+            return
+        fi
+    done
+    echo "unassigned"
+}
+
+printf "%-6s %-6s %-17s %-17s %-18s %-12s %s\n" \
+    "DEV" "SIZE" "MODEL" "SERIAL" "CONTROLLER" "ROLE" "FLAGS"
+printf "%-6s %-6s %-17s %-17s %-18s %-12s %s\n" \
+    "---" "----" "-----" "------" "----------" "----" "-----"
+
+while IFS= read -r line; do
+    name="$(echo "$line" | awk '{print $1}')"
+    size="$(echo "$line" | awk '{print $2}')"
+    model="$(echo "$line" | awk '{print $3}')"
+    serial="$(echo "$line" | awk '{print $4}')"
+
+    paths="${DEV_PATH[$name]:-none}"
+    controller="$(classify_path "$paths")"
+    role="$(classify_role "$name")"
+
+    flags=""
+    if [[ "$size" == "0B" || "$size" == "0" ]]; then
+        flags="DEAD"
+    fi
+    rota="$(lsblk -dn -o ROTA "/dev/$name" 2>/dev/null | xargs || echo '?')"
+    if [[ "$rota" == "0" ]]; then
+        flags="${flags:+$flags,}SSD"
+    elif [[ "$rota" == "1" ]]; then
+        flags="${flags:+$flags,}HDD"
+    fi
+
+    printf "%-6s %-6s %-17s %-17s %-18s %-12s %s\n" \
+        "$name" "$size" "${model:0:17}" "${serial:0:17}" "$controller" "$role" "$flags"
+done < <(lsblk -dn -o NAME,SIZE,MODEL,SERIAL 2>/dev/null | grep -E '^sd|^nvme')
+
+echo ""
+echo "Controller legend:"
+echo "  internal-hba330  = R730XD front/rear backplane (pci-0000:03:00.0)"
+echo "  nas-primary-external  = MD1400 external shelf (pci-0000:82:00.0)"
+echo "  unknown-controller = path not resolved"
+echo ""
+echo "NOTE: Physical slot numbers require enclosure sysfs data (not always available)."
+echo "      If exact slot mapping is needed, cross-reference with: dmesg | grep 'enclosure logical id'"
+INVENTORY

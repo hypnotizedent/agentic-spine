@@ -1,0 +1,187 @@
+---
+schema_version: "1.0"
+status: authoritative
+owner: "@operator"
+updated_at: "2026-03-24"
+scope: communication-protocol
+decision_loop_id: LOOP-SPINE-PRODUCTIZATION-20260324
+
+description: >
+  Governs the full Operator → Translator → Controller communication pathway.
+  Defines the handoff protocol, message types, and routing rules that
+  eliminate human-induced friction and doc sprawl from autonomous execution.
+
+contract: communication.protocol
+version: "1.0"
+
+# ── Pathway Overview ────────────────────────────────────────────────
+#
+#  Operator ──(directive)──▶ Translator ──(normalized_request)──▶ Controller
+#     ▲                          │                                     │
+#     │                          │                                     │
+#     └──(status_rendering)──────┘◀────(execution_receipt)─────────────┘
+#
+pathway:
+  nodes:
+    - role: operator
+      contract: operator.boundary.contract.yaml
+      position: origin
+      description: "Human strategic authority. Emits intent, receives rendered status."
+
+    - role: translator
+      contract: translator.authority.contract.yaml
+      position: membrane
+      description: >
+        Classifies, normalises, and routes. Preserves context across sessions.
+        Never executes, never attests, never claims success.
+
+    - role: controller
+      contract: controller.boundary.contract.yaml
+      position: execution
+      description: >
+        Executes governed tasks, produces receipted evidence, evaluates gates.
+        Never interprets intent, never sets priority.
+
+  edges:
+    - from: operator
+      to: translator
+      message_types: [directive, feedback, approval]
+      format: natural_language
+      protocol: synchronous_conversation
+      description: >
+        Operator provides unstructured intent. Translator must classify
+        before forwarding — raw Operator text never reaches Controller.
+
+    - from: translator
+      to: controller
+      message_types: [normalized_request, governed_task_envelope]
+      format: structured_yaml
+      protocol: capability_dispatch
+      description: >
+        Translator emits routing packets or full governed envelopes.
+        Controller receives only structured, scoped requests.
+
+    - from: controller
+      to: translator
+      message_types: [execution_receipt, response_envelope, friction_item, gap_filing]
+      format: structured_yaml
+      protocol: receipt_return
+      description: >
+        Controller returns receipted evidence. Translator renders
+        results into human-readable form for the Operator.
+
+    - from: translator
+      to: operator
+      message_types: [status_rendering, proposal, friction_alert]
+      format: human_readable
+      protocol: synchronous_conversation
+      description: >
+        Translator converts receipts and envelopes into plain-language
+        status. Operator never sees raw YAML or gate output.
+
+# ── Message Type Definitions ────────────────────────────────────────
+message_types:
+  directive:
+    direction: operator_to_translator
+    format: natural_language
+    fields:
+      - intent              # what the Operator wants
+      - constraints         # what must not happen
+      - priority            # optional urgency signal
+    example: >
+      "Focus on the prompt library and communication contracts.
+       Do not apply sanitization fixes — only produce a script."
+
+  normalized_request:
+    direction: translator_to_controller
+    format: structured_yaml
+    fields:
+      - request_id          # unique identifier
+      - classified_intent   # spine_concern | domain_concern
+      - target_capability   # resolved capability name
+      - scope_authorization # files/paths in scope
+      - parameters          # capability-specific args
+      - loop_context        # governing loop_id, phase, constraints
+      - expected_artifact   # what output type is expected
+    example: |
+      request_id: REQ-20260324-001
+      classified_intent: spine_concern
+      target_capability: prompt.library.bootstrap
+      scope_authorization:
+        - ops/plugins/core/session/templates/
+        - $SPINE_STATE/prompts/
+      loop_context:
+        loop_id: LOOP-SPINE-PRODUCTIZATION-20260324
+        phase: 1
+      expected_artifact: receipt
+
+  execution_receipt:
+    direction: controller_to_translator
+    format: structured_yaml
+    fields:
+      - receipt_id          # run key
+      - request_id          # echo of the request
+      - status              # done | failed | blocked
+      - commit_sha          # if a commit was made
+      - gates_run           # gate IDs evaluated
+      - gates_passed        # gate IDs that passed
+      - evidence_path       # path to full evidence
+    example: |
+      receipt_id: CAP-20260324-195643__prompt.library.bootstrap__Rg5tx65705
+      request_id: REQ-20260324-001
+      status: done
+      gates_run: [D124]
+      gates_passed: [D124]
+
+  status_rendering:
+    direction: translator_to_operator
+    format: human_readable
+    fields:
+      - summary             # one-line status
+      - details             # optional expanded context
+      - next_action         # what the Operator should do next
+    example: >
+      "Prompt Library bootstrapped — 4 templates seeded to .runtime/.
+       Next: review templates and confirm acceptance criteria."
+
+# ── Anti-Patterns ───────────────────────────────────────────────────
+anti_patterns:
+  - id: operator_direct_to_controller
+    description: >
+      Operator must not directly instruct Controller terminals. This
+      bypasses classification, context preservation, and creates
+      floating WIP when the Translator loses track of state.
+    symptom: "Human typing cap run commands directly in a controller terminal"
+    remedy: "Route through Translator. Use ops terminal launch for governed entry."
+
+  - id: translator_executing
+    description: >
+      Translator must not execute capabilities, commit code, or run gates.
+      It may only classify, normalise, and route.
+    symptom: "Translator terminal running mutating capabilities"
+    remedy: "Check forbidden_actions in translator.authority.contract.yaml"
+
+  - id: controller_interpreting_intent
+    description: >
+      Controller must not interpret raw Operator intent. If a request
+      is ambiguous, it must be rejected back to Translator.
+    symptom: "Controller terminal making scope/priority decisions"
+    remedy: "Return ambiguous request to Translator for re-classification"
+
+  - id: unreceipted_work
+    description: >
+      Every execution must produce a receipt. Work without receipts
+      is invisible to the governance system and creates drift.
+    symptom: "git log shows commits without run keys or D-trailers"
+    remedy: "All execution goes through capability dispatch"
+
+# ── Relationship to Existing Contracts ──────────────────────────────
+related_contracts:
+  - contract: translator.authority.contract.yaml
+    relationship: "Translator boundary — this protocol wraps its routing rules"
+  - contract: governed.task.envelope.contract.yaml
+    relationship: "Envelope schema — formal container for Translator→Controller dispatch"
+  - contract: dispatch.envelope.contract.yaml
+    relationship: "Node-to-node dispatch coordination (added 2026-04-05) — formalizes Controller→Execution and multi-lane dispatch"
+  - contract: prompt.library.contract.yaml
+    relationship: "Template governance — standardises terminal context loading"

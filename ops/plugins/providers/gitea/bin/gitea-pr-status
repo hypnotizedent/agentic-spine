@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_SPINE_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+if [[ -z "${SPINE_ROOT:-}" || ! -r "${SPINE_ROOT}/ops/plugins/providers/gitea/lib/gitea-api.sh" ]]; then
+  SPINE_ROOT="$DEFAULT_SPINE_ROOT"
+fi
+
+# shellcheck source=$SPINE_ROOT/ops/plugins/providers/gitea/lib/gitea-api.sh
+source "$SPINE_ROOT/ops/plugins/providers/gitea/lib/gitea-api.sh"
+
+usage() {
+  cat <<'EOF'
+gitea-pr-status - governed Gitea pull request status surface
+
+Usage:
+  gitea-pr-status --pr <number> [--repo owner/repo] [--json]
+EOF
+}
+
+REPO_SLUG=""
+PR_NUMBER=""
+JSON_OUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) REPO_SLUG="${2:-}"; shift 2 ;;
+    --pr) PR_NUMBER="${2:-}"; shift 2 ;;
+    --json) JSON_OUT=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) gitea_stop "unknown argument: $1" ;;
+  esac
+done
+
+[[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || gitea_stop "--pr must be numeric"
+gitea_require_tool python3
+repo_slug="$(gitea_repo_slug_resolve "$REPO_SLUG")"
+owner="$(gitea_repo_owner "$repo_slug")"
+repo="$(gitea_repo_name "$repo_slug")"
+payload="$(gitea_api_request GET "/api/v1/repos/${owner}/${repo}/pulls/${PR_NUMBER}")"
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  GITEA_PR_PAYLOAD="$payload" python3 - "$repo_slug" "$PR_NUMBER" <<'PY'
+import json
+import os
+import sys
+
+pr = json.loads(os.environ["GITEA_PR_PAYLOAD"])
+head = pr.get("head") or {}
+base = pr.get("base") or {}
+print(json.dumps({
+    "surface": "gitea.pr.status",
+    "repo": sys.argv[1],
+    "number": int(sys.argv[2]),
+    "title": pr.get("title"),
+    "state": pr.get("state"),
+    "draft": pr.get("draft", False),
+    "merged": pr.get("merged", False),
+    "mergeable": pr.get("mergeable"),
+    "head": head.get("label") or head.get("ref"),
+    "base": base.get("label") or base.get("ref"),
+    "url": pr.get("html_url"),
+    "body_present": bool(pr.get("body")),
+}, indent=2))
+PY
+  exit 0
+fi
+
+GITEA_PR_PAYLOAD="$payload" python3 - "$repo_slug" "$PR_NUMBER" <<'PY'
+import json
+import os
+import sys
+
+pr = json.loads(os.environ["GITEA_PR_PAYLOAD"])
+head = pr.get("head") or {}
+base = pr.get("base") or {}
+print("gitea.pr.status")
+print(f"repo: {sys.argv[1]}")
+print(f"number: {sys.argv[2]}")
+print(f"title: {pr.get('title')}")
+print(f"state: {pr.get('state')}")
+print(f"draft: {pr.get('draft', False)}")
+print(f"merged: {pr.get('merged', False)}")
+print(f"mergeable: {pr.get('mergeable')}")
+print(f"head: {head.get('label') or head.get('ref') or 'unknown'}")
+print(f"base: {base.get('label') or base.get('ref') or 'unknown'}")
+print(f"url: {pr.get('html_url') or 'n/a'}")
+PY

@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+
+ROLE=""
+LOOP_ID=""
+LANE=""
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+orchestration-launcher-plan - Resolve workbench launcher context from live orchestration state
+
+Usage:
+  orchestration-launcher-plan --role <solo|orchestrator|worker> [options]
+
+Options:
+  --loop-id <id>   Required for orchestrator/worker roles
+  --lane <id>      Required for worker role
+  --json           Emit JSON instead of key=value output
+USAGE
+}
+
+stop() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+lock_pid() {
+  local file="$1"
+  sed -n 's/^pid:[[:space:]]*//p' "$file" | head -1
+}
+
+lock_is_stale() {
+  local file="$1"
+  local pid
+  pid="$(lock_pid "$file")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  kill -0 "$pid" 2>/dev/null && return 1
+  return 0
+}
+
+find_branch_worktree() {
+  local repo="$1"
+  local branch="$2"
+  local current_wt=""
+  local current_branch=""
+
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        current_wt="${line#worktree }"
+        ;;
+      branch\ refs/heads/*)
+        current_branch="${line#branch refs/heads/}"
+        if [[ "$current_branch" == "$branch" ]]; then
+          printf '%s\n' "$current_wt"
+          return 0
+        fi
+        ;;
+    esac
+  done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
+  return 1
+}
+
+resolve_lane_branch() {
+  local manifest="$1"
+  local loop_dir="$2"
+  local lane="$3"
+  local branch=""
+  local ticket="$loop_dir/tickets/$lane.yaml"
+
+  if [[ -f "$ticket" ]]; then
+    branch="$(yq e -r '.branch // ""' "$ticket")"
+  fi
+  if [[ -z "$branch" || "$branch" == "null" ]]; then
+    branch="$(yq e -r ".lanes.\"$lane\".branch // \"\"" "$manifest")"
+  fi
+  [[ -n "$branch" && "$branch" != "null" ]] || stop "missing branch assignment for loop=$LOOP_ID lane=$lane"
+  printf '%s\n' "$branch"
+}
+
+collect_locks() {
+  local state_root="$1"
+  local records=()
+  shopt -s nullglob
+  local file loop lane status owner pid mode worktree branch stale
+  for file in "$state_root"/*/locks/*.lock; do
+    [[ -f "$file" ]] || continue
+    loop="$(sed -n 's/^loop_id:[[:space:]]*//p' "$file" | head -1)"
+    [[ -n "$loop" ]] || loop="$(basename "$(dirname "$(dirname "$file")")")"
+    lane="$(basename "$file" .lock)"
+    status="$(sed -n 's/^status:[[:space:]]*//p' "$file" | head -1)"
+    owner="$(sed -n 's/^owner:[[:space:]]*//p' "$file" | head -1)"
+    pid="$(lock_pid "$file")"
+    mode="$(sed -n 's/^mode:[[:space:]]*//p' "$file" | head -1)"
+    worktree="$(sed -n 's/^worktree:[[:space:]]*//p' "$file" | head -1)"
+    branch="$(sed -n 's/^branch:[[:space:]]*//p' "$file" | head -1)"
+    [[ -n "$status" ]] || status="active"
+    [[ -n "$mode" ]] || mode="legacy"
+    stale="false"
+    if lock_is_stale "$file"; then
+      stale="true"
+    fi
+    records+=("${loop}"$'\t'"${lane}"$'\t'"${status}"$'\t'"${stale}"$'\t'"${owner}"$'\t'"${pid}"$'\t'"${mode}"$'\t'"${worktree}"$'\t'"${branch}"$'\t'"${file}")
+  done
+  printf '%s\n' "${records[@]}"
+}
+
+emit_json() {
+  local role="$1"
+  local loop_id="$2"
+  local lane="$3"
+  local repo="$4"
+  local branch="$5"
+  local worktree="$6"
+  local worktree_exists="$7"
+  local resolution_mode="$8"
+  local active_lock_count="$9"
+  local warning="${10}"
+
+  python3 - "$role" "$loop_id" "$lane" "$repo" "$branch" "$worktree" "$worktree_exists" "$resolution_mode" "$active_lock_count" "$warning" <<'PY'
+import json
+import sys
+
+role, loop_id, lane, repo, branch, worktree, worktree_exists, resolution_mode, active_lock_count, warning = sys.argv[1:]
+locks = []
+for raw in sys.stdin.read().splitlines():
+    if not raw:
+        continue
+    parts = raw.split("\t")
+    while len(parts) < 10:
+        parts.append("")
+    locks.append(
+        {
+            "loop_id": parts[0],
+            "lane": parts[1],
+            "status": parts[2],
+            "stale": parts[3] == "true",
+            "owner": parts[4],
+            "pid": parts[5],
+            "mode": parts[6],
+            "worktree": parts[7],
+            "branch": parts[8],
+            "path": parts[9],
+        }
+    )
+
+payload = {
+    "capability": "orchestration.launcher.plan",
+    "role": role,
+    "loop_id": loop_id or None,
+    "lane": lane or None,
+    "repo": repo or None,
+    "branch": branch or None,
+    "worktree": worktree or None,
+    "worktree_exists": worktree_exists == "true",
+    "resolution_mode": resolution_mode or None,
+    "active_lock_count": int(active_lock_count or "0"),
+    "warning": warning or None,
+    "locks": locks,
+}
+print(json.dumps(payload, indent=2, sort_keys=True))
+PY
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --role) ROLE="${2:-}"; shift 2 ;;
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --lane) LANE="${2:-}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+ROLE="$(printf '%s' "$ROLE" | tr '[:upper:]' '[:lower:]')"
+case "$ROLE" in
+  solo|orchestrator|worker) ;;
+  *) stop "--role must be solo|orchestrator|worker" ;;
+esac
+
+if [[ "$ROLE" != "solo" ]]; then
+  [[ -n "$LOOP_ID" ]] || stop "--loop-id is required for role=$ROLE"
+  orchestration_assert_id "$LOOP_ID" "loop id"
+fi
+
+if [[ "$ROLE" == "worker" ]]; then
+  LANE="$(printf '%s' "$LANE" | tr '[:lower:]' '[:upper:]')"
+  [[ "$LANE" =~ ^[A-Z0-9._-]+$ ]] || stop "--lane is required for role=worker"
+else
+  [[ -z "$LANE" ]] || LANE="$(printf '%s' "$LANE" | tr '[:lower:]' '[:upper:]')"
+fi
+
+ROOT="$(orchestration_root)"
+STATE_ROOT="$(orchestration_state_root)"
+orchestration_need yq
+orchestration_need git
+
+LOCK_RECORDS="$(collect_locks "$STATE_ROOT" || true)"
+ACTIVE_LOCK_COUNT="$(printf '%s\n' "$LOCK_RECORDS" | awk -F'\t' 'NF >= 4 && $3 == "active" && $4 == "false" {count++} END {print count+0}')"
+
+REPO=""
+BRANCH=""
+WORKTREE=""
+WORKTREE_EXISTS="false"
+RESOLUTION_MODE=""
+WARNING=""
+
+if [[ "$ROLE" != "solo" ]]; then
+  LOOP_DIR="$STATE_ROOT/$LOOP_ID"
+  MANIFEST="$LOOP_DIR/manifest.yaml"
+  [[ -f "$MANIFEST" ]] || stop "manifest not found: $MANIFEST"
+  orchestration_assert_manifest_schema "$MANIFEST"
+  REPO="$(orchestration_manifest_repo "$MANIFEST" "$ROOT")"
+  orchestration_assert_git_repo "$REPO"
+  REPO="$(cd "$REPO" && pwd -P)"
+
+  LANE_KEY="C"
+  if [[ "$ROLE" == "worker" ]]; then
+    LANE_KEY="$LANE"
+  fi
+
+  BRANCH="$(resolve_lane_branch "$MANIFEST" "$LOOP_DIR" "$LANE_KEY")"
+  DECLARED_WORKTREE="$(yq e -r ".lanes.\"$LANE_KEY\".entry_worktree // \"\"" "$MANIFEST" 2>/dev/null || true)"
+  [[ "$DECLARED_WORKTREE" == "null" ]] && DECLARED_WORKTREE=""
+  BRANCH_WORKTREE="$(find_branch_worktree "$REPO" "$BRANCH" || true)"
+  FALLBACK_WORKTREE="$REPO/.worktrees/orchestration/$LOOP_ID/$LANE_KEY"
+
+  if [[ -n "$BRANCH_WORKTREE" ]]; then
+    WORKTREE="$BRANCH_WORKTREE"
+    if [[ "$WORKTREE" == "$REPO" ]]; then
+      RESOLUTION_MODE="repo_root_branch_worktree"
+    else
+      RESOLUTION_MODE="existing_branch_worktree"
+    fi
+  elif [[ -n "$DECLARED_WORKTREE" && "$DECLARED_WORKTREE" != "$REPO" ]]; then
+    WORKTREE="$DECLARED_WORKTREE"
+    if [[ -d "$WORKTREE" ]]; then
+      RESOLUTION_MODE="manifest_entry_worktree"
+    else
+      RESOLUTION_MODE="manifest_entry_worktree_missing"
+      WARNING="declared entry_worktree is missing; launcher claim may recreate it"
+    fi
+  else
+    WORKTREE="$FALLBACK_WORKTREE"
+    if [[ -d "$WORKTREE" ]]; then
+      RESOLUTION_MODE="legacy_loop_worktree"
+    else
+      RESOLUTION_MODE="legacy_loop_worktree_missing"
+      WARNING="loop worktree is missing; launcher claim may create it"
+    fi
+  fi
+
+  if [[ -d "$WORKTREE" ]]; then
+    WORKTREE_EXISTS="true"
+  fi
+  LANE="$LANE_KEY"
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  printf '%s\n' "$LOCK_RECORDS" | emit_json "$ROLE" "$LOOP_ID" "$LANE" "$REPO" "$BRANCH" "$WORKTREE" "$WORKTREE_EXISTS" "$RESOLUTION_MODE" "$ACTIVE_LOCK_COUNT" "$WARNING"
+  exit 0
+fi
+
+echo "orchestration.launcher.plan"
+echo "role=$ROLE"
+echo "loop_id=${LOOP_ID:-}"
+echo "lane=${LANE:-}"
+echo "repo=${REPO:-}"
+echo "branch=${BRANCH:-}"
+echo "worktree=${WORKTREE:-}"
+echo "worktree_exists=$WORKTREE_EXISTS"
+echo "resolution_mode=${RESOLUTION_MODE:-}"
+echo "active_lock_count=$ACTIVE_LOCK_COUNT"
+if [[ -n "$WARNING" ]]; then
+  echo "warning=$WARNING"
+fi
+if [[ -n "$LOCK_RECORDS" ]]; then
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    printf 'lock=%s\n' "$record"
+  done <<< "$LOCK_RECORDS"
+fi

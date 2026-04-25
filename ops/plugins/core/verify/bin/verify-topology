@@ -1,0 +1,680 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_VT_COMPUTED="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+if [[ -n "${SPINE_ROOT:-}" && "${SPINE_ROOT}" != "$_VT_COMPUTED" ]]; then
+  echo "WARN: ambient SPINE_ROOT=$SPINE_ROOT disagrees with computed=$_VT_COMPUTED (using computed)" >&2
+fi
+ROOT="$_VT_COMPUTED"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+MAPFILE_COMPAT="$ROOT/ops/plugins/core/verify/bin/bash-mapfile-compat.sh"
+VERIFY_BASH_BIN="${SPINE_VERIFY_BASH_BIN:-}"
+GATE_REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+VERIFY_RING_POLICY="$ROOT/ops/bindings/verify.ring.policy.yaml"
+GATE_REGISTRY_SNAPSHOT=""
+VERIFY_RING_POLICY_SNAPSHOT=""
+GOVERNED_FAST_GATE_ROWS_SNAPSHOT=""
+
+if [[ -z "$VERIFY_BASH_BIN" ]]; then
+  if [[ -x /opt/homebrew/bin/bash ]]; then
+    VERIFY_BASH_BIN="/opt/homebrew/bin/bash"
+  else
+    VERIFY_BASH_BIN="$(command -v bash)"
+  fi
+fi
+export PATH="$(dirname "$VERIFY_BASH_BIN"):$PATH"
+
+if [[ "${BASH_ENV:-}" != "$MAPFILE_COMPAT" ]]; then
+  if [[ -n "${BASH_ENV:-}" ]]; then
+    export SPINE_MAPFILE_COMPAT_CHAIN="${BASH_ENV}"
+  fi
+  export BASH_ENV="$MAPFILE_COMPAT"
+fi
+
+fail() {
+  echo "verify.topology FAIL: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+need_cmd jq
+need_cmd yq
+[[ -x "$VERIFY_BASH_BIN" ]] || fail "missing bash runtime: $VERIFY_BASH_BIN"
+
+usage() {
+  cat <<'USAGE'
+verify-topology
+
+Usage:
+  verify-topology core [--json]
+  verify-topology domain <domain_id> [--json] [--force]
+  verify-topology domains-run <domain_csv|domain...> [--json] [--force]
+  verify-topology ids-run <gate_id...> [--json] [--ring instant|standard|deep]
+  verify-topology release [--json] [--force]
+  verify-topology recommend [--path <path>]... [--capability <cap>]... [--json]
+  verify-topology pack-list
+  verify-topology pack-explain <agent_id|domain>
+  verify-topology pack-run [<agent_id|domain>] [--json]
+
+Notes:
+  - Fast-ring lifecycle truth is loaded from gate.registry.yaml and verify.ring.policy.yaml.
+  - This runner is an estate/workload health surface, not a spine/object truth surface.
+  - `core` here means the fast estate gate pack, not spine core.
+  - Domain checks use the spine-lite workload/infra gate catalog only.
+  - --force and --ring are accepted for compatibility and ignored by the runtime-only runner.
+USAGE
+}
+
+runtime_domain_hints() {
+  cat <<'EOF'
+G1|infra|backup,communications,finance,home,media,mint,observability
+G2|infra|
+G3|infra|backup,home,media
+G4|media|home,infra
+G5|infra|communications,media,mint
+G6|backup|communications,finance,home,infra,media,mint
+G7|backup|communications,home,infra,media
+G8|infra|communications,finance,home,media,mint,observability
+G9|infra|communications,finance,home,media,mint,observability
+G10|communications|infra,network
+G11|communications|infra
+G12|infra|network
+G13|infra|network
+G14|secrets|communications,home,infra,media,mint,network
+G15|infra|observability
+G16|infra|
+G17|observability|infra
+EOF
+}
+
+normalize_domain() {
+  local raw="${1:-}"
+  case "$raw" in
+    home-automation) echo "home" ;;
+    finance-ops) echo "finance" ;;
+    automation) echo "n8n" ;;
+    identity|email|calendar) echo "communications" ;;
+    *) echo "$raw" ;;
+  esac
+}
+
+known_domains() {
+  runtime_domain_hints | awk -F'|' '
+    {
+      if ($2 != "") print $2
+      split($3, extra, ",")
+      for (i in extra) {
+        if (extra[i] != "") print extra[i]
+      }
+    }
+  ' | LC_ALL=C sort -u
+}
+
+unique_lines() {
+  awk 'NF && !seen[$0]++'
+}
+
+load_gate_registry_snapshot() {
+  [[ -n "$GATE_REGISTRY_SNAPSHOT" ]] && return 0
+  [[ -f "$GATE_REGISTRY" ]] || fail "missing gate registry: $GATE_REGISTRY"
+  GATE_REGISTRY_SNAPSHOT="$(yq e -o=json '.gates' "$GATE_REGISTRY" 2>/dev/null)" \
+    || fail "unable to parse gate registry: $GATE_REGISTRY"
+}
+
+load_verify_ring_policy_snapshot() {
+  [[ -n "$VERIFY_RING_POLICY_SNAPSHOT" ]] && return 0
+  [[ -f "$VERIFY_RING_POLICY" ]] || fail "missing verify ring policy: $VERIFY_RING_POLICY"
+  VERIFY_RING_POLICY_SNAPSHOT="$(yq e -r '.rings[]?' "$VERIFY_RING_POLICY" 2>/dev/null | awk 'NF')" \
+    || fail "unable to parse verify ring policy: $VERIFY_RING_POLICY"
+}
+
+governed_fast_gate_rows() {
+  load_verify_ring_policy_snapshot
+  load_gate_registry_snapshot
+
+  if [[ -n "$GOVERNED_FAST_GATE_ROWS_SNAPSHOT" ]]; then
+    printf '%s\n' "$GOVERNED_FAST_GATE_ROWS_SNAPSHOT"
+    return 0
+  fi
+
+  local allowed_rings_json
+  allowed_rings_json="$(printf '%s\n' "$VERIFY_RING_POLICY_SNAPSHOT" | jq -R -s 'split("\n") | map(select(length > 0))')"
+
+  GOVERNED_FAST_GATE_ROWS_SNAPSHOT="$(
+    printf '%s\n' "$GATE_REGISTRY_SNAPSHOT" \
+    | jq -r --argjson allowed_rings "$allowed_rings_json" '
+        map(select(type == "object"))
+        | map(select((.id // "") | tostring | startswith("G")))
+        | map(select((.retired // false) | not))
+        | map(select(((.superseded_by // "") | tostring | length) == 0))
+        | map(select(((.ring // "") | tostring) as $ring | any($allowed_rings[]; . == $ring)))
+        | sort_by((.id | ltrimstr("G") | tonumber))
+        | .[]
+        | [(.id // ""), (.check_script // ""), (.ring // "")] | @tsv
+      '
+  )"
+
+  printf '%s\n' "$GOVERNED_FAST_GATE_ROWS_SNAPSHOT"
+}
+
+all_gate_ids() {
+  governed_fast_gate_rows | awk -F'\t' '{print $1}' | unique_lines
+}
+
+gate_script_rel() {
+  local gate_id="$1"
+  governed_fast_gate_rows | awk -F'\t' -v gate_id="$gate_id" '$1 == gate_id {print $2; exit}'
+}
+
+domain_gate_ids() {
+  local domain
+  domain="$(normalize_domain "${1:-}")"
+  local all_ids
+  all_ids="$(all_gate_ids | tr '\n' ' ')"
+  runtime_domain_hints | awk -F'|' -v domain="$domain" '
+    {
+      split($3, extra, ",")
+      if ($2 == domain) {
+        print $1
+        next
+      }
+      for (i in extra) {
+        if (extra[i] == domain) {
+          print $1
+          next
+        }
+      }
+    }
+  ' | while IFS= read -r gate_id; do
+        [[ -n "$gate_id" ]] || continue
+        case " $all_ids " in
+          *" $gate_id "*) printf '%s\n' "$gate_id" ;;
+        esac
+      done | unique_lines
+}
+
+domain_exists() {
+  local domain
+  domain="$(normalize_domain "${1:-}")"
+  known_domains | grep -Fxq "$domain"
+}
+
+json_array() {
+  if [[ "$#" -eq 0 ]]; then
+    printf '[]\n'
+    return 0
+  fi
+  printf '%s\n' "$@" | jq -R -s 'split("\n") | map(select(length > 0))'
+}
+
+run_gate_ids() {
+  local mode="$1"
+  local json_mode="$2"
+  shift 2
+  local gate_ids=("$@")
+  local pass_count=0
+  local fail_count=0
+  local warning_count=0
+  local failing_ids=()
+  local warning_ids=()
+  local blocking_fail_ids=()
+  local gate_id script_rel script_path rc
+  local -a unique_gate_ids=()
+  local seen=""
+
+  load_gate_registry_snapshot
+  load_verify_ring_policy_snapshot
+
+  for gate_id in "${gate_ids[@]}"; do
+    [[ -n "$gate_id" ]] || continue
+    if [[ ",$seen," == *",$gate_id,"* ]]; then
+      continue
+    fi
+    seen="${seen:+$seen,}$gate_id"
+    unique_gate_ids+=("$gate_id")
+  done
+
+  ((${#unique_gate_ids[@]} > 0)) || fail "no gates resolved for run"
+
+  for gate_id in "${unique_gate_ids[@]}"; do
+    script_rel="$(gate_script_rel "$gate_id")"
+    script_path="$ROOT/$script_rel"
+    if [[ ! -f "$script_path" ]]; then
+      fail_count=$((fail_count + 1))
+      failing_ids+=("$gate_id")
+      blocking_fail_ids+=("$gate_id")
+      if [[ "$json_mode" -eq 0 ]]; then
+        echo "==> $gate_id"
+        echo "missing gate script: $script_path"
+        echo
+      fi
+      continue
+    fi
+
+    if [[ "$json_mode" -eq 0 ]]; then
+      echo "==> $gate_id"
+    fi
+
+    set +e
+    if [[ "$json_mode" -eq 1 ]]; then
+      "$VERIFY_BASH_BIN" "$script_path" >/dev/null 2>&1
+    else
+      "$VERIFY_BASH_BIN" "$script_path"
+    fi
+    rc=$?
+    set -e
+
+    if [[ "$json_mode" -eq 0 ]]; then
+      echo
+    fi
+
+    if [[ "$rc" -eq 0 ]]; then
+      pass_count=$((pass_count + 1))
+    else
+      fail_count=$((fail_count + 1))
+      failing_ids+=("$gate_id")
+      blocking_fail_ids+=("$gate_id")
+    fi
+  done
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    jq -n \
+      --arg mode "$mode" \
+      --arg truth_plane "estate_health" \
+      --arg scope_reading "Estate/workload health gate pack. Does not answer packet, loop, or governance truth." \
+      --argjson may_block_spine_truth false \
+      --argjson failing_ids "$(json_array "${failing_ids[@]}")" \
+      --argjson warning_ids "$(json_array "${warning_ids[@]}")" \
+      --argjson blocking_fail_ids "$(json_array "${blocking_fail_ids[@]}")" \
+      --argjson non_blocking_fail_ids '[]' \
+      --argjson total "${#unique_gate_ids[@]}" \
+      --argjson pass "$pass_count" \
+      --argjson fail "$fail_count" \
+      --argjson warn "$warning_count" \
+      '{
+        mode: $mode,
+        truth_plane: $truth_plane,
+        scope_reading: $scope_reading,
+        may_block_spine_truth: $may_block_spine_truth,
+        total: $total,
+        pass: $pass,
+        fail: $fail,
+        warn: $warn,
+        skipped_inline: 0,
+        skipped_retired: 0,
+        skipped_network: 0,
+        receipt_integrity_warnings: 0,
+        failing_ids: $failing_ids,
+        warning_ids: $warning_ids,
+        blocking_fail_ids: $blocking_fail_ids,
+        non_blocking_fail_ids: $non_blocking_fail_ids
+      }'
+  else
+    echo "verify.topology"
+    echo "mode: $mode"
+    echo "truth_plane: estate_health"
+    echo "scope_reading: estate/workload health only; not packet/loop/governance truth"
+    echo "total: ${#unique_gate_ids[@]}"
+    echo "pass: $pass_count"
+    echo "fail: $fail_count"
+    echo "warn: $warning_count"
+  fi
+
+  [[ "$fail_count" -eq 0 ]]
+}
+
+run_core() {
+  local json_mode=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json_mode=1 ;;
+      --force) ;;
+      *) fail "unknown argument for core: $1" ;;
+    esac
+    shift
+  done
+
+  local gate_ids=()
+  while IFS= read -r gate_id; do
+    [[ -n "$gate_id" ]] || continue
+    gate_ids+=("$gate_id")
+  done < <(all_gate_ids)
+
+  run_gate_ids "core" "$json_mode" "${gate_ids[@]}"
+}
+
+run_domain() {
+  local domain="${1:-}"
+  shift || true
+  [[ -n "$domain" ]] || fail "usage: verify-topology domain <domain_id> [--json] [--force]"
+  domain="$(normalize_domain "$domain")"
+  domain_exists "$domain" || fail "unknown runtime domain: $domain"
+
+  local json_mode=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json_mode=1 ;;
+      --force) ;;
+      *) fail "unknown argument for domain: $1" ;;
+    esac
+    shift
+  done
+
+  local gate_ids=()
+  while IFS= read -r gate_id; do
+    [[ -n "$gate_id" ]] || continue
+    gate_ids+=("$gate_id")
+  done < <(domain_gate_ids "$domain")
+
+  run_gate_ids "domain:$domain" "$json_mode" "${gate_ids[@]}"
+}
+
+run_domains() {
+  local json_mode=0
+  local domains=()
+  local token
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json_mode=1 ;;
+      --force) ;;
+      --*) fail "unknown argument for domains-run: $1" ;;
+      *)
+        domains+=("$1")
+        ;;
+    esac
+    shift
+  done
+
+  ((${#domains[@]} > 0)) || fail "usage: verify-topology domains-run <domain_csv|domain...> [--json] [--force]"
+
+  local gate_ids=()
+  local domain gate_id
+  for token in "${domains[@]}"; do
+    IFS=',' read -r -a split_domains <<< "$token"
+    for domain in "${split_domains[@]}"; do
+      domain="$(normalize_domain "$domain")"
+      [[ -n "$domain" ]] || continue
+      while IFS= read -r gate_id; do
+        [[ -n "$gate_id" ]] || continue
+        gate_ids+=("$gate_id")
+      done < <(domain_gate_ids "$domain")
+    done
+  done
+
+  run_gate_ids "domains" "$json_mode" "${gate_ids[@]}"
+}
+
+run_ids() {
+  local json_mode=0
+  local gate_ids=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json_mode=1 ;;
+      --ring)
+        shift || fail "missing value for --ring"
+        ;;
+      --ring=*) ;;
+      --*) fail "unknown argument for ids-run: $1" ;;
+      *)
+        gate_ids+=("$1")
+        ;;
+    esac
+    shift || true
+  done
+
+  ((${#gate_ids[@]} > 0)) || fail "usage: verify-topology ids-run <gate_id...> [--json] [--ring instant|standard|deep]"
+  run_gate_ids "ids" "$json_mode" "${gate_ids[@]}"
+}
+
+run_release() {
+  local json_mode=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json_mode=1 ;;
+      --force) ;;
+      *) fail "unknown argument for release: $1" ;;
+    esac
+    shift
+  done
+
+  local gate_ids=()
+  while IFS= read -r gate_id; do
+    [[ -n "$gate_id" ]] || continue
+    gate_ids+=("$gate_id")
+  done < <(all_gate_ids)
+
+  run_gate_ids "release" "$json_mode" "${gate_ids[@]}"
+}
+
+resolve_pack_target() {
+  local target="${1:-infra}"
+  target="$(normalize_domain "$target")"
+  case "$target" in
+    *-agent) target="${target%-agent}" ;;
+  esac
+  domain_exists "$target" || fail "unknown runtime pack target: $target"
+  printf '%s\n' "$target"
+}
+
+pack_list() {
+  local domain
+  for domain in $(known_domains); do
+    printf '%s\n' "$domain"
+  done
+}
+
+pack_explain() {
+  local target
+  target="$(resolve_pack_target "$1")"
+  echo "verify.pack"
+  echo "target: $target"
+  echo "gates:"
+  while IFS= read -r gate_id; do
+    [[ -n "$gate_id" ]] || continue
+    echo "  - $gate_id $(gate_script_rel "$gate_id")"
+  done < <(domain_gate_ids "$target")
+}
+
+pack_run() {
+  local json_mode=0
+  local target=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)
+        json_mode=1
+        ;;
+      --*)
+        fail "unknown argument for pack-run: $1"
+        ;;
+      *)
+        if [[ -z "$target" ]]; then
+          target="$1"
+        else
+          fail "unexpected extra argument for pack-run: $1"
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  target="$(resolve_pack_target "${target:-infra}")"
+
+  local gate_ids=()
+  while IFS= read -r gate_id; do
+    [[ -n "$gate_id" ]] || continue
+    gate_ids+=("$gate_id")
+  done < <(domain_gate_ids "$target")
+
+  run_gate_ids "pack:$target" "$json_mode" "${gate_ids[@]}"
+}
+
+infer_domains_from_capability() {
+  local capability="$1"
+  case "$capability" in
+    backup.*) echo "backup" ;;
+    calendar.*) echo "communications microsoft home" ;;
+    cloudflare.*|providers.*) echo "infra communications" ;;
+    communications.*) echo "communications" ;;
+    finance.*) echo "finance observability" ;;
+    ha.*|home.*) echo "home" ;;
+    infra.*|internet.*|vm.*|network.*|docker.*|service.*|services.*|closure.*|platform.*)
+      echo "infra proxmox-network observability"
+      ;;
+    media.*|immich.*) echo "media" ;;
+    microsoft.*) echo "microsoft" ;;
+    mint.*|quote.*|assertion.*) echo "mint" ;;
+    n8n.*|automation.*) echo "n8n" ;;
+    rag.*) echo "rag" ;;
+    secrets.*) echo "secrets" ;;
+    taxlegal.*) echo "tax-legal" ;;
+    verify.*|spine.verify|spine.replay)
+      echo "backup communications finance home infra media microsoft mint observability proxmox-network rag secrets tax-legal"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+infer_domains_from_path() {
+  local path_lc
+  path_lc="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$path_lc" in
+    *backup* ) echo "backup" ;;
+    *communicat*|*calendar*|*mail* ) echo "communications microsoft home" ;;
+    *finance*|*benefit*|*ghostfolio* ) echo "finance observability" ;;
+    *ha/*|*home*|*zigbee*|*z2m* ) echo "home" ;;
+    *media*|*sonarr*|*radarr*|*jellyfin*|*immich* ) echo "media" ;;
+    *mint*|*quote*|*customer-mailbox* ) echo "mint microsoft" ;;
+    *n8n* ) echo "n8n" ;;
+    *rag*|*anythingllm* ) echo "rag" ;;
+    *secret*|*infisical* ) echo "secrets" ;;
+    *taxlegal*|*paperless* ) echo "tax-legal" ;;
+    *proxmox*|*netsec*|*network*|*firewall*|*vlan* ) echo "infra proxmox-network" ;;
+    *observ*|*prometheus*|*uptime*|*monitor* ) echo "observability infra" ;;
+    *)
+      echo "infra"
+      ;;
+  esac
+}
+
+recommend_route() {
+  local json_mode=0
+  local paths=()
+  local capabilities=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)
+        json_mode=1
+        ;;
+      --path)
+        shift || fail "missing value for --path"
+        paths+=("$1")
+        ;;
+      --capability)
+        shift || fail "missing value for --capability"
+        capabilities+=("$1")
+        ;;
+      *)
+        fail "unknown argument for recommend: $1"
+        ;;
+    esac
+    shift
+  done
+
+  local recommended=()
+  local domain gate_path capability
+  for gate_path in "${paths[@]}"; do
+    for domain in $(infer_domains_from_path "$gate_path"); do
+      [[ -n "$domain" ]] || continue
+      if domain_exists "$domain"; then
+        recommended+=("$domain")
+      fi
+    done
+  done
+
+  for capability in "${capabilities[@]}"; do
+    for domain in $(infer_domains_from_capability "$capability"); do
+      [[ -n "$domain" ]] || continue
+      if domain_exists "$domain"; then
+        recommended+=("$domain")
+      fi
+    done
+  done
+
+  if [[ "${#recommended[@]}" -eq 0 ]]; then
+    recommended=("infra")
+  fi
+
+  local ordered=()
+  while IFS= read -r domain; do
+    [[ -n "$domain" ]] || continue
+    ordered+=("$domain")
+  done < <(printf '%s\n' "${recommended[@]}" | unique_lines | LC_ALL=C sort)
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    jq -n \
+      --argjson domains "$(json_array "${ordered[@]}")" \
+      --argjson input_paths "$(json_array "${paths[@]}")" \
+      --argjson input_capabilities "$(json_array "${capabilities[@]}")" \
+      '{recommended_domains:$domains, input_paths:$input_paths, input_capabilities:$input_capabilities}'
+  else
+    echo "verify.route.recommend"
+    echo "recommended_domains: $(IFS=,; echo "${ordered[*]}")"
+  fi
+}
+
+sub="${1:-}"
+case "$sub" in
+  core)
+    shift
+    run_core "$@"
+    ;;
+  domain)
+    shift
+    run_domain "$@"
+    ;;
+  domains|domains-run)
+    shift
+    run_domains "$@"
+    ;;
+  ids|ids-run)
+    shift
+    run_ids "$@"
+    ;;
+  release|release-run)
+    shift
+    run_release "$@"
+    ;;
+  recommend|route-recommend)
+    shift
+    recommend_route "$@"
+    ;;
+  pack-list)
+    shift
+    pack_list "$@"
+    ;;
+  pack-explain)
+    shift
+    [[ $# -ge 1 ]] || fail "usage: verify-topology pack-explain <agent_id|domain>"
+    pack_explain "$1"
+    ;;
+  pack-run)
+    shift
+    pack_run "$@"
+    ;;
+  -h|--help|"")
+    usage
+    ;;
+  *)
+    fail "unknown subcommand: $sub"
+    ;;
+esac

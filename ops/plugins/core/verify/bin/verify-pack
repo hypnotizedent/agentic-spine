@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+RUNTIME="$ROOT/ops/plugins/core/verify/bin/verify-topology"
+
+[[ -x "$RUNTIME" ]] || {
+  echo "verify.pack FAIL: missing runtime: $RUNTIME" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+verify-pack
+
+Usage:
+  verify-pack list
+  verify-pack explain <agent_id|domain>
+  verify-pack run [<agent_id|domain>] [--json]
+
+Notes:
+  - verify.pack dispatches to the spine-lite runtime topology.
+  - Pack targets resolve to runtime domains.
+USAGE
+}
+
+sub="${1:-}"
+case "$sub" in
+  list)
+    shift
+    exec "$RUNTIME" pack-list "$@"
+    ;;
+  explain)
+    shift
+    [[ $# -ge 1 ]] || { usage >&2; exit 2; }
+    exec "$RUNTIME" pack-explain "$@"
+    ;;
+  run)
+    shift
+    if [[ "${1:-}" == "communications" && -z "${VERIFY_TAILSCALE_PROBE_MODE:-}" ]]; then
+      exec env VERIFY_TAILSCALE_PROBE_MODE=passive "$RUNTIME" pack-run "$@"
+    fi
+    exec "$RUNTIME" pack-run "$@"
+    ;;
+  -h|--help|"")
+    usage
+    ;;
+  *)
+    echo "verify.pack FAIL: unknown subcommand: $sub" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

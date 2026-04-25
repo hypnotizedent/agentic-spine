@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# tenant.storage.audit — Verify runtime storage paths comply with tenant storage contract
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+ROOT=""
+
+usage() {
+  echo "Usage: tenant-storage-audit [--root <path>]" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root) ROOT="$2"; shift 2 ;;
+    -h|--help) usage ;;
+    *) echo "unknown argument: $1" >&2; usage ;;
+  esac
+done
+
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -z "$ROOT" ]]; then
+    source "$DEFAULT_ROOT/ops/lib/spine-paths.sh"
+    spine_paths_init >/dev/null 2>&1 || true
+    ROOT="${SPINE_TARGET_REPO:-${SPINE_CODE:-$DEFAULT_ROOT}}"
+  fi
+fi
+
+ROOT="$(cd "$ROOT" && pwd)"
+CONTRACT="$ROOT/ops/bindings/tenant.storage.contract.yaml"
+
+echo "=== Tenant Storage Audit ==="
+echo ""
+
+if [[ ! -f "$CONTRACT" ]]; then
+  echo "FAIL: tenant.storage.contract.yaml not found"
+  exit 1
+fi
+
+ERRORS=0
+CHECKS=0
+
+# Check isolation mode
+mode="$(grep '^isolation_mode:' "$CONTRACT" | awk '{print $2}')"
+echo "isolation_mode: $mode"
+echo ""
+
+# Verify each declared boundary path exists
+echo "Boundary checks:"
+for boundary in receipts ledger mailroom_inbox mailroom_outbox loop_scopes; do
+  CHECKS=$((CHECKS + 1))
+  current_path="$(sed -n "/^  ${boundary}:/,/^  [a-z]/p" "$CONTRACT" | grep 'current_path:' | head -1 | sed 's/.*: *"//' | sed 's/".*//')"
+  if [[ -n "$current_path" ]]; then
+    full_path="$ROOT/$current_path"
+    if [[ -d "$full_path" || -f "$full_path" ]]; then
+      echo "  $boundary: $current_path — EXISTS"
+    else
+      echo "  $boundary: $current_path — PLANNED (dir not yet created)"
+    fi
+  else
+    echo "  $boundary: no current_path declared — SKIP"
+  fi
+done
+
+echo ""
+echo "Summary: $CHECKS checked, $ERRORS contract errors"
+
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "AUDIT: FAIL (contract validation error)"
+  exit 1
+fi
+
+echo "AUDIT: PASS"
+exit 0

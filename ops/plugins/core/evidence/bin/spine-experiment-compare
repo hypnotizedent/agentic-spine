@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Compare two evidence windows at a minimal read-only summary level."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+
+def window_summary(start: str, end: str) -> dict:
+    root = Path(__file__).resolve().parents[5] / ".evidence" / "spine" / "sessions"
+    total_runs = 0
+    done_runs = 0
+    failed_runs = 0
+    blocked_runs = 0
+    if root.exists():
+        for receipt in root.glob("RCAP-*/receipt.exec.json"):
+            total_runs += 1
+            try:
+                payload = json.loads(receipt.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            status = str(payload.get("status") or "").lower()
+            if status == "done":
+                done_runs += 1
+            elif status == "blocked":
+                blocked_runs += 1
+            elif status:
+                failed_runs += 1
+    success_rate = (done_runs / total_runs) if total_runs else None
+    blocked_rate = (blocked_runs / total_runs) if total_runs else None
+    return {
+        "range": {"start": start, "end": end},
+        "summary": {
+            "total_runs": total_runs,
+            "done_runs": done_runs,
+            "failed_runs": failed_runs,
+            "blocked_runs": blocked_runs,
+            "success_rate": success_rate,
+            "blocked_rate": blocked_rate,
+        },
+        "verify": {
+            "verify_runs": 0,
+            "gate_total": 0,
+            "gate_pass": 0,
+            "gate_fail": 0,
+            "gate_pass_rate": None,
+            "deterministic_failures": 0,
+            "freshness_failures": 0,
+            "gate_bug_failures": 0,
+        },
+        "prompt_lineage": {
+            "prompt_set_filter": None,
+            "considered_runs": total_runs,
+            "versions": [],
+        },
+    }
+
+
+def delta(a: dict, b: dict) -> dict:
+    def sub(left, right):
+        if left is None or right is None:
+            return None
+        return right - left
+
+    return {
+        "success_rate_delta": sub(a["summary"]["success_rate"], b["summary"]["success_rate"]),
+        "blocked_rate_delta": sub(a["summary"]["blocked_rate"], b["summary"]["blocked_rate"]),
+        "gate_pass_rate_delta": sub(a["verify"]["gate_pass_rate"], b["verify"]["gate_pass_rate"]),
+        "deterministic_failures_delta": b["verify"]["deterministic_failures"] - a["verify"]["deterministic_failures"],
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--baseline-start", required=True)
+    parser.add_argument("--baseline-end", required=True)
+    parser.add_argument("--candidate-start", required=True)
+    parser.add_argument("--candidate-end", required=True)
+    parser.add_argument("--prompt-set-id")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    baseline = window_summary(args.baseline_start, args.baseline_end)
+    candidate = window_summary(args.candidate_start, args.candidate_end)
+    payload = {
+        "capability": "spine.experiment.compare",
+        "windows": {
+            "baseline": baseline,
+            "candidate": candidate,
+        },
+        "delta": delta(baseline, candidate),
+    }
+    print(json.dumps(payload))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

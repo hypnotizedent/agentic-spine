@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from provider_orchestration import (  # noqa: E402
+    load_contract,
+    opencode_base_url,
+    opencode_provider_id,
+    opencode_small_model,
+    provider_model,
+    surface_status,
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate managed provider-aware tool configs in the workbench repo.")
+    parser.add_argument("--tool", choices=["all", "codex", "opencode"], default="all")
+    parser.add_argument("--provider", help="Explicit provider override for single-tool sync")
+    parser.add_argument(
+        "--workbench-root",
+        help="Workbench repo root (defaults to WORKBENCH_REPO, WORKBENCH_MANAGED_CONFIG_ROOT, or a canonical checkout)",
+    )
+    return parser.parse_args()
+
+
+def detect_workbench_root(explicit: str | None) -> Path:
+    spine_root = Path(__file__).resolve().parents[4]
+    candidates = [
+        explicit,
+        os.environ.get("WORKBENCH_REPO"),
+        os.environ.get("WORKBENCH_MANAGED_CONFIG_ROOT"),
+        os.environ.get("WORKBENCH_ROOT"),
+        spine_root.parent / "workbench",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        resolved = Path(candidate).expanduser().resolve()
+        if resolved.is_dir():
+            return resolved
+    raise SystemExit(
+        "FAIL: unable to resolve workbench repo root from explicit override, managed env, or canonical sibling checkout"
+    )
+
+
+def ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def write_if_changed(path: Path, content: str) -> bool:
+    ensure_parent(path)
+    if path.exists() and path.read_text(encoding="utf-8") == content:
+        return False
+    path.write_text(content, encoding="utf-8")
+    return True
+
+
+def selected_provider(contract: dict, surface: str, requested: str | None = None) -> str:
+    status = surface_status(contract, surface, requested)
+    if status.get("selected"):
+        return str(status["selected"])
+    fallback_candidates = status.get("candidates", [])
+    if not fallback_candidates:
+        raise SystemExit(f"FAIL: no candidates configured for surface={surface}")
+    return str(fallback_candidates[0]["id"])
+
+
+def build_codex_config(contract: dict) -> str:
+    defaults = contract.get("defaults", {})
+    lines = [
+        '# Codex CLI Configuration',
+        f'model = "{provider_model(contract, "codex_native", "codex")}"',
+        'sandbox = "danger-full-access"',
+        'model_reasoning_effort = "xhigh"',
+        'personality = "pragmatic"',
+        '',
+        '[shell_environment_policy]',
+        'inherit = "all"',
+        '',
+        '[notice]',
+        'hide_rate_limit_model_nudge = true',
+        '',
+        '[notice.model_migrations]',
+        '"gpt-5.1-codex-mini" = "gpt-5.2-codex"',
+        '"gpt-5.2" = "gpt-5.2-codex"',
+        '',
+        '[projects."$HOME"]',
+        'trust_level = "trusted"',
+        '',
+        '# Native Codex account auth is the default path.',
+        '# Run `codex login` to attach your subscription-backed account.',
+        '# Local OSS fallback is launcher-driven via `--oss --local-provider`.',
+        f'# Default local provider: {defaults.get("codex_local_provider", "lmstudio")}',
+        '',
+    ]
+    return "\n".join(lines)
+
+
+def opencode_catalog_models(contract: dict, provider_id: str) -> list[str]:
+    provider = contract["providers"][provider_id]
+    block = provider.get("opencode", {}) if isinstance(provider.get("opencode"), dict) else {}
+    configured = block.get("catalog_models", [])
+    ordered: list[str] = []
+    for candidate in [provider_model(contract, provider_id, "opencode"), opencode_small_model(contract, provider_id)]:
+        if candidate and candidate not in ordered:
+            ordered.append(candidate)
+    if isinstance(configured, list):
+        for item in configured:
+            model = str(item).strip()
+            if model and model not in ordered:
+                ordered.append(model)
+    return ordered
+
+
+def opencode_catalog_providers(contract: dict, selected_provider_id: str) -> list[str]:
+    surfaces = contract.get("surfaces", {}) if isinstance(contract.get("surfaces"), dict) else {}
+    opencode_surface = surfaces.get("opencode", {}) if isinstance(surfaces.get("opencode"), dict) else {}
+    configured = opencode_surface.get("managed_provider_catalog", [])
+    ordered: list[str] = []
+    for candidate in [selected_provider_id] + (configured if isinstance(configured, list) else []):
+        provider_id = str(candidate).strip()
+        if not provider_id or provider_id in ordered:
+            continue
+        if provider_id not in contract.get("providers", {}):
+            continue
+        ordered.append(provider_id)
+    if not ordered:
+        ordered.append(selected_provider_id)
+    return ordered
+
+
+def build_opencode_provider_entry(contract: dict, provider_id: str) -> tuple[str, dict]:
+    provider_alias = opencode_provider_id(contract, provider_id)
+    base_url = opencode_base_url(contract, provider_id)
+    provider = contract["providers"][provider_id]
+    if provider_alias == "openai" and provider_id == "openai":
+        options = {
+            "baseURL": base_url,
+            "timeout": 300000,
+        }
+        if bool(provider.get("auth_required", True)):
+            options["apiKey"] = "{env:OPENAI_API_KEY}"
+        return provider_alias, {"options": options}
+    return provider_alias, {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": str(provider.get("display_name", provider_alias)),
+        "options": {
+            "baseURL": base_url,
+            "timeout": 300000,
+        },
+        "models": {
+            model: {
+                "name": model,
+            }
+            for model in opencode_catalog_models(contract, provider_id)
+        },
+    }
+
+
+def build_opencode_config(workbench_root: Path, contract: dict, provider_id: str) -> tuple[str, str]:
+    opencode_path = workbench_root / "dotfiles/opencode/opencode.json"
+    ohmy_path = workbench_root / "dotfiles/opencode/oh-my-opencode.json"
+    provider_alias = opencode_provider_id(contract, provider_id)
+    opencode_model = f"{provider_alias}/{provider_model(contract, provider_id, 'opencode')}"
+    small_model = f"{provider_alias}/{opencode_small_model(contract, provider_id)}"
+
+    current = json.loads(opencode_path.read_text(encoding="utf-8")) if opencode_path.exists() else {}
+    current["$schema"] = "https://opencode.ai/config.json"
+    current["model"] = opencode_model
+    current["small_model"] = small_model
+    provider_entries: dict[str, dict] = {}
+    enabled_providers: list[str] = []
+    for catalog_provider in opencode_catalog_providers(contract, provider_id):
+        alias, entry = build_opencode_provider_entry(contract, catalog_provider)
+        provider_entries[alias] = entry
+        enabled_providers.append(alias)
+    current["provider"] = provider_entries
+    current["enabled_providers"] = enabled_providers
+    agent = current.get("agent") if isinstance(current.get("agent"), dict) else {}
+    default_agent = agent.get("default") if isinstance(agent.get("default"), dict) else {}
+    default_agent["model"] = opencode_model
+    agent["default"] = default_agent
+    current["agent"] = agent
+    opencode_text = json.dumps(current, indent=2) + "\n"
+
+    ohmy = json.loads(ohmy_path.read_text(encoding="utf-8")) if ohmy_path.exists() else {}
+    agents = ohmy.get("agents") if isinstance(ohmy.get("agents"), dict) else {}
+    for cfg in agents.values():
+        if isinstance(cfg, dict) and "model" in cfg:
+            cfg["model"] = opencode_model
+    ohmy["agents"] = agents
+    ohmy_text = json.dumps(ohmy, indent=2) + "\n"
+    return opencode_text, ohmy_text
+
+
+def main() -> int:
+    args = parse_args()
+    workbench_root = detect_workbench_root(args.workbench_root)
+    contract = load_contract()
+
+    changed: list[str] = []
+    if args.tool in {"all", "codex"}:
+        codex_text = build_codex_config(contract)
+        codex_path = workbench_root / "dotfiles/codex/config.toml"
+        if write_if_changed(codex_path, codex_text):
+            changed.append(str(codex_path))
+
+    if args.tool in {"all", "opencode"}:
+        provider_id = args.provider or selected_provider(contract, "opencode")
+        opencode_text, ohmy_text = build_opencode_config(workbench_root, contract, provider_id)
+        opencode_path = workbench_root / "dotfiles/opencode/opencode.json"
+        ohmy_path = workbench_root / "dotfiles/opencode/oh-my-opencode.json"
+        if write_if_changed(opencode_path, opencode_text):
+            changed.append(str(opencode_path))
+        if write_if_changed(ohmy_path, ohmy_text):
+            changed.append(str(ohmy_path))
+
+    for path in changed:
+        print(f"UPDATED {path}")
+    if not changed:
+        print("UNCHANGED")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

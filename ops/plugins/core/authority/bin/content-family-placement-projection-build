@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ops.plugins.infra.lib.content_family_placement import (
+    build_projection,
+    load_yaml,
+    rel,
+    render_markdown,
+    source_sha,
+    source_stamp,
+    yaml_dump,
+)
+
+
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+DEFAULT_ROOT = expand(Path(__file__).resolve().parents[5])
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_target_root(explicit: str | None = None) -> Path:
+    if explicit:
+        return expand(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    for env_name in ("SPINE_TARGET_REPO", "SPINE_ROOT", "SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(env_name)
+        if value:
+            return expand(value)
+    return DEFAULT_ROOT
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"content.family.placement.projection.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="content-family-placement-projection-build")
+    parser.add_argument("--root", help="Target checkout root.")
+    parser.add_argument("--check", action="store_true", help="Fail if generated projection or matrix drifts from disk.")
+    parser.add_argument("--verify", action="store_true", help="Verify source authority files exist and projection metadata is coherent.")
+    parser.add_argument("--stdout", action="store_true", help="Print the rendered YAML projection instead of writing files.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    root = resolve_target_root(args.root)
+    policy_path = Path(os.environ.get("CONTENT_FAMILY_PLACEMENT_POLICY", root / "ops/bindings/domains/media/content.family.placement.policy.yaml"))
+    projection_path = Path(os.environ.get("CONTENT_FAMILY_PLACEMENT_PROJECTION", root / "ops/bindings/domains/media/content.family.placement.projected.yaml"))
+    matrix_path = root / "docs/reference/generated/CONTENT_FAMILY_PLACEMENT_MATRIX.md"
+    source_paths = [policy_path]
+
+    try:
+        policy = load_yaml(policy_path)
+    except Exception as exc:
+        fail(f"unable to load authority: {exc}")
+
+    if str(policy.get("authority_state") or "") != "authoritative":
+        fail("authority missing authority_state=authoritative")
+
+    source_hash = source_sha(root, source_paths)
+    generated_at = source_stamp(root, source_paths)
+    projection = build_projection(policy, source_sha256=source_hash, generated_at_utc=generated_at)
+    projection_header = "\n".join(
+        [
+            "# Content Family Placement Projection",
+            "# Non-secret. Spine-native.",
+            "# Status: projection",
+            "# projection_of: ops/bindings/domains/media/content.family.placement.policy.yaml",
+            "# Do NOT edit manually. Rebuild with: ./bin/ops cap run content.family.placement.projection.build",
+            "",
+        ]
+    )
+    rendered_yaml = projection_header + yaml_dump(projection)
+    rendered_md = render_markdown(projection)
+
+    if args.verify:
+        required_paths: list[str] = []
+        for section in ("storage_planes", "service_planes"):
+            for _plane_id, raw in (policy.get(section) or {}).items():
+                if not isinstance(raw, dict):
+                    continue
+                for source in raw.get("source_authorities") or []:
+                    text = str(source or "").strip()
+                    if text and text not in required_paths:
+                        required_paths.append(text)
+        for rel_path in required_paths:
+            path = root / rel_path
+            if not path.exists():
+                fail(f"missing referenced authority path: {rel_path}")
+
+    if args.stdout:
+        print(rendered_yaml, end="")
+        return
+
+    if args.check:
+        current_yaml = projection_path.read_text(encoding="utf-8") if projection_path.exists() else ""
+        current_md = matrix_path.read_text(encoding="utf-8") if matrix_path.exists() else ""
+        if current_yaml != rendered_yaml or current_md != rendered_md:
+            fail("projection or matrix drift detected", exit_code=1)
+        print(
+            "content.family.placement.projection.build PASS: "
+            f"{rel(root, projection_path)} and {rel(root, matrix_path)} match authority"
+        )
+        return
+
+    projection_path.write_text(rendered_yaml, encoding="utf-8")
+    matrix_path.parent.mkdir(parents=True, exist_ok=True)
+    matrix_path.write_text(rendered_md, encoding="utf-8")
+    print(
+        "content.family.placement.projection.build PASS: "
+        f"wrote {rel(root, projection_path)} and {rel(root, matrix_path)}"
+    )
+
+
+if __name__ == "__main__":
+    main()

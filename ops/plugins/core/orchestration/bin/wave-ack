@@ -1,0 +1,496 @@
+#!/usr/bin/env python3
+"""Canonical wave ack surface extracted from wave.sh."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def _state_root(root: Path) -> Path:
+    workspace_root = root.parent
+    return Path(os.environ.get("SPINE_STATE", workspace_root / ".runtime" / "spine" / "state"))
+
+
+def _runtime_root(root: Path) -> Path:
+    workspace_root = root.parent
+    return Path(os.environ.get("SPINE_RUNTIME_ROOT", workspace_root / ".runtime" / "spine"))
+
+
+def _role_runtime_contract(root: Path) -> Path:
+    return root / "ops" / "bindings" / "role.runtime.control.contract.yaml"
+
+
+def _resolve_traffic_index_file(contract_path: Path, state_root: Path) -> Path:
+    default = state_root / "traffic.index.yaml"
+    if not contract_path.exists():
+        return default
+    try:
+        import yaml
+
+        contract = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+        traffic_index = contract.get("traffic_index") if isinstance(contract, dict) else {}
+        raw = str(traffic_index.get("state_file", "")).strip() if isinstance(traffic_index, dict) else ""
+        if not raw or raw == "null":
+            return default
+        return Path(raw.replace("$SPINE_STATE", str(state_root)))
+    except Exception:
+        return default
+
+
+def _resolve_wave_terminal_identity() -> str:
+    return (
+        os.environ.get("OPS_TERMINAL_ROLE")
+        or os.environ.get("SPINE_TERMINAL_ROLE")
+        or os.environ.get("SPINE_TERMINAL_NAME")
+        or os.environ.get("SPINE_TERMINAL_ID")
+        or "unknown"
+    )
+
+
+def _resolve_wave_terminal_role() -> str:
+    return (
+        os.environ.get("OPS_TERMINAL_ROLE")
+        or os.environ.get("SPINE_TERMINAL_ROLE")
+        or os.environ.get("SPINE_TERMINAL_NAME")
+        or os.environ.get("SPINE_TERMINAL_ID")
+        or ""
+    ).strip()
+
+
+def _wave_lock_guard(lock_file: Path, action: str, override_reason: str) -> None:
+    if not lock_file.is_file():
+        return
+    raw = lock_file.read_text(encoding="utf-8").strip()
+    if not raw:
+        return
+    doc: dict = {}
+    try:
+        doc = json.loads(raw)
+    except Exception:
+        try:
+            import yaml
+
+            doc = yaml.safe_load(raw) or {}
+        except Exception as exc:
+            print(f"FAIL: unable to parse wave lock file {lock_file}: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+    if not isinstance(doc, dict):
+        return
+    if not bool(doc.get("enforce", True)):
+        return
+    blocked_actions = doc.get("blocked_actions")
+    if not isinstance(blocked_actions, list) or not blocked_actions:
+        blocked_actions = ["dispatch", "ack", "close"]
+    blocked = {str(item).strip() for item in blocked_actions if str(item).strip()}
+    if action not in blocked:
+        return
+    reason = str(doc.get("reason", "")).strip()
+    if not override_reason:
+        detail = f" ({reason})" if reason else ""
+        print(
+            f"FAIL: wave lock enforcement blocked action '{action}'{detail}. "
+            f"Retry with --lock-override \"<reason>\" to bypass explicitly.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print(
+        f"WARNING: wave lock override accepted for action '{action}' reason='{override_reason}'",
+        file=sys.stderr,
+    )
+
+
+def _sync_runtime_traffic_index(state_file: Path, traffic_index_file: Path) -> None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+    role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+    next_role = str(role_flow.get("next_role") or packet.get("next_role") or "").strip()
+
+    entry = {
+        "wave_id": str(state.get("wave_id", "")).strip(),
+        "owner_terminal": str(packet.get("owner_terminal", "")).strip(),
+        "current_role": str(role_flow.get("current_role") or packet.get("current_role") or "").strip(),
+        "next_role": next_role,
+        "deadline": str(packet.get("deadline_utc", "")).strip(),
+        "status": str(state.get("status", "active")).strip() or "active",
+        "claimed_paths": packet.get("claimed_paths") if isinstance(packet.get("claimed_paths"), list) else [],
+        "blockers": [],
+        "lifecycle_state": str(state.get("lifecycle_state", "")).strip(),
+        "updated_at": now,
+    }
+
+    for dispatch in state.get("dispatches", []) if isinstance(state.get("dispatches"), list) else []:
+        if not isinstance(dispatch, dict):
+            continue
+        status = str(dispatch.get("status", "")).strip()
+        if status in {"blocked", "failed"}:
+            entry["blockers"].append(
+                {
+                    "dispatch_id": str(dispatch.get("task_id", "")).strip(),
+                    "status": status,
+                }
+            )
+
+    preflight = state.get("preflight") if isinstance(state.get("preflight"), dict) else {}
+    if str(preflight.get("verdict", "")).strip() == "no-go":
+        for blocker in preflight.get("blockers", []) if isinstance(preflight.get("blockers"), list) else []:
+            entry["blockers"].append({"source": "preflight", "status": "no-go", "detail": str(blocker)})
+
+    lock_path = Path(f"{traffic_index_file}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if traffic_index_file.exists():
+            try:
+                index_doc = json.loads(traffic_index_file.read_text(encoding="utf-8"))
+            except Exception:
+                try:
+                    import yaml
+
+                    index_doc = yaml.safe_load(traffic_index_file.read_text(encoding="utf-8")) or {}
+                except Exception:
+                    index_doc = {}
+        else:
+            index_doc = {}
+        if not isinstance(index_doc, dict):
+            index_doc = {}
+        waves = index_doc.get("waves")
+        if not isinstance(waves, list):
+            waves = []
+        filtered = [row for row in waves if str(row.get("wave_id", "")).strip() != entry["wave_id"]]
+        filtered.append(entry)
+        index_doc["waves"] = sorted(filtered, key=lambda row: str(row.get("wave_id", "")))
+        traffic_index_file.write_text(json.dumps(index_doc, indent=2) + "\n", encoding="utf-8")
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _resolve_runtime_role(terminal_role: str, explicit_runtime_role: str, default_role: str) -> str:
+    explicit = (explicit_runtime_role or "").strip()
+    if explicit:
+        return explicit
+    return (default_role or "researcher").strip() or "researcher"
+
+
+def _parse_args(argv: list[str]) -> tuple[str, str, str, str, str, str]:
+    wave_id = ""
+    lane = ""
+    result = ""
+    run_key = ""
+    dispatch_id = ""
+    lock_override_reason = ""
+
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            index += 1
+            continue
+        if token == "--lane":
+            lane = argv[index + 1] if index + 1 < len(argv) else ""
+            index += 2
+            continue
+        if token == "--result":
+            result = argv[index + 1] if index + 1 < len(argv) else ""
+            index += 2
+            continue
+        if token == "--run-key":
+            run_key = argv[index + 1] if index + 1 < len(argv) else ""
+            index += 2
+            continue
+        if token == "--dispatch":
+            dispatch_id = argv[index + 1] if index + 1 < len(argv) else ""
+            index += 2
+            continue
+        if token == "--lock-override":
+            if index + 1 >= len(argv) or not argv[index + 1]:
+                print("ERROR: --lock-override requires a non-empty reason", file=sys.stderr)
+                raise SystemExit(1)
+            lock_override_reason = argv[index + 1]
+            index += 2
+            continue
+        if token in {"-h", "--help"}:
+            print('Usage: ops wave ack <WAVE_ID> --lane <lane> --result "<text>" [OPTIONS]\n')
+            print("Required:")
+            print("  <WAVE_ID>              The wave to acknowledge")
+            print("  --lane <lane>          Lane of the dispatch to ack (e.g., execution, control)")
+            print('  --result "<text>"      Result description\n')
+            print("Options:")
+            print("  --dispatch D<N>        Ack by dispatch index instead of lane (e.g., D1, D2)")
+            print("  --run-key <key>        Attach a run key to the ack")
+            print('  --lock-override "<reason>"  Override wave lock\n')
+            print("Examples:")
+            print('  ops wave ack WAVE-20260409-01 --lane execution --result "done: all tests pass"')
+            print('  ops wave ack WAVE-20260409-01 --dispatch D1 --result "done" --run-key CAP-20260409-run1')
+            raise SystemExit(0)
+        if token.startswith("-"):
+            print(f"Unknown flag: {token}", file=sys.stderr)
+            raise SystemExit(1)
+        wave_id = token
+        index += 1
+
+    if not wave_id:
+        print(
+            'Usage: ops wave ack <WAVE_ID> --lane <lane> --result "<text>" [OPTIONS]',
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if not lane and not dispatch_id:
+        print("Must specify --lane <lane> or --dispatch D<N> to identify the task.", file=sys.stderr)
+        print(f'  Example: ops wave ack {wave_id} --lane execution --result "done"', file=sys.stderr)
+        print(f'  Example: ops wave ack {wave_id} --dispatch D1 --result "done"', file=sys.stderr)
+        raise SystemExit(1)
+    return wave_id, lane, result, run_key, dispatch_id, lock_override_reason
+
+
+def main(argv: list[str]) -> int:
+    wave_id, lane, result, run_key, dispatch_id, lock_override_reason = _parse_args(argv)
+
+    root = _repo_root()
+    state_root = _state_root(root)
+    runtime_root = _runtime_root(root)
+    role_contract = _role_runtime_contract(root)
+    traffic_index_file = _resolve_traffic_index_file(role_contract, state_root)
+    state_file = runtime_root / "waves" / wave_id / "state.json"
+    if not state_file.is_file():
+        print(f"Wave '{wave_id}' does not exist. Create with: ops wave start {wave_id} --objective \"...\"", file=sys.stderr)
+        return 1
+
+    _wave_lock_guard(state_file.parent / "wave.lock", "ack", lock_override_reason)
+
+    ack_terminal_role = _resolve_wave_terminal_role()
+    ack_runtime_role = os.environ.get("SPINE_RUNTIME_ROLE", "").strip()
+    acked_by_terminal = _resolve_wave_terminal_identity()
+
+    fd = os.open(f"{state_file}.lock", os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        dispatches = state.get("dispatches", [])
+        acked_idx = None
+
+        if dispatch_id and dispatch_id.startswith("D"):
+            try:
+                idx = int(dispatch_id[1:]) - 1
+                if 0 <= idx < len(dispatches):
+                    dispatch = dispatches[idx]
+                    if dispatch["status"] != "dispatched":
+                        print(f"Dispatch {dispatch_id} is not pending (status={dispatch['status']})")
+                        return 1
+                    acked_idx = idx
+                else:
+                    print(f"Dispatch {dispatch_id} out of range (have {len(dispatches)} dispatches)")
+                    return 1
+            except ValueError:
+                print(f"Invalid dispatch ID: {dispatch_id} (use D1, D2, ...)")
+                return 1
+        elif lane:
+            pending = [
+                (idx, dispatch)
+                for idx, dispatch in enumerate(dispatches)
+                if dispatch["lane"] == lane and dispatch["status"] == "dispatched"
+            ]
+            if len(pending) == 0:
+                print(f"No pending dispatch for lane '{lane}' in wave '{state['wave_id']}'")
+                return 1
+            if len(pending) > 1:
+                print(f"Multiple pending dispatches for lane '{lane}':")
+                for idx, dispatch in pending:
+                    print(f"  D{idx + 1}: {dispatch['task'][:60]}")
+                print("Use --dispatch D<N> to specify which one to ack.")
+                return 1
+            acked_idx = pending[0][0]
+
+        if acked_idx is None:
+            print("No dispatch acked.")
+            return 1
+
+        dispatch = dispatches[acked_idx]
+        selected_lane = str(dispatch.get("lane", "")).strip()
+        from_role = str(dispatch.get("from_role", "")).strip()
+        to_role = str(dispatch.get("to_role", "")).strip()
+
+        promotion_next = ""
+        close_aliases = {"close", "librarian"}
+        allowed_by_lane = {
+            "control": ["worker"],
+            "execution": ["worker"],
+            "audit": ["researcher", "qc"],
+            "watcher": ["researcher"],
+        }
+        default_runtime_role = "researcher"
+        if role_contract.exists():
+            try:
+                import yaml
+
+                contract = yaml.safe_load(role_contract.read_text(encoding="utf-8")) or {}
+                runtime_roles = contract.get("runtime_roles") if isinstance(contract, dict) else {}
+                if isinstance(runtime_roles, dict):
+                    default_runtime_role = str(runtime_roles.get("default_role", default_runtime_role)).strip() or default_runtime_role
+                    aliases = runtime_roles.get("close_role_aliases")
+                    if isinstance(aliases, list) and aliases:
+                        close_aliases = {str(item).strip() for item in aliases if str(item).strip()} or close_aliases
+                lane_compat = contract.get("lane_role_compatibility") if isinstance(contract, dict) else {}
+                if isinstance(lane_compat, dict):
+                    allowed = lane_compat.get("allowed_runtime_roles_by_lane")
+                    if isinstance(allowed, dict) and allowed:
+                        parsed_allowed = {}
+                        for lane_id, roles in allowed.items():
+                            if not isinstance(roles, list):
+                                continue
+                            normalized = [str(item).strip() for item in roles if str(item).strip()]
+                            if normalized:
+                                parsed_allowed[str(lane_id).strip()] = normalized
+                        if parsed_allowed:
+                            allowed_by_lane = parsed_allowed
+                transitions = contract.get("promotion_gates", {}).get("transitions", [])
+                if isinstance(transitions, list):
+                    for transition in transitions:
+                        if not isinstance(transition, dict):
+                            continue
+                        if str(transition.get("from", "")).strip() == to_role:
+                            promotion_next = str(transition.get("to", "")).strip()
+                            if promotion_next:
+                                break
+            except Exception:
+                pass
+
+        effective_runtime_role = _resolve_runtime_role(ack_terminal_role, ack_runtime_role, default_runtime_role)
+        allowed_roles = [str(item).strip() for item in allowed_by_lane.get(selected_lane, []) if str(item).strip()]
+        if not allowed_roles:
+            print(
+                f"Lane-role authorization missing for lane '{selected_lane}' in lane_role_compatibility.allowed_runtime_roles_by_lane"
+            )
+            return 1
+
+        single_terminal_mode = bool(packet.get("single_terminal_mode"))
+        if not single_terminal_mode:
+            single_terminal_mode = str(packet.get("owner_terminal", "")).strip().startswith("SPINE-CONTROL-")
+        lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+        lane_owner_terminal = ""
+        for row in lane_outcomes:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("lane_id", "")).strip() != selected_lane:
+                continue
+            lane_owner_terminal = str(row.get("owner_terminal", "")).strip()
+            if lane_owner_terminal:
+                break
+        if not lane_owner_terminal and single_terminal_mode:
+            lane_owner_terminal = str(packet.get("owner_terminal", "")).strip()
+
+        control_lane_override = (
+            single_terminal_mode
+            and ack_terminal_role.startswith("SPINE-CONTROL-")
+            and lane_owner_terminal.startswith("SPINE-CONTROL-")
+        )
+
+        if not control_lane_override and effective_runtime_role not in allowed_roles:
+            print(
+                f"Lane-role authorization failed: lane={selected_lane} runtime_role={effective_runtime_role} allowed={allowed_roles}"
+            )
+            if ack_terminal_role:
+                print(f"Terminal role context: {ack_terminal_role}")
+            return 1
+        if control_lane_override:
+            print(
+                f"Lane-role override: terminal={ack_terminal_role} acknowledged owned lane '{selected_lane}' in single-terminal mode"
+            )
+
+        dispatch["status"] = "done"
+        dispatch["completed_at"] = now
+        dispatch["result"] = result
+        dispatch["run_key"] = run_key or None
+        dispatch["acked_by_terminal"] = acked_by_terminal
+
+        lane_updated = False
+        for row in lane_outcomes:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("lane_id", "")).strip() != selected_lane:
+                continue
+            row["lane_status"] = "DONE"
+            row["owner_terminal"] = lane_owner_terminal or ack_terminal_role or packet.get("owner_terminal", "")
+            row["stub_evidence_ref"] = str(row.get("stub_evidence_ref", "") or "")
+            row["updated_at_utc"] = now
+            if run_key:
+                row["run_key"] = run_key
+            lane_updated = True
+            break
+        if not lane_updated:
+            entry = {
+                "lane_id": selected_lane,
+                "lane_status": "DONE",
+                "owner_terminal": lane_owner_terminal or ack_terminal_role or packet.get("owner_terminal", ""),
+                "stub_evidence_ref": "",
+                "updated_at_utc": now,
+            }
+            if run_key:
+                entry["run_key"] = run_key
+            lane_outcomes.append(entry)
+        packet["lane_outcomes"] = lane_outcomes
+
+        role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+        if to_role:
+            role_flow["current_role"] = to_role
+        elif from_role and not role_flow.get("current_role"):
+            role_flow["current_role"] = from_role
+        if promotion_next:
+            role_flow["next_role"] = promotion_next
+        elif to_role in close_aliases:
+            role_flow["next_role"] = ""
+        elif to_role and not role_flow.get("next_role"):
+            role_flow["next_role"] = to_role
+        role_flow["last_transition"] = {
+            "task_id": dispatch.get("task_id"),
+            "from_role": from_role,
+            "to_role": to_role,
+            "completed_at": now,
+            "run_key": run_key,
+        }
+        role_flow.pop("pending_transition", None)
+        state["role_flow"] = role_flow
+        state["packet"] = packet
+
+        lifecycle_state = str(state.get("lifecycle_state", "active")).strip() or "active"
+        if lifecycle_state == "active" and to_role == "worker":
+            state["lifecycle_state"] = "implemented"
+        elif lifecycle_state in {"active", "implemented"} and to_role in {"qc"}:
+            state["lifecycle_state"] = "implemented"
+        elif lifecycle_state in {"active", "implemented"} and to_role in close_aliases:
+            state["lifecycle_state"] = "validated"
+
+        state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    _sync_runtime_traffic_index(state_file, traffic_index_file)
+
+    print(f"Acknowledged D{acked_idx + 1} [{dispatch['lane']}]:")
+    print(f"  Task: {dispatch['task']}")
+    print(f"  Result: {result}")
+    if run_key:
+        print(f"  Run key: {run_key}")
+    print("  Status: done")
+    print(f"  Lifecycle: {state.get('lifecycle_state', 'active')}")
+    print(f"  Ack role: terminal={ack_terminal_role or 'unset'} runtime={effective_runtime_role} lane={selected_lane}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

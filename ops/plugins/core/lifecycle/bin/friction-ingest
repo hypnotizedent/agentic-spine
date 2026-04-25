@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Friction queue ingest — writes to SQLite canonical authority.
+
+Authority: shared_authority.db (friction table)
+Projection: friction-queue.ndjson (appended on each ingest)
+Legacy: friction.queue.yaml is no longer written by this surface.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import gaps_sql_authority as authority  # noqa: E402
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def make_fingerprint(capability: str, expected: str, actual: str) -> str:
+    text = f"{capability}|{expected}|{actual}"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def make_friction_id() -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    short = uuid.uuid4().hex[:6]
+    return f"FR-{ts}-{short}"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Friction queue ingest")
+    parser.add_argument("--loop-id", default=os.environ.get("SPINE_LOOP_ID", ""))
+    parser.add_argument("--capability", required=True)
+    parser.add_argument("--expected", required=True)
+    parser.add_argument("--actual", required=True)
+    parser.add_argument("--severity", default="medium")
+    parser.add_argument("--auto-reconcile", action="store_true")
+    args = parser.parse_args()
+
+    db_path, _ = authority.resolve_paths(ROOT)
+    conn = authority.connect(db_path)
+    authority.ensure_schema(conn)
+
+    now = utc_now()
+    fingerprint = make_fingerprint(args.capability, args.expected, args.actual)
+
+    # Dedup: if same fingerprint exists, increment hit_count
+    existing = authority.get_friction_by_fingerprint(conn, fingerprint)
+    if existing:
+        friction_id = existing["friction_id"]
+        existing["hit_count"] = (existing.get("hit_count") or 1) + 1
+        existing["last_seen_utc"] = now
+        existing["updated_at_utc"] = now
+        if args.loop_id:
+            sources = existing.get("sources") or []
+            if args.loop_id not in sources:
+                sources.append(args.loop_id)
+            existing["sources"] = sources
+        authority.upsert_friction(conn, existing)
+        authority.insert_friction_event(
+            conn,
+            friction_id=friction_id,
+            event_type="hit",
+            from_status=existing["status"],
+            to_status=existing["status"],
+            reason=f"Duplicate ingest (hit_count={existing['hit_count']})",
+            actor="friction.ingest",
+        )
+        conn.commit()
+        item_out = {
+            "friction_id": friction_id,
+            "hit_count": existing["hit_count"],
+            "dedup": True,
+        }
+    else:
+        friction_id = make_friction_id()
+        sources = [args.loop_id] if args.loop_id else []
+        item = {
+            "friction_id": friction_id,
+            "fingerprint": fingerprint,
+            "capability": args.capability,
+            "expected": args.expected,
+            "actual": args.actual,
+            "severity": args.severity,
+            "status": "queued",
+            "first_seen_utc": now,
+            "last_seen_utc": now,
+            "updated_at_utc": now,
+            "created_at_utc": now,
+            "hit_count": 1,
+            "sources": sources,
+        }
+        authority.upsert_friction(conn, item)
+        authority.insert_friction_event(
+            conn,
+            friction_id=friction_id,
+            event_type="ingest",
+            from_status=None,
+            to_status="queued",
+            reason="New friction item ingested via friction.ingest capability",
+            actor="friction.ingest",
+        )
+        conn.commit()
+        item_out = {
+            "friction_id": friction_id,
+            "capability": args.capability,
+            "severity": args.severity,
+            "dedup": False,
+        }
+
+    # Append to NDJSON projection for parity
+    state_root = Path(os.environ.get(
+        "SPINE_STATE",
+        str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+    ))
+    ndjson_path = state_root / "friction-queue.ndjson"
+    fetched = authority.get_friction(conn, friction_id)
+    if fetched:
+        ndjson_entry = authority.friction_to_ndjson_entry(fetched)
+        with open(ndjson_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(ndjson_entry, separators=(",", ":")) + "\n")
+
+    conn.close()
+
+    print(json.dumps({
+        "capability": "friction.ingest",
+        "status": "ok",
+        "authority": "sqlite",
+        "item": item_out,
+    }, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

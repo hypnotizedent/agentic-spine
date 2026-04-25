@@ -1,0 +1,101 @@
+---
+status: authoritative
+owner: "@operator"
+scope: operator-hardware-bootstrap-handoff-contract
+version: 1
+updated_at: "2026-04-15"
+last_verified: "2026-04-15"
+
+# Operator Hardware Bootstrap Handoff Contract
+#
+# This contract defines the Stage 0 -> Stage 1 handoff object for
+# operator-owned hardware reprovisioned to Linux.
+#
+# Stage 0 chain, in order:
+# - operator.hardware.inventory.yaml establishes the device record
+# - operator.hardware.readiness.profiles.yaml defines the readiness gate model
+# - runtime.bootstrap.contract.yaml establishes the governed bootstrap entrypath
+# - operator.hardware.bootstrap.usb.medium.contract.yaml defines the reusable
+#   first-touch delivery medium and local write path
+# - this contract emits the first-touch handoff object after trustworthy SSH proof
+# - Stage 1 welcome/readiness surfaces consume the handoff after first boot
+#
+# Scope:
+# - Stage 0 first-touch bootstrap outputs only
+# - consumed by Stage 1 welcome/readiness planning
+#
+# This surface does NOT:
+# - assign node roles
+# - assign host roles
+# - declare eligibility outcomes
+# - activate any machine
+#
+# Related contracts:
+# - ops/bindings/operator.hardware.inventory.yaml
+# - ops/bindings/operator.hardware.readiness.profiles.yaml
+# - ops/bindings/operator.hardware.bootstrap.usb.medium.contract.yaml
+# - ops/bindings/runtime.bootstrap.contract.yaml
+
+subordinate_to: ops/bindings/root.authority.contract.yaml
+
+handoff_contract:
+  description: >
+    Minimum machine-readable object emitted at the end of the Stage 0 chain,
+    after first-touch bootstrap establishes a claimable Linux host with
+    trustworthy SSH proof.
+
+  required_fields:
+    - device_id
+    - source_platform
+    - target_platform_truth
+    - hostname
+    - operator_user
+    - ssh_public_key_ref
+    - ssh_proof_status
+    - ssh_proof_endpoint
+    - package_baseline_status
+    - key_seeding_status
+    - bootstrap_method
+    - installer_provenance
+    - target_distro
+    - target_distro_version
+    - disk_partition_shape
+    - bootstrap_completed_at
+
+  optional_fields:
+    - tailscale_identity
+    - tailscale_ip
+    - tailscale_status
+    - enrollment_policy
+    - enrollment_policy_lineage
+    - entropy_markers
+    - local_hands_required
+    - local_hands_steps
+    - package_baseline
+    - bootstrap_notes
+    - render_time_snapshot
+    - realized_operator_user
+
+  field_notes:
+    source_platform: "Original platform from operator hardware inventory, such as mac or windows."
+    device_id: "Device identity originates in the operator.hardware.inventory.yaml record, not in this handoff."
+    target_platform_truth: "Target platform after reprovision. Current Stage 0 kernel expects linux."
+    ssh_proof_status: "Must be trustworthy. If proof is absent, handoff is not valid."
+    ssh_public_key_ref: "Selected through the readiness gate model and threaded through bootstrap rendering before handoff emission."
+    installer_provenance: "Method and artifact lineage used to bootstrap the machine."
+    enrollment_policy: "First-boot enrollment policy from operator.hardware.readiness.profiles.yaml enrollment_policies."
+    enrollment_policy_lineage: "Records whether trust-sensitive material was used and what enrollment stance was active."
+    entropy_markers: "Observed quirks or caveats from bootstrap time. Inform later readiness work; do not imply eligibility."
+    render_time_snapshot: "Captures inventory platform, device class, and timestamp at render time for later forensic comparison."
+    realized_operator_user: "Actual operator user observed on the remote host during firstboot claim, separate from the operator-supplied SSH username."
+
+  stage_boundary:
+    produces: "Stage 0 first-touch bootstrap handoff object"
+    consumed_by:
+      - host.operator-hardware.welcome-plan
+      - host.operator-hardware.readiness
+    does_not_imply:
+      - host assignment
+      - node assignment
+      - eligibility classification
+      - activation

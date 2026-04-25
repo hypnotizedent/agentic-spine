@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# docker-compose-status - Read-only docker compose status per stack
+#
+# Outputs per-stack health with reason codes.
+# No restarts, no deploys, no mutations.
+# STOP=2 on preconditions (missing binding, yq, etc.)
+#
+# Reason codes:
+#   ssh_timeout       - Cannot connect to host (timeout)
+#   ssh_auth_denied   - SSH auth denied (wrong user/key)
+#   ssh_unreachable   - SSH cannot resolve hostname / connect refused
+#   ssh_error         - Other SSH error
+#   dir_missing       - Stack directory doesn't exist
+#   compose_missing   - No docker-compose.yml or compose.yml
+#   docker_unreachable- Docker daemon not accessible
+#   compose_ps_failed - docker compose ps failed
+#
+# Usage:
+#   docker-compose-status           # check all targets
+#   docker-compose-status <host>    # check specific host
+#   docker-compose-status [<host>] --strict-exit
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+BINDING="$SPINE_ROOT/ops/bindings/docker.compose.targets.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+# Source shared SSH resolver for LAN→Tailscale fallback
+# shellcheck source=../../../lib/ssh-resolve.sh
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+
+[[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+
+HOST_FILTER=""
+STRICT_EXIT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --strict-exit)
+      STRICT_EXIT=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  docker-compose-status
+  docker-compose-status <host>
+  docker-compose-status --target <host>
+  docker-compose-status [<host>] --strict-exit
+
+Flags:
+  --target <host> Target docker.compose.targets id to check.
+  --strict-exit  Exit non-zero when any checked stack is degraded/down/unreachable.
+EOF
+      exit 0
+      ;;
+    --target)
+      [[ $# -ge 2 ]] || stop "--target requires a value"
+      if [[ -n "$HOST_FILTER" ]]; then
+        stop "too many host filters (expected at most one host target id)"
+      fi
+      HOST_FILTER="$2"
+      shift 2
+      ;;
+    *)
+      if [[ -n "$HOST_FILTER" ]]; then
+        stop "too many host filters (expected at most one host target id)"
+      fi
+      HOST_FILTER="$1"
+      shift
+      ;;
+  esac
+done
+
+# Read targets list
+TARGET_KEYS="$(yq -r '.targets | keys | .[]' "$BINDING" 2>/dev/null || true)"
+[[ -n "${TARGET_KEYS:-}" ]] || stop "binding has no targets: $BINDING"
+
+echo "docker.compose.status"
+echo "binding: $BINDING"
+echo "ssh_binding: $SSH_BINDING"
+
+total_stacks=0
+total_ok=0
+total_degraded=0
+total_down=0
+
+DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_BINDING")"
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
+
+_classify_ssh_error() {
+  local stderr="$1"
+  if echo "$stderr" | grep -qiE "permission denied|authentication failed|no more authentication"; then echo "ssh_auth_denied"; return; fi
+  if echo "$stderr" | grep -qiE "operation timed out|connection timed out|timed out"; then echo "ssh_timeout"; return; fi
+  if echo "$stderr" | grep -qiE "could not resolve hostname|name or service not known"; then echo "ssh_unreachable"; return; fi
+  if echo "$stderr" | grep -qiE "connection refused|connection reset|no route"; then echo "ssh_unreachable"; return; fi
+  echo "ssh_error"
+}
+
+REMOTE_STACK_STATUS_SCRIPT="$(cat <<'EOS'
+set -euo pipefail
+PATHX="$1"
+
+# expand ~ manually (check for literal tilde prefix)
+case "$PATHX" in
+  "~/"*) PATHX="$HOME/${PATHX:2}" ;;
+  "~") PATHX="$HOME" ;;
+esac
+
+if [[ ! -d "$PATHX" ]]; then
+  echo "status=down reason=dir_missing running=0 total=0 note="
+  exit 0
+fi
+
+cd "$PATHX"
+
+FILE=""
+if [[ -f docker-compose.yml ]]; then FILE="docker-compose.yml"; fi
+if [[ -z "$FILE" && -f compose.yml ]]; then FILE="compose.yml"; fi
+if [[ -z "$FILE" && -f docker-compose.yaml ]]; then FILE="docker-compose.yaml"; fi
+if [[ -z "$FILE" && -f compose.yaml ]]; then FILE="compose.yaml"; fi
+if [[ -z "$FILE" && -f docker-compose.prod.yml ]]; then FILE="docker-compose.prod.yml"; fi
+if [[ -z "$FILE" ]]; then
+  echo "status=down reason=compose_missing running=0 total=0 note="
+  exit 0
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "status=down reason=docker_cmd_missing running=0 total=0 note="
+  exit 0
+fi
+
+# Prefer direct docker; fall back to sudo -n docker if docker group isn't configured.
+DOCKER_CMD=(docker)
+if ! docker info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    DOCKER_CMD=(sudo -n docker)
+  else
+    echo "status=down reason=docker_unreachable running=0 total=0 note="
+    exit 0
+  fi
+fi
+
+tmp="$(mktemp /tmp/compose_ps.XXXXXX)"
+trap "rm -f \"$tmp\"" EXIT
+
+# Get compose ps as JSON (NDJSON: one JSON object per line, -a includes exited/stopped)
+if ! "${DOCKER_CMD[@]}" compose -f "$FILE" ps -a --format json > "$tmp" 2>/dev/null; then
+  echo "status=down reason=compose_ps_failed running=0 total=0 note="
+  exit 0
+fi
+
+TOTAL=0
+RUNNING=0
+EXITED=0
+HEALTHY=0
+UNHEALTHY=0
+STARTING=0
+WITH_HEALTH=0
+
+if command -v python3 >/dev/null 2>&1; then
+  read TOTAL RUNNING EXITED HEALTHY UNHEALTHY STARTING WITH_HEALTH < <(python3 - "$tmp" <<PY
+import json, sys
+path = sys.argv[1]
+data = []
+try:
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data.append(json.loads(line))
+            except Exception:
+                pass
+    total = len(data)
+    running = sum(1 for s in data if (s.get("State") or "").lower() == "running")
+    exited = sum(1 for s in data if (s.get("State") or "").lower() == "exited")
+    healthy = sum(1 for s in data if (s.get("Health") or "").lower() == "healthy")
+    unhealthy = sum(1 for s in data if (s.get("Health") or "").lower() == "unhealthy")
+    starting = sum(1 for s in data if (s.get("Health") or "").lower() == "starting")
+    with_health = sum(1 for s in data if (s.get("Health") or "").strip() != "")
+    print(total, running, exited, healthy, unhealthy, starting, with_health)
+except Exception:
+    print(0, 0, 0, 0, 0, 0, 0)
+PY
+  )
+else
+  TOTAL="$(grep -cE '^[[:space:]]*\\{' "$tmp" 2>/dev/null || echo 0)"
+  RUNNING="$(grep -cEi '\"State\"[[:space:]]*:[[:space:]]*\"running\"' "$tmp" 2>/dev/null || echo 0)"
+  EXITED="$(grep -cEi '\"State\"[[:space:]]*:[[:space:]]*\"exited\"' "$tmp" 2>/dev/null || echo 0)"
+  HEALTHY="$(grep -cEi '\"Health\"[[:space:]]*:[[:space:]]*\"healthy\"' "$tmp" 2>/dev/null || echo 0)"
+  UNHEALTHY="$(grep -cEi '\"Health\"[[:space:]]*:[[:space:]]*\"unhealthy\"' "$tmp" 2>/dev/null || echo 0)"
+  STARTING="$(grep -cEi '\"Health\"[[:space:]]*:[[:space:]]*\"starting\"' "$tmp" 2>/dev/null || echo 0)"
+  WITH_HEALTH="$(grep -cEi '\"Health\"[[:space:]]*:[[:space:]]*\"' "$tmp" 2>/dev/null || echo 0)"
+fi
+
+STATUS="ok"
+NOTE=""
+if [[ "$TOTAL" -eq 0 ]]; then
+  STATUS="down"
+  NOTE="no_services"
+fi
+if [[ "$RUNNING" -eq 0 && "$TOTAL" -gt 0 ]]; then
+  STATUS="down"
+  NOTE="none_running"
+fi
+if [[ "$EXITED" -gt 0 ]]; then
+  STATUS="degraded"
+  NOTE="${NOTE:+$NOTE,}${EXITED}_exited"
+fi
+if [[ "$UNHEALTHY" -gt 0 ]]; then
+  STATUS="degraded"
+  NOTE="${NOTE:+$NOTE,}${UNHEALTHY}_unhealthy"
+fi
+if [[ "$STARTING" -gt 0 ]]; then
+  STATUS="degraded"
+  NOTE="${NOTE:+$NOTE,}${STARTING}_starting"
+fi
+
+echo "status=$STATUS reason=none running=$RUNNING total=$TOTAL healthy=$HEALTHY unhealthy=$UNHEALTHY starting=$STARTING healthchecks=$WITH_HEALTH note=$NOTE"
+EOS
+)"
+
+for key in $TARGET_KEYS; do
+  # Filter if specific host requested
+  if [[ -n "$HOST_FILTER" && "$key" != "$HOST_FILTER" ]]; then
+    continue
+  fi
+
+  # NOTE: yq `//` coalesces on null OR false, so don't use it for booleans.
+  enabled="$(yq -r ".targets.\"$key\".enabled" "$BINDING" 2>/dev/null || echo "null")"
+  [[ -z "$enabled" || "$enabled" == "null" ]] && enabled="true"
+  if [[ "$enabled" != "true" ]]; then
+    echo
+    echo "host: $key (disabled=true)"
+    echo "STATUS: SKIP reason=disabled"
+    continue
+  fi
+
+  ssh_target_id="$(yq -r ".targets.\"$key\".ssh_target // \"\"" "$BINDING")"
+  [[ -n "$ssh_target_id" && "$ssh_target_id" != "null" ]] || stop "binding target '$key' missing ssh_target"
+
+  # Resolve ssh target via SSOT binding (no ~/.ssh/config alias dependency)
+  ssh_host_raw="$(ssh_resolve_host "$ssh_target_id")"
+  ssh_user="$(ssh_resolve_user "$ssh_target_id" "$DEF_USER")"
+  ssh_port="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .port // ${DEF_PORT}" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+  ssh_to="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .connect_timeout_sec // ${DEF_TO}" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+
+  [[ -n "$ssh_host_raw" && "$ssh_host_raw" != "null" ]] || stop "ssh target '$ssh_target_id' missing in $SSH_BINDING (or host unset)"
+  [[ -n "$ssh_port" && "$ssh_port" != "null" ]] || ssh_port="$DEF_PORT"
+  [[ -n "$ssh_to" && "$ssh_to" != "null" ]] || ssh_to="$DEF_TO"
+
+  timeout_sec="$(yq -r ".targets.\"$key\".connect_timeout_sec // \"\"" "$BINDING" 2>/dev/null || echo "")"
+  if [[ -z "$timeout_sec" || "$timeout_sec" == "null" ]]; then
+    timeout_sec="$ssh_to"
+  fi
+
+  # Resolve host with LAN→Tailscale fallback
+  resolve_result="$(ssh_resolve_ssh_host_with_fallback "$ssh_target_id" "$timeout_sec")" || true
+  ssh_host="$(echo "$resolve_result" | awk '{print $1}')"
+  path_used="$(echo "$resolve_result" | awk '{print $2}')"
+  [[ -n "$ssh_host" ]] || ssh_host="$ssh_host_raw"
+  [[ -n "$path_used" ]] || path_used="unknown"
+
+  echo
+  echo "host: $key (ssh_target=$ssh_target_id ${ssh_user}@${ssh_host}:${ssh_port} path=${path_used})"
+
+  # Pull stacks array
+  stack_count="$(yq -r ".targets.\"$key\".stacks | length" "$BINDING" 2>/dev/null || echo 0)"
+  if [[ "$stack_count" -le 0 ]]; then
+    echo "stacks: 0"
+    continue
+  fi
+
+  # Check host reachability quickly (non-interactive)
+  ssh_opts=(
+    -o "ConnectTimeout=$timeout_sec"
+    -o "StrictHostKeyChecking=$DEF_STRICT"
+    -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+    -o "NumberOfPasswordPrompts=0"
+    -o "LogLevel=ERROR"
+  )
+  if [[ "$DEF_BATCH" == "true" ]]; then
+    ssh_opts+=(-o "BatchMode=yes")
+  fi
+
+  set +e
+  probe_out="$(ssh "${ssh_opts[@]}" -p "$ssh_port" "${ssh_user}@${ssh_host}" "true" 2>&1)"
+  probe_rc=$?
+  set -e
+  if [[ "$probe_rc" -ne 0 ]]; then
+    echo "stacks: $stack_count"
+    echo "STATUS: UNREACHABLE reason=$(_classify_ssh_error "$probe_out") path=${path_used}"
+    total_stacks=$((total_stacks + stack_count))
+    total_down=$((total_down + stack_count))
+    continue
+  fi
+
+  echo "stacks: $stack_count"
+  printf "%-16s %-10s %-14s %s\n" "STACK" "STATUS" "running/total" "note"
+
+  # Iterate stacks
+  for i in $(seq 0 $((stack_count-1))); do
+    name="$(yq -r ".targets.\"$key\".stacks[$i].name" "$BINDING")"
+    path="$(yq -r ".targets.\"$key\".stacks[$i].path" "$BINDING")"
+
+    total_stacks=$((total_stacks + 1))
+
+    # Run remote and parse key=val output
+    set +e
+    out="$(ssh "${ssh_opts[@]}" -p "$ssh_port" "${ssh_user}@${ssh_host}" "bash -lc $(printf "%q" "$REMOTE_STACK_STATUS_SCRIPT") -- $(printf "%q" "$path")" 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -ne 0 ]]; then
+      if echo "$out" | grep -q "status="; then
+        line="$(echo "$out" | grep -m1 "status=")"
+      else
+        line="status=down reason=$(_classify_ssh_error "$out") running=0 total=0 note="
+      fi
+    else
+      line="$out"
+    fi
+
+    status="$(echo "$line" | sed -n 's/.*status=\([^ ]*\).*/\1/p')"
+    reason="$(echo "$line" | sed -n 's/.*reason=\([^ ]*\).*/\1/p')"
+    running="$(echo "$line" | sed -n 's/.*running=\([^ ]*\).*/\1/p')"
+    total="$(echo "$line" | sed -n 's/.*total=\([^ ]*\).*/\1/p')"
+    note="$(echo "$line" | sed -n 's/.*note=\([^ ]*\).*/\1/p')"
+
+    [[ -n "${status:-}" ]] || { status="down"; reason="parse_error"; running="0"; total="0"; note=""; }
+
+    # Format note for display
+    display_note=""
+    if [[ -n "$note" && "$note" != "none" ]]; then
+      display_note="$note"
+    elif [[ "$reason" != "none" ]]; then
+      display_note="reason=$reason"
+    fi
+
+    printf "%-16s %-10s %-14s %s\n" "$name" "$status" "${running}/${total}" "$display_note"
+
+    # Tally
+    case "$status" in
+      ok) total_ok=$((total_ok + 1)) ;;
+      degraded) total_degraded=$((total_degraded + 1)) ;;
+      *) total_down=$((total_down + 1)) ;;
+    esac
+  done
+done
+
+echo
+echo "summary: $total_stacks stacks | $total_ok ok | $total_degraded degraded | $total_down down"
+
+# Status-style capabilities should report issues but not fail the capability run.
+# Drift gates can enforce policy separately; operators still get reason-coded output.
+overall="OK"
+if [[ "$total_down" -gt 0 ]]; then
+  overall="FAIL"
+elif [[ "$total_degraded" -gt 0 ]]; then
+  overall="DEGRADED"
+fi
+echo "status: $overall"
+
+if [[ "$STRICT_EXIT" -eq 1 && ( "$total_degraded" -gt 0 || "$total_down" -gt 0 ) ]]; then
+  exit 1
+fi
+
+exit 0

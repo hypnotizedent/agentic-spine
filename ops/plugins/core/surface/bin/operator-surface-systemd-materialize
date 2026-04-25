@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Materialize canonical systemd user units for the operator surface stack."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+
+LOCAL_STATE_ROOT = Path(
+    os.environ.get(
+        "SPINE_STATE",
+        str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+    )
+)
+DEFAULT_OUTPUT_DIR = LOCAL_STATE_ROOT / "domain-state" / "generated" / "systemd" / "operator_surface"
+
+SERVER_UNIT = "com.ronny.operator-surface-server.service"
+REGENERATE_UNIT = "com.ronny.operator-surface-regenerate.service"
+WATCHDOG_UNIT = "com.ronny.operator-surface-watchdog.service"
+WATCHDOG_TIMER = "com.ronny.operator-surface-watchdog.timer"
+
+
+def render_units(
+    *,
+    repo_path: str,
+    state_root: str,
+    evidence_root: str,
+    python_bin: str,
+    port: int,
+) -> dict[str, str]:
+    server_bin = f"{repo_path}/ops/plugins/core/surface/bin/operator-surface-server"
+    regenerate_bin = f"{repo_path}/ops/plugins/core/surface/bin/operator-surface-regenerate"
+    watchdog_bin = f"{repo_path}/ops/plugins/core/surface/bin/operator-surface-watchdog"
+
+    units = {
+        SERVER_UNIT: (
+            "[Unit]\n"
+            "Description=Operator surface static server (read-only cockpit + mobile)\n"
+            "After=network-online.target\n"
+            "\n"
+            "[Service]\n"
+            "Type=simple\n"
+            f"ExecStart={python_bin} {server_bin} --port {port}\n"
+            "Restart=on-failure\n"
+            "RestartSec=10\n"
+            f"Environment=SPINE_STATE={state_root}\n"
+            f"Environment=SPINE_EVIDENCE_ROOT={evidence_root}\n"
+            f"Environment=SPINE_CODE={repo_path}\n"
+            "\n"
+            "[Install]\n"
+            "WantedBy=default.target\n"
+        ),
+        REGENERATE_UNIT: (
+            "[Unit]\n"
+            "Description=Regenerate operator surface (cockpit + mobile + payload)\n"
+            "\n"
+            "[Service]\n"
+            "Type=oneshot\n"
+            f"ExecStart={python_bin} {regenerate_bin}\n"
+            f"Environment=SPINE_STATE={state_root}\n"
+            f"Environment=SPINE_EVIDENCE_ROOT={evidence_root}\n"
+            f"Environment=SPINE_CODE={repo_path}\n"
+            f"Environment=SPINE_REPO={repo_path}\n"
+            f"WorkingDirectory={repo_path}\n"
+        ),
+        WATCHDOG_UNIT: (
+            "[Unit]\n"
+            "Description=Operator surface watchdog (repair 8900 leaf if unhealthy)\n"
+            "After=network-online.target\n"
+            "Wants=network-online.target\n"
+            "\n"
+            "[Service]\n"
+            "Type=oneshot\n"
+            f"ExecStart={python_bin} {watchdog_bin}\n"
+            f"WorkingDirectory={repo_path}\n"
+        ),
+        WATCHDOG_TIMER: (
+            "[Unit]\n"
+            "Description=Run operator surface watchdog every 2 minutes\n"
+            "\n"
+            "[Timer]\n"
+            "OnBootSec=1min\n"
+            "OnUnitActiveSec=2min\n"
+            "AccuracySec=30s\n"
+            "Persistent=true\n"
+            "\n"
+            "[Install]\n"
+            "WantedBy=timers.target\n"
+        ),
+    }
+    return units
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Materialize canonical operator-surface systemd units")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
+    parser.add_argument("--repo-path", default="/home/ubuntu/code/agentic-spine")
+    parser.add_argument("--state-root", default="/home/ubuntu/code/.runtime/spine/state")
+    parser.add_argument("--evidence-root", default="/home/ubuntu/code/.evidence/spine")
+    parser.add_argument("--python-bin", default="/usr/bin/python3")
+    parser.add_argument("--port", type=int, default=8900)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    units = render_units(
+        repo_path=args.repo_path,
+        state_root=args.state_root,
+        evidence_root=args.evidence_root,
+        python_bin=args.python_bin,
+        port=args.port,
+    )
+
+    written = []
+    for name, content in units.items():
+        path = output_dir / name
+        path.write_text(content, encoding="utf-8")
+        written.append(str(path))
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "output_dir": str(output_dir),
+                    "units": written,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print("operator-surface.systemd.materialize")
+        print(f"output_dir: {output_dir}")
+        for path in written:
+            print(f"wrote: {path}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

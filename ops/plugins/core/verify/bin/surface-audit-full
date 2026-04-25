@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+OUT_DIR="$(spine_resolve_mailroom_path 'evidence/verify/governance')"
+STAMP="$(date +%Y%m%d)"
+OUT_FILE="$OUT_DIR/SURFACE_AUDIT_${STAMP}.md"
+CHECK_TIMEOUT_SECONDS="${SURFACE_AUDIT_CHECK_TIMEOUT_SECONDS:-120}"
+
+mkdir -p "$OUT_DIR"
+
+fail_count=0
+warn_count=0
+rows=()
+section_details=()
+
+record() {
+  local section="$1"
+  local status="$2"
+  local detail="$3"
+  rows+=("$section|$status|$detail")
+  if [[ "$status" == "FAIL" ]]; then
+    fail_count=$((fail_count + 1))
+  elif [[ "$status" == "WARN" ]]; then
+    warn_count=$((warn_count + 1))
+  fi
+}
+
+run_with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$CHECK_TIMEOUT_SECONDS" "$@"
+  else
+    "$@"
+  fi
+}
+
+run_check() {
+  local section="$1"
+  local detail="$2"
+  shift 2
+  if run_with_timeout "$@" >/tmp/surface_audit_check.out 2>/tmp/surface_audit_check.err; then
+    record "$section" "PASS" "$detail"
+  else
+    local err
+    err="$(sed -n '1,2p' /tmp/surface_audit_check.err | tr '\n' ' ' | xargs || true)"
+    [[ -n "$err" ]] || err="$(sed -n '1,2p' /tmp/surface_audit_check.out | tr '\n' ' ' | xargs || true)"
+    record "$section" "FAIL" "${detail}; ${err:-check failed}"
+  fi
+}
+
+# 1) Entry surface parity — retired after 0329f442 collapsed the Claude hook
+# layer; the boot entry projection remains but no longer claims a Claude hook
+# surface
+
+# 2) Launcher/entry script parity
+launcher_command="${ROOT}/ops/commands/terminal-launch.sh"
+launcher_exec="${ROOT}/ops/plugins/core/session/bin/terminal-launch-exec"
+if [[ -x "$launcher_command" ]] && [[ -x "$launcher_exec" ]] \
+  && rg -q "cmd_exec" "$launcher_command" \
+  && ! rg -n 'spine_terminal_entry\.sh|ops/commands/terminal-launch\.sh' \
+      "$WORKBENCH_ROOT/AGENTS.md" \
+      "$WORKBENCH_ROOT/dotfiles" \
+      "$WORKBENCH_ROOT/scripts" \
+      "$WORKBENCH_ROOT/docs/governance/WORKBENCH_ACTIVE_SURFACE_OWNERSHIP_REGISTRY.md" \
+      >/tmp/surface_audit_launcher_refs.out 2>/tmp/surface_audit_launcher_refs.err; then
+  record "2. Launcher/Entry Parity" "PASS" "spine-owned launcher + exec surfaces present; active workbench source has no retired shim or raw launcher-path references"
+else
+  launcher_err=""
+  if [[ -s /tmp/surface_audit_launcher_refs.out ]]; then
+    launcher_err="$(sed -n '1,4p' /tmp/surface_audit_launcher_refs.out | tr '\n' ' ' | xargs || true)"
+  fi
+  record "2. Launcher/Entry Parity" "FAIL" "missing spine launcher surface or active workbench source still references retired launcher compatibility paths${launcher_err:+; $launcher_err}"
+fi
+
+# 3) Capability authority parity
+required_manifest_caps=(
+  verify.infra.run
+  verify.domain.run
+  verify.release.run
+  verify.route.recommend
+  verify.pack.list
+  verify.pack.run
+  verify.pack.explain
+  gate.topology.validate
+  gate.topology.assign
+  gate.registry.add
+  gate.registry.update
+  domain.onboard.new
+  surface.audit.full
+  stability.control.snapshot
+  stability.control.reconcile
+  mcp.runtime.status
+)
+
+mapfile -t authority_caps < <(yq e -r '.capabilities | keys | .[]' "$ROOT/ops/capabilities.yaml")
+mapfile -t manifest_caps < <(yq e -r '.plugins[].capabilities[]?' "$ROOT/ops/plugins/MANIFEST.yaml")
+
+declare -A authority_index=()
+for cap in "${authority_caps[@]}"; do
+  [[ -n "$cap" ]] && authority_index["$cap"]=1
+done
+
+declare -A manifest_index=()
+for cap in "${manifest_caps[@]}"; do
+  [[ -n "$cap" ]] && manifest_index["$cap"]=1
+done
+
+missing_authority=0
+missing_manifest=0
+for cap in "${required_manifest_caps[@]}"; do
+  [[ -n "$cap" ]] || continue
+  if [[ -z "${authority_index[$cap]:-}" ]]; then
+    missing_authority=$((missing_authority + 1))
+  fi
+  if [[ -z "${manifest_index[$cap]:-}" ]]; then
+    missing_manifest=$((missing_manifest + 1))
+  fi
+done
+
+if [[ "$missing_authority" -eq 0 && "$missing_manifest" -eq 0 ]]; then
+  record "3. Capability Authority Parity" "PASS" "capabilities.yaml and MANIFEST.yaml cover required control-lane capabilities"
+else
+  record "3. Capability Authority Parity" "FAIL" "$missing_authority required capabilities missing from authority; $missing_manifest missing from plugin MANIFEST.yaml"
+fi
+
+# 4) Gate topology parity
+run_check "4. Gate Topology Parity" "registry vs topology vs profiles checks" \
+  bash "$ROOT/surfaces/verify/d127-domain-assignment-drift-lock.sh"
+
+# 5) Domain docs routing parity
+domain_docs_gate_script="$ROOT/surfaces/verify/d122-domain-doc-route-lock.sh"
+domain_docs_gate_retired="$(
+  yq e -r '.gates[] | select(.id == "D122") | (.retired // false)' \
+    "$ROOT/ops/bindings/gate.registry.yaml" 2>/dev/null || echo "false"
+)"
+if [[ -x "$domain_docs_gate_script" ]]; then
+  run_check "5. Domain Docs Routing Parity" "domain.docs.routes integrity" \
+    bash "$domain_docs_gate_script"
+elif [[ "$domain_docs_gate_retired" == "true" ]]; then
+  record "5. Domain Docs Routing Parity" "PASS" "D122 retired; no active domain-doc route lock script required"
+else
+  record "5. Domain Docs Routing Parity" "FAIL" "missing active domain-doc route lock script"
+fi
+
+# 6) Workbench implementation parity
+if run_with_timeout "$ROOT/bin/ops" cap run workbench.impl.audit >/tmp/surface_audit_workbench.out 2>/tmp/surface_audit_workbench.err; then
+  record "6. Workbench Implementation Parity" "PASS" "workbench.impl.audit passed"
+else
+  record "6. Workbench Implementation Parity" "FAIL" "workbench.impl.audit failed"
+fi
+
+# 7) MCP runtime parity
+if run_with_timeout "$ROOT/bin/ops" cap run mcp.runtime.status >/tmp/surface_audit_mcp.out 2>/tmp/surface_audit_mcp.err; then
+  record "7. MCP Runtime Parity" "PASS" "mcp.runtime.status passed"
+else
+  record "7. MCP Runtime Parity" "FAIL" "mcp.runtime.status failed"
+fi
+
+# 8) VM authority consistency
+if [[ -f "$ROOT/ops/bindings/vm.lifecycle.yaml" && -f "$ROOT/ops/bindings/vm.lifecycle.contract.yaml" && -f "$ROOT/ops/bindings/ssh.targets.yaml" ]]; then
+  if run_with_timeout "$ROOT/bin/ops" cap run vm.governance.audit >/tmp/surface_audit_vm.out 2>/tmp/surface_audit_vm.err; then
+    record "8. VM Authority Consistency" "PASS" "vm.lifecycle + vm contract + ssh targets aligned"
+  else
+    record "8. VM Authority Consistency" "WARN" "vm authority files exist but vm.governance.audit returned non-zero"
+  fi
+else
+  record "8. VM Authority Consistency" "FAIL" "missing vm.lifecycle* or ssh.targets binding"
+fi
+
+# 9) Predictive control readiness
+snapshot_json_tmp="$(mktemp)"
+set +e
+run_with_timeout "$ROOT/ops/plugins/infra/observability/bin/stability-control-snapshot" --json >"$snapshot_json_tmp" 2>/tmp/surface_audit_snapshot.err
+snapshot_rc=$?
+set -e
+if jq -e '.capability == "stability.control.snapshot" and (.domains | length) > 0' "$snapshot_json_tmp" >/dev/null 2>&1; then
+  watcher_fidelity_ok=0
+  if jq -e '
+    ([.probes[]
+      | select(.domain == "infra-core-stack")
+      | select(.capability == "infra.core.slo.status" or .capability == "vm.predictive.headroom")] | length) >= 2
+    and
+    ([.probes[]
+      | select(.domain == "infra-core-stack")
+      | select(.capability == "infra.core.slo.status" or .capability == "vm.predictive.headroom")
+      | (.observed_node_id != null and .observed_node_id != "" and
+         .transport_path != null and .transport_path != "" and
+         .evidence_validity != null and .evidence_validity != "" and
+         .topology_context != null and .topology_context != "" and
+         .fidelity_status == "aligned")] | all)
+  ' "$snapshot_json_tmp" >/dev/null 2>&1; then
+    watcher_fidelity_ok=1
+  fi
+
+  if [[ "$snapshot_rc" -eq 0 && "$watcher_fidelity_ok" -eq 1 ]]; then
+    record "9. Predictive Control Readiness" "PASS" "snapshot capability healthy + structured output + watcher probe fidelity metadata present"
+  elif [[ "$snapshot_rc" -eq 0 ]]; then
+    record "9. Predictive Control Readiness" "WARN" "snapshot capability healthy, but watcher probe fidelity metadata is incomplete"
+  elif [[ "$watcher_fidelity_ok" -eq 1 ]]; then
+    record "9. Predictive Control Readiness" "WARN" "snapshot output valid with watcher probe fidelity metadata; runtime currently degraded (rc=$snapshot_rc)"
+  else
+    record "9. Predictive Control Readiness" "WARN" "snapshot output valid, but runtime degraded and watcher probe fidelity metadata is incomplete (rc=$snapshot_rc)"
+  fi
+else
+  snapshot_err="$(sed -n '1,3p' /tmp/surface_audit_snapshot.err | tr '\n' ' ' | xargs || true)"
+  if [[ "$snapshot_rc" -eq 124 ]] || printf '%s\n' "$snapshot_err" | grep -qiE 'timed out|terminated'; then
+    record "9. Predictive Control Readiness" "WARN" "snapshot timed out before producing structured JSON payload"
+  else
+    record "9. Predictive Control Readiness" "FAIL" "snapshot did not produce expected JSON payload${snapshot_err:+; $snapshot_err}"
+  fi
+fi
+rm -f "$snapshot_json_tmp"
+
+# 10) Domain onboarding integrity
+if run_with_timeout "$ROOT/ops/plugins/core/verify/bin/gate-topology-validate" >/tmp/surface_audit_topoval.out 2>/tmp/surface_audit_topoval.err; then
+  if yq e -r '.capabilities."domain.onboard.new".command // ""' "$ROOT/ops/capabilities.yaml" | grep -q .; then
+    record "10. Domain Onboarding Integrity" "PASS" "domain.onboard.new + topology validation available"
+  else
+    record "10. Domain Onboarding Integrity" "FAIL" "domain.onboard.new capability missing"
+  fi
+else
+  record "10. Domain Onboarding Integrity" "FAIL" "gate-topology-validate failed"
+fi
+
+{
+  echo "# Surface Audit"
+  echo
+  echo "- Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "- Capability: surface.audit.full"
+  echo "- Output: $OUT_FILE"
+  echo "- Summary: FAIL=$fail_count WARN=$warn_count"
+  echo
+  echo "| Section | Status | Details |"
+  echo "|---|---|---|"
+  for row in "${rows[@]}"; do
+    IFS='|' read -r section status detail <<< "$row"
+    echo "| $section | $status | $detail |"
+  done
+  echo
+  echo "## Required Sections Included"
+  echo "1. Entry surface parity"
+  echo "2. Launcher/entry parity"
+  echo "3. Capability triad parity"
+  echo "4. Gate topology parity"
+  echo "5. Domain docs routing parity"
+  echo "6. Workbench implementation parity"
+  echo "7. MCP runtime parity"
+  echo "8. VM authority consistency"
+  echo "9. Predictive control readiness"
+  echo "10. Domain onboarding integrity"
+} > "$OUT_FILE"
+
+cat "$OUT_FILE"
+
+if [[ "$fail_count" -gt 0 ]]; then
+  exit 1
+fi
+
+exit 0

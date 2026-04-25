@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Reconcile orphaned waves — mark active waves superseded when their parent loop is terminal or absent."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+# Import joined-state synthesizer for orphan detection
+sys.path.insert(0, str(SCRIPT_DIR))
+import importlib.util
+import importlib.machinery
+
+_loader = importlib.machinery.SourceFileLoader(
+    "joined_state",
+    str(SCRIPT_DIR / "spine-engine-joined-state"),
+)
+_spec = importlib.util.spec_from_loader("joined_state", _loader)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+
+resolve_root = _mod.resolve_root
+resolve_paths = _mod.resolve_paths
+collect_loop_rows = _mod.collect_loop_rows
+collect_wave_state = _mod.collect_wave_state
+TERMINAL_LOOP_STATUSES = _mod.TERMINAL_LOOP_STATUSES
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def find_orphaned_waves(root: Path) -> list[dict]:
+    paths = resolve_paths(root)
+    _, loop_status_index = collect_loop_rows(paths)
+    active_waves, _ = collect_wave_state(paths)
+
+    orphaned = []
+    for wave in active_waves:
+        parent_loop = wave.get("loop_id", "")
+        if not parent_loop:
+            continue
+        parent_status = loop_status_index.get(parent_loop, "")
+        if parent_status in TERMINAL_LOOP_STATUSES or (parent_loop and not parent_status):
+            wave["parent_loop_status"] = parent_status or "absent"
+            orphaned.append(wave)
+    return orphaned
+
+
+def supersede_wave(state_path: str, reason: str, dry_run: bool) -> bool:
+    path = Path(state_path)
+    if not path.exists():
+        print(f"  SKIP {path} (not found)")
+        return False
+
+    with path.open("r", encoding="utf-8") as f:
+        state = json.load(f)
+
+    if state.get("status") == "closed" or state.get("status") == "superseded":
+        print(f"  SKIP {path.parent.name} (already {state.get('status')})")
+        return False
+
+    state["status"] = "superseded"
+    state["lifecycle_state"] = "superseded"
+    state["closed_at"] = utc_now()
+    state["superseded_reason"] = reason
+
+    if dry_run:
+        print(f"  DRY-RUN would supersede {path.parent.name}")
+        return True
+
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+
+    print(f"  SUPERSEDED {path.parent.name}")
+    return True
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Reconcile orphaned waves by marking them superseded.")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would change without writing")
+    parser.add_argument("--json", action="store_true", help="Output JSON summary")
+    args = parser.parse_args()
+
+    root = resolve_root()
+    orphaned = find_orphaned_waves(root)
+
+    if not orphaned:
+        if args.json:
+            json.dump({"reconciled": 0, "waves": []}, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print("wave-orphan-reconcile: no orphaned waves found")
+        return 0
+
+    if not args.json:
+        print(f"wave-orphan-reconcile: {len(orphaned)} orphaned wave(s) found")
+
+    results = []
+    reconciled = 0
+    for wave in orphaned:
+        wave_id = wave["wave_id"]
+        loop_id = wave["loop_id"]
+        parent_status = wave["parent_loop_status"]
+        reason = f"parent loop {loop_id} is {parent_status} — wave superseded by lifecycle reconciliation"
+
+        changed = supersede_wave(wave["state_path"], reason, args.dry_run)
+        if changed:
+            reconciled += 1
+        results.append({
+            "wave_id": wave_id,
+            "loop_id": loop_id,
+            "parent_loop_status": parent_status,
+            "reconciled": changed,
+        })
+
+    if args.json:
+        json.dump({"reconciled": reconciled, "dry_run": args.dry_run, "waves": results}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        label = "would reconcile" if args.dry_run else "reconciled"
+        print(f"wave-orphan-reconcile: {label} {reconciled} wave(s)")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

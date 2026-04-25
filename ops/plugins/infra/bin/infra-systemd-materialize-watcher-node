@@ -1,0 +1,424 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Watcher Node Systemd Materializer (dry-run only)
+#
+# Generates systemd .service and .timer unit files for the current
+# watcher_node workload set resolved from the live scheduler registry.
+#
+# Outputs generated units to a runtime path for inspection.
+# Does NOT install, activate, or transfer units to any host.
+#
+# Loop: LOOP-SPINE-LINUX-WATCHER-MATERIALIZER-V1-20260414
+
+ROOT="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+OUTPUT_DIR=""
+JSON_OUTPUT=false
+
+MAC_REPO_ROOT="$ROOT"
+MAC_WORKSPACE_ROOT="$(cd "$ROOT/.." && pwd)"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--output-dir DIR] [--json]
+
+Options:
+  --output-dir DIR   Write generated units here (default: \$SPINE_STATE/domain-state/generated/systemd/watcher_node)
+  --json             Emit summary as JSON to stdout
+  -h|--help          Show this help
+EOF
+  exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+    --json) JSON_OUTPUT=true; shift ;;
+    -h|--help) usage ;;
+    --) shift; break ;;
+    *) echo "ERROR: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$OUTPUT_DIR" ]]; then
+  source "$ROOT/ops/lib/runtime-paths.sh"
+  spine_runtime_resolve_paths
+  OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/systemd/watcher_node"
+fi
+mkdir -p "$OUTPUT_DIR"
+
+REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
+LAUNCHD_DIR="$ROOT/ops/plugins/infra/host/launchd"
+
+[[ -f "$REGISTRY" ]] || { echo "ERROR: registry not found: $REGISTRY" >&2; exit 1; }
+
+mapfile -t LABELS < <(yq -r '.labels[] | select(.intended_node_role == "watcher_node" and .state == "active") | .label' "$REGISTRY")
+
+TOTAL=${#LABELS[@]}
+if [[ $TOTAL -eq 0 ]]; then
+  echo "ERROR: no active watcher_node labels found in registry" >&2
+  exit 1
+fi
+
+SERVICES_GENERATED=0
+TIMERS_GENERATED=0
+GAPS=()
+RESULTS=()
+
+label_to_unit() {
+  local label="$1"
+  local name="${label#com.ronny.}"
+  name="${name#com.example-operator.}"
+  echo "spine-watcher-${name}"
+}
+
+extract_exec_start() {
+  local plist="$1"
+  python3 - "$plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    d = plistlib.load(f)
+
+args = d.get("ProgramArguments", [])
+if not args:
+    sys.exit(1)
+
+for a in args:
+    print(a)
+PY
+}
+
+extract_env_vars() {
+  local plist="$1"
+  python3 - "$plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    d = plistlib.load(f)
+
+env = d.get("EnvironmentVariables", {})
+for k, v in sorted(env.items()):
+    print(f"{k}={v}")
+PY
+}
+
+extract_working_dir() {
+  local plist="$1"
+  python3 -c "
+import plistlib, sys
+with open(sys.argv[1], 'rb') as f:
+    d = plistlib.load(f)
+print(d.get('WorkingDirectory', ''))
+" "$plist"
+}
+
+extract_schedule() {
+  local plist="$1"
+  python3 - "$plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    d = plistlib.load(f)
+
+if d.get("KeepAlive") is True or (isinstance(d.get("KeepAlive"), dict)):
+    print("daemon")
+    sys.exit(0)
+
+if "StartCalendarInterval" in d:
+    ci = d["StartCalendarInterval"]
+    weekday = ci.get("Weekday")
+    month = ci.get("Month")
+    day = ci.get("Day")
+    hour = ci.get("Hour")
+    minute = ci.get("Minute")
+
+    m = f"{month:02d}" if month is not None else "*"
+    dd = f"{day:02d}" if day is not None else "*"
+    hh = f"{hour:02d}" if hour is not None else "*"
+    mm = f"{minute:02d}" if minute is not None else "00"
+
+    if weekday is not None:
+        day_map = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
+        dow = day_map.get(weekday, str(weekday))
+        print(f"calendar:{dow} *-{m}-{dd} {hh}:{mm}:00")
+    else:
+        print(f"calendar:*-{m}-{dd} {hh}:{mm}:00")
+    sys.exit(0)
+
+if "StartInterval" in d:
+    interval = d["StartInterval"]
+    print(f"interval:{interval}")
+    sys.exit(0)
+
+print("unknown")
+PY
+}
+
+portability_translate_path() {
+  local raw="$1"
+  local translated="$raw"
+
+  translated="${translated/${HOME}\/\.local\/bin\/spine-ops/\$\{SPINE_REPO\}\/bin\/ops}"
+  translated="${translated/${MAC_WORKSPACE_ROOT}\/workbench/\$\{SPINE_FOUNDATION_ROOT\}}"
+  translated="${translated/${MAC_REPO_ROOT}/\$\{SPINE_REPO\}}"
+  translated="${translated/${MAC_WORKSPACE_ROOT}\/\.runtime\/spine/\$\{SPINE_RUNTIME_ROOT\}}"
+  translated="${translated/${MAC_WORKSPACE_ROOT}/\$\{SPINE_WORKSPACE_ROOT\}}"
+  translated="${translated/${HOME}\/\.local\/bin/\$\{HOME\}\/\.local\/bin}"
+
+  echo "$translated"
+}
+
+check_path_portability() {
+  local plist="$1"
+  python3 - "$plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    d = plistlib.load(f)
+
+issues = []
+args = d.get("ProgramArguments", [])
+env = d.get("EnvironmentVariables", {})
+wdir = d.get("WorkingDirectory", "")
+
+for a in args:
+    if "/opt/homebrew" in a:
+        issues.append(f"homebrew_path_in_args:{a}")
+
+path_val = env.get("PATH", "")
+if "/opt/homebrew" in path_val:
+    issues.append("homebrew_in_PATH")
+
+for a in args:
+    if "/workbench/" in a:
+        issues.append(f"workbench_dep_parameterized:{a}")
+if "/workbench" in wdir:
+    issues.append(f"workbench_wdir_parameterized:{wdir}")
+
+for i in issues:
+    print(i)
+PY
+}
+
+for label in "${LABELS[@]}"; do
+  unit_name="$(label_to_unit "$label")"
+  plist_file="$LAUNCHD_DIR/${label}.plist"
+
+  if [[ ! -f "$plist_file" ]]; then
+    GAPS+=("${label}:plist_not_found")
+    RESULTS+=("{\"label\":\"$label\",\"unit\":\"$unit_name\",\"status\":\"blocked\",\"reason\":\"plist template not found\"}")
+    continue
+  fi
+
+  schedule_raw="$(extract_schedule "$plist_file")"
+  schedule_type="${schedule_raw%%:*}"
+  schedule_value="${schedule_raw#*:}"
+
+  mapfile -t exec_args < <(extract_exec_start "$plist_file")
+  if [[ ${#exec_args[@]} -eq 0 ]]; then
+    GAPS+=("${label}:no_program_arguments")
+    RESULTS+=("{\"label\":\"$label\",\"unit\":\"$unit_name\",\"status\":\"blocked\",\"reason\":\"no ProgramArguments in plist\"}")
+    continue
+  fi
+
+  exec_start=""
+  for arg in "${exec_args[@]}"; do
+    translated_arg="$(portability_translate_path "$arg")"
+    if [[ -z "$exec_start" ]]; then
+      exec_start="$translated_arg"
+    else
+      exec_start="$exec_start $translated_arg"
+    fi
+  done
+
+  mapfile -t env_lines < <(extract_env_vars "$plist_file")
+
+  working_dir="$(extract_working_dir "$plist_file")"
+  if [[ -n "$working_dir" ]]; then
+    working_dir="$(portability_translate_path "$working_dir")"
+  fi
+
+  mapfile -t port_issues < <(check_path_portability "$plist_file")
+
+  notes=""
+  status="translated"
+
+  if [[ ${#port_issues[@]} -gt 0 ]]; then
+    for issue in "${port_issues[@]}"; do
+      [[ -z "$issue" ]] && continue
+      if [[ -z "$notes" ]]; then
+        notes="$issue"
+      else
+        notes="$notes; $issue"
+      fi
+    done
+    if [[ -n "$notes" ]]; then
+      status="translated_with_notes"
+    fi
+  fi
+
+  service_file="$OUTPUT_DIR/${unit_name}.service"
+  {
+    echo "[Unit]"
+    echo "Description=Spine watcher_node workload: ${label}"
+    echo "# Source label: ${label}"
+    echo "# Generated by: infra.systemd.materialize.watcher_node (dry-run)"
+    echo "# Plist source: ${plist_file##*/}"
+    echo ""
+    echo "[Service]"
+    echo "Type=$(if [[ "$schedule_type" == "daemon" ]]; then echo "simple"; else echo "oneshot"; fi)"
+    echo "EnvironmentFile=/etc/spine/watcher-node.env"
+    echo "EnvironmentFile=-/etc/spine/watcher-secrets.env"
+    echo "ExecStart=${exec_start}"
+
+    if [[ -n "$working_dir" ]]; then
+      if [[ "$working_dir" == /* ]]; then
+        echo "WorkingDirectory=${working_dir}"
+      else
+        if [[ -z "$notes" ]]; then
+          notes="working_directory_requires_host_override:${working_dir}"
+        else
+          notes="$notes; working_directory_requires_host_override:${working_dir}"
+        fi
+      fi
+    fi
+
+    for env_line in "${env_lines[@]}"; do
+      [[ -z "$env_line" ]] && continue
+      if [[ "$env_line" == PATH=* ]]; then
+        continue
+      fi
+      if [[ "$env_line" == SPINE_ROOT=* ]]; then
+        echo 'Environment="SPINE_ROOT=${SPINE_REPO}"'
+        continue
+      fi
+      env_key="${env_line%%=*}"
+      env_val="${env_line#*=}"
+      env_val="$(portability_translate_path "$env_val")"
+      echo "Environment=\"${env_key}=${env_val}\""
+    done
+
+    if [[ "$schedule_type" == "daemon" ]]; then
+      echo "Restart=always"
+      echo "RestartSec=5"
+    fi
+
+    echo ""
+    echo "# Original launchd log paths (systemd uses journal by default):"
+    echo "# StandardOutPath was configured in plist"
+    echo "# StandardErrorPath was configured in plist"
+    echo "# To replicate: StandardOutput=append:/var/log/spine/<name>.out"
+    echo ""
+    echo "[Install]"
+    echo "WantedBy=multi-user.target"
+
+    if [[ -n "$notes" ]]; then
+      echo ""
+      echo "# translation_gaps: ${notes}"
+    fi
+  } > "$service_file"
+  SERVICES_GENERATED=$((SERVICES_GENERATED + 1))
+
+  if [[ "$schedule_type" != "daemon" ]]; then
+    timer_file="$OUTPUT_DIR/${unit_name}.timer"
+    {
+      echo "[Unit]"
+      echo "Description=Timer for spine watcher_node workload: ${label}"
+      echo "# Source label: ${label}"
+      echo ""
+      echo "[Timer]"
+      if [[ "$schedule_type" == "calendar" ]]; then
+        echo "OnCalendar=${schedule_value}"
+        echo "# Original launchd: StartCalendarInterval"
+      elif [[ "$schedule_type" == "interval" ]]; then
+        echo "OnBootSec=${schedule_value}s"
+        echo "OnUnitActiveSec=${schedule_value}s"
+        echo "# Original launchd: StartInterval=${schedule_value}s"
+      fi
+      echo "Persistent=true"
+      echo ""
+      echo "[Install]"
+      echo "WantedBy=timers.target"
+    } > "$timer_file"
+    TIMERS_GENERATED=$((TIMERS_GENERATED + 1))
+  fi
+
+  timer_note=""
+  if [[ "$schedule_type" != "daemon" ]]; then
+    timer_note=", timer: ${unit_name}.timer"
+  fi
+  RESULTS+=("{\"label\":\"$label\",\"unit\":\"${unit_name}.service${timer_note}\",\"status\":\"${status}\",\"schedule_type\":\"${schedule_type}\",\"notes\":\"${notes}\"}")
+done
+
+ENV_FILE="$OUTPUT_DIR/watcher-node.env"
+{
+  echo "# Spine watcher_node shared environment — generated by systemd materializer"
+  echo "# Deploy to /etc/spine/watcher-node.env on the target host and set paths."
+  echo "#"
+  echo "# All generated .service units reference this file via EnvironmentFile="
+  echo ""
+  echo "SPINE_REPO=${MAC_REPO_ROOT}"
+  echo ""
+  echo "SPINE_WORKSPACE_ROOT=${MAC_WORKSPACE_ROOT}"
+  echo ""
+  echo "SPINE_RUNTIME_ROOT=${MAC_WORKSPACE_ROOT}/.runtime/spine"
+  echo ""
+  echo "SPINE_FOUNDATION_ROOT=${MAC_WORKSPACE_ROOT}/workbench"
+  echo ""
+  echo "PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+} > "$ENV_FILE"
+
+echo ""
+echo "════════════════════════════════════════"
+echo "WATCHER NODE SYSTEMD MATERIALIZATION"
+echo "════════════════════════════════════════"
+echo "Output directory: $OUTPUT_DIR"
+echo "Environment file: $ENV_FILE"
+echo "Labels resolved:  $TOTAL"
+echo "Services generated: $SERVICES_GENERATED"
+echo "Timers generated:   $TIMERS_GENERATED"
+echo "Translation gaps:   ${#GAPS[@]}"
+echo ""
+
+if [[ ${#GAPS[@]} -gt 0 ]]; then
+  echo "Gaps:"
+  for gap in "${GAPS[@]}"; do
+    echo "  - $gap"
+  done
+  echo ""
+fi
+
+echo "Per-label results:"
+for r in "${RESULTS[@]}"; do
+  echo "  $r"
+done
+echo ""
+echo "STATUS: dry-run complete. No units installed or activated."
+
+if $JSON_OUTPUT; then
+  echo ""
+  echo "--- JSON SUMMARY ---"
+  jq -n \
+    --argjson total "$TOTAL" \
+    --argjson services "$SERVICES_GENERATED" \
+    --argjson timers "$TIMERS_GENERATED" \
+    --argjson gap_count "${#GAPS[@]}" \
+    --arg output_dir "$OUTPUT_DIR" \
+    --arg mode "dry-run" \
+    '{
+      mode: $mode,
+      output_dir: $output_dir,
+      labels_resolved: $total,
+      services_generated: $services,
+      timers_generated: $timers,
+      translation_gaps: $gap_count,
+      installed: false,
+      activated: false
+    }'
+fi

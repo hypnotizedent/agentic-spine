@@ -1,0 +1,76 @@
+# media
+
+Canonical domain pointer for `media`.
+
+## Canonical Product Authority Home
+
+**`~/code/workbench/agents/media/`**
+
+As of 2026-03-30, canonical L3 media product authority lives in the workbench media home.
+Spine retains engine-facing registrations, routing, gates, and compatibility projections only.
+
+Relocation: `MEDIA_WORKBENCH_HOME_RELOCATION` (new_truth, ratified 2026-03-30)
+Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
+
+## Authority Surfaces (workbench canonical)
+
+- Product bindings: `~/code/workbench/agents/media/bindings/` (20 files)
+- Product archive: `~/code/workbench/agents/media/archive/` (3 files)
+- Runtime-first truth: `~/code/workbench/agents/media/docs/runtime/`
+- Compose/deploy: `~/code/workbench/infra/compose/media-stack/docker-compose.yml`
+- Agent contract: `~/code/workbench/agents/media/AGENT.md`
+- Boundary: `~/code/workbench/agents/media/docs/BOUNDARY.md`
+
+## Spine Engine-Facing Surfaces (retained)
+
+- Capability registrations: `ops/capabilities.yaml` (all `media.*` IDs)
+- Compatibility projections: `ops/bindings/domains/media/` (23 files, marked do-not-edit-here)
+- Verify entrypoint: `./bin/ops cap run verify.run -- domain media`
+
+## Governance Contracts (spine-owned)
+
+- Current placement authority: `ops/bindings/domains/media/media.path.authority.contract.yaml`
+- Current quality/policy authority: `ops/bindings/domains/media/media.quality.policy.yaml`
+- Historical placement/lifecycle docs: `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md` and `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_LIFECYCLE.md`
+
+<!-- DOMAIN_CAPABILITY_CATALOG_START -->
+## Capability Catalog
+Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
+
+| Capability |
+|---|
+| `homarr.config.generate` |
+| `media.backup.create` |
+| `media.backup.restore` |
+| `media.capacity.runway.status` |
+| `media.capacity.snapshot.build` |
+| `media.config.restore.drill` |
+| `media.download.canary.check` |
+| `media.downloads.bloat.status` |
+| `media.duplicate.scan` |
+| `media.e2e.verify` |
+| `media.health.check` |
+| `media.import.cli` |
+| `media.library.junk.audit` |
+| `media.metrics.today` |
+| `media.music.metrics.today` |
+| `media.nfs.verify` |
+| `media.pipeline.trace` |
+| `media.qbittorrent.status` |
+| `media.quarantine.review` |
+| `media.queue.reconcile` |
+| `media.queue.reconcile.lidarr` |
+| `media.queue.reconcile.sonarr` |
+| `media.rename.status` |
+| `media.scene.rename` |
+| `media.service.status` |
+| `media.slskd.status` |
+| `media.sonarr.metrics.today` |
+| `media.sonarr.policy.parity` |
+| `media.soularr.status` |
+| `media.stack.restart` |
+| `media.status` |
+| `media.storage.status` |
+| `media.vpn.health` |
+| `recyclarr.sync` |
+<!-- DOMAIN_CAPABILITY_CATALOG_END -->

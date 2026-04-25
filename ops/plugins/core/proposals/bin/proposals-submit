@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+def slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "proposal"
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("Usage: proposals-submit <description>", file=sys.stderr)
+        return 2
+    description = " ".join(sys.argv[1:]).strip()
+    now = datetime.now(timezone.utc)
+    proposal_id = f"CP-{now.strftime('%Y%m%d-%H%M%S')}"
+    outbox = Path(os.environ.get("SPINE_OUTBOX", str(Path.home() / "code" / ".runtime" / "spine" / "mailroom" / "outbox")))
+    target = outbox / "proposals" / f"{proposal_id}__{slugify(description)[:64]}"
+    target.mkdir(parents=True, exist_ok=False)
+    (target / "files").mkdir()
+    manifest = {
+        "proposal": proposal_id,
+        "agent": os.environ.get("USER", "unknown"),
+        "created": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "status": "pending",
+        "loop_id": os.environ.get("SPINE_LOOP_ID", ""),
+        "description": description,
+        "changes": [],
+    }
+    (target / "manifest.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
+    (target / "receipt.md").write_text(f"# {proposal_id}\n\n- description: {description}\n")
+    print(json.dumps({"capability": "proposals.submit", "status": "ok", "proposal_id": proposal_id, "path": str(target)}, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

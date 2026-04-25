@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/vertical.integration.admission.contract.yaml"
+DEPLOY_STATUS_BIN="$ROOT/ops/plugins/domains/mint/bin/deploy-status"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+
+stop() {
+  echo "STOP (2): $*" >&2
+  exit 2
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || stop "missing dependency: $1"
+}
+
+resolve_contract_path() {
+  local p="${1:-}"
+  if [[ -z "$p" ]]; then
+    printf '%s\n' ""
+    return
+  fi
+  if [[ "$p" == /* ]]; then
+    printf '%s\n' "$p"
+  else
+    printf '%s\n' "$ROOT/$p"
+  fi
+}
+
+combine_status() {
+  local current="$1"
+  local next="$2"
+  if [[ "$current" == "FAIL" || "$next" == "FAIL" ]]; then
+    printf '%s\n' "FAIL"
+    return
+  fi
+  if [[ "$current" == "WARN" || "$next" == "WARN" ]]; then
+    printf '%s\n' "WARN"
+    return
+  fi
+  printf '%s\n' "PASS"
+}
+
+need_cmd yq
+need_cmd curl
+need_cmd ssh
+[[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+
+module_count="$(yq e '.parity_status.modules | length' "$CONTRACT" 2>/dev/null || echo 0)"
+[[ "$module_count" =~ ^[0-9]+$ ]] || stop "invalid module count in contract"
+(( module_count > 0 )) || stop "no parity modules configured in contract"
+
+deploy_output=""
+deploy_rc=0
+if [[ -x "$DEPLOY_STATUS_BIN" ]]; then
+  set +e
+  deploy_output="$($DEPLOY_STATUS_BIN 2>&1)"
+  deploy_rc=$?
+  set -e
+else
+  deploy_rc=127
+  deploy_output="deploy status runner missing: $DEPLOY_STATUS_BIN"
+fi
+
+deploy_parsed=""
+if (( deploy_rc == 0 )); then
+  deploy_parsed="$(awk 'NF && $1 !~ /^(mint\.deploy\.status|===|compose_path:|CONTAINER|summary:|status:)/ {print $1"\t"$2}' <<< "$deploy_output" || true)"
+fi
+
+declare -A RUNTIME_ROWS_CACHE=()
+declare -A RUNTIME_RC_CACHE=()
+declare -A RUNTIME_NOTE_CACHE=()
+
+load_runtime_source() {
+  local cache_key="$1"
+  local mode="$2"
+  local ssh_target="$3"
+  local compose_path="$4"
+  local rows="" rc=0 note=""
+
+  if [[ -n "${RUNTIME_RC_CACHE[$cache_key]+x}" ]]; then
+    return
+  fi
+
+  case "$mode" in
+    ""|mint_deploy_status)
+      rows="$deploy_parsed"
+      rc="$deploy_rc"
+      note="mint.deploy.status"
+      ;;
+    ssh_compose_ps)
+      if [[ ! -f "$SSH_BINDING" ]]; then
+        rc=2
+        note="missing ssh binding: $SSH_BINDING"
+      elif [[ -z "$ssh_target" || -z "$compose_path" ]]; then
+        rc=2
+        note="ssh_compose_ps requires ssh_target + compose_path in contract"
+      else
+        local host user port timeout ssh_out ssh_err_summary
+        host="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target\") | .host // \"\"" "$SSH_BINDING" | head -n1)"
+        user="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target\") | .user // (.ssh.defaults.user // \"root\")" "$SSH_BINDING" | head -n1)"
+        port="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target\") | .port // (.ssh.defaults.port // 22)" "$SSH_BINDING" | head -n1)"
+        timeout="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target\") | .connect_timeout_sec // (.ssh.defaults.connect_timeout_sec // 5)" "$SSH_BINDING" | head -n1)"
+
+        if [[ -z "$host" || "$host" == "null" ]]; then
+          rc=2
+          note="unknown ssh target: $ssh_target"
+        else
+          [[ -n "$user" && "$user" != "null" ]] || user="root"
+          [[ -n "$port" && "$port" != "null" ]] || port="22"
+          [[ -n "$timeout" && "$timeout" != "null" ]] || timeout="5"
+          set +e
+          ssh_out="$(ssh -o ConnectTimeout="$timeout" \
+                        -o StrictHostKeyChecking=no \
+                        -o UserKnownHostsFile=/dev/null \
+                        -o BatchMode=yes \
+                        -o LogLevel=ERROR \
+                        -p "$port" \
+                        "${user}@${host}" \
+                        "cd \"$compose_path\" && docker compose ps --format '{{.Name}}\t{{.State}}\t{{.Status}}'" 2>&1)"
+          rc=$?
+          set -e
+
+          if (( rc == 0 )); then
+            rows="$(awk -F'\t' 'NF >= 2 {print $1"\t"$2}' <<< "$ssh_out" || true)"
+            note="ssh_compose_ps:${ssh_target}:${compose_path}"
+          else
+            ssh_err_summary="$(head -n1 <<< "$ssh_out" | tr -d '\r')"
+            note="ssh_compose_ps:${ssh_target}:${compose_path} rc=${rc} (${ssh_err_summary})"
+          fi
+        fi
+      fi
+      ;;
+    *)
+      rc=2
+      note="unsupported runtime source mode: $mode"
+      ;;
+  esac
+
+  RUNTIME_ROWS_CACHE["$cache_key"]="$rows"
+  RUNTIME_RC_CACHE["$cache_key"]="$rc"
+  RUNTIME_NOTE_CACHE["$cache_key"]="$note"
+}
+
+echo "vertical.integration.parity.status"
+echo "generated_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "contract: $CONTRACT"
+echo
+printf "%-12s %-28s %-5s %s\n" "MODULE" "DIMENSION" "STATE" "REASON"
+
+overall_status="PASS"
+module_summary=""
+
+for ((idx=0; idx<module_count; idx++)); do
+  module_id="$(yq e -r ".parity_status.modules[$idx].id // \"module_$idx\"" "$CONTRACT")"
+  module_status="PASS"
+
+  # 1) Code surface present
+  code_repo_rel="$(yq e -r ".parity_status.modules[$idx].code_surface.in_repo_path // \"\"" "$CONTRACT")"
+  code_external="$(yq e -r ".parity_status.modules[$idx].code_surface.external_read_only_path // \"\"" "$CONTRACT")"
+  code_repo_abs="$(resolve_contract_path "$code_repo_rel")"
+  code_state="FAIL"
+  code_reason="missing both code paths"
+  if [[ -n "$code_repo_abs" && -d "$code_repo_abs" ]]; then
+    code_state="PASS"
+    code_reason="in-repo path exists: ${code_repo_rel}"
+  elif [[ -n "$code_external" && -d "$code_external" ]]; then
+    code_state="PASS"
+    code_reason="external read-only path exists: ${code_external}"
+  fi
+  printf "%-12s %-28s %-5s %s\n" "$module_id" "code_surface_present" "$code_state" "$code_reason"
+  module_status="$(combine_status "$module_status" "$code_state")"
+
+  # 2) Runtime container expected/running state
+  runtime_state="PASS"
+  runtime_reason=""
+  runtime_mode="$(yq e -r ".parity_status.modules[$idx].runtime.source.mode // \"mint_deploy_status\"" "$CONTRACT")"
+  runtime_ssh_target="$(yq e -r ".parity_status.modules[$idx].runtime.source.ssh_target // \"\"" "$CONTRACT")"
+  runtime_compose_path="$(yq e -r ".parity_status.modules[$idx].runtime.source.compose_path // \"\"" "$CONTRACT")"
+  runtime_cache_key="${runtime_mode}|${runtime_ssh_target}|${runtime_compose_path}"
+
+  load_runtime_source "$runtime_cache_key" "$runtime_mode" "$runtime_ssh_target" "$runtime_compose_path"
+  runtime_rows="${RUNTIME_ROWS_CACHE[$runtime_cache_key]}"
+  runtime_rc="${RUNTIME_RC_CACHE[$runtime_cache_key]}"
+  runtime_source_note="${RUNTIME_NOTE_CACHE[$runtime_cache_key]}"
+
+  if (( runtime_rc != 0 )); then
+    runtime_state="WARN"
+    runtime_reason="runtime check unavailable (${runtime_source_note})"
+  else
+    matched_any=0
+    running_any=0
+    runtime_matches=""
+    while IFS= read -r expected_container; do
+      [[ -n "$expected_container" ]] || continue
+      while IFS=$'\t' read -r cname cstate; do
+        [[ -n "$cname" ]] || continue
+        if [[ "$cname" == $expected_container ]]; then
+          matched_any=1
+          if [[ -n "$runtime_matches" ]]; then
+            runtime_matches+=", "
+          fi
+          runtime_matches+="${cname}:${cstate}"
+          if [[ "${cstate,,}" == "running" ]]; then
+            running_any=1
+          fi
+        fi
+      done <<< "$runtime_rows"
+    done < <(yq e -r ".parity_status.modules[$idx].runtime.expected_containers[]?" "$CONTRACT")
+
+    if (( matched_any == 0 )); then
+      runtime_state="FAIL"
+      runtime_reason="no expected containers found in ${runtime_source_note}"
+    elif (( running_any == 0 )); then
+      runtime_state="FAIL"
+      runtime_reason="expected containers found but not running in ${runtime_source_note}: ${runtime_matches}"
+    else
+      runtime_state="PASS"
+      runtime_reason="running containers (${runtime_source_note}): ${runtime_matches}"
+    fi
+  fi
+  printf "%-12s %-28s %-5s %s\n" "$module_id" "runtime_container_state" "$runtime_state" "$runtime_reason"
+  module_status="$(combine_status "$module_status" "$runtime_state")"
+
+  # 3) Endpoint health check
+  endpoint_url="$(yq e -r ".parity_status.modules[$idx].endpoint_health.url // \"\"" "$CONTRACT")"
+  endpoint_state="FAIL"
+  endpoint_reason="endpoint url missing in contract"
+  if [[ -n "$endpoint_url" ]]; then
+    set +e
+    endpoint_http="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$endpoint_url" 2>/dev/null)"
+    curl_rc=$?
+    set -e
+    if (( curl_rc != 0 )); then
+      endpoint_state="FAIL"
+      endpoint_reason="curl failed (rc=${curl_rc}) for ${endpoint_url}"
+    else
+      expected_hit=0
+      while IFS= read -r expected_code; do
+        [[ -n "$expected_code" ]] || continue
+        if [[ "$endpoint_http" == "$expected_code" ]]; then
+          expected_hit=1
+          break
+        fi
+      done < <(yq e -r ".parity_status.modules[$idx].endpoint_health.expected_http_codes[]?" "$CONTRACT")
+      if (( expected_hit == 1 )); then
+        endpoint_state="PASS"
+        endpoint_reason="http=${endpoint_http} (${endpoint_url})"
+      else
+        endpoint_state="FAIL"
+        endpoint_reason="unexpected http=${endpoint_http} (${endpoint_url})"
+      fi
+    fi
+  fi
+  printf "%-12s %-28s %-5s %s\n" "$module_id" "endpoint_health" "$endpoint_state" "$endpoint_reason"
+  module_status="$(combine_status "$module_status" "$endpoint_state")"
+
+  # 4) MCP exposure check
+  mcp_state="PASS"
+  mcp_reason="markers present"
+  missing_mcp_files=""
+  missing_mcp_markers=""
+  marker_found=0
+  mcp_files_count=0
+  while IFS= read -r mcp_file_rel; do
+    [[ -n "$mcp_file_rel" ]] || continue
+    mcp_files_count=$((mcp_files_count + 1))
+    mcp_file_abs="$(resolve_contract_path "$mcp_file_rel")"
+    if [[ ! -f "$mcp_file_abs" ]]; then
+      if [[ -n "$missing_mcp_files" ]]; then
+        missing_mcp_files+=", "
+      fi
+      missing_mcp_files+="$mcp_file_rel"
+    fi
+  done < <(yq e -r ".parity_status.modules[$idx].mcp_exposure.files[]?" "$CONTRACT")
+
+  while IFS= read -r marker; do
+    [[ -n "$marker" ]] || continue
+    marker_hit=0
+    while IFS= read -r mcp_file_rel; do
+      [[ -n "$mcp_file_rel" ]] || continue
+      mcp_file_abs="$(resolve_contract_path "$mcp_file_rel")"
+      [[ -f "$mcp_file_abs" ]] || continue
+      if grep -Fq -- "$marker" "$mcp_file_abs"; then
+        marker_hit=1
+        marker_found=1
+        break
+      fi
+    done < <(yq e -r ".parity_status.modules[$idx].mcp_exposure.files[]?" "$CONTRACT")
+    if (( marker_hit == 0 )); then
+      if [[ -n "$missing_mcp_markers" ]]; then
+        missing_mcp_markers+=", "
+      fi
+      missing_mcp_markers+="$marker"
+    fi
+  done < <(yq e -r ".parity_status.modules[$idx].mcp_exposure.required_markers[]?" "$CONTRACT")
+
+  if (( mcp_files_count == 0 )); then
+    mcp_state="FAIL"
+    mcp_reason="contract has no mcp files configured"
+  elif [[ -n "$missing_mcp_files" ]]; then
+    mcp_state="FAIL"
+    mcp_reason="missing mcp files: ${missing_mcp_files}"
+  elif [[ -n "$missing_mcp_markers" ]]; then
+    mcp_state="FAIL"
+    mcp_reason="missing mcp markers: ${missing_mcp_markers}"
+  elif (( marker_found == 0 )); then
+    mcp_state="FAIL"
+    mcp_reason="no required markers found in mcp files"
+  fi
+  printf "%-12s %-28s %-5s %s\n" "$module_id" "mcp_exposure" "$mcp_state" "$mcp_reason"
+  module_status="$(combine_status "$module_status" "$mcp_state")"
+
+  # 5) Docs/contracts reference check
+  docs_state="PASS"
+  docs_reason="required references present"
+  missing_docs_files=""
+  missing_docs_markers=""
+  docs_files_count=0
+  docs_marker_found=0
+
+  while IFS= read -r docs_file_rel; do
+    [[ -n "$docs_file_rel" ]] || continue
+    docs_files_count=$((docs_files_count + 1))
+    docs_file_abs="$(resolve_contract_path "$docs_file_rel")"
+    if [[ ! -f "$docs_file_abs" ]]; then
+      if [[ -n "$missing_docs_files" ]]; then
+        missing_docs_files+=", "
+      fi
+      missing_docs_files+="$docs_file_rel"
+    fi
+  done < <(yq e -r ".parity_status.modules[$idx].docs_contract_reference.files[]?" "$CONTRACT")
+
+  while IFS= read -r marker; do
+    [[ -n "$marker" ]] || continue
+    marker_hit=0
+    while IFS= read -r docs_file_rel; do
+      [[ -n "$docs_file_rel" ]] || continue
+      docs_file_abs="$(resolve_contract_path "$docs_file_rel")"
+      [[ -f "$docs_file_abs" ]] || continue
+      if grep -Fq -- "$marker" "$docs_file_abs"; then
+        marker_hit=1
+        docs_marker_found=1
+        break
+      fi
+    done < <(yq e -r ".parity_status.modules[$idx].docs_contract_reference.files[]?" "$CONTRACT")
+    if (( marker_hit == 0 )); then
+      if [[ -n "$missing_docs_markers" ]]; then
+        missing_docs_markers+=", "
+      fi
+      missing_docs_markers+="$marker"
+    fi
+  done < <(yq e -r ".parity_status.modules[$idx].docs_contract_reference.required_markers[]?" "$CONTRACT")
+
+  if (( docs_files_count == 0 )); then
+    docs_state="FAIL"
+    docs_reason="contract has no docs reference files configured"
+  elif [[ -n "$missing_docs_files" ]]; then
+    docs_state="FAIL"
+    docs_reason="missing docs files: ${missing_docs_files}"
+  elif [[ -n "$missing_docs_markers" ]]; then
+    docs_state="FAIL"
+    docs_reason="missing docs markers: ${missing_docs_markers}"
+  elif (( docs_marker_found == 0 )); then
+    docs_state="FAIL"
+    docs_reason="no required markers found in docs/contracts files"
+  fi
+  printf "%-12s %-28s %-5s %s\n" "$module_id" "docs_contract_reference" "$docs_state" "$docs_reason"
+  module_status="$(combine_status "$module_status" "$docs_state")"
+
+  overall_status="$(combine_status "$overall_status" "$module_status")"
+  if [[ -n "$module_summary" ]]; then
+    module_summary+=$'\n'
+  fi
+  module_summary+="${module_id}: ${module_status}"
+done
+
+echo
+echo "module_summary:"
+printf "%s\n" "$module_summary"
+echo "overall: ${overall_status}"
+
+exit 0

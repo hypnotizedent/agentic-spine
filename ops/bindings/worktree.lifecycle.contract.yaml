@@ -1,0 +1,138 @@
+# Worktree Lifecycle Contract
+# Status: authoritative
+# Last verified: 2026-03-22
+# Scope: lifecycle-aware worktree hygiene for multi-terminal wave/loop runtime
+
+version: "1.6"
+updated: "2026-03-27"
+owner: "@operator"
+scope: worktree-lifecycle
+
+policy:
+  main_branch: "main"
+  canonical_worktree_root: "$SPINE_RUNTIME/spine/tmp/worktrees"
+  canonical_temp_clone_root: "$SPINE_RUNTIME/spine/tmp/clones"
+  managed_worktree_paths: []
+  managed_worktree_sync_policy:
+    stale_hours: 24
+    stale_action: force_realign
+    # If a managed worktree is >24h behind main and is not dirty,
+    # force-realign it (checkout --force -B) instead of failing on non-ff.
+    # This prevents stale managed worktrees from permanently blocking lifecycle cleanup.
+  launcher_control_worktree_path: "$SPINE_ROOT"
+  launcher_control_worktree_branch: "main"
+  launcher_control_worktree_base_ref: "origin/main"
+  root_checkout_role: "integration_only"
+  managed_worktrees_are_default_mutation_surface: true
+  root_general_mutation_forbidden: true
+  controller_root_main_landing_mode: "staged_only_single_exact_slice"
+  shared_root_checkout_mutation_is_blocking_contention: true
+  shared_git_index_mutation_is_blocking_contention: true
+  protected_hotspot_shared_mutation_is_blocking_contention: true
+  protected_hotspot_tokens:
+    - "hotspot:operational-gaps"
+    - "hotspot:loop-scopes"
+    - "hotspot:friction-queue"
+    - "hotspot:gate-id-reservations"
+    - "hotspot:path-claims"
+  parallel_mutation_model: "separate_managed_worktrees"
+  canonical_worktree_layout: "<root>/agentic-spine/<wave>"
+  lease_filename: ".spine-lane-lease.yaml"
+  lease_ttl_hours_default: 24
+  local_branch_prefixes_allow_no_remote:
+    - "codex/"
+    - "worktree-agent-"
+    - "orchestration/"
+    - "runtime/"
+    - "managed/"
+  require_plan_linkage_for_unmerged_nonactive_local_branches: true
+  branch_memory_keep_statuses:
+    - deferred
+    - promoted
+  branch_memory_terminal_statuses:
+    - retired
+    - canceled
+  merged_branch_grace_hours: 24
+  closed_owner_grace_hours: 6
+  unowned_local_branch_grace_hours: 168
+  temp_clone_grace_hours: 24
+  main_stash_warn_hours: 24
+  main_stash_fail_hours: 72
+  fail_on_detached_head: true
+  fail_on_dirty_when_owner_closed: true
+  warn_on_dirty_when_owner_active: true
+  fail_on_dirty_temp_clone: true
+  fail_on_missing_temp_clone_origin: true
+  fail_on_root_non_main: true
+  fail_on_root_dirty: true
+
+enforcement_tiers:
+  lane:
+    description: "Commit-time/root-lane enforcement. Root main is integration-only; only explicit controller staged-only landing is tolerated, and only current-lane safety issues block."
+    mode_flag: "--lane"
+    blocks_on:
+      - "current worktree: detached_head"
+      - "current worktree: dirty_closed_owner"
+      - "current worktree: closed_*_zombie (past grace)"
+      - "current worktree: closed_owner_missing_disposition"
+      - "current worktree: closed_owner_invalid_disposition"
+      - "current worktree: dirty_managed_worktree"
+      - "current worktree: managed_worktree_not_at_main"
+      - "current worktree: orphan_branch_no_remote"
+      - "current worktree: branch_missing_plan_linkage"
+      - "current worktree: unowned_local_branch_past_grace"
+      - "current worktree: merged_branch_past_grace"
+      - "current checkout (root): root_checkout_dirty"
+      - "current checkout (root): root_checkout_not_main"
+      - "current checkout (root): root_checkout_detached"
+    reports_only:
+      - "all issues from unrelated worktrees"
+      - "all issues from unrelated branches"
+      - "root checkout issues when running from a worktree"
+      - "temp clone issues"
+      - "stash issues"
+    invoked_by:
+      - "manual lane hygiene checks"
+  gate:
+    description: "Full host-wide hygiene enforcement. All issues block."
+    mode_flag: "--gate"
+    blocks_on:
+      - "all lifecycle issues across all worktrees, branches, root, temp clones, stashes"
+    invoked_by:
+      - "surfaces/verify/drift-gate.sh (verify.infra.run)"
+      - "ops/commands/preflight.sh (informational)"
+  report:
+    description: "Informational classification. No exit code enforcement."
+    mode_flag: "(default, no flag)"
+    invoked_by:
+      - "manual invocation"
+
+cleanup:
+  phases:
+    - report-only
+    - archive-only
+    - delete
+  delete_token_env_var: "OPS_WORKTREE_DELETE_TOKEN"
+  delete_token_value: "RELEASE_MAIN_CLEANUP_WINDOW"
+  require_archive_before_delete: true
+  require_branch_merged_or_explicit_token: true
+  block_if_active_lease: true
+  normalize_root_when_head_matches_main: true
+  require_clean_temp_clone_for_delete: true
+  root_normalization_contracts:
+    - "ops/bindings/snapshot.surface.contract.yaml"
+    - "ops/bindings/terminal.worker.projection.contract.yaml"
+  root_normalization_drop_cleanup_candidate_stashes: true
+  root_normalization_require_ff_only_main_update: true
+
+runtime:
+  archive_root: "~/.local/state/agentic-spine/worktree-lifecycle-archive"
+  waves_state_dir: "$SPINE_RUNTIME/spine/state/waves"
+  loops_scope_dir: "$SPINE_RUNTIME/spine/state/loop-scopes"
+
+messages:
+  remediation: "Use `./bin/ops wave start <WAVE_ID> --objective \"...\" --repo $SPINE_ROOT` to provision `$SPINE_RUNTIME/spine/tmp/worktrees/agentic-spine/<WAVE_ID>`, or `./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo $SPINE_ROOT`. Root main is integration-only; normal mutation belongs in managed worktrees. Root dirty main is forbidden except for an explicit controller-owned staged-only landing window for one exact slice."
+  gate_summary: "Lifecycle hygiene classifies governed worktrees, repo-scoped temp clones, boring-root normalization, and retained stashes. Worktrees are available when isolation helps; exact-slice root-main landings remain available for bounded changes."
+  root_lane_rule: "Root main is available for bounded exact-slice landing. Use worktrees when isolation materially helps."
+  staged_only_window_rule: "A staged_only root-main state is a bounded landing window for one exact slice, not a requirement for ordinary clean commits."
+  contention_rule: "Shared root checkout, shared git index, or protected hotspot mutation across terminals is blocking contention. Protected hotspots are hotspot:operational-gaps, hotspot:loop-scopes, hotspot:friction-queue, hotspot:gate-id-reservations, and hotspot:path-claims. Unrelated managed worktrees remain allowed."

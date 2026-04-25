@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""open-set-snapshot — Generate a single-file view of the current open set.
+
+Reads active/open loops from the joined runtime loop view when available,
+falling back to SQLite-only loop authority, and reads open gaps from SQLite
+authority.
+Writes a YAML snapshot to $SPINE_STATE/open-set-snapshot.yaml and prints it.
+
+This is a read-only diagnostic. It creates no new obligations.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+LIB_DIR = SCRIPT_DIR.parent / "lib"
+sys.path.insert(0, str(LIB_DIR))
+
+import gaps_sql_authority as gsa
+
+
+_LIVE_LOOP_STATUSES = ("active", "open")
+
+
+def resolve_root() -> Path:
+    candidate = SCRIPT_DIR
+    for _ in range(10):
+        if (candidate / "ops" / "bindings").exists():
+            return candidate
+        candidate = candidate.parent
+    raise RuntimeError("Cannot resolve SPINE_ROOT")
+
+
+def resolve_state_root(root: Path) -> Path:
+    return Path(
+        os.environ.get("SPINE_STATE")
+        or str(root.parent / ".runtime" / "spine" / "state")
+    )
+
+
+def _normalize_loop_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "loop_id": str(row.get("loop_id") or "").strip(),
+        "status": str(row.get("status") or "").strip().lower(),
+        "owner": str(row.get("owner") or "").strip(),
+        "scope": str(row.get("scope") or "").strip(),
+        "priority": str(row.get("priority") or "").strip(),
+        "objective": str(row.get("objective") or "")[:120],
+        "next_action": str(row.get("next_action") or "")[:120] or None,
+    }
+
+
+def read_live_authority_loops(root: Path) -> tuple[list[dict] | None, list[str]]:
+    """Read live loops from SQLite authority without mutating runtime state."""
+    import loops_sql_authority as lsa
+
+    db_path, _ = lsa.resolve_paths(root)
+    if not db_path.exists():
+        return None, [f"loops authority missing: {db_path}"]
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro",
+            uri=True,
+            timeout=0.5,
+        )
+        conn.row_factory = sqlite3.Row
+        table_row = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='loops'"
+        ).fetchone()
+        if table_row is None:
+            return None, ["loops authority schema unavailable"]
+
+        placeholders = ",".join("?" for _ in _LIVE_LOOP_STATUSES)
+        rows = conn.execute(
+            f"SELECT loop_id, status, owner, scope, priority, objective, next_action "
+            f"FROM loops WHERE LOWER(status) IN ({placeholders}) "
+            "ORDER BY updated_at_utc DESC, loop_id DESC",
+            _LIVE_LOOP_STATUSES,
+        ).fetchall()
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return None, [f"loops authority read failed: {exc.__class__.__name__}"]
+    finally:
+        if conn is not None:
+            conn.close()
+
+    loops = []
+    for row in rows:
+        normalized = _normalize_loop_row(dict(row))
+        if normalized["loop_id"]:
+            loops.append(normalized)
+    return loops, []
+
+
+def read_joined_active_loops(root: Path) -> list[dict] | None:
+    """Read active loops from the canonical joined runtime view."""
+    joined_bin = root / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-engine-joined-state"
+    if not joined_bin.exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [str(joined_bin), "--json", "--no-write"],
+            cwd=str(root),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+
+    raw_loops = ((payload.get("loops") or {}).get("open")) or []
+    if not isinstance(raw_loops, list):
+        return None
+
+    loops = []
+    for row in raw_loops:
+        if not isinstance(row, dict):
+            continue
+        loop_id = str(row.get("loop_id") or "").strip()
+        if not loop_id:
+            continue
+        loops.append(_normalize_loop_row(row))
+    return loops
+
+
+def merge_live_loop_views(
+    live_loops: list[dict],
+    projection_loops: list[dict] | None,
+) -> tuple[list[dict], list[str]]:
+    if not projection_loops:
+        return live_loops, []
+
+    projection_by_id = {
+        str(row.get("loop_id") or "").strip(): row
+        for row in projection_loops
+        if str(row.get("loop_id") or "").strip()
+    }
+    live_ids = {row["loop_id"] for row in live_loops if row.get("loop_id")}
+
+    merged: list[dict] = []
+    for live_row in live_loops:
+        overlay = projection_by_id.get(live_row["loop_id"], {})
+        candidate = dict(live_row)
+        for key in ("owner", "scope", "priority", "objective", "next_action"):
+            if overlay.get(key):
+                candidate[key] = overlay[key]
+        candidate["status"] = live_row["status"]
+        merged.append(candidate)
+
+    stale_projection_ids = sorted(loop_id for loop_id in projection_by_id if loop_id not in live_ids)
+    return merged, stale_projection_ids
+
+
+def read_open_gaps(root: Path) -> list[dict]:
+    db_path, gaps_yaml = gsa.resolve_paths(root)
+    conn = gsa.connect(db_path)
+    gsa.ensure_schema(conn)
+    gsa.bootstrap_from_yaml(conn, gaps_yaml)
+
+    cursor = conn.execute(
+        "SELECT gap_id, title, severity, status, parent_loop, description "
+        "FROM gaps WHERE status = 'open' ORDER BY gap_id"
+    )
+    gaps = []
+    for row in cursor.fetchall():
+        desc = str(row[5] or "")
+        first_line = desc.split("\n")[0][:120] if desc else ""
+        gaps.append({
+            "gap_id": row[0],
+            "title": row[1] or first_line,
+            "severity": row[2],
+            "parent_loop": row[4],
+            "summary": first_line,
+        })
+    conn.close()
+    return gaps
+
+
+def main() -> int:
+    root = resolve_root()
+    state_root = resolve_state_root(root)
+    posture = os.environ.get("SPINE_EXECUTION_POSTURE", "discover")
+
+    live_loops, loop_warnings = read_live_authority_loops(root)
+    joined_loops = read_joined_active_loops(root)
+    stale_projection_ids: list[str] = []
+    if live_loops is not None:
+        loops, stale_projection_ids = merge_live_loop_views(live_loops, joined_loops)
+        loop_authority_state = "confirmed"
+        loop_authority_source = "sqlite"
+    else:
+        loops = joined_loops or []
+        loop_authority_state = "degraded"
+        loop_authority_source = "joined_projection_fallback" if joined_loops is not None else "unavailable"
+
+    if live_loops is not None and joined_loops is None:
+        loop_warnings.append("joined-state projection unavailable")
+    if stale_projection_ids:
+        loop_warnings.append(
+            f"ignored {len(stale_projection_ids)} joined-state-only loop projection(s)"
+        )
+
+    gaps = read_open_gaps(root)
+
+    snapshot = {
+        "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "execution_posture": posture,
+        "summary": {
+            "active_loops": len(loops),
+            "open_gaps": len(gaps),
+            "loop_authority_state": loop_authority_state,
+            "loop_authority_source": loop_authority_source,
+        },
+        "loop_authority": {
+            "state": loop_authority_state,
+            "source": loop_authority_source,
+            "warnings": sorted(dict.fromkeys(loop_warnings)),
+            "ignored_joined_only_loop_ids": stale_projection_ids,
+        },
+        "active_loops": loops,
+        "open_gaps": gaps,
+    }
+
+    output_path = state_root / "open-set-snapshot.yaml"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        yaml.dump(snapshot, default_flow_style=False, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    if "--json" in sys.argv:
+        print(json.dumps(snapshot, indent=2))
+    else:
+        print(yaml.dump(snapshot, default_flow_style=False, sort_keys=False, allow_unicode=True), end="")
+        print(f"\nWritten to: {output_path}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

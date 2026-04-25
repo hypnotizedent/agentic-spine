@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# loops.create — Create a new loop scope file from template
+#
+# Usage: loops-create --name NAME --objective "desc" [--priority high|medium|low] \
+#                   [--phase "Step 1:desc"]... [--success "criterion"]... [--dod "item"]...
+#
+# Normalizes name to uppercase, computes LOOP-{NAME}-{YYYYMMDD},
+# checks uniqueness, renders template.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+source "$ROOT/ops/lib/posture-guard.sh"
+source "$ROOT/ops/lib/git-lock.sh"
+SCOPES_DIR="$SPINE_STATE/loop-scopes"
+ARCHIVE_DIR="$SPINE_STATE/archive/closed-loop-scopes"
+
+# Posture enforcement: reject loop creation during converge posture.
+posture_guard_reject_growth "loops.create"
+TEMPLATE="$ROOT/ops/plugins/core/lifecycle/templates/loop-scope.template.md"
+LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+
+NAME="" OBJECTIVE="" PRIORITY="medium" HORIZON="now" READINESS="runnable" EXEC_MODE="orchestrator_subagents"
+FORCE=0
+JSON_OUTPUT=0
+declare -a PHASES=()
+declare -a SUCCESS_CRITERIA=()
+declare -a DOD_ITEMS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --name)      NAME="${2:?--name requires a value}"; shift 2 ;;
+    --objective) OBJECTIVE="${2:?--objective requires a value}"; shift 2 ;;
+    --priority)  PRIORITY="${2:?--priority requires a value}"; shift 2 ;;
+    --horizon)   HORIZON="${2:?--horizon requires a value}"; shift 2 ;;
+    --readiness)       READINESS="${2:?--readiness requires a value}"; shift 2 ;;
+    --execution-mode)  EXEC_MODE="${2:?--execution-mode requires a value}"; shift 2 ;;
+    --phase)           PHASES+=("${2:?--phase requires a value}"); shift 2 ;;
+    --success)   SUCCESS_CRITERIA+=("${2:?--success requires a value}"); shift 2 ;;
+    --dod)       DOD_ITEMS+=("${2:?--dod requires a value}"); shift 2 ;;
+    --force)     FORCE=1; shift ;;
+    --json)      JSON_OUTPUT=1; shift ;;
+    -h|--help)
+      echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low]"
+      echo "       [--horizon now|later|future] [--readiness runnable|blocked]"
+      echo "       [--execution-mode single_worker|orchestrator_subagents]"
+      echo "       [--phase \"Step 1:desc\"]... [--success \"criterion\"]... [--dod \"item\"]..."
+      echo "       [--force] [--json]"
+      echo ""
+      echo "Creates a new loop scope file from template with optional scaffold sections."
+      echo "Blocks if an active loop with overlapping scope exists (use --force to override)."
+      echo "Use --json for machine-consumable output."
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$NAME" ]]      || { echo "FAIL: --name required" >&2; exit 2; }
+[[ -n "$OBJECTIVE" ]]  || { echo "FAIL: --objective required" >&2; exit 2; }
+
+case "$PRIORITY" in
+  high|medium|low) ;;
+  *) echo "FAIL: --priority must be high, medium, or low (got '$PRIORITY')" >&2; exit 2 ;;
+esac
+
+case "$HORIZON" in
+  now|later|future) ;;
+  *) echo "FAIL: --horizon must be now, later, or future (got '$HORIZON')" >&2; exit 2 ;;
+esac
+
+case "$READINESS" in
+  runnable|blocked) ;;
+  *) echo "FAIL: --readiness must be runnable or blocked (got '$READINESS')" >&2; exit 2 ;;
+esac
+
+case "$EXEC_MODE" in
+  single_worker|orchestrator_subagents) ;;
+  *) echo "FAIL: --execution-mode must be single_worker or orchestrator_subagents (got '$EXEC_MODE')" >&2; exit 2 ;;
+esac
+
+acquire_git_lock loops || exit 1
+SCOPE_FILE_TMP=""
+cleanup_birth_artifacts() {
+  [[ -n "$SCOPE_FILE_TMP" ]] && rm -f "$SCOPE_FILE_TMP" 2>/dev/null || true
+}
+trap 'cleanup_birth_artifacts; release_git_lock' EXIT INT TERM
+
+# Boundary model enforcement: active loops must be horizon=now.
+# Deferred work (later/future) creates with status=planned, not active.
+# See: planning.horizon.contract.yaml boundary_model.loop
+if [[ "$HORIZON" != "now" ]]; then
+  echo "NOTE: horizon=${HORIZON} — loop will be created with status=planned (deferred intent)" >&2
+fi
+
+# V3 Operating Model: Active WIP cap enforcement (SPINE.md Rule 3).
+# Maximum 5 active loops. New active loops are blocked when at or above cap.
+# Use --force to override (requires explicit triage justification).
+ACTIVE_WIP_CAP=5
+if [[ "$HORIZON" == "now" && -d "$SCOPES_DIR" ]]; then
+  ACTIVE_COUNT=0
+  while IFS= read -r scope_file; do
+    [[ -f "$scope_file" ]] || continue
+    file_status="$(awk '/^status:/{print $2; exit}' "$scope_file" | tr -d '"' || true)"
+    [[ "$file_status" == "active" ]] && (( ACTIVE_COUNT++ )) || true
+  done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
+  if [[ "$ACTIVE_COUNT" -ge "$ACTIVE_WIP_CAP" ]]; then
+    if [[ "$FORCE" -eq 1 ]]; then
+      echo "WARN: active WIP cap exceeded ($ACTIVE_COUNT/$ACTIVE_WIP_CAP active loops). --force used." >&2
+    else
+      echo "FAIL: active WIP cap reached ($ACTIVE_COUNT/$ACTIVE_WIP_CAP active loops)." >&2
+      echo "  → V3 Operating Model Rule 3: maximum $ACTIVE_WIP_CAP active loops." >&2
+      echo "  → Triage existing loops: close, supersede, defer, or consolidate." >&2
+      echo "  → To review current work: ./bin/ops status" >&2
+      echo "  → To override: add --force (requires triage justification)" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# Normalize name:
+# - uppercase
+# - collapse separators
+# - strip leading LOOP- prefixes if caller already provided them
+# - keep only [A-Z0-9-]
+NORM_NAME="$(echo "$NAME" \
+  | tr '[:lower:]' '[:upper:]' \
+  | sed -E 's/[[:space:]_]+/-/g; s/[^A-Z0-9-]//g; s/-+/-/g; s/^-+//; s/-+$//')"
+while [[ "$NORM_NAME" == LOOP-* ]]; do
+  NORM_NAME="${NORM_NAME#LOOP-}"
+done
+# Avoid double-date suffixes when callers pass names that already include
+# one or more trailing YYYYMMDD tokens.
+while [[ "$NORM_NAME" =~ -[0-9]{8}$ ]]; do
+  NORM_NAME="${NORM_NAME%-????????}"
+  NORM_NAME="${NORM_NAME%-}"
+done
+[[ -n "$NORM_NAME" ]] || { echo "FAIL: --name resolves to empty loop name after normalization" >&2; exit 2; }
+TODAY="$(date -u +%Y%m%d)"
+LOOP_ID="LOOP-${NORM_NAME}-${TODAY}"
+
+# Check uniqueness
+SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+if [[ -f "$SCOPE_FILE" ]]; then
+  echo "FAIL: Loop already exists: $SCOPE_FILE" >&2
+  exit 1
+fi
+ARCHIVED_SCOPE_FILE="$ARCHIVE_DIR/${LOOP_ID}.scope.md"
+if [[ -f "$ARCHIVED_SCOPE_FILE" ]]; then
+  echo "FAIL: Loop already exists in archive: $ARCHIVED_SCOPE_FILE" >&2
+  exit 1
+fi
+
+# Owner-overlap check: block if active loops share keywords with the new loop name.
+# Use --force to override when the overlap is intentional.
+if [[ -d "$SCOPES_DIR" ]]; then
+  NEW_KEYWORDS="$(echo "$NORM_NAME" | tr '-' '\n' | sort -u)"
+  overlap_found=0
+  overlap_ids=""
+  while IFS= read -r existing_scope; do
+    [[ -f "$existing_scope" ]] || continue
+    existing_status="$(awk '/^status:/{print $2; exit}' "$existing_scope" | tr -d '"' || true)"
+    [[ "$existing_status" == "active" ]] || continue
+    existing_id="$(awk '/^loop_id:/{print $2; exit}' "$existing_scope" | tr -d '"' || true)"
+    [[ "$existing_id" != "$LOOP_ID" ]] || continue
+    # Extract keywords from existing loop name (strip LOOP- prefix and date suffix)
+    existing_name="$(echo "$existing_id" | sed -E 's/^LOOP-//; s/-[0-9]{8}$//')"
+    existing_keywords="$(echo "$existing_name" | tr '-' '\n' | sort -u)"
+    # Count keyword overlap
+    shared="$(comm -12 <(echo "$NEW_KEYWORDS") <(echo "$existing_keywords") | grep -cv '^$' || true)"
+    if [[ "$shared" -ge 2 ]]; then
+      echo "OVERLAP: active loop $existing_id shares $shared keyword(s) with new loop $LOOP_ID" >&2
+      overlap_found=1
+      overlap_ids="${overlap_ids:+$overlap_ids, }$existing_id"
+    fi
+  done < <(find "$SCOPES_DIR" -name "LOOP-*.scope.md" -type f 2>/dev/null)
+  if [[ "$overlap_found" -eq 1 ]]; then
+    if [[ "$FORCE" -eq 1 ]]; then
+      echo "WARN: --force used, creating despite scope overlap with: $overlap_ids" >&2
+    else
+      echo "FAIL: active loop(s) with overlapping scope: $overlap_ids" >&2
+      echo "  → Check if the existing loop already owns this scope." >&2
+      echo "  → To review current work: ./bin/ops status" >&2
+      echo "  → To override: add --force" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# Derive scope from name (lowercase, first word)
+SCOPE="$(echo "$NORM_NAME" | tr '[:upper:]' '[:lower:]' | cut -d'-' -f1)"
+
+# Ensure scopes directory exists
+mkdir -p "$SCOPES_DIR"
+
+SCOPE_FILE_TMP="$(mktemp "${SCOPES_DIR}/.${LOOP_ID}.birth.XXXXXX.tmp")"
+
+# Escape objective for YAML double-quoted frontmatter and sed replacement.
+OBJECTIVE_YAML="${OBJECTIVE//\\/\\\\}"
+OBJECTIVE_YAML="${OBJECTIVE_YAML//\"/\\\"}"
+OBJECTIVE_SED="${OBJECTIVE_YAML//\\/\\\\}"
+OBJECTIVE_SED="${OBJECTIVE_SED//&/\\&}"
+
+# Render template via sed substitution
+# Note: horizon/readiness have literal defaults in template, override if non-default
+sed \
+  -e "s|{{LOOP_ID}}|${LOOP_ID}|g" \
+  -e "s|{{DATE}}|$(date -u +%Y-%m-%d)|g" \
+  -e "s|{{PRIORITY}}|${PRIORITY}|g" \
+  -e "s|{{OBJECTIVE}}|${OBJECTIVE_SED}|g" \
+  -e "s|{{SCOPE}}|${SCOPE}|g" \
+  "$TEMPLATE" > "$SCOPE_FILE_TMP"
+
+# Override horizon/readiness if non-default values specified
+if [[ "$HORIZON" != "now" ]]; then
+  sed -i '' "s/^horizon: now$/horizon: ${HORIZON}/" "$SCOPE_FILE_TMP"
+  # Boundary model: deferred loops get status=planned, not active
+  sed -i '' "s/^status: active$/status: planned/" "$SCOPE_FILE_TMP"
+fi
+if [[ "$READINESS" != "runnable" ]]; then
+  sed -i '' "s/^execution_readiness: runnable$/execution_readiness: ${READINESS}/" "$SCOPE_FILE_TMP"
+fi
+if [[ "$EXEC_MODE" != "orchestrator_subagents" ]]; then
+  sed -i '' "s/^execution_mode: orchestrator_subagents$/execution_mode: ${EXEC_MODE}/" "$SCOPE_FILE_TMP"
+fi
+
+# Append scaffold sections for consistent loop structure
+{
+  echo ""
+  echo "## Phases"
+  if (( ${#PHASES[@]} == 0 )); then
+    echo "- Step 1: capture and classify findings"
+    echo "- Step 2: implement changes"
+    echo "- Step 3: verify and close out"
+  else
+    for phase in "${PHASES[@]}"; do
+      if [[ "$phase" == *:* ]]; then
+        phase_name="${phase%%:*}"
+        phase_desc="${phase#*:}"
+        echo "- ${phase_name}: ${phase_desc}"
+      else
+        echo "- $phase"
+      fi
+    done
+  fi
+  echo ""
+  echo "## Success Criteria"
+  if (( ${#SUCCESS_CRITERIA[@]} == 0 )); then
+    echo "- All linked gaps/proposals are captured and linked to this loop."
+    echo "- Relevant verify pack(s) pass."
+  else
+    for criterion in "${SUCCESS_CRITERIA[@]}"; do
+      echo "- $criterion"
+    done
+  fi
+  echo ""
+  echo "## Definition Of Done"
+  if (( ${#DOD_ITEMS[@]} == 0 )); then
+    echo "- Scope artifacts updated and committed."
+    echo "- Receipted verification run keys recorded."
+    echo "- Loop status can be moved to closed."
+  else
+    for item in "${DOD_ITEMS[@]}"; do
+      echo "- $item"
+    done
+  fi
+} >> "$SCOPE_FILE_TMP"
+
+# ── SQLite authority bridge: upsert loop into shared_authority.db ──
+# Birth parity contract (B1+B2): both scope file and SQLite row must exist
+# after creation. If either surface cannot be established, birth fails closed.
+LOOP_STATUS="active"
+[[ "$HORIZON" == "now" ]] || LOOP_STATUS="planned"
+
+LOOP_JSON="$(python3 -c "
+import json, sys
+print(json.dumps({
+    'loop_id': sys.argv[1],
+    'created': sys.argv[2],
+    'status': sys.argv[3],
+    'owner': '@ronny',
+    'scope': sys.argv[4],
+    'priority': sys.argv[5],
+    'horizon': sys.argv[6],
+    'execution_readiness': sys.argv[7],
+    'execution_mode': sys.argv[8],
+    'objective': sys.argv[9],
+}))
+" "$LOOP_ID" "$(date -u +%Y-%m-%d)" "$LOOP_STATUS" "$SCOPE" "$PRIORITY" "$HORIZON" "$READINESS" "$EXEC_MODE" "$OBJECTIVE")"
+
+SQLITE_OK=0
+if [[ -x "$LOOPS_BRIDGE" ]]; then
+  if python3 "$LOOPS_BRIDGE" upsert --json "$LOOP_JSON" --actor "loops.create" >&2; then
+    SQLITE_OK=1
+  fi
+else
+  echo "FAIL: loops-authority-bridge not found or not executable at $LOOPS_BRIDGE" >&2
+fi
+
+if [[ "$SQLITE_OK" -eq 0 ]]; then
+  echo "FAIL: birth parity — SQLite upsert failed for $LOOP_ID" >&2
+  echo "  Cleaning up scope file to prevent scope-only birth..." >&2
+  rm -f "$SCOPE_FILE_TMP"
+  echo "  Scope file removed: $SCOPE_FILE_TMP" >&2
+  echo "  No split-authority loop was left behind." >&2
+  exit 1
+fi
+
+# ── Post-birth verification: B1 (scope exists) + B2 (SQLite row exists) ──
+BIRTH_VERIFIED=1
+
+# B1: scope file exists with expected loop_id and status
+if [[ ! -f "$SCOPE_FILE_TMP" ]]; then
+  echo "FAIL: birth verification B1 — scope file missing after write: $SCOPE_FILE_TMP" >&2
+  BIRTH_VERIFIED=0
+else
+  SCOPE_LID="$(awk '/^loop_id:/{print $2; exit}' "$SCOPE_FILE_TMP" | tr -d '"' || true)"
+  if [[ "$SCOPE_LID" != "$LOOP_ID" ]]; then
+    echo "FAIL: birth verification B1 — scope file loop_id mismatch: expected $LOOP_ID, got $SCOPE_LID" >&2
+    BIRTH_VERIFIED=0
+  fi
+fi
+
+# B2: SQLite row exists with matching loop_id and status
+SQLITE_ROW="$(python3 "$LOOPS_BRIDGE" query --id "$LOOP_ID" 2>/dev/null || true)"
+if [[ -z "$SQLITE_ROW" ]]; then
+  echo "FAIL: birth verification B2 — no SQLite row for $LOOP_ID after upsert" >&2
+  BIRTH_VERIFIED=0
+else
+  SQLITE_STATUS="$(echo "$SQLITE_ROW" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || true)"
+  if [[ "$SQLITE_STATUS" != "$LOOP_STATUS" ]]; then
+    echo "FAIL: birth verification B2 — SQLite status mismatch: expected $LOOP_STATUS, got $SQLITE_STATUS" >&2
+    BIRTH_VERIFIED=0
+  fi
+fi
+
+if [[ "$BIRTH_VERIFIED" -eq 0 ]]; then
+  echo "FAIL: birth parity verification failed for $LOOP_ID — cleaning up" >&2
+  if [[ -n "$SQLITE_ROW" ]]; then
+    # SQLite cleanup must complete before the scope file is removed.
+    LIB_DIR="$(dirname "$LOOPS_BRIDGE")/../lib"
+    if python3 -c "
+import sys, os
+sys.path.insert(0, sys.argv[1])
+import loops_sql_authority as lsa
+from pathlib import Path
+state = os.environ.get('SPINE_STATE') or str(Path.home() / 'code' / '.runtime' / 'spine' / 'state')
+db_path = Path(state) / 'shared_authority.db'
+conn = lsa.connect(db_path)
+lsa.ensure_schema(conn)
+lsa.delete_loop(conn, sys.argv[2])
+conn.commit()
+conn.close()
+" "$LIB_DIR" "$LOOP_ID" 2>/dev/null; then
+      rm -f "$SCOPE_FILE_TMP"
+    else
+      echo "FAIL: SQLite cleanup failed for $LOOP_ID; temp scope file retained at $SCOPE_FILE_TMP" >&2
+      exit 1
+    fi
+  else
+    rm -f "$SCOPE_FILE_TMP"
+  fi
+  echo "  No split-authority loop was left behind." >&2
+  exit 1
+fi
+
+if ! mv -f "$SCOPE_FILE_TMP" "$SCOPE_FILE"; then
+  echo "FAIL: birth parity — unable to publish scope file for $LOOP_ID" >&2
+  LIB_DIR="$(dirname "$LOOPS_BRIDGE")/../lib"
+  if python3 -c "
+import sys, os
+sys.path.insert(0, sys.argv[1])
+import loops_sql_authority as lsa
+from pathlib import Path
+state = os.environ.get('SPINE_STATE') or str(Path.home() / 'code' / '.runtime' / 'spine' / 'state')
+db_path = Path(state) / 'shared_authority.db'
+conn = lsa.connect(db_path)
+lsa.ensure_schema(conn)
+lsa.delete_loop(conn, sys.argv[2])
+conn.commit()
+conn.close()
+" "$LIB_DIR" "$LOOP_ID" 2>/dev/null; then
+    rm -f "$SCOPE_FILE_TMP"
+  else
+    echo "FAIL: SQLite cleanup failed for $LOOP_ID after publish failure; temp scope file retained at $SCOPE_FILE_TMP" >&2
+    exit 1
+  fi
+  exit 1
+fi
+SCOPE_FILE_TMP=""
+
+if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+  printf '{"loop_id":"%s","scope_file":"%s","birth_parity":"pass"}\n' "$LOOP_ID" "$SCOPE_FILE"
+else
+  echo "CREATED: $LOOP_ID"
+  echo "File: $SCOPE_FILE"
+fi

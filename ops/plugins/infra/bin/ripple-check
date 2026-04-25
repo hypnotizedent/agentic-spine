@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# spine.ripple.check — List all files referencing a given host
+#
+# Usage: ripple-check <hostname>
+#
+# Searches runtime bindings for host references.
+set -euo pipefail
+
+SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+
+HOST="${1:-}"
+if [[ -z "$HOST" ]]; then
+  echo "Usage: ripple-check <hostname>" >&2
+  echo "Example: ripple-check download-stack" >&2
+  exit 1
+fi
+
+echo "=== Ripple Check: $HOST ==="
+echo
+
+HITS=0
+
+# Surface 1: naming.policy.yaml
+echo "--- naming.policy.yaml ---"
+NP="$SP/ops/bindings/naming.policy.yaml"
+if [[ -f "$NP" ]] && grep -q "$HOST" "$NP"; then
+  grep -n "$HOST" "$NP" | head -5
+  HITS=$((HITS + 1))
+else
+  echo "  (not found)"
+fi
+echo
+
+# Surface 2: ssh.targets.yaml
+echo "--- ssh.targets.yaml ---"
+ST="$SP/ops/bindings/ssh.targets.yaml"
+if [[ -f "$ST" ]] && grep -q "$HOST" "$ST"; then
+  grep -n "$HOST" "$ST" | head -5
+  HITS=$((HITS + 1))
+else
+  echo "  (not found)"
+fi
+echo
+
+# Surface 3: docker.compose.targets.yaml
+echo "--- docker.compose.targets.yaml ---"
+CT="$SP/ops/bindings/docker.compose.targets.yaml"
+if [[ -f "$CT" ]] && grep -q "$HOST" "$CT"; then
+  grep -n "$HOST" "$CT" | head -5
+  HITS=$((HITS + 1))
+else
+  echo "  (not found)"
+fi
+echo
+
+# Surface 4: infra.placement.policy.yaml
+echo "--- infra.placement.policy.yaml ---"
+PP="$SP/ops/bindings/infra.placement.policy.yaml"
+if [[ -f "$PP" ]] && grep -q "$HOST" "$PP"; then
+  grep -n "$HOST" "$PP" | head -5
+  HITS=$((HITS + 1))
+else
+  echo "  (not found)"
+fi
+echo
+
+# Surface 5: backup.calendar.yaml
+echo "--- backup.calendar.yaml ---"
+BC="$SP/ops/bindings/domains/backup/backup.calendar.yaml"
+if [[ -f "$BC" ]] && grep -q "$HOST" "$BC"; then
+  grep -n "$HOST" "$BC" | head -5
+  HITS=$((HITS + 1))
+else
+  echo "  (not found)"
+fi
+echo
+
+# Surface 6: backup.inventory.yaml
+echo "--- backup.inventory.yaml ---"
+BI="$SP/ops/bindings/domains/backup/backup.inventory.yaml"
+if [[ -f "$BI" ]] && grep -q "$HOST" "$BI"; then
+  grep -n "$HOST" "$BI" | head -5
+  HITS=$((HITS + 1))
+else
+  echo "  (not found)"
+fi
+echo
+
+# Surface 7: services.health.yaml
+echo "--- services.health.yaml ---"
+SH="$SP/ops/bindings/services.health.yaml"
+if [[ -f "$SH" ]] && grep -q "$HOST" "$SH"; then
+  grep -n "$HOST" "$SH" | head -5
+  HITS=$((HITS + 1))
+else
+  echo "  (not found)"
+fi
+echo
+
+# Broad search: any other bindings referencing this host
+echo "--- Other references (rg scan) ---"
+OTHER=$(cd "$SP" && rg --files-with-matches --fixed-strings "$HOST" \
+  --glob='!.archive/**' --glob='!.worktrees/**' --glob='!evidence/**' \
+  --glob='!mailroom/state/ledger.csv' --glob='!mailroom/outbox/**' \
+  --glob='!node_modules/**' --glob='!.git/**' \
+  ops/bindings/ 2>/dev/null | \
+  grep -v -E '(naming.policy|ssh.targets|docker.compose.targets|infra.placement|backup.calendar|backup.inventory|services.health|operational.gaps)' || true)
+
+if [[ -n "$OTHER" ]]; then
+  echo "$OTHER"
+  echo
+fi
+
+echo "=== Summary: $HOST referenced in $HITS primary surfaces ==="
+echo
+echo "If modifying this host, update ALL surfaces listed above."
+echo "Follow the rename_procedure in naming.policy.yaml (9 steps, top to bottom)."

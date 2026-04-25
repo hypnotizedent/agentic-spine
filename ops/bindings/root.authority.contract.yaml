@@ -1,0 +1,181 @@
+---
+status: authoritative
+owner: "@operator"
+last_verified: 2026-03-28
+scope: root-authority-taxonomy
+version: 1
+updated_at: "2026-03-28"
+
+related_contracts:
+  - contract: ops/bindings/node.role.contract.yaml
+    relationship: "Physical-node authority is subordinate to this path taxonomy for state, evidence, and mailroom locality."
+
+# Root Authority Contract
+# Establishes the canonical root taxonomy for the spine platform.
+# Defines the authoritative path hierarchy, tool-adapter policy,
+# and residue classification for competing roots.
+
+taxonomy:
+  home:
+    path: $HOME
+    role: adapter_and_install_target_only
+    policy: never_canonical_machine_truth
+    note: >
+      Home directory is the install target for tool adapters (Claude config,
+      Codex skills, Hammerspoon, brew, etc). It is never the source of truth
+      for spine state, evidence, or runtime.
+
+  platform:
+    path: $HOME/code
+    role: single_platform_root
+    policy: only_versioned_repos_and_governed_runtime
+    note: >
+      All versioned repos, runtime state, and evidence live under this root.
+      No repo or state surface may be rooted outside this path.
+
+  runtime:
+    path: $SPINE_RUNTIME/spine
+    role: canonical_runtime_state
+    subpaths:
+      state: $SPINE_RUNTIME/spine/state
+      mailroom: $SPINE_RUNTIME/spine/mailroom
+      locks: $SPINE_RUNTIME/spine/locks
+      logs: $SPINE_RUNTIME/spine/logs
+      tmp: $SPINE_RUNTIME/spine/tmp
+    note: >
+      Externalized runtime state for the spine. Local-only, not inside any
+      versioned repo. Source contract: ops/bindings/mailroom.runtime.contract.yaml.
+
+  evidence:
+    path: $SPINE_EVIDENCE/spine
+    role: canonical_evidence_trail
+    subpaths:
+      sessions: $SPINE_EVIDENCE/spine/sessions
+      verify: $SPINE_EVIDENCE/spine/verify
+      reports: $SPINE_EVIDENCE/spine/reports
+      cap_runs: $SPINE_EVIDENCE/spine/cap-runs
+    note: >
+      Governed evidence trail. Receipts, verify reports, and cap run logs.
+
+  worktrees:
+    path: $SPINE_RUNTIME/spine/tmp/worktrees
+    role: canonical_worktree_root
+    layout: "<root>/agentic-spine/<WAVE_ID>"
+    note: >
+      All managed worktrees are provisioned under this root.
+      Source contract: ops/bindings/worktree.lifecycle.contract.yaml.
+
+  repos:
+    path: $HOME/code/*
+    role: versioned_repos_only
+    note: >
+      Only versioned git repos live directly under the platform root.
+      Runtime state, evidence, and worktrees use governed dotfile roots.
+
+tool_adapter_policy:
+  principle: >
+    Home-level tool paths are adapter or deploy targets only.
+    Authoritative tool behavior must resolve through repo-owned
+    wrappers, contracts, and capabilities.
+  examples:
+    - path: ~/.claude/
+      role: Claude Code adapter config (install target)
+    - path: ~/.codex/skills/
+      role: Codex skill install target (thin adapter)
+    - path: ~/.config/opencode/
+      role: OpenCode config (install target)
+    - path: ~/.local/bin/
+      role: pipx/brew deploy target for CLI tools
+  enforcement: >
+    No spine contract may declare a home-level path as authoritative truth.
+    Repo-owned wrappers (ops/commands/cap.sh, ops/plugins/*/bin/*)
+    are the authority layer. Home-level tool configs are consumers.
+
+residue:
+  - path: $HOME/.runtime
+    status: orphan
+    disposition: requires_migration_or_removal
+    note: >
+      Legacy home-level runtime root. Superseded by
+      $SPINE_RUNTIME. Must not be used by any live surface.
+
+  - path: $HOME/.wt
+    status: orphan
+    disposition: historical_residue_only
+    note: >
+      Legacy home-level worktree root. Superseded by
+      $SPINE_RUNTIME/spine/tmp/worktrees.
+      Operator-storage and launchd plist references migrated to
+      canonical $WORKBENCH_ROOT in Step 7
+      (SPINE-CLEAN-ARCHITECTURE-20260409, f021f2d2). No live
+      callers remain. Directory itself may still exist on disk
+      as inert residue.
+
+  - path: $HOME/.worktrees
+    status: orphan
+    disposition: requires_removal
+    note: >
+      Deprecated worktree root predating both ~/.wt and the canonical root.
+
+  - path: $SPINE_WORKTREES
+    status: orphan
+    disposition: historical_residue_only
+    note: >
+      Intermediate worktree root used between ~/.wt and the canonical root.
+      Live spine-core scripts patched in H2-A to use canonical root.
+      Operator-storage and launchd plist references migrated to
+      canonical $WORKBENCH_ROOT in Step 7
+      (SPINE-CLEAN-ARCHITECTURE-20260409, f021f2d2). No live
+      callers remain.
+
+exception_policy:
+  allowed_scope: $HOME/code
+  home_root_exceptions: forbidden
+  note: >
+    Any legitimate operational exception must remain under ~/code.
+    Home-root exceptions are never allowed. If a path cannot be resolved
+    under ~/code in this pass, it must be classified explicitly and
+    scheduled for a migration pass.
+
+damage_model:
+  wrong_root_write:
+    description: >
+      Terminal resolves the wrong root and writes state into a non-canonical
+      location. Result: state is invisible to governed surfaces, causing
+      continuity breaks.
+    examples:
+      - writing to ~/.runtime instead of ~/code/.runtime
+      - creating worktrees under ~/.wt instead of canonical root
+    mitigation: root.authority.contract.yaml + binding calibration
+
+  dirty_governed_path:
+    description: >
+      A governed repo path accumulates runtime state that should be
+      externalized. Result: git status noise, accidental commits of
+      ephemeral state, verify failures.
+    mitigation: mailroom.runtime.contract.yaml externalization
+
+  split_brain_state:
+    description: >
+      Two roots exist for the same purpose (e.g. ~/.runtime and
+      ~/code/.runtime both active). Result: different terminals see
+      different state, causing conflicting decisions.
+    mitigation: single canonical root per concern, residue retirement
+
+  remote_clone_drift:
+    description: >
+      A repo clone on a remote execution host accumulates ad hoc edits,
+      becoming a hidden second development surface. Result: code truth
+      diverges from operator_console, deploy path becomes ungoverned,
+      and restarts serve untested code.
+    mitigation: >
+      Code reaches execution_host only via governed promotion from
+      operator_console (reviewed commit, explicit push, controlled
+      restart). The remote repo clone is a deploy target, not a
+      working checkout.
+
+  broken_continuity:
+    description: >
+      Session A writes to root X, session B reads from root Y.
+      State from session A is invisible to session B.
+    mitigation: all sessions resolve paths through the same contract chain

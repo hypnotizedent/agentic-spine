@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def expand(raw: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
+
+
+DEFAULT_ROOT = expand(Path(__file__).resolve().parents[4])
+
+
+def git_top_level(start: Path) -> Path | None:
+    probe = start if start.is_dir() else start.parent
+    proc = subprocess.run(
+        ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    stdout = proc.stdout.strip()
+    return Path(stdout).resolve() if stdout else None
+
+
+def resolve_target_root(explicit: str | None = None) -> Path:
+    if explicit:
+        return expand(explicit)
+    cwd_root = git_top_level(Path.cwd())
+    if cwd_root is not None:
+        return cwd_root
+    script_root = git_top_level(Path(__file__).resolve())
+    if script_root is not None:
+        return script_root
+    for env_name in ("SPINE_TARGET_REPO", "SPINE_ROOT", "SPINE_REPO", "SPINE_CODE"):
+        value = os.environ.get(env_name)
+        if value:
+            return expand(value)
+    return DEFAULT_ROOT
+
+
+ROOT = DEFAULT_ROOT
+PROJECTED_PATH = ROOT / "ops/bindings/domains/backup/backup.locality.projected.yaml"
+
+
+def fail(message: str, *, exit_code: int = 1) -> None:
+    print(f"backup.locality.audit FAIL: {message}", file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail(f"expected mapping root: {path}")
+    return data
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="backup-locality-audit")
+    parser.add_argument("--root", help="Target checkout root.")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--brief", action="store_true")
+    parser.add_argument("--strict", action="store_true")
+    return parser.parse_args()
+
+
+def configure_root(root: Path) -> None:
+    global ROOT, PROJECTED_PATH
+    ROOT = root
+    PROJECTED_PATH = ROOT / "ops/bindings/domains/backup/backup.locality.projected.yaml"
+
+
+def main() -> None:
+    args = parse_args()
+    configure_root(resolve_target_root(args.root))
+    projected = load_yaml(PROJECTED_PATH)
+
+    failures: list[dict[str, Any]] = []
+    for row in ensure_list(projected.get("targets")):
+        target = ensure_dict(row)
+        checks = ensure_dict(target.get("checks"))
+        failed_checks = [name for name, value in checks.items() if not value]
+        if failed_checks:
+            failures.append(
+                {
+                    "target": str(target.get("target") or ""),
+                    "failed_checks": failed_checks,
+                    "declared": ensure_dict(target.get("declared")),
+                    "derived": ensure_dict(target.get("derived")),
+                }
+            )
+
+    total = int(ensure_dict(projected.get("summary")).get("targets_total") or len(ensure_list(projected.get("targets"))))
+    issues = len(failures)
+    status = "PASS" if issues == 0 else "FAIL"
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "capability": "backup.locality.audit",
+                    "status": status.lower(),
+                    "targets_total": total,
+                    "issues": issues,
+                    "failures": failures,
+                },
+                indent=2,
+                sort_keys=False,
+            )
+        )
+        raise SystemExit(1 if args.strict and issues > 0 else (1 if issues > 0 else 0))
+
+    if args.brief:
+        print(f"{status} issues={issues} targets={total}")
+        raise SystemExit(1 if issues > 0 else 0)
+
+    print("backup.locality.audit")
+    print(f"status: {status}")
+    print(f"targets: {total}")
+    print(f"issues: {issues}")
+    for failure in failures:
+        print(f"[FAIL] {failure['target']}: {', '.join(failure['failed_checks'])}")
+    raise SystemExit(1 if issues > 0 else 0)
+
+
+if __name__ == "__main__":
+    main()

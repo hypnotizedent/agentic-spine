@@ -1,0 +1,876 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# Script: rag
+# Purpose: Spine-native RAG CLI (AnythingLLM + Qdrant on ai-consolidation VM 207)
+# Authority: docs/governance/RAG_INDEXING_RULES.md, docs/governance/SEARCH_EXCLUSIONS.md,
+#            ops/bindings/services.health.yaml, ops/bindings/secrets.binding.yaml
+# Location: ops/plugins/infra/rag/bin/rag
+# Last Updated: 2026-02-13
+# ═══════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+# Resolve the code root robustly.
+# Why: `infisical run -- <cmd>` may drop non-secret env vars (like SPINE_CODE),
+# so prefer git to find the repo root and keep the fallback aligned with the
+# nested infra plugin path.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+default_code_root=""
+if [[ -n "${git_root:-}" && "${git_root:-}" != "null" ]]; then
+  default_code_root="$git_root"
+else
+  default_code_root="$(cd "$script_dir/../../../../.." && pwd)"
+fi
+
+SPINE_CODE="${SPINE_CODE:-$default_code_root}"
+# Prefer the runtime-reported spine path. This avoids hardcoding $HOME paths and
+# keeps worktrees/copies working, while still allowing an override.
+SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
+
+SERVICES_BINDING="${SPINE_REPO}/ops/bindings/services.health.yaml"
+SECRETS_BINDING="${SPINE_REPO}/ops/bindings/secrets.binding.yaml"
+
+WORKSPACE_SLUG="${RAG_WORKSPACE_SLUG:-agentic-spine}"
+ANYTHINGLLM_URL="${ANYTHINGLLM_URL:-${ANYTHINGLLM_BASE_URL:-}}"
+QDRANT_URL="${QDRANT_URL:-${QDRANT_BASE_URL:-}}"
+OLLAMA_URL="${OLLAMA_URL:-${OLLAMA_BASE_URL:-}}"
+
+log() { echo "→ $*"; }
+log_ok() { echo "OK: $*"; }
+log_err() { echo "ERROR: $*" >&2; }
+
+usage() {
+  cat <<'EOF'
+Spine-native RAG (AnythingLLM on ai-consolidation)
+
+Usage:
+  rag health
+  rag status [--workspace <slug>]
+  rag ask "<question>" [--workspace <slug>] [--mode retrieve|auto|chat] [--retrieve-only]
+  rag retrieve "<query>" [--workspace <slug>] [--limit N]
+  rag sync [--workspace <slug>] [--dry-run] [--resume]
+
+Modes (rag ask):
+  retrieve     Embed query + Qdrant vector search. Fast, deterministic. (default)
+  auto         Try chat first (RAG_CHAT_TIMEOUT_SEC), fall back to retrieve on timeout.
+  chat         Chat only, fail if chat times out (no fallback).
+  --retrieve-only  Alias for --mode retrieve.
+
+Env:
+  RAG_WORKSPACE_SLUG (default: agentic-spine)
+  ANYTHINGLLM_URL / ANYTHINGLLM_BASE_URL (optional; auto-derived from services.health.yaml)
+  ANYTHINGLLM_API_KEY (required for status/ask/sync; injected via spine secrets.exec)
+  QDRANT_URL / QDRANT_BASE_URL (optional; auto-derived from services.health.yaml)
+  OLLAMA_URL / OLLAMA_BASE_URL (optional; auto-derived from services.health.yaml)
+  RAG_QDRANT_COLLECTION (default: workspace slug)
+  RAG_EMBED_MODEL (default: mxbai-embed-large:latest)
+  RAG_CHAT_TIMEOUT_SEC (default: 45) - chat attempt timeout (--mode auto/chat only)
+EOF
+}
+
+require_tool() {
+  local t="$1"
+  command -v "$t" >/dev/null 2>&1 || { log_err "Missing required tool: $t"; exit 1; }
+}
+
+derive_anythingllm_url() {
+  # Derive base URL from ops/bindings/services.health.yaml (SSOT).
+  if [[ -n "${ANYTHINGLLM_URL:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$SERVICES_BINDING" ]] || ! command -v yq >/dev/null 2>&1; then
+    ANYTHINGLLM_URL="http://100.x.x.x:3002"
+    return 0
+  fi
+
+  local ping_url
+  ping_url="$(yq -r '.endpoints[] | select(.id=="anythingllm") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
+  if [[ -z "$ping_url" || "$ping_url" == "null" ]]; then
+    ANYTHINGLLM_URL="http://100.x.x.x:3002"
+    return 0
+  fi
+  # Strip a known suffix to get the base URL.
+  ANYTHINGLLM_URL="${ping_url%/api/ping}"
+}
+
+derive_qdrant_url() {
+  if [[ -n "${QDRANT_URL:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$SERVICES_BINDING" ]] || ! command -v yq >/dev/null 2>&1; then
+    QDRANT_URL="http://100.x.x.x:6333"
+    return 0
+  fi
+
+  local health_url
+  health_url="$(yq -r '.endpoints[] | select(.id=="qdrant") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
+  if [[ -z "$health_url" || "$health_url" == "null" ]]; then
+    QDRANT_URL="http://100.x.x.x:6333"
+    return 0
+  fi
+  QDRANT_URL="${health_url%/healthz}"
+}
+
+derive_ollama_url() {
+  if [[ -n "${OLLAMA_URL:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$SERVICES_BINDING" ]] || ! command -v yq >/dev/null 2>&1; then
+    OLLAMA_URL="http://100.x.x.x:11434"
+    return 0
+  fi
+
+  local tags_url
+  tags_url="$(yq -r '.endpoints[] | select(.id=="ollama") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
+  if [[ -z "$tags_url" || "$tags_url" == "null" ]]; then
+    OLLAMA_URL="http://100.x.x.x:11434"
+    return 0
+  fi
+  OLLAMA_URL="${tags_url%/api/tags}"
+}
+
+load_api_key() {
+  # Secrets policy: secret-bearing commands must be run under spine-governed injection
+  # (`./bin/ops cap run secrets.exec -- <cmd...>`). This CLI refuses to fetch secrets
+  # on its own to keep receipts clean and avoid duplicate secret-provider logic.
+  if [[ -n "${ANYTHINGLLM_API_KEY:-}" ]]; then
+    return 0
+  fi
+  log_err "STOP: ANYTHINGLLM_API_KEY is not set."
+  log_err "hint: run via spine secrets injection:"
+  log_err "  ./bin/ops cap run secrets.exec -- ./ops/plugins/infra/rag/bin/rag <cmd>"
+  exit 2
+}
+
+make_auth_header_file() {
+  # Keep bearer token out of process args (ps). Use curl header-file form.
+  local header_file
+  header_file="$(mktemp)"
+  chmod 600 "$header_file"
+  printf 'Authorization: Bearer %s\n' "$ANYTHINGLLM_API_KEY" > "$header_file"
+  echo "$header_file"
+}
+
+http_get() {
+  local url="$1"
+  local tmp code header_file
+  tmp="$(mktemp)"
+  header_file="$(make_auth_header_file)"
+  code="$(curl -sS --max-time 30 -o "$tmp" -w "%{http_code}" -H "@${header_file}" "$url" || true)"
+  rm -f "$header_file"
+  if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
+    log_err "GET failed (HTTP ${code:-unknown}): $url"
+    cat "$tmp" >&2 || true
+    rm -f "$tmp"
+    return 1
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+http_post_json() {
+  local url="$1"
+  local json="$2"
+  local tmp code header_file
+  tmp="$(mktemp)"
+  header_file="$(make_auth_header_file)"
+  # Chat/query responses can be slow depending on model/backlog; be generous.
+  code="$(curl -sS --max-time 600 --retry 3 --retry-delay 2 -o "$tmp" -w "%{http_code}" \
+    -H "@${header_file}" \
+    -H "Content-Type: application/json" \
+    -d "$json" \
+    "$url" || true)"
+  rm -f "$header_file"
+  if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
+    log_err "POST failed (HTTP ${code:-unknown}): $url"
+    cat "$tmp" >&2 || true
+    rm -f "$tmp"
+    return 1
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+http_post_json_chat_try() {
+  # Best-effort: return 0 and print body on success; return 1 on failure.
+  # This intentionally uses a shorter timeout so we can fall back to retrieval quickly.
+  local url="$1"
+  local json="$2"
+  local max_time="${RAG_CHAT_TIMEOUT_SEC:-45}"
+  local tmp code header_file
+  tmp="$(mktemp)"
+  header_file="$(make_auth_header_file)"
+  code="$(curl -sS --max-time "$max_time" -o "$tmp" -w "%{http_code}" \
+    -H "@${header_file}" \
+    -H "Content-Type: application/json" \
+    -d "$json" \
+    "$url" || true)"
+  rm -f "$header_file"
+  if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+check_workspace_exists() {
+  # Preflight: verify workspace slug exists on AnythingLLM.
+  # Returns 0 if workspace exists, 1 if not.
+  local slug="${1:-$WORKSPACE_SLUG}"
+  local resp
+  resp="$(http_get "${ANYTHINGLLM_URL}/api/v1/workspace/${slug}" 2>/dev/null)" || {
+    log_err "STOP: workspace '${slug}' does not exist on AnythingLLM (${ANYTHINGLLM_URL})."
+    log_err "hint: create it via AnythingLLM UI at ${ANYTHINGLLM_URL} or API:"
+    log_err "  curl -X POST -H 'Authorization: Bearer \$KEY' -H 'Content-Type: application/json' \\"
+    log_err "    -d '{\"name\": \"${slug}\"}' ${ANYTHINGLLM_URL}/api/v1/workspace/new"
+    return 1
+  }
+  # Additional check: API may return 200 with null workspace
+  if command -v jq >/dev/null 2>&1; then
+    local ws_name
+    ws_name="$(echo "$resp" | jq -r '
+      if .workspace and (.workspace|type=="array") then .workspace[0].name // empty
+      elif .workspace and (.workspace|type=="object") then .workspace.name // empty
+      else empty end
+    ' 2>/dev/null || true)"
+    if [[ -z "$ws_name" ]]; then
+      log_err "STOP: workspace '${slug}' not found (API returned empty workspace object)."
+      log_err "hint: create it via AnythingLLM UI at ${ANYTHINGLLM_URL}"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+ollama_embed() {
+  local prompt="$1"
+  local model="${RAG_EMBED_MODEL:-mxbai-embed-large:latest}"
+  require_tool curl
+  require_tool jq
+  local resp
+  resp="$(curl -sS --max-time 30 -H "Content-Type: application/json" \
+    -d "$(jq -cn --arg model "$model" --arg prompt "$prompt" '{model:$model,prompt:$prompt}')" \
+    "${OLLAMA_URL}/api/embeddings")"
+  echo "$resp" | jq -c '.embedding'
+}
+
+qdrant_search() {
+  local vector_json="$1"
+  local collection="${RAG_QDRANT_COLLECTION:-$WORKSPACE_SLUG}"
+  local limit="${RAG_RETRIEVE_LIMIT:-5}"
+  require_tool curl
+  require_tool jq
+  curl -sS --max-time 30 -H "Content-Type: application/json" \
+    -d "$(jq -cn --argjson v "$vector_json" --argjson l "$limit" '
+      {vector:$v,limit:$l,with_payload:true,with_vectors:false}
+    ')" \
+    "${QDRANT_URL}/collections/${collection}/points/search"
+}
+
+contains_secret_material() {
+  # Conservative denylist; returns 0 if secrets are likely present.
+  local file="$1"
+  python3 - "$file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+p = Path(sys.argv[1])
+try:
+  text = p.read_text(errors="ignore")
+except Exception:
+  print("0")
+  raise SystemExit(0)
+
+lines = text.splitlines()
+joined = "\n".join(lines)
+
+deny = [
+  r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+  r"\bAKIA[0-9A-Z]{16}\b",
+  r"\bASIA[0-9A-Z]{16}\b",
+  r"\bghp_[A-Za-z0-9]{20,}\b",
+  r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+  r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+  r"\bsk-[A-Za-z0-9]{20,}\b",  # common OpenAI-style token prefix
+]
+for pat in deny:
+  if re.search(pat, joined):
+    print("1")
+    raise SystemExit(0)
+
+# env-style assignments that look like real secret values
+for line in lines:
+  if "=" not in line:
+    continue
+  k, v = line.split("=", 1)
+  k = k.strip()
+  v = v.strip()
+  if not k or not v:
+    continue
+  if not re.search(r"(KEY|TOKEN|SECRET|PASS|PASSWORD)", k, re.IGNORECASE):
+    continue
+  if v.lower() in ("", "changeme", "change-me", "redacted", "example", "xxx", "xxxxx"):
+    continue
+  if v.startswith("<") and v.endswith(">"):
+    continue
+  if len(v) >= 12:
+    print("1")
+    raise SystemExit(0)
+
+print("0")
+PY
+}
+
+build_manifest() {
+  # Emit eligible markdown file paths, relative to SPINE_CODE, one per line.
+  python3 - <<'PY' "$SPINE_CODE"
+import os
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+allowed_roots = [root / "docs", root / "ops", root / "surfaces"]
+
+excluded_prefixes = [
+  "docs/" + "legacy/",
+  "docs/reference/audits/",
+  "docs/governance/_archived/",
+  "docs/governance/_imported/",
+  "evidence/",
+  "mailroom/state/",
+  "fixtures/",
+  ".git/",
+  "node_modules/",
+]
+
+def is_excluded(rel: str) -> bool:
+  if "/.archive/" in rel or rel.startswith(".archive/") or rel.endswith("/.archive"):
+    return True
+  for p in excluded_prefixes:
+    if rel.startswith(p):
+      return True
+  return False
+
+def has_required_frontmatter(path: Path) -> bool:
+  try:
+    lines = path.read_text(errors="ignore").splitlines()
+  except Exception:
+    return False
+  if not lines or lines[0].strip() != "---":
+    return False
+  # Find end of front matter quickly.
+  end = None
+  for i in range(1, min(len(lines), 80)):
+    if lines[i].strip() == "---":
+      end = i
+      break
+  if end is None:
+    return False
+  front = "\n".join(lines[:end+1])
+  required = ["status:", "owner:", "last_verified:"]
+  return all(r in front for r in required)
+
+out = []
+for base in allowed_roots:
+  if not base.exists():
+    continue
+  for p in base.rglob("*.md"):
+    rel = p.relative_to(root).as_posix()
+    if is_excluded(rel):
+      continue
+    if not has_required_frontmatter(p):
+      continue
+    out.append(rel)
+
+for rel in sorted(set(out)):
+  sys.stdout.write(rel + "\n")
+PY
+}
+
+prepare_file_for_upload() {
+  local abs_file="$1"
+  local tmp
+  tmp="$(mktemp)"
+  python3 - "$abs_file" "$tmp" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+text = src.read_text(errors="ignore")
+lines = text.splitlines()
+
+title = None
+for line in lines:
+  m = re.match(r'^\s*#\s+(.+)', line)
+  if m:
+    title = m.group(1).strip()
+    break
+if not title:
+  title = src.name
+
+header = f"DOCUMENT: {title}\nSOURCE: {src.as_posix()}\n\n"
+
+out = []
+in_code = False
+for line in lines:
+  stripped = line.strip()
+  if stripped.startswith("```"):
+    in_code = not in_code
+    out.append(line)
+    continue
+  if not in_code and re.match(r'^\s*#{1,6}\s+', line):
+    if out and out[-1].strip() != "":
+      out.append("")
+    out.append(f"DOCUMENT: {title}")
+    out.append("")
+    out.append(line)
+    continue
+  out.append(line)
+
+dst.write_text(header + "\n".join(out))
+PY
+  echo "$tmp"
+}
+
+# Load-shaping knob defaults (overridden by binding in sync path)
+LS_TIMEOUT="${RAG_UPLOAD_TIMEOUT:-180}"
+LS_MAX_RETRIES="${RAG_MAX_RETRIES:-2}"
+LS_BACKOFF_STRATEGY="${RAG_BACKOFF_STRATEGY:-exponential}"
+LS_RETRY_BASE_DELAY="${RAG_RETRY_BASE_DELAY:-5}"
+LS_RETRY_MAX_DELAY="${RAG_RETRY_MAX_DELAY:-60}"
+LS_INTER_DOC_PACE="${RAG_INTER_DOC_PACE:-1}"
+
+resolve_load_shaping() {
+  # Resolve load-shaping knobs from workspace contract binding
+  local ws_binding="${SPINE_REPO}/ops/bindings/domains/rag/rag.workspace.contract.yaml"
+  if [[ ! -f "$ws_binding" ]] || ! command -v yq >/dev/null 2>&1; then
+    return 0  # use defaults
+  fi
+  local val
+  val="$(yq -r '.sync_policy.load_shaping.per_request_timeout_sec // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_TIMEOUT="$val"
+  val="$(yq -r '.sync_policy.load_shaping.max_retries // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_MAX_RETRIES="$val"
+  val="$(yq -r '.sync_policy.load_shaping.backoff_strategy // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_BACKOFF_STRATEGY="$val"
+  val="$(yq -r '.sync_policy.load_shaping.retry_base_delay_sec // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_RETRY_BASE_DELAY="$val"
+  val="$(yq -r '.sync_policy.load_shaping.retry_max_delay_sec // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_RETRY_MAX_DELAY="$val"
+  val="$(yq -r '.sync_policy.load_shaping.inter_doc_pace_sec // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_INTER_DOC_PACE="$val"
+}
+
+compute_retry_delay() {
+  # Compute delay for retry attempt $1 (0-indexed)
+  local attempt="$1"
+  local delay="$LS_RETRY_BASE_DELAY"
+  if [[ "$LS_BACKOFF_STRATEGY" == "exponential" ]]; then
+    # delay * 2^attempt, capped at max
+    local multiplier=1
+    local i=0
+    while [[ "$i" -lt "$attempt" ]]; do
+      multiplier=$((multiplier * 2))
+      i=$((i + 1))
+    done
+    delay=$((LS_RETRY_BASE_DELAY * multiplier))
+  fi
+  if [[ "$delay" -gt "$LS_RETRY_MAX_DELAY" ]]; then
+    delay="$LS_RETRY_MAX_DELAY"
+  fi
+  echo "$delay"
+}
+
+upload_file() {
+  local rel="$1"
+  local abs="${SPINE_CODE}/${rel}"
+  if [[ ! -f "$abs" ]]; then
+    log_err "Missing file: $rel"
+    return 1
+  fi
+  if [[ "$(contains_secret_material "$abs" | tr -d '\n')" == "1" ]]; then
+    log "SKIP(secrets): $rel"
+    return 0
+  fi
+
+  local prepared
+  prepared="$(prepare_file_for_upload "$abs")"
+
+  local attempt=0
+  while [[ "$attempt" -le "$LS_MAX_RETRIES" ]]; do
+    local tmp code header_file
+    tmp="$(mktemp)"
+    header_file="$(make_auth_header_file)"
+    code="$(curl -sS --max-time "$LS_TIMEOUT" -o "$tmp" -w "%{http_code}" \
+      -H "@${header_file}" \
+      -F "file=@${prepared};filename=$(basename "$abs")" \
+      "${ANYTHINGLLM_URL}/api/workspace/${WORKSPACE_SLUG}/upload-and-embed" || true)"
+    rm -f "$header_file"
+
+    if [[ -n "$code" && "$code" -ge 200 && "$code" -lt 300 ]]; then
+      if ! grep -qi "<!DOCTYPE html" "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        rm -f "$prepared" 2>/dev/null || true
+        log_ok "Uploaded: $rel"
+        return 0
+      fi
+      log_err "Upload returned HTML (wrong endpoint/auth?): $rel"
+    else
+      log_err "Upload failed (HTTP ${code:-unknown}): $rel (attempt $((attempt + 1))/$((LS_MAX_RETRIES + 1)))"
+    fi
+    cat "$tmp" >&2 2>/dev/null || true
+    rm -f "$tmp"
+
+    if [[ "$attempt" -lt "$LS_MAX_RETRIES" ]]; then
+      local delay
+      delay="$(compute_retry_delay "$attempt")"
+      log "Retrying in ${delay}s (backoff: $LS_BACKOFF_STRATEGY)..."
+      sleep "$delay"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  rm -f "$prepared" 2>/dev/null || true
+  return 1
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  health)
+    derive_anythingllm_url
+    derive_qdrant_url
+    derive_ollama_url
+    echo "=== RAG Health ==="
+    echo "anythingllm: ${ANYTHINGLLM_URL}"
+    if curl -sSf --max-time 10 "${ANYTHINGLLM_URL}/api/ping" >/dev/null; then
+      echo "anythingllm_ping: OK"
+    else
+      echo "anythingllm_ping: FAIL"
+      exit 1
+    fi
+    echo "qdrant: ${QDRANT_URL}"
+    if curl -sSf --max-time 10 "${QDRANT_URL}/healthz" >/dev/null; then
+      echo "qdrant_healthz: OK"
+    else
+      echo "qdrant_healthz: FAIL"
+      exit 1
+    fi
+    echo "ollama: ${OLLAMA_URL}"
+    if curl -sSf --max-time 10 "${OLLAMA_URL}/api/tags" >/dev/null; then
+      echo "ollama_tags: OK"
+    else
+      echo "ollama_tags: FAIL"
+      exit 1
+    fi
+    ;;
+
+  status)
+    while [[ "${1:-}" == "--workspace" ]]; do
+      WORKSPACE_SLUG="${2:-}"; shift 2 || true
+    done
+    derive_anythingllm_url
+    load_api_key
+    require_tool curl
+    require_tool python3
+    check_workspace_exists "$WORKSPACE_SLUG" || exit 1
+    local_json="$(http_get "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}")"
+    if command -v jq >/dev/null 2>&1; then
+      doc_count="$(echo "$local_json" | jq -r '
+        if .workspace and (.workspace|type=="array") then .workspace[0].documents|length
+        elif .workspace and (.workspace|type=="object") then .workspace.documents|length
+        else 0 end
+      ')"
+    else
+      doc_count="(jq-missing)"
+    fi
+    total_eligible="$(build_manifest | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+    # Subtract secrets-excluded docs to match what sync actually uploads
+    secrets_excluded=0
+    while IFS= read -r rel; do
+      [[ -z "$rel" ]] && continue
+      abs="${SPINE_CODE}/${rel}"
+      [[ -f "$abs" ]] || continue
+      if [[ "$(contains_secret_material "$abs" | tr -d '\n')" == "1" ]]; then
+        secrets_excluded=$((secrets_excluded + 1))
+      fi
+    done <<<"$(build_manifest)"
+    eligible_count=$((total_eligible - secrets_excluded))
+    echo "workspace: ${WORKSPACE_SLUG}"
+    echo "docs_indexed: ${doc_count}"
+    echo "docs_eligible: ${eligible_count}"
+    if [[ "$secrets_excluded" -gt 0 ]]; then
+      echo "secrets_excluded: ${secrets_excluded}"
+    fi
+    if [[ "$doc_count" =~ ^[0-9]+$ && "$eligible_count" =~ ^[0-9]+$ ]]; then
+      if [[ "$doc_count" -ge "$eligible_count" ]]; then
+        echo "parity: OK"
+      else
+        delta=$((eligible_count - doc_count))
+        echo "parity: DRIFT (${delta} docs behind)"
+      fi
+    else
+      echo "parity: UNKNOWN"
+    fi
+    ;;
+
+  ask)
+    question="${1:-}"
+    shift || true
+    ask_mode="${RAG_ASK_MODE:-retrieve}"
+    while [[ "$#" -gt 0 ]]; do
+      case "${1:-}" in
+        --workspace) WORKSPACE_SLUG="${2:-}"; shift 2 ;;
+        --mode) ask_mode="${2:-retrieve}"; shift 2 ;;
+        --retrieve-only) ask_mode="retrieve"; shift ;;
+        *) log_err "Unknown arg: $1"; usage; exit 1 ;;
+      esac
+    done
+    if [[ -z "${question:-}" ]]; then
+      usage
+      exit 1
+    fi
+    case "$ask_mode" in
+      retrieve)
+        # Default: embed query via Ollama, search Qdrant vectors.
+        # Fast, deterministic, no chat LLM dependency.
+        "$0" retrieve "$question" --workspace "$WORKSPACE_SLUG"
+        ;;
+      auto)
+        # Try chat first, fall back to retrieval on timeout/failure.
+        derive_anythingllm_url
+        derive_qdrant_url
+        derive_ollama_url
+        load_api_key
+        require_tool curl
+        require_tool python3
+
+        payload="$(python3 - <<'PY' "$question"
+import json,sys
+print(json.dumps({"message": sys.argv[1], "mode": "query"}))
+PY
+)"
+        chat_ok=0
+        resp=""
+        if resp="$(http_post_json_chat_try "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}/chat" "$payload")"; then
+          chat_ok=1
+        fi
+
+        if (( chat_ok == 1 )) && command -v jq >/dev/null 2>&1; then
+          answer="$(echo "$resp" | jq -r '.textResponse // .response // .message // .text // empty')"
+          if [[ -n "$answer" ]]; then
+            echo "mode: chat"
+            echo "$answer"
+            sources="$(echo "$resp" | jq -r '.sources // [] | if length==0 then "" else (map("- \((.doc // .title // .source // .file // .name // "Unknown")) (\((.score // .confidence // .relevance // 0) | tostring))") | join("\n")) end')"
+            if [[ -n "$sources" ]]; then
+              echo ""
+              echo "Sources:"
+              echo "$sources"
+            fi
+            exit 0
+          fi
+        fi
+
+        log_err "AnythingLLM chat unavailable/slow; falling back to retrieval."
+        "$0" retrieve "$question" --workspace "$WORKSPACE_SLUG"
+        ;;
+      chat)
+        # Chat only, fail if unavailable.
+        derive_anythingllm_url
+        load_api_key
+        require_tool curl
+        require_tool python3
+
+        payload="$(python3 - <<'PY' "$question"
+import json,sys
+print(json.dumps({"message": sys.argv[1], "mode": "query"}))
+PY
+)"
+        resp=""
+        if ! resp="$(http_post_json_chat_try "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}/chat" "$payload")"; then
+          log_err "Chat unavailable (timeout or error). Use --mode retrieve or --mode auto."
+          exit 1
+        fi
+
+        if command -v jq >/dev/null 2>&1; then
+          answer="$(echo "$resp" | jq -r '.textResponse // .response // .message // .text // empty')"
+          if [[ -n "$answer" ]]; then
+            echo "mode: chat"
+            echo "$answer"
+            exit 0
+          fi
+        fi
+        log_err "Chat returned empty response."
+        exit 1
+        ;;
+      *)
+        log_err "Unknown mode: $ask_mode (expected: retrieve, auto, chat)"
+        exit 1
+        ;;
+    esac
+    ;;
+
+  retrieve)
+    query="${1:-}"
+    shift || true
+    limit="${RAG_RETRIEVE_LIMIT:-5}"
+    while [[ "$#" -gt 0 ]]; do
+      case "${1:-}" in
+        --workspace) WORKSPACE_SLUG="${2:-}"; shift 2 ;;
+        --limit) limit="${2:-}"; shift 2 ;;
+        *) log_err "Unknown arg: $1"; usage; exit 1 ;;
+      esac
+    done
+    if [[ -z "${query:-}" ]]; then
+      usage
+      exit 1
+    fi
+    if ! [[ "$limit" =~ ^[0-9]+$ ]] || [[ "$limit" -lt 1 ]] || [[ "$limit" -gt 20 ]]; then
+      log_err "--limit must be an integer 1-20"
+      exit 1
+    fi
+
+    export RAG_RETRIEVE_LIMIT="$limit"
+    derive_qdrant_url
+    derive_ollama_url
+    require_tool jq
+
+    collection="${RAG_QDRANT_COLLECTION:-$WORKSPACE_SLUG}"
+    echo "mode: retrieve"
+    echo "collection: ${collection}"
+
+    vector="$(ollama_embed "$query")"
+    resp="$(qdrant_search "$vector")"
+
+    if echo "$resp" | jq -e '.result and (.result|type=="array")' >/dev/null 2>&1; then
+      count="$(echo "$resp" | jq -r '.result|length')"
+      if [[ "$count" -eq 0 ]]; then
+        echo ""
+        echo "No results."
+        exit 0
+      fi
+      echo ""
+      echo "$resp" | jq -r '
+        .result[]
+        | . as $r
+        | ($r.payload // {}) as $p
+        | ($p.url // $p.source // $p.file // $p.path // ($p.metadata.source? // $p.metadata.file? // $p.metadata.path?) // ($p.doc.source? // $p.doc.title? // $p.doc.name?) // "Unknown") as $raw_src
+        | ($raw_src | gsub("^file:///app/collector/hotdir/";"") | gsub("^file:///app/server/storage/documents/[^/]*/[^/]*/";"")) as $src
+        | ($p.title // ($p.metadata.title? // $p.doc.title?) // "Untitled") as $title
+        | ($p.text // $p.content // $p.page_content // $p.pageContent // ($p.chunk // "") ) as $raw_text
+        | ($raw_text | tostring | gsub("<document_metadata>[^<]*</document_metadata>";"") | gsub("\\s+";" ") | ltrimstr(" ") | .[0:280]) as $snippet
+        | "- score=\($r.score|tostring)\n  title=\($title)\n  source=\($src)\n  snippet=\($snippet)\n"
+      '
+      exit 0
+    fi
+
+    log_err "Unexpected Qdrant response:"
+    echo "$resp" | jq -C '.' >&2 || echo "$resp" >&2
+    exit 1
+    ;;
+
+  sync)
+    dry_run=0
+    resume=0
+    while [[ "$#" -gt 0 ]]; do
+      case "${1:-}" in
+        --workspace) WORKSPACE_SLUG="${2:-}"; shift 2 ;;
+        --dry-run) dry_run=1; shift ;;
+        --resume) resume=1; shift ;;
+        *) log_err "Unknown arg: $1"; usage; exit 1 ;;
+      esac
+    done
+
+    derive_anythingllm_url
+    load_api_key
+    require_tool curl
+    require_tool python3
+
+    # Resolve load-shaping knobs from binding
+    resolve_load_shaping
+
+    # Preflight: verify workspace exists before building manifest
+    check_workspace_exists "$WORKSPACE_SLUG" || exit 1
+
+    CHECKPOINT_DIR="${SPINE_CODE}/mailroom/state/rag-sync"
+    CHECKPOINT_FILE="${CHECKPOINT_DIR}/checkpoint.txt"
+
+    manifest="$(build_manifest)"
+    total="$(echo "$manifest" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+    echo "workspace: ${WORKSPACE_SLUG}"
+    echo "anythingllm: ${ANYTHINGLLM_URL}"
+    echo "code_root: ${SPINE_CODE}"
+    echo "eligible_docs: ${total}"
+    echo "load_shaping: timeout=${LS_TIMEOUT}s retries=${LS_MAX_RETRIES} backoff=${LS_BACKOFF_STRATEGY} pace=${LS_INTER_DOC_PACE}s"
+
+    if [[ "$dry_run" == "1" ]]; then
+      echo ""
+      echo "$manifest"
+      exit 0
+    fi
+
+    # Checkpoint support: load previous progress if resuming
+    mkdir -p "$CHECKPOINT_DIR"
+    completed_files=""
+    resumed_count=0
+    if [[ "$resume" == "1" && -f "$CHECKPOINT_FILE" ]]; then
+      completed_files="$(cat "$CHECKPOINT_FILE")"
+      resumed_count="$(echo "$completed_files" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+      echo "resuming: ${resumed_count} files already uploaded (from checkpoint)"
+    else
+      # Fresh run: clear any stale checkpoint
+      rm -f "$CHECKPOINT_FILE"
+    fi
+
+    uploaded=0
+    failed=0
+    skipped=0
+    while IFS= read -r rel; do
+      [[ -z "$rel" ]] && continue
+      # Skip files already in checkpoint
+      if [[ -n "$completed_files" ]] && echo "$completed_files" | grep -qxF "$rel"; then
+        skipped=$((skipped + 1))
+        continue
+      fi
+      if upload_file "$rel"; then
+        uploaded=$((uploaded + 1))
+        # Append to checkpoint on success
+        echo "$rel" >> "$CHECKPOINT_FILE"
+      else
+        failed=$((failed + 1))
+      fi
+      # Inter-document pacing to prevent embedding overload
+      if [[ "$LS_INTER_DOC_PACE" -gt 0 ]]; then
+        sleep "$LS_INTER_DOC_PACE"
+      fi
+    done <<<"$manifest"
+
+    echo ""
+    echo "uploaded: $uploaded"
+    echo "skipped_checkpoint: $skipped"
+    echo "failed: $failed"
+    if [[ "$failed" -gt 0 ]]; then
+      echo "checkpoint: ${CHECKPOINT_FILE} (use --resume to continue)"
+      exit 1
+    fi
+    # Clean run: remove checkpoint
+    rm -f "$CHECKPOINT_FILE"
+    ;;
+
+  -h|--help|"")
+    usage
+    ;;
+
+  *)
+    log_err "Unknown command: $cmd"
+    usage
+    exit 1
+    ;;
+esac

@@ -1,0 +1,292 @@
+status: authoritative
+owner: "@operator"
+last_verified: "2026-03-05"
+scope: tailscale-control-plane-and-auth-authority
+version: "v1"
+summary: "Canonical authority for Tailscale control-plane usage, auth posture, and machine-vs-human access boundaries."
+
+tailnet:
+  id: taile9480.ts.net
+  device_count: 23
+  site_breakdown:
+    shop: 14
+    home: 3
+    mobile_or_unknown: 6
+  access_policy_breakdown:
+    lan_first: 13
+    tailscale_required: 9
+    lan_only: 1
+
+api_credentials:
+  infisical_project: infrastructure
+  infisical_env: prod
+  keys:
+    api_key: TAILSCALE_API_KEY
+    auth_key: TAILSCALE_AUTH_KEY
+    oauth_client_id: TAILSCALE_OAUTH_CLIENT_ID
+    oauth_client_secret: TAILSCALE_OAUTH_CLIENT_SECRET
+  oauth_token_endpoint: "https://api.tailscale.com/api/v2/oauth/token"
+  api_base: "https://api.tailscale.com/api/v2"
+  notes:
+    - "API key: read-only (device list, ACL read). Cannot rename or modify devices."
+    - "OAuth client credentials: read-write (device rename, ACL write). Bearer token TTL=1h."
+    - "Auth key: node enrollment only (tailscale up --authkey)."
+
+authority:
+  control_plane:
+    canonical_url: "https://admin.tailscale.com/admin/machines"
+    operator_plane_only: true
+    notes:
+      - "Control-plane changes are human-authorized actions."
+      - "Machine monitors must not perform interactive control-plane auth."
+  local_runtime:
+    allowed_cli_read_surfaces:
+      - "tailscale status --json"
+      - "tailscale debug prefs"
+      - "tailscale serve status --json"
+    forbidden_machine_commands:
+      - "tailscale login"
+      - "tailscale up (without noninteractive auth key path)"
+      - "tailscale ssh (interactive path)"
+
+auth_modes:
+  machine_noninteractive:
+    allowed:
+      - auth_key_bootstrap_only
+      - openssh_batch_lan
+      - openssh_batch_via_tailscale_ip
+    forbidden:
+      - browser_auth_url
+      - interactive_tailscale_ssh
+    blocked_state_on_violation: BLOCKED_AUTH
+  human_interactive:
+    allowed:
+      - tailscale_ssh_interactive
+      - browser_auth_url
+      - tailscale_admin_console
+    constraints:
+      - "Human interactive actions require explicit operator intent."
+
+monitoring_policy:
+  single_flight_required: true
+  blocked_auth_retry_allowed: false
+  blocked_auth_patterns:
+    - "tailscale ssh requires an additional check"
+    - "to authenticate, visit:"
+    - "login.tailscale.com"
+  required_state_fields:
+    - lane_state
+    - retry_allowed
+    - reason
+    - target.id
+    - target.host
+    - last_run.status_rc
+
+preflight_policy:
+  cleanliness_invariant: SCOPE_CLEAN_REQUIRED
+  execution_scope: isolated_execution_worktree_only
+  out_of_scope_drift_handling: OBSERVE_ONLY
+  cleanup_lane_required_for_ambient_drift: true
+
+acl_policy:
+  canonical_file: "ops/bindings/tailscale.acl.policy.hujson"
+  format: hujson
+  workflow:
+    validate: "tailscale.acl.validate"
+    apply: "tailscale.acl.apply"
+    status: "tailscale.acl.status"
+  policy:
+    - "All ACL changes must go through git → validate → apply workflow."
+    - "Direct admin console ACL edits are prohibited once GitOps is active."
+    - "OAuth client credentials required for apply (API keys are read-only for policy)."
+  test_semantics:
+    status: authoritative
+    grants_tests_behavior:
+      - "Runtime enforcement uses grants/acls, while tests are static policy assertions evaluated at validation time."
+      - "Test execution can differ from runtime expectations when sources rely on broad autogroup identities."
+    autogroup_expectations:
+      - "autogroup:admin expectations that are valid in grants may not resolve equivalently in tests."
+      - "Prefer tag-based test sources/targets for deterministic policy test outcomes."
+    prerequisites:
+      - "Apply canonical device tags before enforcing tests that reference tag:* identities."
+      - "Run tailscale.tag.apply and confirm tag rollout before interpreting ACL test failures as policy defects."
+    troubleshooting:
+      - "If validate/apply reports test failures tied to missing tag identities, classify as rollout prerequisite failure first."
+      - "If validate/apply reports autogroup test mismatch, verify equivalent tag-based coverage instead of forcing autogroup test assertions."
+  gate: D312
+
+enrollment:
+  default_mode: oauth_scoped
+  oauth_preferred: true
+  enrollment_command: "tailscale up --authkey=${AUTH_KEY} --hostname=${HOSTNAME}"
+  paths:
+    primary:
+      name: oauth_scoped_enrollment
+      description: "Mint a short-lived auth key via OAuth client credentials, enroll with --authkey."
+      steps:
+        - "Obtain OAuth bearer token via TAILSCALE_OAUTH_CLIENT_ID + TAILSCALE_OAUTH_CLIENT_SECRET"
+        - "POST /api/v2/tailnet/{tailnet}/keys with capabilities.devices.create.reusable=false"
+        - "Use returned key with tailscale up --authkey"
+      requires:
+        - TAILSCALE_OAUTH_CLIENT_ID
+        - TAILSCALE_OAUTH_CLIENT_SECRET
+      key_lifetime: "short-lived (single use, expires)"
+    emergency_fallback:
+      name: static_reusable_auth_key
+      description: "Use pre-provisioned reusable auth key from Infisical. Emergency only."
+      requires:
+        - TAILSCALE_AUTH_KEY
+      key_lifetime: "reusable (rotate manually)"
+      constraints:
+        - "Only use when OAuth path is unavailable (API outage, credential rotation in progress)."
+        - "Document usage in gap registry when invoked."
+  gate: D313
+
+dns_authority:
+  status: authoritative
+  scope: resolver-ownership
+  resolvers:
+    magicdns:
+      scope: "*.ts.net internal name resolution"
+      authority: tailscale
+      notes:
+        - "MagicDNS resolves device-name.taile9480.ts.net to Tailscale IPs."
+        - "Enabled by default. Used for Tailscale-native FQDN lookups."
+        - "NOT used for public DNS or service discovery."
+    pihole:
+      scope: "Home LAN DNS filtering and ad blocking"
+      authority: self-hosted
+      location: "pihole-home (home site, LAN-only)"
+      notes:
+        - "Primary DNS for home network devices."
+        - "Upstream: Cloudflare 1.1.1.1 (DOH)"
+        - "NOT authoritative for public zones."
+    cloudflare:
+      scope: "Public DNS for all owned zones"
+      authority: cloudflare
+      zones: 7
+      notes:
+        - "Authoritative nameserver for example.com, example-shop.com, example-shop.com, hantash.com, hypnotized*.{com,clothing,design}"
+        - "All public DNS records managed via Cloudflare dashboard or cloudflare.dns.record.set capability."
+        - "DNSSEC enabled where supported."
+    public_fallback:
+      scope: "Fallback for non-authoritative queries"
+      resolvers: ["1.1.1.1", "8.8.8.8"]
+      notes:
+        - "Used by VMs for general internet resolution."
+        - "NOT used for zone-authoritative lookups."
+  anti_patterns:
+    - "Never use MagicDNS for public service discovery."
+    - "Never use Pi-hole as authoritative for external zones."
+    - "Never hardcode DNS resolver IPs in application config."
+  gate: D314
+
+cloudflare_tailscale_coexistence:
+  status: authoritative
+  scope: routing-boundary
+  principles:
+    - "Cloudflare owns public ingress: DNS zones, tunnel routes, WAF, TLS termination."
+    - "Tailscale owns private machine access: device-to-device, SSH, internal API calls."
+    - "No service should be reachable via both Cloudflare tunnel AND direct Tailscale IP from the public internet."
+  boundaries:
+    cloudflare_tunnel:
+      purpose: "Public HTTPS ingress for browser-accessible services"
+      routing: "CF DNS CNAME → CF tunnel → cloudflared on infra-core → backend service"
+      examples:
+        - "finances.example-shop.com → firefly-iii on finance-stack"
+        - "photos.example.com → immich on immich VM"
+        - "jellyfin.example.com → jellyfin on streaming-stack"
+      auth: "CF Access service token or native app auth"
+    tailscale_direct:
+      purpose: "Private machine-to-machine access for automation and SSH"
+      routing: "Tailscale IP (100.x.x.x) direct or LAN IP (192.168.1.x) for same-site"
+      examples:
+        - "Gate SSH probes to shop VMs via LAN IP"
+        - "Capability scripts accessing service APIs"
+        - "Scheduler health checks"
+      auth: "SSH key auth via openssh_batch"
+    lan_first:
+      purpose: "Same-site access prefers LAN over Tailscale"
+      routing: "ssh-resolve.sh resolves to LAN IP when access_policy=lan_first"
+      contract: "ops/bindings/tailscale.ssh.lifecycle.contract.yaml"
+  overlap_policy:
+    - "cloudflared uses Tailscale IPs in extra_hosts for backend routing — this is INTERNAL to CF tunnel, not public exposure."
+    - "Services with both CF tunnel and Tailscale access (e.g., HA) are documented in DOMAIN_ROUTING_REGISTRY.yaml."
+    - "New services must declare routing_layer in DOMAIN_ROUTING_REGISTRY.yaml before deployment."
+  gate: D314
+
+lifecycle_bindings:
+  ssh_targets: "ops/bindings/ssh.targets.yaml"
+  vm_lifecycle: "ops/bindings/vm.lifecycle.yaml"
+  service_registry: "docs/governance/SERVICE_REGISTRY.yaml"
+  workbench_ssh_contract: "ops/bindings/workbench.ssh.attach.contract.yaml"
+  acl_policy: "ops/bindings/tailscale.acl.policy.hujson"
+  cloudflare_inventory: "ops/bindings/cloudflare.inventory.yaml"
+  domain_routing_registry: "ops/bindings/domain.routing.registry.yaml"
+
+tombstones:
+  - id: TS-LEGACY-001
+    path: "$WORKBENCH_ROOT/docs/legacy/infrastructure/runbooks/TAILSCALE_GOVERNANCE.md"
+    state: tombstoned_reference_only
+    replacement: "docs/contracts/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml"
+  - id: TS-LEGACY-002
+    path: "$WORKBENCH_ROOT/scripts/root/bootstrap/new-vm.sh"
+    state: tombstoned_for_machine_monitoring
+    replacement: "ops/bindings/tailscale.ssh.lifecycle.contract.yaml"
+    note: "Legacy helper can remain for human bootstrap context, but not for machine polling flows."
+  - id: TS-LEGACY-003
+    path: "$WORKBENCH_ROOT/scripts/root/bootstrap/new-lxc.sh"
+    state: tombstoned_for_machine_monitoring
+    replacement: "ops/bindings/tailscale.ssh.lifecycle.contract.yaml"
+    note: "Legacy helper can remain for human bootstrap context, but not for machine polling flows."
+control_plane_integration:
+  status: partial
+  scope: webhook-and-audit-log-observability
+  capabilities:
+    integration_status: tailscale.integration.status
+    webhook_subscribe: tailscale.webhook.subscribe
+    audit_status: tailscale.audit.status
+  webhooks:
+    status: active
+    api_available: true
+    api_endpoint: "POST /api/v2/tailnet/{tailnet}/webhooks"
+    subscribe_capability: tailscale.webhook.subscribe
+    current_count: 1
+    events:
+      - nodeCreated
+      - nodeDeleted
+      - nodeKeyExpiringInOneDay
+      - policyUpdate
+    receiver:
+      endpoint: "https://tailscale-webhook.example.com/tailscale"
+      auth: "webhook secret in Infisical at /spine/vm-infra/provisioning as TAILSCALE_WEBHOOK_SECRET"
+      deployment_options:
+        - name: n8n_webhook
+          target: "automation-stack (VM 202, 192.168.x.x)"
+          url_pattern: "https://n8n.example.com/webhook/tailscale"
+          notes: "Preferred — integrates with existing n8n workflows"
+        - name: dedicated_receiver
+          target: "automation-stack (VM 202)"
+          notes: "Lightweight HTTP service, container-based"
+    gap_ref: "GAP-OP-1259"
+    blocker: null
+  audit_log:
+    status: deferred
+    api_available: false
+    api_note: "No API endpoints exist (404 on /logging and /log-stream). Admin console only."
+    status_capability: tailscale.audit.status
+    api_alternatives_checked:
+      - "GET /api/v2/tailnet/{tailnet}/logging: 404"
+      - "GET /api/v2/tailnet/{tailnet}/log-stream: 404"
+    streaming:
+      destination: "TBD — Grafana Loki on observability-stack (VM 205) or S3 bucket"
+      format: json
+    admin_console_action: "Settings → Logs → Configure streaming"
+    admin_console_url: "https://admin.tailscale.com/admin/settings/logs"
+    gap_ref: "GAP-OP-1260"
+    blocker: "Log destination not provisioned, no API available"
+  operator_actions_artifact: "mailroom/state/tailscale-audit/operator-actions-20260302.yaml"
+
+promotion_policy:
+  default_gate_mode: enforce
+  enforce_requires_clean_runs: 3

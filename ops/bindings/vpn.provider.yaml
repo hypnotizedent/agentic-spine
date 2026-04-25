@@ -1,0 +1,99 @@
+# Status: authoritative
+# Last verified: 2026-03-22
+# Scope: vpn-provider-routing-contract
+
+version: 2
+updated_at: "2026-03-22"
+owner: "@operator"
+scope: "media-p2p-vpn"
+
+provider:
+  id: privado
+  display_name: "Privado VPN"
+  account_email: "user@example.com"
+  protocol: openvpn
+  default_region: "Netherlands"
+  tunnel_service: gluetun
+  tunnel_image: "qmcgaw/gluetun:latest"
+
+secrets:
+  provider: infisical
+  project: infrastructure
+  environment: prod
+  path: /spine/vm-infra/media-stack/download
+  keys:
+    username: PRIVADO_VPN_USER
+    password: PRIVADO_VPN_PASS
+  delivery: env_file
+  env_file_path: /srv/appdata/compose/media-stack/.env
+  note: "Infisical is the canonical source. Secrets projected to .env for compose consumption. Infisical CLI not installed on media-home; manual rotation required."
+
+features:
+  socks5_available: true
+  dns_over_https_available: true
+  dns_over_tls_available: true
+  email_relay_available: true
+
+dns_policy:
+  pihole_upstream: "cloudflare"
+  pihole_unchanged: true
+  gluetun_dot: "off"
+  note: "Privado DNS features are available but not used for LAN-wide DNS. Tunnel DNS remains isolated to gluetun."
+
+routing:
+  default_route_mode: direct
+  route_modes:
+    - direct
+    - via_tunnel
+  canonical_vm: media-home
+  services:
+    gluetun:
+      route_mode: direct
+      role: tunnel
+      required: true
+      vm: media-home
+      compose_path: /srv/appdata/compose/media-stack/docker-compose.yml
+    slskd:
+      route_mode: via_tunnel
+      tunnel_service: gluetun
+      required: true
+      vm: media-home
+      rationale: "Soulseek P2P traffic must stay VPN-tunneled."
+    qbittorrent:
+      route_mode: via_tunnel
+      tunnel_service: gluetun
+      required: true
+      vm: media-home
+      rationale: "All BitTorrent P2P traffic routed through Privado VPN tunnel. QB-VPN-ROUTE-001 superseded 2026-03-22."
+      network_mode: "service:gluetun"
+      ports_on_gluetun:
+        - "8081:8081"
+        - "6881:6881"
+        - "6881:6881/udp"
+      arr_host: gluetun
+      arr_host_note: "ARR download clients use hostname 'gluetun' to reach qBittorrent WebUI at port 8081 through shared network namespace."
+    sabnzbd:
+      route_mode: direct
+      required: true
+      vm: media-home
+      rationale: "Usenet transport is already provider-encrypted; VPN not required."
+
+decision_gates:
+  QB-VPN-ROUTE-001:
+    status: superseded
+    current_decision: via_tunnel
+    superseded_at: "2026-03-22"
+    superseded_by: "media-qbittorrent-vpn-canonicalization-and-gluetun-cutover-v1"
+    previous_decision: direct
+    rationale: "Operator activated VPN-backed transport as canonical posture for all BitTorrent traffic on media-home."
+    owner: "@operator"
+
+validation:
+  verify_gate: D223
+  required_containers:
+    - gluetun
+    - slskd
+    - qbittorrent
+  required_bindings:
+    - ops/bindings/secrets.namespace.policy.yaml
+    - ops/bindings/domains/media/media.services.yaml

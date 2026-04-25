@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Canonical versioned pre-commit hook.
+#
+# Enforced live gate set: D150.
+# Mirror-sanitization canary.
+#
+# Retired from pre-commit (gates no longer exist on disk):
+# D30, D31, D42, D44, D46, D47, D58, D84, D85 — removed 2026-04-15.
+# D62 — removed 2026-03-23 (network git fetches can hang).
+
+# When git invokes hooks from a worktree, inherited git env vars can cause
+# cross-worktree checks to resolve the wrong repository. Clear them so each
+# gate resolves paths through its own git -C / repo-root logic.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE 2>/dev/null || true
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "${ROOT:-}" ]]; then
+  ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+fi
+if [[ ! -d "${ROOT:-}" ]]; then
+  exit 0
+fi
+
+cd "$ROOT"
+
+if ! command -v git >/dev/null 2>&1; then
+  exit 0
+fi
+
+STAGED_FILES="$(git diff --cached --name-only 2>/dev/null || true)"
+
+SP="$ROOT"
+FAIL=0
+CHECKED=0
+FAILED_GATES=""
+
+for gate in \
+  "$SP/surfaces/verify/d150-code-root-hygiene-lock.sh"; do
+  if [[ -x "$gate" ]]; then
+    CHECKED=$((CHECKED + 1))
+    if ! bash "$gate" > /dev/null 2>&1; then
+      FAIL=1
+      FAILED_GATES="$FAILED_GATES $(basename "$gate")"
+    fi
+  fi
+done
+
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "pre-commit: $CHECKED gates checked, FAILED:$FAILED_GATES"
+  echo "Fix the issue, then commit again."
+  exit 1
+fi
+
+# Mirror-sanitization canary: reject redaction placeholders from the mirror
+# pipeline. They belong only in the ephemeral mirror payload.
+CANARY_PATTERN='<INFISICAL_WORKSPACE_ID_REDACTED>'
+CANARY_DIRS="ops/bindings/ ops/plugins/providers/ docs/core/ docs/governance/"
+CANARY_HITS=""
+for cdir in $CANARY_DIRS; do
+  while IFS= read -r cfile; do
+    [[ -n "$cfile" ]] || continue
+    if git show ":$cfile" 2>/dev/null | grep -qF "$CANARY_PATTERN"; then
+      CANARY_HITS="$CANARY_HITS $cfile"
+    fi
+  done < <(printf '%s\n' "$STAGED_FILES" | grep "^${cdir}" || true)
+done
+
+if [[ -n "$CANARY_HITS" ]]; then
+  echo "pre-commit: BLOCKED - mirror sanitization placeholder in staged files:"
+  for chit in $CANARY_HITS; do
+    echo "  $chit"
+  done
+  echo "  The string '$CANARY_PATTERN' must NEVER be committed to the canonical repo."
+  echo "  This placeholder belongs only in the ephemeral mirror payload."
+  echo "  Incident ref: b6d55b39 (2026-03-25 break-glass recovery)"
+  exit 1
+fi
+
+echo "pre-commit: $CHECKED gates passed"
+exit 0

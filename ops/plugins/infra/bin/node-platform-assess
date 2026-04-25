@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# node-platform-assess
+# Read-only: given a candidate and role, assess realization feasibility
+# for the target platform without materializing anything.
+#
+# Does NOT generate units (launchd or systemd).
+# Does NOT plan or execute migration.
+# Does NOT elect hosts.
+#
+# Authority and evidence sources:
+#   - ssh.targets.yaml
+#   - vm.lifecycle.yaml
+#   - launchd.scheduler.registry.yaml
+#   - node.role.contract.yaml
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SSH_TARGETS="${SPINE_REPO}/ops/bindings/ssh.targets.yaml"
+VM_LIFECYCLE="${SPINE_REPO}/ops/bindings/vm.lifecycle.yaml"
+SCHEDULER_REGISTRY="${SPINE_REPO}/ops/bindings/launchd.scheduler.registry.yaml"
+NODE_CONTRACT="${SPINE_REPO}/ops/bindings/node.role.contract.yaml"
+
+usage() {
+    cat <<'EOF'
+node-platform-assess - Assess realization feasibility for a node role
+
+Usage:
+  node-platform-assess --role <role> --candidate <id> [--json]
+
+Arguments:
+  --role <role>          Node role from node.role.contract.yaml
+  --candidate <id>       Candidate identifier (ssh target id or "local")
+  --json                 Machine-readable JSON output
+
+This capability is READ-ONLY. No units generated. No migration planned.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+ROLE=""
+CANDIDATE=""
+JSON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --role) ROLE="${2:-}"; shift 2 ;;
+        --candidate) CANDIDATE="${2:-}"; shift 2 ;;
+        --json) JSON_MODE=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$ROLE" ]] || fail "--role is required"
+[[ -n "$CANDIDATE" ]] || fail "--candidate is required"
+
+need yq
+need jq
+
+for f in "$SSH_TARGETS" "$VM_LIFECYCLE" "$SCHEDULER_REGISTRY" "$NODE_CONTRACT"; do
+    [[ -f "$f" ]] || fail "authority surface not found: $f"
+done
+
+# Validate role
+valid_roles=$(yq e '.node_types | keys | .[]' "$NODE_CONTRACT" 2>/dev/null)
+role_found=false
+for r in $valid_roles; do
+    [[ "$r" == "$ROLE" ]] && role_found=true
+done
+$role_found || fail "unknown role: $ROLE"
+
+# Detect candidate platform
+platform="unknown"
+platform_detail=""
+reasons=()
+
+if [[ "$CANDIDATE" == "local" ]]; then
+    local_os=$(uname -s)
+    if [[ "$local_os" == "Darwin" ]]; then
+        platform="darwin-launchd"
+        platform_detail="macOS $(sw_vers -productVersion 2>/dev/null || echo 'unknown'), launchd native"
+    elif [[ "$local_os" == "Linux" ]]; then
+        if command -v systemctl >/dev/null 2>&1; then
+            platform="linux-systemd"
+            platform_detail="Linux (local), systemd detected"
+        else
+            platform="unknown"
+            platform_detail="Linux (local), no systemd found"
+        fi
+    fi
+else
+    # Look up in vm.lifecycle.yaml for OS info
+    vm_os=$(yq e ".vms[] | select(.ssh_target == \"$CANDIDATE\") | .os // \"\"" "$VM_LIFECYCLE" 2>/dev/null)
+    vm_status=$(yq e ".vms[] | select(.ssh_target == \"$CANDIDATE\") | .status // \"\"" "$VM_LIFECYCLE" 2>/dev/null)
+
+    if [[ -z "$vm_os" || "$vm_os" == "null" ]]; then
+        # Not in vm.lifecycle — check ssh.targets
+        ssh_entry=$(yq e ".ssh.targets[] | select(.id == \"$CANDIDATE\")" "$SSH_TARGETS" 2>/dev/null)
+        if [[ -z "$ssh_entry" || "$ssh_entry" == "null" ]]; then
+            platform="unknown"
+            platform_detail="candidate '$CANDIDATE' not found in vm.lifecycle or ssh.targets"
+        else
+            platform="unknown"
+            platform_detail="candidate in ssh.targets but not in vm.lifecycle; OS unknown"
+        fi
+    else
+        case "$vm_os" in
+            ubuntu*|debian*|linux*)
+                platform="linux-systemd"
+                platform_detail="$vm_os (vm.lifecycle.yaml), systemd assumed"
+                ;;
+            haos*)
+                platform="unknown"
+                platform_detail="Home Assistant OS — not a general-purpose target"
+                reasons+=("Home Assistant OS is not a viable node realization target")
+                ;;
+            *)
+                platform="unknown"
+                platform_detail="os=$vm_os — platform classification unclear"
+                ;;
+        esac
+    fi
+fi
+
+# Resolve workload count for the role
+workload_count=$(yq e "[.labels[] | select(.intended_node_role == \"$ROLE\")] | length" "$SCHEDULER_REGISTRY" 2>/dev/null || echo "0")
+daemon_count=$(yq e "[.labels[] | select(.intended_node_role == \"$ROLE\" and .mode == \"daemon\")] | length" "$SCHEDULER_REGISTRY" 2>/dev/null || echo "0")
+scheduled_count=$(yq e "[.labels[] | select(.intended_node_role == \"$ROLE\" and .mode == \"scheduled\")] | length" "$SCHEDULER_REGISTRY" 2>/dev/null || echo "0")
+
+# Assess feasibility
+feasibility="insufficient_evidence"
+platform_gap=""
+
+case "$platform" in
+    "darwin-launchd")
+        feasibility="directly_supported"
+        platform_gap="none — registry is launchd-native and candidate is macOS"
+        reasons+=("launchd scheduler registry is native to this platform")
+        reasons+=("all $workload_count workloads can run via existing launchd templates")
+        ;;
+    "linux-systemd")
+        if [[ "$workload_count" -eq 0 ]]; then
+            feasibility="directly_supported"
+            platform_gap="none — no workloads mapped to this role"
+            reasons+=("no workloads mapped to $ROLE in scheduler registry")
+        else
+            feasibility="translation_required"
+            platform_gap="registry is launchd-native; Linux would require a future systemd materializer"
+            reasons+=("$workload_count workload(s) in launchd.scheduler.registry are macOS-native")
+            reasons+=("$scheduled_count scheduled (→ systemd timers) + $daemon_count daemon (→ systemd services)")
+            reasons+=("no systemd materializer exists today")
+            reasons+=("translation is structurally feasible but not yet implemented")
+        fi
+        ;;
+    "unknown")
+        feasibility="insufficient_evidence"
+        platform_gap="candidate platform could not be classified"
+        if [[ ${#reasons[@]} -eq 0 ]]; then
+            reasons+=("platform detection could not determine OS or init system")
+        fi
+        ;;
+esac
+
+# Output
+if $JSON_MODE; then
+    reasons_json=$(printf '%s\n' "${reasons[@]}" | jq -R . | jq -s .)
+
+    jq -n \
+        --arg role "$ROLE" \
+        --arg candidate "$CANDIDATE" \
+        --arg platform "$platform" \
+        --arg platform_detail "$platform_detail" \
+        --arg feasibility "$feasibility" \
+        --arg platform_gap "$platform_gap" \
+        --argjson workload_count "$workload_count" \
+        --argjson daemon_count "$daemon_count" \
+        --argjson scheduled_count "$scheduled_count" \
+        --argjson reasons "$reasons_json" \
+        '{
+            role: $role,
+            candidate: $candidate,
+            platform: $platform,
+            platform_detail: $platform_detail,
+            feasibility: $feasibility,
+            platform_gap: $platform_gap,
+            workload_count: $workload_count,
+            workload_breakdown: {
+                daemon: $daemon_count,
+                scheduled: $scheduled_count
+            },
+            reasons: $reasons,
+            generated_units: false,
+            migration_plan: false,
+            host_election: false,
+            note: "Read-only platform assessment. No units generated. No migration planned."
+        }'
+else
+    echo "node.platform.assess"
+    echo "===================="
+    echo "role:       $ROLE"
+    echo "candidate:  $CANDIDATE"
+    echo "platform:   $platform"
+    echo "detail:     $platform_detail"
+    echo "feasibility: $feasibility"
+    echo
+    echo "WORKLOADS:"
+    echo "  total:     $workload_count"
+    echo "  daemon:    $daemon_count"
+    echo "  scheduled: $scheduled_count"
+    echo
+    echo "PLATFORM GAP:"
+    echo "  $platform_gap"
+    echo
+    echo "REASONS:"
+    for r in "${reasons[@]}"; do
+        echo "  - $r"
+    done
+    echo
+    echo "NOTE: Read-only platform assessment. No units generated."
+    echo "      No migration planned. No host election occurred."
+fi

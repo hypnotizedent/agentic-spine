@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Canonical wave-owned residue surface."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def main(argv: list[str]) -> int:
+    sweep = False
+    json_out = False
+    for token in argv[1:]:
+        if token == "--sweep":
+            sweep = True
+        elif token == "--json":
+            json_out = True
+        elif token in {"-h", "--help"}:
+            print(
+                "Usage: wave-residue [--sweep] [--json]\n\n"
+                "Canonical wave-owned residue surface. Reports and optionally sweeps\n"
+                "stale wave worktrees, stale codex/WAVE-* branches, and waves whose\n"
+                "workspace was marked cleaned but still have residue."
+            )
+            return 0
+        else:
+            print(f"Unknown wave-residue arg: {token}", file=sys.stderr)
+            return 2
+
+    root = _repo_root()
+    state_root = Path(os.environ.get("SPINE_STATE", root.parent / ".runtime" / "spine" / "state"))
+    runtime_root = Path(os.environ.get("SPINE_RUNTIME_ROOT", state_root.parent / "runtime"))
+
+    sys.path.insert(0, str(root / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+    from wave_residue import collect_residue, sweep_residue
+
+    report = collect_residue(str(runtime_root), str(root))
+    if sweep:
+        sweep_result = sweep_residue(str(runtime_root), str(root), report=report)
+        payload = {"mode": "sweep", "pre": report, "sweep": sweep_result, "post": collect_residue(str(runtime_root), str(root))}
+    else:
+        payload = {"mode": "report", "report": report}
+
+    if json_out:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    def render_report(report_data: dict, title: str) -> None:
+        items = report_data.get("items") or []
+        counts = report_data.get("counts") or {}
+        print(f"── {title} ──")
+        print(f"  scanned_repo:   {report_data.get('repo_path')}")
+        print(f"  runtime_root:   {report_data.get('runtime_root')}")
+        print(f"  total:          {counts.get('total', 0)}")
+        print(f"  safe_to_sweep:  {counts.get('safe_to_sweep', 0)}")
+        print(f"  ambiguous:      {counts.get('ambiguous', 0)}")
+        by_class = counts.get("by_class") or {}
+        if by_class:
+            print("  by_class:")
+            for key in sorted(by_class):
+                print(f"    {key}: {by_class[key]}")
+        if not items:
+            print("  (no residue)")
+            return
+        safe = [item for item in items if item.get("safe_to_sweep")]
+        ambiguous = [item for item in items if not item.get("safe_to_sweep")]
+        if safe:
+            print("  safe-to-sweep:")
+            for item in safe:
+                print(
+                    f"    [{item.get('class')}] {item.get('identity')} "
+                    f"(wave={item.get('wave_id')}, ws_lifecycle={item.get('workspace_lifecycle_state')})"
+                )
+        if ambiguous:
+            print("  ambiguous (report-only):")
+            for item in ambiguous:
+                print(f"    [{item.get('class')}] {item.get('identity')}  → {item.get('ambiguous_reason')}")
+
+    if payload["mode"] == "report":
+        render_report(payload["report"], "wave residue (report)")
+    else:
+        render_report(payload["pre"], "wave residue (pre-sweep)")
+        sweep_data = payload["sweep"]
+        print("── sweep ──")
+        print(f"  swept:            {len(sweep_data.get('swept') or [])}")
+        print(f"  skipped_ambiguous:{len(sweep_data.get('skipped_ambiguous') or [])}")
+        print(f"  errors:           {len(sweep_data.get('errors') or [])}")
+        for item in sweep_data.get("swept") or []:
+            print(f"    SWEPT    [{item.get('class')}] {item.get('identity')}  action={item.get('action_taken')}")
+        for item in sweep_data.get("skipped_ambiguous") or []:
+            print(f"    SKIPPED  [{item.get('class')}] {item.get('identity')}  reason={item.get('reason')}")
+        for item in sweep_data.get("errors") or []:
+            print(f"    ERROR    [{item.get('class')}] {item.get('identity')}  error={item.get('error')}")
+        render_report(payload["post"], "wave residue (post-sweep)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

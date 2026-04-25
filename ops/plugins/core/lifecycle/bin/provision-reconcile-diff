@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""Read-only diff: compare operator hardware inventory + SSH targets against
+assessment artifacts. Shows what is stale without mutating anything.
+
+Usage:
+  ./bin/ops cap run provision.reconcile.diff
+  ./bin/ops cap run provision.reconcile.diff -- --json
+  ./bin/ops cap run provision.reconcile.diff -- --device macbook-2016-pro
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+
+def spine_state() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_STATE",
+            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+        )
+    )
+
+
+def spine_code() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_CODE",
+            str(Path.home() / "code" / "agentic-spine"),
+        )
+    )
+
+
+def load_yaml(path: Path) -> dict | list | None:
+    try:
+        with open(path) as f:
+            return yaml.safe_load(f)
+    except Exception:
+        return None
+
+
+def find_assessments(state_dir: Path) -> dict[str, Path]:
+    """Find assessment artifacts by device_id pattern."""
+    assessments: dict[str, Path] = {}
+    domain_spine = state_dir / "domain-state" / "spine"
+    if not domain_spine.is_dir():
+        return assessments
+    for f in domain_spine.iterdir():
+        if f.name.endswith(".md") and "ASSESSMENT" in f.name:
+            # Extract device hint from filename
+            # e.g., MACBOOK-2016-PRO-ASSESSMENT-20260415.md -> macbook-2016-pro
+            stem = f.stem
+            m = re.match(r"^(.+)-ASSESSMENT-\d+$", stem)
+            if m:
+                device_hint = m.group(1).lower().replace("_", "-")
+                # Normalize common patterns
+                device_hint = device_hint.replace("raspberry-pi-home-1", "raspberry-pi-home-1")
+                assessments[device_hint] = f
+    return assessments
+
+
+def find_golden_provisioning(state_dir: Path) -> dict[str, Path]:
+    """Find golden provisioning gap audits by device pattern."""
+    golden: dict[str, Path] = {}
+    domain_spine = state_dir / "domain-state" / "spine"
+    if not domain_spine.is_dir():
+        return golden
+    for f in domain_spine.iterdir():
+        if f.name.startswith("GOLDEN-PROVISIONING-") and f.name.endswith(".md"):
+            if "CAPABILITY-GAPS" in f.name:
+                continue  # Skip the combined summary
+            stem = f.stem
+            m = re.match(r"^GOLDEN-PROVISIONING-(.+)-\d+$", stem)
+            if m:
+                device_hint = m.group(1).lower().replace("_", "-")
+                golden[device_hint] = f
+    return golden
+
+
+def extract_assessment_frontmatter(path: Path) -> dict:
+    """Extract YAML frontmatter from assessment markdown."""
+    try:
+        text = path.read_text()
+        if text.startswith("---"):
+            end = text.index("---", 3)
+            return yaml.safe_load(text[3:end]) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def match_device_to_inventory(device_hint: str, machines: list[dict]) -> dict | None:
+    """Match an assessment device hint to an inventory entry."""
+    for m in machines:
+        did = m.get("device_id", "")
+        if did == device_hint:
+            return m
+        # Try partial match
+        if device_hint.replace("-", "") in did.replace("-", ""):
+            return m
+        if did.replace("-", "") in device_hint.replace("-", ""):
+            return m
+    return None
+
+
+def match_device_to_ssh(device_id: str, targets: list[dict]) -> dict | None:
+    """Match a device_id to an SSH target entry."""
+    for t in targets:
+        if t.get("id") == device_id:
+            return t
+    return None
+
+
+def compute_inventory_delta(machine: dict, assessment_path: Path) -> list[dict]:
+    """Compute delta between inventory entry and assessment artifact."""
+    deltas = []
+
+    # Check last_assessed
+    if machine.get("last_assessed") is None:
+        deltas.append({
+            "field": "last_assessed",
+            "current": None,
+            "issue": "Assessment artifact exists but last_assessed is null",
+            "assessment_file": str(assessment_path.name),
+        })
+
+    # Check evidence
+    if not machine.get("evidence"):
+        deltas.append({
+            "field": "evidence",
+            "current": "[]",
+            "issue": "Assessment artifact exists but evidence is empty",
+        })
+
+    # Check eligibility vocabulary consistency
+    elig = machine.get("eligibility_state", "unknown")
+    ts_id = machine.get("tailscale_identity")
+    ts_ip = machine.get("tailscale_ip")
+
+    if elig == "ineligible" and ts_id and ts_ip:
+        deltas.append({
+            "field": "eligibility_state",
+            "current": "ineligible",
+            "issue": "Machine has Tailscale enrolled but eligibility is ineligible — may be stale",
+        })
+
+    if elig == "candidate" and (not ts_id or not ts_ip):
+        deltas.append({
+            "field": "eligibility_state",
+            "current": "candidate",
+            "issue": "Vocabulary requires Tailscale enrolled for candidate, but tailscale_identity or tailscale_ip is null",
+        })
+
+    # Check known_constraints for obviously stale patterns
+    constraints = machine.get("known_constraints", [])
+    stale_patterns = [
+        ("only proven path was temporary iPhone tether", "Network tether constraint may be stale if wired LAN is now proved"),
+        ("Bootstrap incomplete", "Bootstrap constraint may be stale if machine has been cleaned to boring baseline"),
+        ("Stranded recovery posture", "Recovery constraint may be stale if Tailscale is now enrolled"),
+    ]
+    for pattern, issue in stale_patterns:
+        for c in constraints:
+            if pattern.lower() in c.lower():
+                deltas.append({
+                    "field": "known_constraints",
+                    "current": c,
+                    "issue": issue,
+                })
+
+    return deltas
+
+
+def compute_ssh_delta(device_id: str, ssh_target: dict | None, machine: dict) -> list[dict]:
+    """Compute delta between SSH target and inventory/assessment truth."""
+    deltas = []
+
+    if ssh_target is None:
+        ts_id = machine.get("tailscale_identity")
+        if ts_id:
+            deltas.append({
+                "field": "ssh_target",
+                "current": "MISSING",
+                "issue": f"No SSH target entry for {device_id} — machine has Tailscale enrolled, entry can be created",
+            })
+        else:
+            deltas.append({
+                "field": "ssh_target",
+                "current": "MISSING",
+                "issue": f"No SSH target entry for {device_id} — blocked on Tailscale enrollment",
+            })
+        return deltas
+
+    # Check MAC
+    if not ssh_target.get("mac"):
+        deltas.append({
+            "field": "mac",
+            "current": "absent",
+            "issue": "SSH target has no MAC field — sharpens identity",
+        })
+
+    # Check site
+    if not ssh_target.get("site") and machine.get("site"):
+        deltas.append({
+            "field": "site",
+            "current": "absent",
+            "issue": f"SSH target has no site field — inventory says site={machine['site']}",
+        })
+
+    # Check description for stale patterns
+    desc = ssh_target.get("description", "")
+    stale_desc_patterns = [
+        "bootstrap incomplete",
+        "stranded recovery",
+        "offline-unrecoverable",
+        "demoted",
+    ]
+    for pattern in stale_desc_patterns:
+        if pattern in desc.lower():
+            deltas.append({
+                "field": "description",
+                "current_excerpt": pattern,
+                "issue": f"SSH target description contains potentially stale language: '{pattern}'",
+            })
+
+    # Check tags for stale values
+    tags = ssh_target.get("tags", [])
+    stale_tags = ["demoted", "offline-unrecoverable"]
+    for tag in stale_tags:
+        if tag in tags:
+            deltas.append({
+                "field": "tags",
+                "current": tag,
+                "issue": f"SSH target tag '{tag}' may be stale if machine has been reassessed",
+            })
+
+    return deltas
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Read-only reconcile diff")
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument("--device", type=str, help="Filter to one device_id")
+    args, _ = parser.parse_known_args()
+
+    code = spine_code()
+    state = spine_state()
+
+    # Load authority surfaces
+    inv_path = code / "ops" / "bindings" / "operator.hardware.inventory.yaml"
+    ssh_path = code / "ops" / "bindings" / "ssh.targets.yaml"
+
+    inv_data = load_yaml(inv_path)
+    ssh_data = load_yaml(ssh_path)
+
+    if not inv_data:
+        print("ERROR: cannot read operator.hardware.inventory.yaml", file=sys.stderr)
+        sys.exit(1)
+
+    machines = inv_data.get("machines", [])
+    ssh_targets = (ssh_data or {}).get("ssh", {}).get("targets", [])
+
+    # Find assessment artifacts
+    assessments = find_assessments(state)
+    golden = find_golden_provisioning(state)
+
+    results = []
+
+    for device_hint, assess_path in assessments.items():
+        machine = match_device_to_inventory(device_hint, machines)
+        if not machine:
+            results.append({
+                "device_hint": device_hint,
+                "assessment": str(assess_path.name),
+                "status": "unmatched",
+                "issue": "Assessment artifact exists but no matching inventory entry found",
+                "inventory_deltas": [],
+                "ssh_deltas": [],
+            })
+            continue
+
+        device_id = machine["device_id"]
+
+        if args.device and args.device != device_id:
+            continue
+
+        ssh_target = match_device_to_ssh(device_id, ssh_targets)
+        golden_path = golden.get(device_hint)
+
+        inv_deltas = compute_inventory_delta(machine, assess_path)
+        ssh_deltas = compute_ssh_delta(device_id, ssh_target, machine)
+
+        status = "clean" if not inv_deltas and not ssh_deltas else "stale"
+
+        results.append({
+            "device_id": device_id,
+            "assessment": str(assess_path.name),
+            "golden_provisioning": str(golden_path.name) if golden_path else None,
+            "eligibility_state": machine.get("eligibility_state"),
+            "last_assessed": machine.get("last_assessed"),
+            "has_ssh_target": ssh_target is not None,
+            "status": status,
+            "inventory_delta_count": len(inv_deltas),
+            "ssh_delta_count": len(ssh_deltas),
+            "inventory_deltas": inv_deltas,
+            "ssh_deltas": ssh_deltas,
+        })
+
+    # Also check machines with no assessment (but skip placeholders)
+    assessed_device_ids = set()
+    for r in results:
+        if "device_id" in r:
+            assessed_device_ids.add(r["device_id"])
+
+    for m in machines:
+        did = m.get("device_id", "")
+        if did in assessed_device_ids:
+            continue
+        if args.device and args.device != did:
+            continue
+        # Skip obvious placeholders
+        if m.get("model") is None and m.get("tailscale_identity") is None:
+            continue
+        results.append({
+            "device_id": did,
+            "assessment": None,
+            "status": "no_assessment",
+            "eligibility_state": m.get("eligibility_state"),
+            "last_assessed": m.get("last_assessed"),
+        })
+
+    if args.json:
+        print(json.dumps({"reconcile_diff": results}, indent=2))
+    else:
+        total_deltas = sum(r.get("inventory_delta_count", 0) + r.get("ssh_delta_count", 0) for r in results)
+        assessed = [r for r in results if r.get("assessment")]
+        clean = [r for r in assessed if r.get("status") == "clean"]
+        stale = [r for r in assessed if r.get("status") == "stale"]
+
+        print(f"provision.reconcile.diff")
+        print(f"assessed: {len(assessed)}  clean: {len(clean)}  stale: {len(stale)}  deltas: {total_deltas}")
+        print("─" * 60)
+
+        for r in results:
+            did = r.get("device_id", r.get("device_hint", "?"))
+            status = r.get("status", "?")
+            marker = "✓" if status == "clean" else "△" if status == "stale" else "○" if status == "no_assessment" else "?"
+
+            print(f"\n{marker} {did}  [{status}]")
+            if r.get("assessment"):
+                print(f"  assessment: {r['assessment']}")
+            if r.get("eligibility_state"):
+                print(f"  eligibility: {r['eligibility_state']}")
+            if r.get("last_assessed"):
+                print(f"  last_assessed: {r['last_assessed']}")
+            if r.get("has_ssh_target") is not None:
+                print(f"  ssh_target: {'yes' if r['has_ssh_target'] else 'MISSING'}")
+
+            for d in r.get("inventory_deltas", []):
+                print(f"  [inventory] {d['field']}: {d['issue']}")
+            for d in r.get("ssh_deltas", []):
+                print(f"  [ssh] {d.get('field', '?')}: {d['issue']}")
+
+
+if __name__ == "__main__":
+    main()
