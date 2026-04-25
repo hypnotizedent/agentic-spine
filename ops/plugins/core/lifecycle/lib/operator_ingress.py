@@ -1107,3 +1107,364 @@ def metabolize_operator_ingress(
         "metabolized_at": doc.get("classified_at", ""),
         "translator_workload": translator_workload or {},
     }
+
+
+# ---------------------------------------------------------------------------
+# Promotion consumer: check activation_conditions on classified/deferred OIs
+# ---------------------------------------------------------------------------
+
+# Dispositions eligible for promotion evaluation
+_PROMOTABLE_DISPOSITIONS = {"deferred", "packet_candidate"}
+
+# Classifications that could promote (have a named seam or actionable content)
+_PROMOTABLE_CLASSIFICATIONS = {
+    "bind_to_existing_seam",
+    "bind_adjacent_to_existing_seam",
+    "direct_command",
+    "review_request",
+}
+
+
+def _list_open_loops(state_root: str) -> list[str]:
+    """Return IDs of loops that have no closed.yaml."""
+    orch_dir = Path(state_root) / "orchestration"
+    if not orch_dir.is_dir():
+        return []
+    open_loops = []
+    for d in orch_dir.iterdir():
+        if d.is_dir() and d.name.startswith("LOOP-"):
+            if not (d / "closed.yaml").exists():
+                open_loops.append(d.name)
+    return sorted(open_loops)
+
+
+def _find_covering_loop(concern_text: str, open_loops: list[str]) -> str | None:
+    """Check if any open loop already covers the OI concern.
+
+    Uses simple keyword overlap between the OI content and loop IDs.
+    Returns the first matching loop ID, or None.
+    """
+    if not concern_text or not open_loops:
+        return None
+    # Normalize: extract significant words from the concern
+    words = set(
+        w.lower()
+        for w in re.split(r"[\s\-_./]+", concern_text)
+        if len(w) > 3
+    )
+    for loop_id in open_loops:
+        loop_words = set(
+            w.lower()
+            for w in re.split(r"[\s\-_]+", loop_id.replace("LOOP-", ""))
+            if len(w) > 3
+        )
+        # Require at least 2 significant word overlaps to count as covering
+        if len(words & loop_words) >= 2:
+            return loop_id
+    return None
+
+
+def _oi_has_concrete_deliverable(doc: dict[str, Any]) -> bool:
+    """Check if the OI names a concrete deliverable (not just aspirational)."""
+    hint = str(doc.get("operator_hint", "")).lower()
+    raw = str(doc.get("raw_content", "")).lower()
+    text = hint + " " + raw
+    # Aspirational signals — these suggest no concrete deliverable
+    aspirational = [
+        "someday", "keep an eye", "it would be nice",
+        "think about", "maybe we should", "consider",
+    ]
+    for phrase in aspirational:
+        if phrase in text:
+            return False
+    # Must have some actionable content
+    return bool(hint.strip() or len(raw.strip()) > 20)
+
+
+def _oi_is_bounded(doc: dict[str, Any]) -> bool:
+    """Check if the OI implies bounded work (not open-ended)."""
+    raw = str(doc.get("raw_content", "")).lower()
+    unbounded = [
+        "continuously", "always monitor", "permanent",
+        "indefinite", "ongoing maintenance", "keep running",
+    ]
+    for phrase in unbounded:
+        if phrase in raw:
+            return False
+    return True
+
+
+def evaluate_oi_promotion(
+    doc: dict[str, Any],
+    open_loops: list[str],
+) -> dict[str, Any]:
+    """Evaluate whether a classified OI qualifies for promotion.
+
+    Returns a dict with:
+      eligible: bool
+      action: "attach" | "open_loop" | "stay_deferred"
+      reason: str
+      covering_loop: str | None (if attaching)
+    """
+    ingress_id = str(doc.get("ingress_id", ""))
+    classification = str(doc.get("classification", ""))
+    disposition = str(doc.get("disposition", ""))
+    activation_conditions = str(doc.get("activation_conditions", ""))
+
+    # Already promoted
+    if disposition not in _PROMOTABLE_DISPOSITIONS:
+        return {
+            "eligible": False,
+            "action": "stay_deferred",
+            "reason": f"disposition '{disposition}' is not promotable",
+            "covering_loop": None,
+        }
+
+    # packet_candidate items are always eligible for evaluation even without
+    # activation_conditions — they already have a routing target and were
+    # classified as actionable by the metabolizer.
+    if disposition != "packet_candidate" and not activation_conditions.strip():
+        return {
+            "eligible": False,
+            "action": "stay_deferred",
+            "reason": "no activation_conditions set",
+            "covering_loop": None,
+        }
+
+    # Criterion 1: classification must be promotable (has a named seam)
+    if classification not in _PROMOTABLE_CLASSIFICATIONS:
+        return {
+            "eligible": False,
+            "action": "stay_deferred",
+            "reason": f"classification '{classification}' is not promotable",
+            "covering_loop": None,
+        }
+
+    # Criterion 3: concrete deliverable
+    if not _oi_has_concrete_deliverable(doc):
+        return {
+            "eligible": False,
+            "action": "stay_deferred",
+            "reason": "no concrete deliverable identified",
+            "covering_loop": None,
+        }
+
+    # Criterion 5: bounded work
+    if not _oi_is_bounded(doc):
+        return {
+            "eligible": False,
+            "action": "stay_deferred",
+            "reason": "work appears unbounded",
+            "covering_loop": None,
+        }
+
+    # Criterion 4: check for existing covering loop
+    concern = str(doc.get("operator_hint", "")) + " " + str(doc.get("raw_content", ""))
+    covering = _find_covering_loop(concern, open_loops)
+    if covering:
+        return {
+            "eligible": True,
+            "action": "attach",
+            "reason": f"existing loop covers this concern: {covering}",
+            "covering_loop": covering,
+        }
+
+    # All criteria met, no covering loop — open a new one
+    return {
+        "eligible": True,
+        "action": "open_loop",
+        "reason": "all promotion criteria satisfied; no covering loop found",
+        "covering_loop": None,
+    }
+
+
+def promote_operator_ingress(
+    *,
+    state_root: str,
+    ingress_id: str,
+    action: str,
+    covering_loop: str | None = None,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Execute promotion for a qualifying OI object.
+
+    action must be "attach" or "open_loop".
+    For "attach", covering_loop must be provided.
+    For "open_loop", a new loop ID is derived from the OI.
+    """
+    path = _find_ingress_file(state_root, ingress_id)
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise OperatorIngressError(f"failed to read ingress object: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise OperatorIngressError(f"ingress object is not a valid YAML dict: {path}")
+
+    before_doc = copy.deepcopy(doc)
+    now = _utcnow()
+    now_str = _iso_utc(now)
+
+    if action == "attach":
+        if not covering_loop:
+            raise OperatorIngressError("attach action requires covering_loop")
+        doc["lifecycle_state"] = "routed"
+        doc["disposition"] = "attached"
+        doc["disposition_detail"] = f"Promoted by activation consumer: attached to {covering_loop}."
+        doc["next_stage"] = covering_loop
+        doc["routed_at"] = now_str
+        refs = doc.get("downstream_refs", [])
+        if covering_loop not in refs:
+            refs.append(covering_loop)
+        doc["downstream_refs"] = refs
+        doc.pop("activation_conditions", None)
+        doc["promoted_at"] = now_str
+        doc["promoted_by"] = "activation_consumer"
+        doc["promotion_reason"] = reason
+
+    elif action == "open_loop":
+        # Derive a loop ID from the OI hint or content
+        hint = str(doc.get("operator_hint", "")).strip()
+        if hint:
+            slug = re.sub(r"[^a-zA-Z0-9]+", "-", hint).strip("-").upper()[:40]
+        else:
+            slug = ingress_id.replace("OI-", "").upper()[:20]
+        date_part = now.strftime("%Y%m%d")
+        loop_id = f"LOOP-OI-PROMOTED-{slug}-{date_part}"
+
+        doc["lifecycle_state"] = "routed"
+        doc["disposition"] = "attached"
+        doc["disposition_detail"] = f"Promoted by activation consumer: opened {loop_id}."
+        doc["next_stage"] = loop_id
+        doc["routed_at"] = now_str
+        refs = doc.get("downstream_refs", [])
+        if loop_id not in refs:
+            refs.append(loop_id)
+        doc["downstream_refs"] = refs
+        doc.pop("activation_conditions", None)
+        doc["promoted_at"] = now_str
+        doc["promoted_by"] = "activation_consumer"
+        doc["promotion_reason"] = reason
+
+    else:
+        raise OperatorIngressError(f"unknown promotion action: {action}")
+
+    content = yaml.safe_dump(
+        doc, default_flow_style=False, sort_keys=False, allow_unicode=True
+    )
+    _atomic_write(path, content)
+    _append_ingress_lifecycle_event(
+        state_root=state_root,
+        event="promoted",
+        ingress_id=ingress_id,
+        path=path,
+        before=before_doc,
+        after=copy.deepcopy(doc),
+    )
+
+    return {
+        "status": "ok",
+        "ingress_id": ingress_id,
+        "action": action,
+        "lifecycle_state": doc["lifecycle_state"],
+        "disposition": doc["disposition"],
+        "disposition_detail": doc["disposition_detail"],
+        "next_stage": doc.get("next_stage", ""),
+        "downstream_refs": doc.get("downstream_refs", []),
+        "promoted_at": now_str,
+        "path": str(path),
+        "covering_loop": covering_loop or "",
+    }
+
+
+def process_promotable_operator_ingress(
+    *,
+    state_root: str,
+    batch_limit: int = 10,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Scan classified OI objects and promote qualifying ones.
+
+    Idempotent: already-promoted objects are skipped.
+    """
+    ingress_dir = _ingress_dir(state_root)
+    if not ingress_dir.is_dir():
+        return {"status": "ok", "evaluated": 0, "promoted": 0, "deferred": 0, "results": []}
+
+    open_loops = _list_open_loops(state_root)
+    results: list[dict[str, Any]] = []
+    promoted_count = 0
+    deferred_count = 0
+    evaluated_count = 0
+
+    for path in sorted(ingress_dir.glob("OI-*.yaml")):
+        if evaluated_count >= batch_limit:
+            break
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(doc, dict):
+            continue
+
+        disposition = str(doc.get("disposition", ""))
+        if disposition not in _PROMOTABLE_DISPOSITIONS:
+            continue
+
+        activation_conditions = str(doc.get("activation_conditions", ""))
+        if disposition != "packet_candidate" and not activation_conditions.strip():
+            continue
+
+        evaluated_count += 1
+        ingress_id = str(doc.get("ingress_id", path.stem))
+        evaluation = evaluate_oi_promotion(doc, open_loops)
+
+        if not evaluation["eligible"]:
+            deferred_count += 1
+            results.append({
+                "ingress_id": ingress_id,
+                "action": "stay_deferred",
+                "reason": evaluation["reason"],
+                "promoted": False,
+            })
+            continue
+
+        if dry_run:
+            promoted_count += 1
+            results.append({
+                "ingress_id": ingress_id,
+                "action": evaluation["action"],
+                "reason": evaluation["reason"],
+                "covering_loop": evaluation["covering_loop"],
+                "promoted": False,
+                "dry_run": True,
+            })
+            continue
+
+        result = promote_operator_ingress(
+            state_root=state_root,
+            ingress_id=ingress_id,
+            action=evaluation["action"],
+            covering_loop=evaluation["covering_loop"],
+            reason=evaluation["reason"],
+        )
+        promoted_count += 1
+        # If we opened a loop, add it to open_loops for subsequent items
+        if evaluation["action"] == "open_loop" and result.get("next_stage"):
+            open_loops.append(result["next_stage"])
+        results.append({
+            "ingress_id": ingress_id,
+            "action": evaluation["action"],
+            "reason": evaluation["reason"],
+            "covering_loop": evaluation.get("covering_loop", ""),
+            "next_stage": result.get("next_stage", ""),
+            "promoted": True,
+        })
+
+    return {
+        "status": "ok",
+        "evaluated": evaluated_count,
+        "promoted": promoted_count,
+        "deferred": deferred_count,
+        "open_loops_checked": len(open_loops),
+        "results": results,
+    }

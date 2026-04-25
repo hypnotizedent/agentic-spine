@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""operator-ingress-promote — bounded consumer for qualifying OI activation_conditions."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import operator_ingress as oi
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="operator-ingress-promote",
+        description="Evaluate classified OI objects and promote qualifying ones.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Evaluate without promoting. Show what would happen.",
+    )
+    parser.add_argument(
+        "--batch-limit",
+        type=int,
+        default=10,
+        help="Maximum items to evaluate per run (default: 10).",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit JSON output.",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Verify dependencies and exit.",
+    )
+
+    if "--self-check" in sys.argv:
+        try:
+            import yaml  # noqa: F401
+            print("operator.ingress.promote self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"operator.ingress.promote self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    args = parser.parse_args()
+
+    state_root = os.environ.get("SPINE_STATE", "")
+    if not state_root:
+        msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": msg}, indent=2))
+        else:
+            print(f"operator.ingress.promote FAIL: {msg}", file=sys.stderr)
+        return 1
+
+    try:
+        result = oi.process_promotable_operator_ingress(
+            state_root=state_root,
+            batch_limit=args.batch_limit,
+            dry_run=args.dry_run,
+        )
+    except oi.OperatorIngressError as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"operator.ingress.promote FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        mode = "DRY RUN" if args.dry_run else "PROMOTE"
+        print(f"[{mode}] evaluated={result['evaluated']} promoted={result['promoted']} deferred={result['deferred']} open_loops_checked={result['open_loops_checked']}")
+        for item in result["results"]:
+            status = "WOULD_PROMOTE" if item.get("dry_run") else ("PROMOTED" if item["promoted"] else "DEFERRED")
+            print(f"  {item['ingress_id']}  {status}  {item['action']}  {item['reason']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

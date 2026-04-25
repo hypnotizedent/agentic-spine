@@ -99,6 +99,17 @@ def _run_once(
         cumulative_stats["last_cycle_processed"] = int(result.get("processed_count", 0) or 0)
         cumulative_stats["last_cycle_pending"] = int(result.get("pending_count", 0) or 0)
         _save_cumulative_stats(state_root, cumulative_stats)
+    # After classification, run the promotion consumer for qualifying items
+    try:
+        promo_result = oi.process_promotable_operator_ingress(
+            state_root=state_root,
+            batch_limit=batch_limit,
+        )
+        result["promotion_evaluated"] = promo_result.get("evaluated", 0)
+        result["promotion_promoted"] = promo_result.get("promoted", 0)
+    except Exception as exc:
+        result["promotion_error"] = str(exc)
+
     if regenerate_surfaces and int(result.get("processed_count", 0) or 0) > 0:
         _regenerate_surfaces()
     return result
