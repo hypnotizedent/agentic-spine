@@ -96,7 +96,7 @@ operator intent
       → worktree merged, then pruned         [manual: agent pushes/merges, runs hygiene]
     → packet closed with artifact            [governed: orchestration via wave.finish, prompts via controller_prompt.close]
   → loop closed with acceptance              [governed: loop-closeout-finalize]
-  → handoff emitted at session boundary      [manual: close-session.sh or session.handoff.create]
+  → handoff emitted at session boundary      [manual: session.handoff.create]
 ```
 
 ## Default Close Path
