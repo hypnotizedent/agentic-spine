@@ -1240,10 +1240,26 @@ details[open] summary::after{transform:rotate(90deg)}
 .cq-s-red{color:var(--red);background:rgba(248,113,113,.12)}
 .cq-evidence{font-family:var(--m);font-size:.55rem;color:var(--tm);margin-top:.3rem}
 
+/* Front door grid */
+.front-door{display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:1.5rem}
+.fd-cell{background:var(--s);border:1px solid var(--b);border-radius:10px;padding:.75rem .85rem;border-top:3px solid var(--b)}
+.fd-cell-grn{border-top-color:var(--grn)}
+.fd-cell-ylw{border-top-color:var(--ylw)}
+.fd-cell-red{border-top-color:var(--red)}
+.fd-cell-blu{border-top-color:#4da6ff}
+.fd-verb{font-size:.5rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;margin-bottom:.3rem}
+.fd-cell-grn .fd-verb{color:var(--grn)}
+.fd-cell-ylw .fd-verb{color:var(--ylw)}
+.fd-cell-red .fd-verb{color:var(--red)}
+.fd-cell-blu .fd-verb{color:#4da6ff}
+.fd-count{font-family:var(--m);font-size:.55rem;color:var(--tm);line-height:1.4}
+.fd-sh{font-size:.55rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--t);margin-bottom:.5rem;opacity:.6}
+
 .foot{font-size:.5rem;color:var(--t);opacity:.25;text-align:center;margin-top:2rem;line-height:1.6}
 
 @media (max-width:860px){
   .stats,.rel{grid-template-columns:repeat(2,1fr)}
+  .front-door{grid-template-columns:repeat(2,1fr)}
   .nr{flex-direction:column}
   .today-line{grid-template-columns:72px 1fr}
   .today-line-sub{grid-column:2}
@@ -1252,6 +1268,7 @@ details[open] summary::after{transform:rotate(90deg)}
 @media (max-width:560px){
   body{padding:1rem}
   .stats,.rel{grid-template-columns:1fr}
+  .front-door{grid-template-columns:1fr}
   .top-bar{flex-direction:column;align-items:flex-start;gap:.35rem}
   .surface-nav{margin-top:.15rem}
   .top-bar .beacon{margin-left:0}
@@ -1602,6 +1619,109 @@ def operator_vision_section(ov: dict, directional_boundary: dict, temporal_stand
     """
 
 
+def operator_front_door_section(fd: dict) -> str:
+    """Render the four-verb operator front door as a compact grid."""
+    if not fd:
+        return ""
+
+    inspect = fd.get("inspect", {})
+    approve = fd.get("approve", {})
+    intervene = fd.get("intervene", {})
+    execute = fd.get("execute", {})
+
+    # Color logic: inspect
+    if int(inspect.get("degraded_standing", 0) or 0) > 0:
+        inspect_css = "fd-cell-ylw"
+    else:
+        inspect_css = "fd-cell-grn"
+
+    # Color logic: approve
+    if int(approve.get("total", 0) or 0) > 0:
+        approve_css = "fd-cell-ylw"
+    else:
+        approve_css = "fd-cell-grn"
+
+    # Color logic: intervene
+    if int(intervene.get("total", 0) or 0) > 0:
+        intervene_css = "fd-cell-red"
+    else:
+        intervene_css = "fd-cell-grn"
+
+    # Color logic: execute
+    if int(execute.get("total", 0) or 0) > 0:
+        execute_css = "fd-cell-blu"
+    else:
+        execute_css = "fd-cell-grn"
+
+    # Build count lines
+    healthy = int(inspect.get("healthy_standing", 0) or 0)
+    degraded = int(inspect.get("degraded_standing", 0) or 0)
+    loops = int(inspect.get("open_loops", 0) or 0)
+    inspect_parts = []
+    if healthy:
+        inspect_parts.append(f"{healthy} healthy")
+    if degraded:
+        inspect_parts.append(f"{degraded} degraded")
+    inspect_parts.append(f"{loops} loops")
+    inspect_count = " &middot; ".join(inspect_parts)
+
+    pending_i = int(approve.get("pending_ingress", 0) or 0)
+    pending_h = int(approve.get("pending_handoffs", 0) or 0)
+    approve_total = int(approve.get("total", 0) or 0)
+    if approve_total == 0:
+        approve_count = "nothing pending"
+    else:
+        ap = []
+        if pending_i:
+            ap.append(f"{pending_i} ingress")
+        if pending_h:
+            ap.append(f"{pending_h} handoff{'s' if pending_h != 1 else ''}")
+        approve_count = " &middot; ".join(ap)
+
+    active_int = int(intervene.get("active_interventions", 0) or 0)
+    open_gaps = int(intervene.get("open_gaps", 0) or 0)
+    if int(intervene.get("total", 0) or 0) == 0:
+        intervene_count = "all clear"
+    else:
+        ip = []
+        if active_int:
+            ip.append(f"{active_int} intervention{'s' if active_int != 1 else ''}")
+        ip.append(f"{open_gaps} gaps")
+        intervene_count = " &middot; ".join(ip)
+
+    waves = int(execute.get("active_waves", 0) or 0)
+    exec_loops = int(execute.get("loops_needing_execution", 0) or 0)
+    if int(execute.get("total", 0) or 0) == 0:
+        execute_count = "idle"
+    else:
+        ep = []
+        ep.append(f"{waves} wave{'s' if waves != 1 else ''}")
+        if exec_loops:
+            ep.append(f"{exec_loops} loops")
+        execute_count = " &middot; ".join(ep)
+
+    return f"""
+  <div class="fd-sh">Operator</div>
+  <div class="front-door">
+    <div class="fd-cell {inspect_css}">
+      <div class="fd-verb">Inspect</div>
+      <div class="fd-count">{inspect_count}</div>
+    </div>
+    <div class="fd-cell {approve_css}">
+      <div class="fd-verb">Approve</div>
+      <div class="fd-count">{approve_count}</div>
+    </div>
+    <div class="fd-cell {intervene_css}">
+      <div class="fd-verb">Intervene</div>
+      <div class="fd-count">{intervene_count}</div>
+    </div>
+    <div class="fd-cell {execute_css}">
+      <div class="fd-verb">Execute</div>
+      <div class="fd-count">{execute_count}</div>
+    </div>
+  </div>"""
+
+
 def generate(payload: dict | None = None) -> str:
     p = payload if isinstance(payload, dict) else build_payload(compact=False)
 
@@ -1622,6 +1742,7 @@ def generate(payload: dict | None = None) -> str:
     ]
 
     # Build sections
+    sec_front_door = operator_front_door_section(p.get("operator_front_door", {}))
     sec_board = board_section(p)
     sec_waiting = waiting_section(p)
     sec_vision = operator_vision_section(
@@ -1688,6 +1809,9 @@ def generate(payload: dict | None = None) -> str:
     </div>
     <span class="ts">{_h(p['generated_utc'])}</span>
   </div>
+
+  <!-- Operator front door: four-verb model -->
+  {sec_front_door}
 
   <!-- Board: the glanceable operator surface -->
   {sec_board}

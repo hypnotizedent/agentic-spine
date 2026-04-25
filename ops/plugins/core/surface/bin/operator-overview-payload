@@ -779,6 +779,99 @@ def collect_standing_program_health() -> dict:
     return result
 
 
+def collect_operator_front_door(payload: dict) -> dict:
+    """Aggregate existing payload data into the four-verb operator model."""
+    sph = payload.get("standing_program_health", {})
+    ws = payload.get("work_state", {})
+    ov = payload.get("operator_vision", {})
+    loops_data = payload.get("active_loops", {})
+    handoffs = payload.get("active_handoffs", {})
+    attention = payload.get("attention", [])
+
+    # --- inspect ---
+    total_standing = int(sph.get("total", 0) or 0)
+    active_interventions = int(sph.get("active_interventions", 0) or 0)
+    degraded = active_interventions
+    healthy = max(0, total_standing - degraded)
+    # Count non-standing labels (human_session_only): birth_mode == "human_session"
+    birth_modes = sph.get("birth_modes", {})
+    human_session_only = int(birth_modes.get("human_session", 0) or 0)
+    open_loops = int(ws.get("open_loops", 0) or 0)
+    inspect_parts = []
+    if healthy:
+        inspect_parts.append(f"{healthy} standing healthy")
+    if degraded:
+        inspect_parts.append(f"{degraded} degraded")
+    inspect_parts.append(f"{open_loops} loops")
+    inspect = {
+        "healthy_standing": healthy,
+        "degraded_standing": degraded,
+        "human_session_only": human_session_only,
+        "open_loops": open_loops,
+        "summary": ", ".join(inspect_parts),
+    }
+
+    # --- approve ---
+    mhw = ov.get("my_human_work_now", {}) if isinstance(ov, dict) else {}
+    pending_ingress = int(mhw.get("pending_ingress", 0) or 0)
+    pending_handoffs = int(handoffs.get("count", 0) or 0)
+    approve_total = pending_ingress + pending_handoffs
+    approve_parts = []
+    if pending_ingress:
+        approve_parts.append(f"{pending_ingress} pending ingress")
+    if pending_handoffs:
+        approve_parts.append(f"{pending_handoffs} handoff{'s' if pending_handoffs != 1 else ''}")
+    approve = {
+        "pending_ingress": pending_ingress,
+        "pending_handoffs": pending_handoffs,
+        "total": approve_total,
+        "summary": ", ".join(approve_parts) if approve_parts else "nothing pending",
+    }
+
+    # --- intervene ---
+    intervention_labels = list(sph.get("intervention_labels", []) or [])
+    open_gaps = int(ws.get("open_gaps", 0) or 0)
+    intervene_total = active_interventions + open_gaps
+    intervene_parts = []
+    if active_interventions:
+        intervene_parts.append(f"{active_interventions} active intervention{'s' if active_interventions != 1 else ''}")
+    intervene_parts.append(f"{open_gaps} gaps")
+    intervene = {
+        "active_interventions": active_interventions,
+        "intervention_labels": intervention_labels,
+        "open_gaps": open_gaps,
+        "total": intervene_total,
+        "summary": ", ".join(intervene_parts),
+    }
+
+    # --- execute ---
+    active_waves = int(ws.get("active_waves", 0) or 0)
+    loop_items = loops_data.get("items", []) if isinstance(loops_data, dict) else []
+    loops_needing_execution = 0
+    for loop in loop_items:
+        na = str(loop.get("next_action", "") or "").lower()
+        if "execute" in na or "implement" in na:
+            loops_needing_execution += 1
+    execute_total = active_waves + loops_needing_execution
+    execute_parts = []
+    execute_parts.append(f"{active_waves} wave{'s' if active_waves != 1 else ''}")
+    if loops_needing_execution:
+        execute_parts.append(f"{loops_needing_execution} loops need execution")
+    execute = {
+        "active_waves": active_waves,
+        "loops_needing_execution": loops_needing_execution,
+        "total": execute_total,
+        "summary": ", ".join(execute_parts),
+    }
+
+    return {
+        "inspect": inspect,
+        "approve": approve,
+        "intervene": intervene,
+        "execute": execute,
+    }
+
+
 def collect_proposals() -> dict:
     data = _run_json([
         str(REPO / "ops" / "plugins" / "core" / "proposals" / "bin" / "proposals-status"),
@@ -1542,6 +1635,9 @@ def build_payload(compact: bool = False) -> dict:
         ),
         "temporal_standing": temporal_standing,
     }
+
+    # Front door aggregation — reads from the payload built above
+    payload["operator_front_door"] = collect_operator_front_door(payload)
 
     if not compact:
         payload["git_log"] = collect_git_log(30)
