@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# watcher.health — Read the watcher's cycle state and present health status.
+#
+# This capability reads the rolling cycle state file written by each
+# alerting-probe-cycle run. It answers "what has the watcher done recently?"
+# without requiring SSH to the watcher node.
+#
+# State file: $SPINE_LOGS/watcher-cycle-state.json
+# Writer: ops/plugins/core/bin/alerting-probe-cycle.sh
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+JSON_MODE=0
+SHOW_CYCLES=5
+
+usage() {
+  cat <<'USAGE'
+watcher.health
+
+Usage:
+  watcher-health [--json] [--cycles N]
+
+Options:
+  --json         Output as JSON
+  --cycles N     Number of recent cycles to show (default: 5)
+
+Shows watcher node health: heartbeat, last success/failure, consecutive
+run counts, recent cycle history, and intervention state.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --cycles)
+      SHOW_CYCLES="${2:-5}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+CYCLE_STATE="${SPINE_LOGS}/watcher-cycle-state.json"
+
+if [[ ! -f "$CYCLE_STATE" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n '{capability:"watcher.health",status:"no_data",message:"Watcher cycle state file not found. The watcher may not have run yet, or logs are not synced to this host.",state_path:"'"$CYCLE_STATE"'"}'
+  else
+    echo "watcher.health"
+    echo ""
+    echo "  STATUS: no_data"
+    echo "  Watcher cycle state file not found."
+    echo "  Path: $CYCLE_STATE"
+    echo ""
+    echo "  The watcher may not have run yet, or logs are not synced to this host."
+    echo "  On the watcher node (proxmox-home), this file is written by each"
+    echo "  alerting-probe-cycle run."
+  fi
+  exit 0
+fi
+
+state="$(jq -c '.' "$CYCLE_STATE" 2>/dev/null || echo '{}')"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg capability "watcher.health" \
+    --arg state_path "$CYCLE_STATE" \
+    --argjson state "$state" \
+    --argjson show_cycles "$SHOW_CYCLES" \
+    '{
+      capability: $capability,
+      state_path: $state_path,
+      health: $state.health,
+      last_run_at: $state.last_run_at,
+      last_run_status: $state.last_run_status,
+      last_success_at: $state.last_success_at,
+      last_failure_at: $state.last_failure_at,
+      consecutive_successes: $state.consecutive_successes,
+      consecutive_failures: $state.consecutive_failures,
+      threshold: $state.threshold,
+      recent_cycles: ($state.cycles[:$show_cycles]),
+      total_cycles_stored: ($state.cycles | length)
+    }'
+  exit 0
+fi
+
+health="$(jq -r '.health // "unknown"' <<<"$state")"
+last_run_at="$(jq -r '.last_run_at // "never"' <<<"$state")"
+last_run_status="$(jq -r '.last_run_status // "unknown"' <<<"$state")"
+last_success="$(jq -r '.last_success_at // "never"' <<<"$state")"
+last_failure="$(jq -r '.last_failure_at // "never"' <<<"$state")"
+consec_ok="$(jq -r '.consecutive_successes // 0' <<<"$state")"
+consec_fail="$(jq -r '.consecutive_failures // 0' <<<"$state")"
+total_cycles="$(jq -r '.cycles | length // 0' <<<"$state")"
+thresh_degraded="$(jq -r '.threshold.failure_count_for_degraded // "?"' <<<"$state")"
+thresh_intervention="$(jq -r '.threshold.failure_count_for_intervention // "?"' <<<"$state")"
+
+# Compute age of last run
+now_epoch="$(date +%s)"
+if [[ "$last_run_at" != "never" ]]; then
+  # Try GNU date first, fall back to macOS date
+  last_epoch="$(date -d "$last_run_at" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%SZ" "$last_run_at" +%s 2>/dev/null || echo 0)"
+  if [[ "$last_epoch" =~ ^[0-9]+$ ]] && (( last_epoch > 0 )); then
+    age_s=$(( now_epoch - last_epoch ))
+    age_m=$(( age_s / 60 ))
+    if (( age_m > 30 )); then
+      age_display="${age_m}m ago (STALE — expected every 15m)"
+    else
+      age_display="${age_m}m ago"
+    fi
+  else
+    age_display="unknown"
+  fi
+else
+  age_display="never"
+fi
+
+health_icon="[OK]"
+case "$health" in
+  degraded) health_icon="[WARN]" ;;
+  failed)   health_icon="[FAIL]" ;;
+esac
+
+echo "watcher.health"
+echo ""
+echo "  $health_icon Health: $health"
+echo ""
+echo "  Last run:       $last_run_at ($age_display)"
+echo "  Last status:    $last_run_status"
+echo "  Last success:   $last_success"
+echo "  Last failure:   $last_failure"
+echo ""
+echo "  Consecutive OK: $consec_ok"
+echo "  Consecutive FAIL: $consec_fail"
+echo "  Threshold degraded: $thresh_degraded failures"
+echo "  Threshold intervention: $thresh_intervention failures"
+echo ""
+
+# Intervention check
+intervention_dir="${SPINE_STATE}/interventions"
+pending_interventions=0
+if [[ -d "$intervention_dir" ]]; then
+  while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    disp="$(grep -m1 '^disposition:' "$f" 2>/dev/null | awk '{print $2}' || true)"
+    if [[ "$disp" == *pending* ]]; then
+      pending_interventions=$((pending_interventions + 1))
+    fi
+  done < <(find "$intervention_dir" -name 'INTERVENTION-watcher-*.yaml' -type f 2>/dev/null || true)
+fi
+
+if (( pending_interventions > 0 )); then
+  echo "  PENDING INTERVENTIONS: $pending_interventions"
+  echo "  Dir: $intervention_dir"
+  echo ""
+fi
+
+echo "  Recent cycles ($SHOW_CYCLES of $total_cycles stored):"
+echo ""
+printf "  %-24s %-10s %-10s %-12s %s\n" "at" "status" "duration" "probe" "alerts"
+printf "  %-24s %-10s %-10s %-12s %s\n" "------------------------" "----------" "----------" "------------" "------"
+
+jq -r --argjson n "$SHOW_CYCLES" '.cycles[:$n][] | [.at, .status, (.duration_s|tostring)+"s", .probe_status, (.alerts_created|tostring)] | @tsv' <<<"$state" 2>/dev/null \
+  | while IFS=$'\t' read -r at status dur probe alerts; do
+      printf "  %-24s %-10s %-10s %-12s %s\n" "$at" "$status" "$dur" "$probe" "$alerts"
+    done
+
+echo ""
+echo "  State file: $CYCLE_STATE"
