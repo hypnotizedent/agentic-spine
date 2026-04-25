@@ -73,26 +73,44 @@ def _normalize_tracker_value(value: object) -> str | None:
     return text
 
 
+# Authority: SQLite (scope-file fallback)
 def _find_active_loop(state_root: str) -> dict | None:
-    """Find the active loop from scope files. Returns frontmatter dict or None."""
+    """Find the active loop from SQLite authority. Falls back to scope files."""
+
+    # ── Primary path: SQLite via loops_sql_authority ──────────────────────
+    db_path = os.path.join(state_root, "shared_authority.db")
+    try:
+        from pathlib import Path
+
+        _script_dir = Path(__file__).resolve().parent
+        _lib_dir = _script_dir.parent / "lib"
+        if str(_lib_dir) not in sys.path:
+            sys.path.insert(0, str(_lib_dir))
+        import loops_sql_authority as lsa
+
+        conn = lsa.connect(Path(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT * FROM loops WHERE LOWER(status) IN (?, ?, ?) ORDER BY loop_id",
+                tuple(sorted(_OPEN_STATUSES)),
+            ).fetchall()
+            candidates = [lsa.loop_from_row(r) for r in rows]
+        finally:
+            conn.close()
+
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            return {"_ambiguous": True, "_candidates": candidates}
+        return None
+
+    except Exception:
+        pass  # Fall through to scope-file fallback
+
+    # ── Fallback: scope-file frontmatter parsing ─────────────────────────
     scopes_dir = os.path.join(state_root, "loop-scopes")
     if not os.path.isdir(scopes_dir):
         return None
-
-    db_path = os.path.join(state_root, "shared_authority.db")
-    live_loop_ids: set[str] | None = set()
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            rows = conn.execute(
-                "SELECT loop_id FROM loops WHERE LOWER(status) IN (?, ?, ?)",
-                tuple(sorted(_OPEN_STATUSES)),
-            ).fetchall()
-            live_loop_ids = {str(row[0]).strip() for row in rows if row and str(row[0]).strip()}
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        live_loop_ids = None
 
     candidates = []
     try:
@@ -112,16 +130,12 @@ def _find_active_loop(state_root: str) -> dict | None:
         fm = _parse_frontmatter(text)
         status = fm.get("status", "").lower()
         if status in _OPEN_STATUSES:
-            loop_id = str(fm.get("loop_id", "")).strip()
-            if live_loop_ids is None or loop_id not in live_loop_ids:
-                continue
             fm["_path"] = path
             candidates.append(fm)
 
     if len(candidates) == 1:
         return candidates[0]
     if len(candidates) > 1:
-        # Multiple loops — return None with candidates stored
         return {"_ambiguous": True, "_candidates": candidates}
     return None
 

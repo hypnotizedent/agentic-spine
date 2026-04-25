@@ -58,71 +58,67 @@ if [[ -z "$terminal_id" ]]; then
   terminal_id="$(hostname -s | tr '[:lower:]' '[:upper:]')-LOCAL-01"
 fi
 
+# Authority: SQLite (scope-file projection updated after)
 scope_file="$SCOPES_DIR/${loop_id}.scope.md"
-[[ -f "$scope_file" ]] || { echo "FAIL: scope file not found: $scope_file" >&2; exit 1; }
 
 heartbeat_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# Check loop exists in SQLite authority
+BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+loop_json="$("$BRIDGE" query --id "$loop_id" 2>/dev/null)" || {
+  echo "FAIL: loop not found in SQLite: $loop_id" >&2; exit 1
+}
+
 acquire_git_lock gaps || exit 1
-tmp_file="$(mktemp "${scope_file}.tmp.XXXXXX")"
-trap 'rm -f "$tmp_file" 2>/dev/null || true; release_git_lock' EXIT INT TERM
+trap 'release_git_lock' EXIT INT TERM
 
-python3 - "$scope_file" "$terminal_id" "$ttl_minutes" "$heartbeat_at" "$blocked_by" "$note" > "$tmp_file" <<'PY'
-from pathlib import Path
-import re
+python3 - "$loop_id" "$terminal_id" "$ttl_minutes" "$heartbeat_at" "$blocked_by" "$note" "$SCOPES_DIR" "$ROOT" <<'PY'
+import json
+import os
 import sys
+from pathlib import Path
 
-scope = Path(sys.argv[1])
+repo_root = Path(sys.argv[8])
+sys.path.insert(0, str(repo_root / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import loops_sql_authority as lsa
+
+loop_id = sys.argv[1]
 terminal_id = sys.argv[2]
 ttl_minutes = sys.argv[3]
 heartbeat_at = sys.argv[4]
 blocked_by = sys.argv[5]
 note = sys.argv[6]
+scopes_dir = Path(sys.argv[7])
 
-text = scope.read_text()
-lines = text.splitlines(keepends=True)
-fm_markers = [i for i, line in enumerate(lines) if line.strip() == "---"]
-if len(fm_markers) < 2:
-    raise SystemExit(f"FAIL: missing YAML frontmatter in {scope}")
+state = os.environ.get('SPINE_STATE') or str(Path.home() / 'code' / '.runtime' / 'spine' / 'state')
+db_path = Path(os.environ.get('LOOPS_DB_PATH', str(Path(state) / 'shared_authority.db')))
+conn = lsa.connect(db_path)
+lsa.ensure_schema(conn)
 
-fm_start, fm_end = fm_markers[0], fm_markers[1]
-fm_lines = lines[fm_start + 1:fm_end]
+loop = lsa.get_loop(conn, loop_id)
+if not loop:
+    print(f"FAIL: loop not found in SQLite: {loop_id}", file=sys.stderr)
+    sys.exit(1)
 
-def yaml_scalar(value: str, numeric: bool = False) -> str:
-    if numeric:
-        return value
-    if re.fullmatch(r"[A-Za-z0-9._@/-]+", value):
-        return value
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f"\"{escaped}\""
-
-def upsert(field: str, value: str, numeric: bool = False) -> None:
-    rendered = f"{field}: {yaml_scalar(value, numeric=numeric)}\n"
-    for idx, line in enumerate(fm_lines):
-        if re.match(rf"^{re.escape(field)}:\s*", line):
-            fm_lines[idx] = rendered
-            return
-    insert_at = len(fm_lines)
-    for idx, line in enumerate(fm_lines):
-        if re.match(r"^objective:\s*", line):
-            insert_at = idx
-            break
-    fm_lines.insert(insert_at, rendered)
-
-upsert("execution_mode", "background")
-upsert("active_terminal", terminal_id)
-upsert("last_heartbeat_utc", heartbeat_at)
-upsert("heartbeat_ttl_minutes", ttl_minutes, numeric=True)
+# Update fields
+loop["execution_mode"] = "background"
+loop["active_terminal"] = terminal_id
+loop["last_heartbeat_utc"] = heartbeat_at
+loop["heartbeat_ttl_minutes"] = int(ttl_minutes)
 if blocked_by:
-    upsert("blocked_by", blocked_by)
+    loop["blocked_by"] = blocked_by
 if note:
-    upsert("operator_note", note)
+    loop["operator_note"] = note
 
-result = lines[:fm_start + 1] + fm_lines + lines[fm_end:]
-sys.stdout.write("".join(result))
+lsa.upsert_loop(conn, loop)
+conn.commit()
+
+# Refresh scope-file projection from SQLite
+lsa.project_to_scope_files(conn, scopes_dir)
+conn.close()
 PY
 
-mv "$tmp_file" "$scope_file"
 trap - EXIT INT TERM
 release_git_lock
 

@@ -9,12 +9,13 @@ set -euo pipefail
 #
 # Usage: planning-horizon-promote-due [--dry-run]
 #
-# Authority: ops/bindings/planning.horizon.contract.yaml
+# Authority: SQLite (scope-file projection updated after)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
+DB_PATH="$SPINE_STATE/shared_authority.db"
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -29,8 +30,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-exec python3 - "$SCOPES_DIR" "$DRY_RUN" "$ROOT" <<'PYTHON'
-import re
+exec python3 - "$SCOPES_DIR" "$DRY_RUN" "$ROOT" "$DB_PATH" <<'PYTHON'
+# Authority: SQLite (scope-file projection updated after)
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -38,76 +39,51 @@ from pathlib import Path
 scopes_dir = Path(sys.argv[1])
 dry_run = sys.argv[2] == "True"
 root = Path(sys.argv[3])
+db_path = Path(sys.argv[4])
 
-FM_RE = re.compile(r"^---\s*$")
+# Add the library directory to sys.path
+sys.path.insert(0, str(root / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+from loops_sql_authority import (
+    connect,
+    ensure_schema,
+    list_loops,
+    get_loop,
+    upsert_loop,
+    project_to_scope_files,
+    ARCHIVED_SCOPE_STATUSES,
+)
+
 EST = timezone(timedelta(hours=-5))
 
-def parse_fm(path):
-    lines = path.read_text().splitlines()
-    in_fm = False
-    fm = {}
-    for line in lines:
-        if FM_RE.match(line):
-            if in_fm:
-                break
-            in_fm = True
-            continue
-        if in_fm and ":" in line:
-            key, _, val = line.partition(":")
-            fm[key.strip()] = val.strip().strip('"')
-    return fm
-
-def update_fm_field(path, field, value):
-    """Update a frontmatter field in place."""
-    lines = path.read_text().splitlines()
-    new_lines = []
-    in_fm = False
-    fm_count = 0
-    replaced = False
-    for line in lines:
-        if FM_RE.match(line):
-            fm_count += 1
-            if fm_count == 1:
-                in_fm = True
-            elif fm_count == 2:
-                if not replaced:
-                    new_lines.append(f"{field}: {value}")
-                in_fm = False
-            new_lines.append(line)
-            continue
-        if in_fm and line.startswith(f"{field}:"):
-            new_lines.append(f"{field}: {value}")
-            replaced = True
-        else:
-            new_lines.append(line)
-    path.write_text("\n".join(new_lines) + "\n")
+conn = connect(db_path)
+ensure_schema(conn)
 
 def is_loop_closed(loop_id):
-    scope_file = scopes_dir / f"{loop_id}.scope.md"
-    if not scope_file.exists():
+    loop = get_loop(conn, loop_id)
+    if loop is None:
         return False
-    fm = parse_fm(scope_file)
-    return fm.get("status", "") == "closed"
+    return (loop.get("status") or "") in ARCHIVED_SCOPE_STATUSES
 
 now_est = datetime.now(EST).date()
 promoted = []
 skipped = []
+mutated = False
 
-for f in sorted(scopes_dir.glob("*.scope.md")):
-    fm = parse_fm(f)
-    status = fm.get("status", "")
+for loop in list_loops(conn):
+    status = loop.get("status", "")
     if status not in ("active", "draft", "open", "planned"):
         continue
 
-    horizon = fm.get("horizon", "now")
+    horizon = loop.get("horizon", "now")
     if horizon == "now":
         continue
 
-    trigger = fm.get("activation_trigger", "manual")
-    loop_id = fm.get("loop_id", f.stem)
+    loop_id = loop.get("loop_id", "")
+    trigger = loop.get("activation_trigger", "manual")
 
     if trigger == "date":
-        not_before = fm.get("not_before_est", "")
+        not_before = loop.get("not_before_est", "")
         if not not_before:
             skipped.append(f"{loop_id}: date trigger but no not_before_est")
             continue
@@ -121,15 +97,17 @@ for f in sorted(scopes_dir.glob("*.scope.md")):
             if dry_run:
                 promoted.append(f"{loop_id}: would promote {horizon}->now (date={not_before} reached)")
             else:
-                update_fm_field(f, "horizon", "now")
+                loop["horizon"] = "now"
                 if status == "planned":
-                    update_fm_field(f, "status", "active")
+                    loop["status"] = "active"
+                upsert_loop(conn, loop)
+                mutated = True
                 promoted.append(f"{loop_id}: promoted {horizon}->now (date={not_before} reached)")
         else:
             skipped.append(f"{loop_id}: not yet due (not_before={not_before}, today={now_est})")
 
     elif trigger == "dependency":
-        depends_on = fm.get("depends_on_loop", "")
+        depends_on = loop.get("depends_on_loop", "")
         if not depends_on:
             skipped.append(f"{loop_id}: dependency trigger but no depends_on_loop")
             continue
@@ -138,15 +116,23 @@ for f in sorted(scopes_dir.glob("*.scope.md")):
             if dry_run:
                 promoted.append(f"{loop_id}: would promote {horizon}->now (dependency {depends_on} closed)")
             else:
-                update_fm_field(f, "horizon", "now")
+                loop["horizon"] = "now"
                 if status == "planned":
-                    update_fm_field(f, "status", "active")
+                    loop["status"] = "active"
+                upsert_loop(conn, loop)
+                mutated = True
                 promoted.append(f"{loop_id}: promoted {horizon}->now (dependency {depends_on} closed)")
         else:
             skipped.append(f"{loop_id}: waiting on {depends_on}")
 
     elif trigger == "manual":
         skipped.append(f"{loop_id}: manual trigger, no auto-promotion")
+
+# Refresh scope-file projections once after all mutations
+if mutated:
+    project_to_scope_files(conn, scopes_dir)
+
+conn.close()
 
 prefix = "[DRY RUN] " if dry_run else ""
 print(f"{prefix}Planning Horizon Promotion Check")

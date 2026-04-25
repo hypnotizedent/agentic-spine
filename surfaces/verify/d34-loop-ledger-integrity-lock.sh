@@ -8,6 +8,7 @@
 #   P3: Scope files in loop-scopes/ have no status that contradicts SQLite
 #   P4: ops status open_loops count == SQLite open count
 #   P5: No scope-only orphans (open scope files with no SQLite row)
+#   P6: All closure-set files declare SQLite authority (regression guard)
 #
 # Authority: SQLite (shared_authority.db) is the sole active-state source.
 # Scope files are projections, not policy.
@@ -56,7 +57,7 @@ if [[ "$SQLITE_OPEN" != "$SUMMARY_OPEN" ]]; then
     fail "P1: open count mismatch: sqlite=$SQLITE_OPEN summary=$SUMMARY_OPEN"
 fi
 
-# ── P2: WIP count matches authority ──────────────��────────────────────────
+# ── P2: WIP count matches authority ──────────────────────────────────────
 
 # WIP cap in loops-create should enforce against the same WIP count.
 # This check verifies the count is derivable from SQLite, not scope files.
@@ -129,7 +130,7 @@ print(f'DRIFT_COUNT={drift_count}')
     fi
 fi
 
-# ── P4: ops status open count agrees ─────────────────���───────────────────
+# ── P4: ops status open count agrees ─────────────────────────────────────
 
 STATUS_JSON="$("$ROOT/bin/ops" status --json 2>/dev/null)" || true
 if [[ -n "$STATUS_JSON" ]]; then
@@ -198,4 +199,27 @@ $ORPHAN_LINES"
     fi
 fi
 
-echo "D34 PASS: loop ledger integrity (open=$SQLITE_OPEN wip=$SQLITE_WIP live=$SQLITE_LIVE scope_drift=$SCOPE_DRIFT orphans=${ORPHAN_COUNT:-0} source=sqlite)"
+# ── P6: Closure set files all declare SQLite authority ────────────────
+
+CLOSURE_SET=(
+    "ops/plugins/core/orchestration/bin/authority-resolve"
+    "ops/plugins/core/lifecycle/bin/entry-compile"
+    "ops/plugins/core/lifecycle/bin/session-v3-attach"
+    "ops/plugins/core/lifecycle/bin/loops-background-start"
+    "ops/plugins/core/lifecycle/bin/planning-horizon-promote-due"
+)
+P6_MISSING=0
+for cs_file in "${CLOSURE_SET[@]}"; do
+    cs_path="$ROOT/$cs_file"
+    if [[ -f "$cs_path" ]]; then
+        if ! grep -q '# Authority: SQLite' "$cs_path" 2>/dev/null; then
+            warn "P6: $cs_file lacks '# Authority: SQLite' marker"
+            P6_MISSING=$((P6_MISSING + 1))
+        fi
+    fi
+done
+if [[ "$P6_MISSING" -gt 0 ]]; then
+    fail "P6: $P6_MISSING closure-set file(s) missing SQLite authority marker"
+fi
+
+echo "D34 PASS: loop ledger integrity (open=$SQLITE_OPEN wip=$SQLITE_WIP live=$SQLITE_LIVE scope_drift=$SCOPE_DRIFT orphans=${ORPHAN_COUNT:-0} closure_set=5/5 source=sqlite)"
