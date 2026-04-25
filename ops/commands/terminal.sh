@@ -267,6 +267,26 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     exit 0
 fi
 
+write_entry_script() {
+    local entry_cmd="$1"
+    local launch_script
+    launch_script="$(mktemp -t spine-terminal-entry.XXXXXX.sh)"
+    chmod 700 "$launch_script"
+
+    # iTerm AppleScript can clip long inline commands; hand off via temp script.
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'set -euo pipefail\n'
+        printf 'rm -f -- %q\n' "$launch_script"
+        printf '%s\n' "$entry_cmd"
+    } >"$launch_script"
+
+    printf '%s\n' "$launch_script"
+}
+
+LAUNCH_SCRIPT="$(write_entry_script "$ENTRY_CMD")"
+EXEC_CMD="/bin/bash $(printf '%q' "$LAUNCH_SCRIPT")"
+
 # Build iTerm title
 TITLE=""
 if [[ -n "$TERMINAL_NAME" ]]; then
@@ -278,7 +298,7 @@ else
 fi
 
 # Open iTerm window via AppleScript
-ESCAPED_CMD="${ENTRY_CMD//\\/\\\\}"
+ESCAPED_CMD="${EXEC_CMD//\\/\\\\}"
 ESCAPED_CMD="${ESCAPED_CMD//\"/\\\"}"
 ESCAPED_TITLE="${TITLE//\\/\\\\}"
 ESCAPED_TITLE="${ESCAPED_TITLE//\"/\\\"}"
