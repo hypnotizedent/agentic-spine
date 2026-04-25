@@ -45,6 +45,7 @@ hydrate_ha_alerting_secrets() {
   fi
 }
 
+_watcher_cycle_start_epoch="$(date +%s)"
 echo "[alerting-probe-cycle] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Source host-local watcher secret file if present, BEFORE Infisical hydration.
@@ -65,6 +66,150 @@ fi
 
 hydrate_ha_alerting_secrets
 
+# --- Node-centric receipt: rolling cycle state ---
+# Every cycle writes governed execution evidence to a state file discoverable
+# through the capability layer (watcher.health). Replaces the old model where
+# a human had to SSH to the watcher node to determine cycle health.
+WATCHER_CYCLE_STATE="${SPINE_LOGS:-${HOME}/code/.runtime/spine/logs}/watcher-cycle-state.json"
+WATCHER_CYCLE_MAX=20
+WATCHER_THRESHOLD_DEGRADED=2
+WATCHER_THRESHOLD_INTERVENTION=5
+
+_watcher_write_cycle_state() {
+  local cycle_status="$1"
+  local cycle_duration="$2"
+  local cycle_at
+  cycle_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  command -v jq >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$WATCHER_CYCLE_STATE")"
+
+  local prev_state="{}"
+  if [[ -f "$WATCHER_CYCLE_STATE" ]]; then
+    prev_state="$(jq -c '.' "$WATCHER_CYCLE_STATE" 2>/dev/null || echo '{}')"
+  fi
+
+  local prev_consecutive_successes prev_consecutive_failures prev_last_success prev_last_failure prev_cycles
+  prev_consecutive_successes="$(jq -r '.consecutive_successes // 0' <<<"$prev_state")"
+  prev_consecutive_failures="$(jq -r '.consecutive_failures // 0' <<<"$prev_state")"
+  prev_last_success="$(jq -r '.last_success_at // null' <<<"$prev_state")"
+  prev_last_failure="$(jq -r '.last_failure_at // null' <<<"$prev_state")"
+  prev_cycles="$(jq -c '.cycles // []' <<<"$prev_state")"
+
+  local new_consecutive_successes=0 new_consecutive_failures=0
+  local new_last_success="$prev_last_success" new_last_failure="$prev_last_failure"
+
+  if [[ "$cycle_status" == "success" ]]; then
+    new_consecutive_successes=$(( prev_consecutive_successes + 1 ))
+    new_consecutive_failures=0
+    new_last_success="$cycle_at"
+  else
+    new_consecutive_successes=0
+    new_consecutive_failures=$(( prev_consecutive_failures + 1 ))
+    new_last_failure="$cycle_at"
+  fi
+
+  local health="healthy"
+  if (( new_consecutive_failures >= WATCHER_THRESHOLD_INTERVENTION )); then
+    health="failed"
+  elif (( new_consecutive_failures >= WATCHER_THRESHOLD_DEGRADED )); then
+    health="degraded"
+  fi
+
+  local probe_status="unknown"
+  if [[ -f "$SNAPSHOT_FILE" ]]; then
+    probe_status="$(jq -r '.status // "unknown"' "$SNAPSHOT_FILE" 2>/dev/null || echo "unknown")"
+  fi
+  local alerts_created=0
+  if [[ -f "$SNAPSHOT_FILE" ]]; then
+    alerts_created="$(jq -r '.incident_count // 0' "$SNAPSHOT_FILE" 2>/dev/null || echo 0)"
+  fi
+
+  local new_cycle
+  new_cycle="$(jq -cn \
+    --arg at "$cycle_at" \
+    --arg status "$cycle_status" \
+    --argjson duration_s "$cycle_duration" \
+    --arg probe_status "$probe_status" \
+    --argjson alerts_created "$alerts_created" \
+    '{at:$at,status:$status,duration_s:$duration_s,probe_status:$probe_status,alerts_created:$alerts_created}')"
+
+  local updated_cycles
+  updated_cycles="$(jq -c --argjson new "$new_cycle" --argjson max "$WATCHER_CYCLE_MAX" \
+    '[$new] + . | .[:$max]' <<<"$prev_cycles")"
+
+  jq -n \
+    --arg node "watcher_node" \
+    --arg program "alerting-probe-cycle" \
+    --arg last_run_at "$cycle_at" \
+    --arg last_run_status "$cycle_status" \
+    --arg last_success_at "$new_last_success" \
+    --arg last_failure_at "$new_last_failure" \
+    --argjson consecutive_successes "$new_consecutive_successes" \
+    --argjson consecutive_failures "$new_consecutive_failures" \
+    --arg health "$health" \
+    --argjson cycles "$updated_cycles" \
+    --argjson threshold_degraded "$WATCHER_THRESHOLD_DEGRADED" \
+    --argjson threshold_intervention "$WATCHER_THRESHOLD_INTERVENTION" \
+    '{
+      node: $node,
+      program: $program,
+      last_run_at: $last_run_at,
+      last_run_status: $last_run_status,
+      last_success_at: $last_success_at,
+      last_failure_at: (if $last_failure_at == "null" then null else $last_failure_at end),
+      consecutive_successes: $consecutive_successes,
+      consecutive_failures: $consecutive_failures,
+      health: $health,
+      cycles: $cycles,
+      threshold: {
+        failure_count_for_degraded: $threshold_degraded,
+        failure_count_for_intervention: $threshold_intervention
+      }
+    }' > "${WATCHER_CYCLE_STATE}.tmp" && mv "${WATCHER_CYCLE_STATE}.tmp" "$WATCHER_CYCLE_STATE"
+
+  # Threshold-based intervention birth: if consecutive failures cross the
+  # intervention threshold, scaffold a governed intervention artifact.
+  if (( new_consecutive_failures == WATCHER_THRESHOLD_INTERVENTION )); then
+    spine_enqueue_email_intent \
+      "watcher-self-health" \
+      "incident" \
+      "Watcher intervention: ${new_consecutive_failures} consecutive probe failures" \
+      "The watcher alerting-probe-cycle has failed ${new_consecutive_failures} consecutive times. Health: ${health}. Last failure: ${cycle_at}. Manual investigation required." \
+      "watcher-cycle-state"
+
+    local intervention_dir="${SPINE_STATE:-${HOME}/code/.runtime/spine/state}/interventions"
+    mkdir -p "$intervention_dir"
+    local intervention_file="${intervention_dir}/INTERVENTION-watcher-$(date -u +%Y%m%dT%H%M%SZ).yaml"
+    cat > "$intervention_file" <<INTERVENTION
+intervention_id: "watcher-failure-$(date -u +%Y%m%dT%H%M%SZ)"
+created_at: "${cycle_at}"
+source: "watcher-cycle-state"
+node: "watcher_node"
+program: "alerting-probe-cycle"
+trigger: "consecutive_failures >= ${WATCHER_THRESHOLD_INTERVENTION}"
+consecutive_failures: ${new_consecutive_failures}
+health: "${health}"
+suggested_actions:
+  - "Check systemd journal on proxmox-home: journalctl -u spine-watcher-alerting-probe-cycle"
+  - "Verify HA reachability from watcher node"
+  - "Check watcher secrets: /etc/spine/watcher-secrets.env"
+  - "Run manual probe: ops cap run alerting.probe"
+disposition: "pending"
+INTERVENTION
+    echo "[alerting-probe-cycle] INTERVENTION scaffolded: ${intervention_file}"
+  fi
+}
+
+_watcher_exit_with_failure() {
+  local duration=$(( $(date +%s) - _watcher_cycle_start_epoch ))
+  [[ "$duration" =~ ^[0-9]+$ ]] || duration=0
+  _watcher_write_cycle_state "failure" "$duration"
+  exit 1
+}
+
+# --- Execution ---
+
 [[ -x "${PROBE_BIN}" ]] || { echo "[alerting-probe-cycle] FAIL: missing probe bin: ${PROBE_BIN}" >&2; exit 1; }
 [[ -x "${DISPATCH_BIN}" ]] || { echo "[alerting-probe-cycle] FAIL: missing dispatch bin: ${DISPATCH_BIN}" >&2; exit 1; }
 
@@ -75,7 +220,7 @@ if ! spine_job_run "alerting-probe-cycle:alerting.probe" "${PROBE_BIN}" --out "$
     "alerting.probe failed" \
     "Scheduled alerting probe failed; dispatch was not executed." \
     "alerting-probe-cycle"
-  exit 1
+  _watcher_exit_with_failure
 fi
 
 if ! spine_job_run "alerting-probe-cycle:alerting.dispatch" "${DISPATCH_BIN}" --no-probe --snapshot "${SNAPSHOT_FILE}"; then
@@ -85,7 +230,7 @@ if ! spine_job_run "alerting-probe-cycle:alerting.dispatch" "${DISPATCH_BIN}" --
     "alerting.dispatch failed" \
     "Scheduled alerting dispatch failed; review alerting logs and channel health." \
     "alerting-probe-cycle"
-  exit 1
+  _watcher_exit_with_failure
 fi
 
 # If alerting snapshot exposes failing_gates, opportunistically trigger deterministic recovery.
@@ -97,3 +242,8 @@ if command -v jq >/dev/null 2>&1 && [[ -f "$SNAPSHOT_FILE" && -x "$RECOVERY_DISP
 fi
 
 echo "[alerting-probe-cycle] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# Write cycle receipt — success path
+_watcher_cycle_duration=$(( $(date +%s) - _watcher_cycle_start_epoch ))
+[[ "$_watcher_cycle_duration" =~ ^[0-9]+$ ]] || _watcher_cycle_duration=0
+_watcher_write_cycle_state "success" "$_watcher_cycle_duration"
