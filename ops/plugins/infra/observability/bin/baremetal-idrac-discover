@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+SSH_BINDING = ROOT / "ops" / "bindings" / "ssh.targets.yaml"
+INFISICAL_AGENT = ROOT / "ops" / "plugins" / "providers" / "bin" / "infisical-agent.sh"
+
+
+def stop(message: str) -> None:
+    print(f"STOP (2): {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def run(cmd: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        check=check,
+    )
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        stop(f"missing binding: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        stop(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        stop(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def tcp_open(host: str, port: int, timeout: float) -> bool:
+    if not host:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def resolve_candidates(entry: dict[str, Any]) -> list[tuple[str, str]]:
+    host = str(entry.get("host") or "")
+    tailscale_ip = str(entry.get("tailscale_ip") or "")
+    policy = str(entry.get("access_policy") or "")
+    candidates: list[tuple[str, str]] = []
+
+    def add(candidate: str, label: str) -> None:
+        if candidate and all(existing != candidate for existing, _ in candidates):
+            candidates.append((candidate, label))
+
+    if policy == "tailscale_required":
+        add(tailscale_ip or host, "tailscale")
+    elif policy == "lan_only":
+        add(host, "lan")
+    elif policy == "lan_first" or not policy:
+        add(host, "lan")
+        add(tailscale_ip, "tailscale")
+    else:
+        add(host, "direct")
+        add(tailscale_ip, "tailscale")
+    return candidates
+
+
+def resolve_jump(
+    target_id: str,
+    targets: dict[str, dict[str, Any]],
+    defaults: dict[str, Any],
+    timeout: int,
+) -> dict[str, Any] | None:
+    entry = targets.get(target_id)
+    if not entry:
+        return None
+    port = int(entry.get("port") or defaults.get("port") or 22)
+    user = str(entry.get("user") or defaults.get("user") or "root")
+    for host, path in resolve_candidates(entry):
+        if tcp_open(host, port, timeout):
+            return {
+                "id": target_id,
+                "host": host,
+                "port": port,
+                "user": user,
+                "path": path,
+            }
+    candidates = resolve_candidates(entry)
+    if candidates:
+        host, path = candidates[0]
+        return {
+            "id": target_id,
+            "host": host,
+            "port": port,
+            "user": user,
+            "path": f"{path}_unreachable",
+        }
+    return None
+
+
+def build_ssh_cmd(jump: dict[str, Any], remote_cmd: list[str], timeout: int) -> list[str]:
+    ssh_cmd = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={timeout}",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "LogLevel=ERROR",
+        "-p",
+        str(jump["port"]),
+        f"{jump['user']}@{jump['host']}",
+        " ".join(shlex.quote(part) for part in remote_cmd),
+    ]
+    return ssh_cmd
+
+
+def run_curl(
+    url: str,
+    *,
+    timeout: int,
+    jump: dict[str, Any] | None,
+    username: str | None = None,
+    password: str | None = None,
+) -> dict[str, Any]:
+    curl_cmd = [
+        "curl",
+        "-sk",
+        "--connect-timeout",
+        str(timeout),
+        "--max-time",
+        str(max(timeout + 10, 15)),
+        "-w",
+        "\n__SPINE_HTTP_STATUS__=%{http_code}\n",
+    ]
+    if username and password:
+        curl_cmd.extend(["-u", f"{username}:{password}"])
+    curl_cmd.append(url)
+
+    proc = run(build_ssh_cmd(jump, curl_cmd, timeout) if jump else curl_cmd)
+    stdout = proc.stdout or ""
+    body = stdout
+    http_status: int | None = None
+
+    marker = "\n__SPINE_HTTP_STATUS__="
+    if marker in stdout:
+        body, trailer = stdout.rsplit(marker, 1)
+        try:
+            http_status = int(trailer.strip().splitlines()[0])
+        except Exception:
+            http_status = None
+
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "http_status": http_status,
+        "body": body.strip(),
+        "stderr": (proc.stderr or "").strip(),
+    }
+
+
+def run_ping(host: str, *, timeout: int, jump: dict[str, Any] | None) -> bool:
+    if not host or shutil.which("ping") is None:
+        return False
+    ping_cmd = ["ping", "-c", "1", "-W", str(timeout), host]
+    proc = run(build_ssh_cmd(jump, ping_cmd, timeout) if jump else ping_cmd)
+    return proc.returncode == 0
+
+
+def parse_json_blob(blob: str) -> dict[str, Any] | None:
+    if not blob:
+        return None
+    try:
+        data = json.loads(blob)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def get_nested(data: dict[str, Any] | None, path: list[str], default: Any = None) -> Any:
+    cur: Any = data
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+    return cur
+
+
+def normalize_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def collect_temperature_summary(thermal: dict[str, Any] | None) -> list[str]:
+    if not thermal:
+        return []
+    values = thermal.get("Temperatures")
+    if not isinstance(values, list):
+        return []
+    summary: list[str] = []
+    interesting = ("Inlet", "Exhaust", "CPU", "System Board")
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        name = normalize_text(item.get("Name"))
+        reading = item.get("ReadingCelsius")
+        if not name or reading in (None, ""):
+            continue
+        if any(token.lower() in name.lower() for token in interesting):
+            summary.append(f"{name} {reading}C")
+    return summary[:8]
+
+
+def service_root_recognized(service_root: dict[str, Any] | None) -> bool:
+    if not service_root:
+        return False
+    if normalize_text(service_root.get("RedfishVersion")):
+        return True
+    if normalize_text(service_root.get("@odata.type")):
+        return True
+    return False
+
+
+def resolve_credentials(args: argparse.Namespace) -> tuple[str, str | None, str]:
+    user = normalize_text(args.username) or normalize_text(os.environ.get("IDRAC_ADMIN_USER")) or "root"
+    password = normalize_text(args.password) or normalize_text(os.environ.get("IDRAC_ADMIN_PASSWORD"))
+    source = "env" if password else "none"
+
+    if password:
+        return user, password, source
+
+    if INFISICAL_AGENT.is_file() and os.access(INFISICAL_AGENT, os.X_OK):
+        inf_user = run([str(INFISICAL_AGENT), "get", "infrastructure", "prod", "IDRAC_ADMIN_USER"])
+        inf_pass = run([str(INFISICAL_AGENT), "get", "infrastructure", "prod", "IDRAC_ADMIN_PASSWORD"])
+        resolved_user = normalize_text(inf_user.stdout)
+        resolved_pass = normalize_text(inf_pass.stdout)
+        if resolved_pass:
+            return resolved_user or user, resolved_pass, "infisical"
+
+    return user, None, source
+
+
+def render_human(result: dict[str, Any]) -> str:
+    target = result["target"]
+    access = result["access"]
+    recognition = result["recognition"]
+    identity = result["identity"]
+    health = result["health"]
+    lines = [
+        "baremetal.idrac.discover",
+        f"target:       {target['label']}",
+        f"host:         {target['resolved_host']}",
+        f"access_path:  {access['access_path']}",
+        f"probe_via:    {access['probe_via'] or 'none'}",
+        f"reachable:    {'yes' if recognition['reachable'] else 'no'}",
+        f"recognizable: {'yes' if recognition['recognized_as_idrac'] else 'no'}",
+        f"auth:         {recognition['credential_status']}",
+        f"power:        {health['power_state'] or 'unknown'}",
+        f"health:       {health['system_health'] or health['manager_health'] or 'unknown'}",
+        f"hostname:     {identity['hostname'] or 'unknown'}",
+        f"manufacturer: {identity['manufacturer'] or 'unknown'}",
+        f"model:        {identity['model'] or 'unknown'}",
+        f"service_tag:  {identity['service_tag'] or 'unknown'}",
+        f"memory_gib:   {identity['memory_gib'] if identity['memory_gib'] is not None else 'unknown'}",
+        f"processors:   {identity['processor_count'] or '?'}x {identity['processor_model'] or 'unknown'}",
+        f"firmware:     {identity['firmware_version'] or 'unknown'}",
+    ]
+    temps = health["temperatures"]
+    if temps:
+        lines.append(f"temps:        {', '.join(temps)}")
+    lines.append(f"status:       {result['status']}")
+    return "\n".join(lines)
+
+
+def render_legacy(result: dict[str, Any]) -> str:
+    target = result["target"]
+    access = result["access"]
+    identity = result["identity"]
+    health = result["health"]
+    recognition = result["recognition"]
+
+    lines = [
+        "idrac.health.status",
+        f"host: {target['label']}",
+        f"access_path: {access['access_path']}",
+        f"recovery_access: {access['recovery_access'] or 'unspecified'}",
+        "",
+    ]
+
+    if recognition["reachable"]:
+        lines.extend(
+            [
+                f"power:      {health['power_state'] or 'Unknown'}",
+                f"health:     {health['system_health'] or health['manager_health'] or 'Unknown'}",
+                f"hostname:   {identity['hostname'] or 'Unknown'}",
+                f"memory:     {identity['memory_gib'] if identity['memory_gib'] is not None else 'Unknown'} GB",
+                f"processors: {identity['processor_count'] or '?'}x {identity['processor_model'] or 'Unknown'}",
+                f"source:     {recognition['source']}",
+            ]
+        )
+        if health["temperatures"]:
+            lines.append(f"temps:      {', '.join(health['temperatures'])}")
+        lines.append(f"status:     {result['status']}")
+    else:
+        lines.extend(
+            [
+                "reachable:  no",
+                f"note:       host unreachable (access_path={access['access_path']})",
+                f"status:     {result['status']}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Generic read-only Dell iDRAC discovery rail.")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--target-id", default="", help="Governed ssh.targets ID for a BMC target")
+    group.add_argument("--target-ip", default="", help="Direct BMC IP when no target ID exists yet")
+    parser.add_argument("--probe-via", default="", help="Optional governed SSH target to use as a jump host")
+    parser.add_argument("--username", default="", help="Override iDRAC username")
+    parser.add_argument("--password", default="", help="Override iDRAC password")
+    parser.add_argument("--timeout", type=int, default=5, help="Network timeout in seconds")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    parser.add_argument("--legacy-text", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+
+    for dep in ("curl", "ssh", "python3"):
+        if shutil.which(dep) is None:
+            stop(f"missing dependency: {dep}")
+
+    binding = load_yaml(SSH_BINDING)
+    ssh_root = binding.get("ssh")
+    if not isinstance(ssh_root, dict):
+        stop(f"unexpected ssh binding shape in {SSH_BINDING}")
+    defaults = ssh_root.get("defaults") if isinstance(ssh_root.get("defaults"), dict) else {}
+    targets_list = ssh_root.get("targets") if isinstance(ssh_root.get("targets"), list) else []
+    targets = {str(item.get("id")): item for item in targets_list if isinstance(item, dict) and item.get("id")}
+
+    binding_entry: dict[str, Any] | None = None
+    target_id = normalize_text(args.target_id)
+    if target_id:
+        binding_entry = targets.get(target_id)
+        if not binding_entry:
+            stop(f"target id not found in {SSH_BINDING}: {target_id}")
+
+    target_host = normalize_text(args.target_ip)
+    if binding_entry is not None:
+        target_host = normalize_text(binding_entry.get("host"))
+    if not target_host:
+        stop("target host could not be resolved")
+
+    probe_via = normalize_text(args.probe_via) or normalize_text((binding_entry or {}).get("probe_via"))
+    recovery_access = normalize_text((binding_entry or {}).get("recovery_access"))
+    description = normalize_text((binding_entry or {}).get("description"))
+    site = normalize_text((binding_entry or {}).get("site"))
+    tags = (binding_entry or {}).get("tags") if isinstance((binding_entry or {}).get("tags"), list) else []
+
+    label = target_host
+    if target_id and target_host:
+        label = f"{target_id} ({target_host})"
+
+    username, password, credential_source = resolve_credentials(args)
+    credential_status = "present" if password else "missing"
+
+    service_root_url = f"https://{target_host}/redfish/v1"
+    system_url = f"{service_root_url}/Systems/System.Embedded.1"
+    manager_url = f"{service_root_url}/Managers/iDRAC.Embedded.1"
+    thermal_url = f"{service_root_url}/Chassis/System.Embedded.1/Thermal"
+
+    direct_root = run_curl(service_root_url, timeout=args.timeout, jump=None)
+    direct_ping = run_ping(target_host, timeout=args.timeout, jump=None)
+
+    jump = resolve_jump(probe_via, targets, defaults, args.timeout) if probe_via else None
+    jump_root: dict[str, Any] | None = None
+    jump_ping = False
+    if jump:
+        jump_root = run_curl(service_root_url, timeout=args.timeout, jump=jump)
+        jump_ping = run_ping(target_host, timeout=args.timeout, jump=jump)
+
+    access_path = "unreachable"
+    chosen_jump: dict[str, Any] | None = None
+    service_root_result = direct_root
+    ping_reachable = direct_ping
+
+    direct_reachable = direct_root.get("http_status") not in (None, 0) or direct_ping
+    jump_reachable = bool(jump_root and (jump_root.get("http_status") not in (None, 0) or jump_ping))
+
+    if direct_reachable:
+        access_path = "direct_lan"
+    elif jump_reachable:
+        access_path = f"jump_via_{probe_via}"
+        chosen_jump = jump
+        service_root_result = jump_root or direct_root
+        ping_reachable = jump_ping
+
+    service_root_json = parse_json_blob(str(service_root_result.get("body") or ""))
+    recognized = service_root_recognized(service_root_json)
+
+    manager_result: dict[str, Any] | None = None
+    system_result: dict[str, Any] | None = None
+    thermal_result: dict[str, Any] | None = None
+
+    if access_path != "unreachable" and password:
+        manager_result = run_curl(manager_url, timeout=args.timeout, jump=chosen_jump, username=username, password=password)
+        system_result = run_curl(system_url, timeout=args.timeout, jump=chosen_jump, username=username, password=password)
+        thermal_result = run_curl(thermal_url, timeout=args.timeout, jump=chosen_jump, username=username, password=password)
+
+        auth_statuses = {
+            manager_result.get("http_status"),
+            system_result.get("http_status"),
+            thermal_result.get("http_status"),
+        }
+        if 401 in auth_statuses or 403 in auth_statuses:
+            credential_status = "auth_failed"
+        elif any(status and status < 400 for status in auth_statuses if isinstance(status, int)):
+            credential_status = "authenticated"
+
+    manager_json = parse_json_blob(str((manager_result or {}).get("body") or ""))
+    system_json = parse_json_blob(str((system_result or {}).get("body") or ""))
+    thermal_json = parse_json_blob(str((thermal_result or {}).get("body") or ""))
+
+    if normalize_text(get_nested(manager_json, ["Model"])) or normalize_text(get_nested(system_json, ["Manufacturer"])):
+        recognized = True
+
+    identity = {
+        "hostname": normalize_text(get_nested(system_json, ["HostName"])),
+        "manufacturer": normalize_text(get_nested(system_json, ["Manufacturer"])),
+        "model": normalize_text(get_nested(system_json, ["Model"])),
+        "service_tag": normalize_text(get_nested(system_json, ["SKU"])) or normalize_text(get_nested(system_json, ["SerialNumber"])),
+        "serial_number": normalize_text(get_nested(system_json, ["SerialNumber"])),
+        "uuid": normalize_text(get_nested(system_json, ["UUID"])),
+        "memory_gib": get_nested(system_json, ["MemorySummary", "TotalSystemMemoryGiB"]),
+        "processor_count": get_nested(system_json, ["ProcessorSummary", "Count"]),
+        "processor_model": normalize_text(get_nested(system_json, ["ProcessorSummary", "Model"])),
+        "bios_version": normalize_text(get_nested(system_json, ["BiosVersion"])),
+        "firmware_version": normalize_text(get_nested(manager_json, ["FirmwareVersion"])),
+        "manager_model": normalize_text(get_nested(manager_json, ["Model"])),
+    }
+
+    health = {
+        "power_state": normalize_text(get_nested(system_json, ["PowerState"])),
+        "system_health": normalize_text(get_nested(system_json, ["Status", "HealthRollup"])) or normalize_text(get_nested(system_json, ["Status", "Health"])),
+        "manager_health": normalize_text(get_nested(manager_json, ["Status", "HealthRollup"])) or normalize_text(get_nested(manager_json, ["Status", "Health"])),
+        "temperatures": collect_temperature_summary(thermal_json),
+    }
+
+    reachable = access_path != "unreachable"
+    if not reachable:
+        status = "DOWN"
+    elif recognized and credential_status == "authenticated":
+        status = "OK"
+    elif recognized:
+        status = "LIMITED"
+    else:
+        status = "UNRECOGNIZED"
+
+    result = {
+        "capability": "baremetal.idrac.discover",
+        "status": status,
+        "target": {
+            "label": label,
+            "input_mode": "target_id" if target_id else "target_ip",
+            "target_id": target_id,
+            "resolved_host": target_host,
+            "binding_present": binding_entry is not None,
+            "description": description,
+            "site": site,
+            "tags": tags,
+        },
+        "access": {
+            "access_path": access_path,
+            "probe_via": probe_via,
+            "jump_host": (jump or {}).get("host"),
+            "jump_host_id": (jump or {}).get("id"),
+            "jump_host_path": (jump or {}).get("path"),
+            "recovery_access": recovery_access,
+            "ping_reachable": ping_reachable,
+            "service_root_http_status": service_root_result.get("http_status"),
+            "service_root_exit_code": service_root_result.get("exit_code"),
+        },
+        "recognition": {
+            "reachable": reachable,
+            "redfish_service_root_reachable": service_root_result.get("http_status") not in (None, 0),
+            "redfish_service_root_parsed": service_root_json is not None,
+            "recognized_as_idrac": recognized,
+            "credential_source": credential_source,
+            "credential_status": credential_status,
+            "source": "redfish",
+        },
+        "identity": identity,
+        "health": health,
+        "artifacts": {
+            "service_root_http_status": service_root_result.get("http_status"),
+            "manager_http_status": (manager_result or {}).get("http_status"),
+            "system_http_status": (system_result or {}).get("http_status"),
+            "thermal_http_status": (thermal_result or {}).get("http_status"),
+        },
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=False))
+    elif args.legacy_text:
+        print(render_legacy(result))
+    else:
+        print(render_human(result))
+
+    return 0 if status == "OK" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
