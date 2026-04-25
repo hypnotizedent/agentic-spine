@@ -36,6 +36,7 @@ EVIDENCE_ROOT = Path(
         str(Path.home() / "code" / ".evidence" / "spine"),
     )
 )
+SURFACE_OUTPUT_DIR = STATE_ROOT / "operator-surface"
 
 TEMPORAL_NOW_SECONDS = 6 * 60 * 60
 TEMPORAL_RECENT_SECONDS = 72 * 60 * 60
@@ -79,11 +80,59 @@ def _read_scope_frontmatter(path: str | Path) -> dict:
     end = text.find("\n---", 3)
     if end < 0:
         return {}
+    data: dict[str, str] = {}
+    for raw in text[3:end].strip().splitlines():
+        if ":" not in raw:
+            continue
+        key, value = raw.split(":", 1)
+        data[key.strip()] = value.strip().strip('"').strip("'")
+    return data
+
+
+def _load_previous_operator_payload() -> dict:
+    path = SURFACE_OUTPUT_DIR / "payload.json"
     try:
-        import yaml
-        return yaml.safe_load(text[3:end]) or {}
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _count_commits_since(last_generated_utc: str) -> int:
+    if not last_generated_utc:
+        return 0
+    out, ok = _run(["git", "rev-list", "--count", f"--since={last_generated_utc}", "HEAD"])
+    if not ok:
+        return 0
+    try:
+        return int(out.strip() or "0")
+    except ValueError:
+        return 0
+
+
+def collect_continuity(previous_payload: dict, current_loops: list[dict]) -> dict:
+    last_generated_utc = str(previous_payload.get("generated_utc") or "")
+    prev_loops = previous_payload.get("active_loops", {}).get("items", []) if isinstance(previous_payload.get("active_loops"), dict) else []
+    prev_status = {
+        str(item.get("id") or ""): str(item.get("status") or "")
+        for item in prev_loops
+        if isinstance(item, dict) and item.get("id")
+    }
+    curr_status = {
+        str(item.get("id") or ""): str(item.get("status") or "")
+        for item in current_loops
+        if item.get("id")
+    }
+    changed_ids = sorted(
+        loop_id
+        for loop_id in (set(prev_status) | set(curr_status))
+        if prev_status.get(loop_id) != curr_status.get(loop_id)
+    )
+    return {
+        "last_generated_utc": last_generated_utc,
+        "commits_since": _count_commits_since(last_generated_utc),
+        "loops_changed": changed_ids,
+    }
 
 
 def _yaml_load(path: Path) -> dict | list | None:
@@ -1311,6 +1360,7 @@ def build_payload(compact: bool = False) -> dict:
     status = _run_json([str(REPO / "bin" / "ops"), "status", "--json"])
     refs = collect_git_refs()
     generated_utc = utcnow()
+    previous_payload = _load_previous_operator_payload()
     operator_vision = collect_operator_vision()
     projection_freshness = collect_projection_freshness()
     attention = collect_attention(status, refs)
@@ -1342,10 +1392,12 @@ def build_payload(compact: bool = False) -> dict:
         if parts and parts[-1].startswith("LOOP-"):
             router_primary_id = parts[-1]
     active_loops["focus"] = _select_focus(active_loops.get("items", []), router_primary_id)
+    continuity = collect_continuity(previous_payload, active_loops.get("items", []))
 
     payload: dict = {
-        "version": 3,
+        "version": 4,
         "generated_utc": generated_utc,
+        "continuity": continuity,
         "operator_vision": operator_vision,
         "spine_now": collect_spine_now(status),
         "temporal_truth": collect_temporal_truth(status),

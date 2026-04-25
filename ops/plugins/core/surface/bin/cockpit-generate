@@ -67,6 +67,22 @@ def _temporal_badge(state: str) -> str:
     )
 
 
+def _continuity_summary(continuity: dict) -> tuple[str, bool]:
+    last_generated = str(continuity.get("last_generated_utc") or "")
+    commits_since = int(continuity.get("commits_since", 0) or 0)
+    loops_changed = list(continuity.get("loops_changed", []) or [])
+    if not last_generated:
+        return "First check from this board", False
+    if commits_since == 0 and not loops_changed:
+        return "Nothing changed since last check", False
+    parts: list[str] = []
+    if commits_since:
+        parts.append(f"{commits_since} commit{'s' if commits_since != 1 else ''}")
+    if loops_changed:
+        parts.append(f"{len(loops_changed)} loop{'s' if len(loops_changed) != 1 else ''} changed")
+    return " \u00b7 ".join(parts), True
+
+
 # ---------------------------------------------------------------------------
 # Section builders — consume the shared payload
 # ---------------------------------------------------------------------------
@@ -116,22 +132,18 @@ def board_section(payload: dict) -> str:
     loops_data = payload.get("active_loops", {})
     loops = loops_data.get("items", [])
     focus = loops_data.get("focus", {}) if isinstance(loops_data.get("focus"), dict) else {}
-    handoffs = payload.get("active_handoffs", {}).get("count", 0)
+    handoffs = int(payload.get("active_handoffs", {}).get("count", 0) or 0)
     attention = payload.get("attention", [])
     posture = payload.get("current_posture", {}) if isinstance(payload.get("current_posture"), dict) else {}
     aperture = payload.get("aperture", {}) if isinstance(payload.get("aperture"), dict) else {}
+    continuity = payload.get("continuity", {}) if isinstance(payload.get("continuity"), dict) else {}
     ov = payload.get("operator_vision", {})
     mhw = ov.get("my_human_work_now", {}) if isinstance(ov, dict) else {}
-    waiting_data = ov.get("what_is_waiting_on_me", {}) if isinstance(ov, dict) else {}
 
     pending_ingress = int(mhw.get("pending_ingress", 0) or 0)
-    float_risk = int(mhw.get("float_risk_count", 0) or 0)
-    parked_without = int(waiting_data.get("parked_without_lifecycle", 0) or 0)
-    parked_inbox = int(work.get("inbox_lanes", {}).get("parked", 0) or 0)
-
-    # Split attention: real operator asks vs system noise (repo dirty, etc.)
-    real_attention = [a for a in attention if a.get("type") != "repo_dirty"]
-    system_notes = [a for a in attention if a.get("type") == "repo_dirty"]
+    actionable_attention = [a for a in attention if a.get("priority") in {"high", "medium"}]
+    waiting_count = handoffs + len(actionable_attention) + pending_ingress
+    continuity_text, continuity_active = _continuity_summary(continuity)
 
     # Engine status
     verify = spine.get("verify_status", "unknown")
@@ -139,15 +151,13 @@ def board_section(payload: dict) -> str:
     gaps = int(work.get("open_gaps", 0) or 0)
     waves = int(work.get("active_waves", 0) or 0)
 
-    if verify == "pass" and anomalies == 0:
-        engine_css = "grn"
-        engine_label = "All clear"
-    elif verify != "pass":
+    healthy_engine = verify == "pass" and anomalies == 0 and gaps == 0 and waves == 0
+    if verify != "pass":
         engine_css = "red"
-        engine_label = "Degraded"
+        engine_label = "Engine degraded"
     else:
         engine_css = "ylw"
-        engine_label = "Mixed signals"
+        engine_label = "Engine mixed"
 
     engine_bits = f"verify {verify} \u00b7 {gaps} gaps \u00b7 {waves} waves \u00b7 {anomalies} anomalies"
 
@@ -161,10 +171,7 @@ def board_section(payload: dict) -> str:
         sys_parts.append("mirror diverged")
     sys_line = ""
     if sys_parts:
-        sys_line = (
-            f'<div style="font-size:.5rem;color:var(--t);opacity:.6;margin-top:.25rem">'
-            f'{_h(" \u00b7 ".join(sys_parts))}</div>'
-        )
+        sys_line = f'<div class="engine-subtle-note">{_h(" \u00b7 ".join(sys_parts))}</div>'
 
     # NOW zone ��� hero loop(s)
     if loops:
@@ -176,10 +183,6 @@ def board_section(payload: dict) -> str:
         secondaries = [l for l in loops if l.get("id") in secondary_ids]
 
         loop_title = primary.get("title") or primary.get("id") or "Open loop"
-        loop_meta = " \u00b7 ".join(bit for bit in (
-            primary.get("status"), primary.get("readiness"),
-            primary.get("horizon"), primary.get("severity"),
-        ) if bit)
 
         # Why line (humanized)
         why_human = str(focus.get("why_human", "") or "").strip()
@@ -187,14 +190,14 @@ def board_section(payload: dict) -> str:
         if why_human:
             why_html = f'<div class="focus-why">{_h(why_human)}</div>'
 
-        # Confidence badge (only show when not high)
+        # Confidence badge (keep only low confidence; medium is noise)
         confidence = str(focus.get("confidence", "") or "").strip().lower()
         confidence_html = ""
-        if confidence and confidence != "high":
-            confidence_css = confidence if confidence in ("medium", "low") else "unknown"
+        if confidence == "low":
             confidence_html = (
-                f'<span class="focus-confidence focus-confidence-{confidence_css}">'
-                f'{_h(confidence)} confidence</span>'
+                '<div class="hero-loop-meta-wrap">'
+                '<span class="focus-confidence focus-confidence-low">low confidence</span>'
+                '</div>'
             )
 
         # Next move — operator intent primary, machine suggestion fallback only
@@ -234,10 +237,7 @@ def board_section(payload: dict) -> str:
         hero_html = f'''
         <div class="hero-loop">
           <div class="hero-loop-title">{_h(loop_title)}</div>
-          <div class="hero-loop-meta-wrap">
-            <div class="hero-loop-meta">{_h(loop_meta)}</div>
-            {confidence_html}
-          </div>
+          {confidence_html}
           {why_html}
           {next_move_html}
           {constraint_html}
@@ -250,7 +250,7 @@ def board_section(payload: dict) -> str:
             for sl in secondaries[:5]:
                 sl_title = sl.get("title") or sl.get("id") or "loop"
                 sl_meta = " \u00b7 ".join(bit for bit in (
-                    sl.get("status"), sl.get("readiness"),
+                    sl.get("status"), sl.get("readiness"), sl.get("horizon"), sl.get("severity"),
                 ) if bit)
                 also_items.append(
                     f'<div class="also-live-item">'
@@ -279,7 +279,15 @@ def board_section(payload: dict) -> str:
         )
         now_css = "zone-now zone-idle"
 
-    engine_line = f'''
+    if healthy_engine:
+        engine_line = f'''
+    <div class="engine-line engine-line-ok">
+      <div class="engine-dot grn"></div>
+      <div class="engine-text">Engine ok</div>
+      {sys_line}
+    </div>'''
+    else:
+        engine_line = f'''
     <div class="engine-line">
       <div class="engine-dot {engine_css}"></div>
       <div class="engine-text">{_h(engine_label)} \u2014 {_h(engine_bits)}</div>
@@ -309,8 +317,8 @@ def board_section(payload: dict) -> str:
     aperture_html = ""
     if aperture.get("available"):
         ap_name = _h(aperture.get("name", ""))
-        legal_items = aperture.get("legal", [])
-        illegal_items = aperture.get("illegal", [])
+        legal_items = aperture.get("legal", [])[:4]
+        illegal_items = aperture.get("illegal", [])[:3]
         legal_html = "".join(
             f'<div class="aperture-item aperture-legal">{_h(item)}</div>'
             for item in legal_items
@@ -333,49 +341,19 @@ def board_section(payload: dict) -> str:
       {engine_line}
       {posture_html}
       {aperture_html}
+      <div class="status-ribbon">
+        <a class="ribbon-badge {"ribbon-badge-active" if waiting_count else "ribbon-badge-ok"}" href="#waiting-drilldown">{waiting_count} waiting</a>
+        <a class="ribbon-badge {"ribbon-badge-active" if continuity_active else "ribbon-badge-ok"}" href="#changes-drilldown">{_h(continuity_text)}</a>
+        <a class="ribbon-badge {"ribbon-badge-ok" if healthy_engine else "ribbon-badge-active"}" href="#infrastructure-drilldown">{"engine ok" if healthy_engine else "engine needs attention"}</a>
+        <a class="ribbon-badge {"ribbon-badge-active" if refs.get("is_dirty") else "ribbon-badge-ok"}" href="#infrastructure-drilldown">{"repo dirty" if refs.get("is_dirty") else "repo clean"}</a>
+        <a class="ribbon-badge {"ribbon-badge-ok" if refs.get("local_full") == refs.get("origin_full") and refs.get("github_ok") and refs.get("local_head") == refs.get("github_head") else "ribbon-badge-active"}" href="#infrastructure-drilldown">{_h("origin synced" if refs.get("local_full") == refs.get("origin_full") else "origin diverged")} · {_h("mirror synced" if refs.get("github_ok") and refs.get("local_head") == refs.get("github_head") else ("mirror unavailable" if not refs.get("github_ok") else "mirror diverged"))}</a>
+      </div>
     </div>'''
 
     # WAITING zone — only real operator asks, not system noise
-    needs_now = handoffs + len(real_attention) + pending_ingress
-    if needs_now > 0:
-        wait_items = []
-        if handoffs:
-            wait_items.append(f'<div class="zone-item"><div class="zone-item-dot active"></div><span class="zone-item-count">{handoffs}</span><span class="zone-item-text">handoff{"s" if handoffs != 1 else ""} from agents</span></div>')
-        if real_attention:
-            wait_items.append(f'<div class="zone-item"><div class="zone-item-dot active"></div><span class="zone-item-count">{len(real_attention)}</span><span class="zone-item-text">surfaced attention</span></div>')
-        if pending_ingress:
-            wait_items.append(f'<div class="zone-item"><div class="zone-item-dot active"></div><span class="zone-item-count">{pending_ingress}</span><span class="zone-item-text">pending ingress</span></div>')
-        wait_body = "\n".join(wait_items)
-    else:
-        wait_body = '<div class="zone-calm">Nothing waiting on you</div>'
-
-    waiting_zone = f'''
-    <div class="zone zone-waiting{" zone-empty" if needs_now == 0 else ""}">
-      <div class="zone-label">Waiting on you</div>
-      {wait_body}
-    </div>'''
-
-    # BACKGROUND zone — only show items with a governance obligation
-    # (review SLA, activation trigger). Historical residue without an
-    # actionable hook belongs in drilldown, not the board.
-    # TODO: when parked-item lifecycle gains review_due dates, surface
-    # items whose review is overdue or imminent here.
-    bg_body = '<div class="zone-calm">No background residue</div>'
-    bg_total = 0
-
-    bg_zone = f'''
-    <div class="zone zone-background{" zone-empty" if bg_total == 0 else ""}">
-      <div class="zone-label">Background</div>
-      {bg_body}
-    </div>'''
-
     return f'''
     <div class="board">
       {now_zone}
-      <div class="zone-row">
-        {waiting_zone}
-        {bg_zone}
-      </div>
     </div>'''
 
 
@@ -636,15 +614,65 @@ def attention_section(attention: list[dict]) -> str:
     return f'<div class="attn">{"".join(rows)}</div>'
 
 
-def timeline_section(log: list[dict]) -> str:
+def waiting_section(payload: dict) -> str:
+    active_handoffs = payload.get("active_handoffs", {}) if isinstance(payload.get("active_handoffs"), dict) else {}
+    handoff_items = active_handoffs.get("items", []) or []
+    operator_vision = payload.get("operator_vision", {}) if isinstance(payload.get("operator_vision"), dict) else {}
+    pending_ingress = int(operator_vision.get("my_human_work_now", {}).get("pending_ingress", 0) or 0)
+    attention_items = [
+        item for item in (payload.get("attention", []) or [])
+        if item.get("priority") in {"high", "medium"}
+    ]
+    total = int(active_handoffs.get("count", 0) or 0) + pending_ingress + len(attention_items)
+    rows: list[str] = []
+    if handoff_items:
+        for item in handoff_items[:5]:
+            summary = str(item.get("summary", "") or item.get("id", ""))
+            route = " → ".join(bit for bit in (item.get("from_role", ""), item.get("to_role", "")) if bit)
+            meta = " · ".join(bit for bit in (route, item.get("created_at_utc", "")) if bit)
+            rows.append(
+                f'<div class="attn-item"><div class="attn-dot y"></div>'
+                f'<div><div>{_h(summary)}</div><div class="waiting-meta">{_h(meta)}</div></div></div>'
+            )
+    if pending_ingress:
+        rows.append(
+            f'<div class="attn-item"><div class="attn-dot y"></div>'
+            f'<div><div>{pending_ingress} pending ingress</div>'
+            f'<div class="waiting-meta">awaiting membrane or classification</div></div></div>'
+        )
+    for item in attention_items[:5]:
+        color = "r" if item.get("priority") == "high" else "y"
+        rows.append(f'<div class="attn-item"><div class="attn-dot {color}"></div>{_h(item.get("summary", ""))}</div>')
+    if not rows:
+        rows.append('<div class="waiting-empty">Nothing waiting on you.</div>')
+    return f"""
+    <div class="sh">Waiting on You</div>
+    <details id="waiting-drilldown"{" open" if total else ""}>
+      <summary>Operator asks <span class="det-count">{total} active</span></summary>
+      <div class="det-body">{"".join(rows)}</div>
+    </details>"""
+
+
+def timeline_section(log: list[dict], continuity: dict) -> str:
     if not log:
-        return '<div class="sh">Recent Timeline</div><p style="font-size:.6rem;color:var(--t)">unavailable</p>'
+        return '<div class="sh">What Changed</div><p style="font-size:.6rem;color:var(--t)">unavailable</p>'
+    continuity_text, continuity_active = _continuity_summary(continuity)
+    loops_changed = list(continuity.get("loops_changed", []) or [])
     days: dict[str, list[dict]] = {}
     for entry in log:
         d = entry["date"]
         days.setdefault(d, []).append(entry)
 
     rows = []
+    if continuity_text:
+        rows.append(f'<div class="timeline-lead">{_h(continuity_text)}</div>')
+    if loops_changed:
+        rows.append(
+            '<div class="timeline-loop-changes">'
+            f'<div class="timeline-loop-label">loop status changes</div>'
+            + "".join(f'<div class="timeline-loop-item">{_h(loop_id)}</div>' for loop_id in loops_changed)
+            + '</div>'
+        )
     for day, commits in days.items():
         rows.append(f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;border-top:1px solid var(--b);margin-top:.25rem">{_h(day)}</div>')
         for c in commits:
@@ -656,9 +684,9 @@ def timeline_section(log: list[dict]) -> str:
             )
     body = "\n".join(rows)
     return f"""
-    <div class="sh">Recent Timeline</div>
-    <details>
-      <summary>Git History <span class="det-count">{len(log)} commits</span></summary>
+    <div class="sh">What Changed</div>
+    <details id="changes-drilldown"{" open" if continuity_active else ""}>
+      <summary>Timeline <span class="det-count">{len(log)} commits</span></summary>
       <div class="det-body">{body}</div>
     </details>"""
 
@@ -968,18 +996,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;ba
 .zone{background:var(--s);border:1px solid var(--b);border-radius:12px;padding:1.25rem 1.5rem;border-left:3px solid var(--b)}
 .zone-now{border-left-color:var(--grn);background:linear-gradient(135deg,rgba(52,211,153,.04),var(--s) 60%)}
 .zone-now.zone-idle{border-left-color:var(--t);background:var(--s)}
-.zone-waiting{border-left-color:var(--ylw)}
-.zone-background{border-left-color:var(--b2)}
 .zone-empty{opacity:.55}
 .zone-label{font-size:.5rem;font-weight:700;text-transform:uppercase;letter-spacing:.14em;margin-bottom:.75rem}
 .zone-now .zone-label{color:var(--grn)}
-.zone-waiting .zone-label{color:var(--ylw)}
-.zone-background .zone-label{color:var(--t)}
-.zone-row{display:grid;grid-template-columns:1fr 1fr;gap:.75rem}
 
 .hero-loop{margin-bottom:.35rem}
 .hero-loop-title{font-family:var(--m);font-size:.9rem;font-weight:700;color:var(--tb);line-height:1.3;overflow-wrap:break-word;word-break:break-word}
-.hero-loop-meta{font-family:var(--m);font-size:.55rem;color:var(--tm);margin-top:.35rem}
 .hero-loop-meta-wrap{display:flex;align-items:center;gap:.6rem;margin-top:.35rem;flex-wrap:wrap}
 .hero-loop-none{font-size:.7rem;color:var(--tm);font-style:italic}
 .hero-loop-cta-wrap{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap;margin-top:.75rem}
@@ -987,12 +1009,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;ba
 .hero-loop-cta:hover{background:rgba(34,211,238,.14);border-color:rgba(34,211,238,.42)}
 .hero-loop-cta-sub{font-size:.52rem;color:var(--t)}
 
-.engine-line{display:flex;align-items:center;gap:.5rem;padding-top:.65rem;border-top:1px solid rgba(26,35,50,.5);margin-top:.35rem}
+.engine-line{display:flex;align-items:center;gap:.5rem;padding-top:.65rem;border-top:1px solid rgba(26,35,50,.5);margin-top:.35rem;flex-wrap:wrap}
+.engine-line-ok{padding-top:.45rem}
 .engine-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
 .engine-dot.grn{background:var(--grn);box-shadow:0 0 6px rgba(52,211,153,.4)}
 .engine-dot.ylw{background:var(--ylw);box-shadow:0 0 6px rgba(251,191,36,.4)}
 .engine-dot.red{background:var(--red);box-shadow:0 0 6px rgba(248,113,113,.4)}
 .engine-text{font-size:.6rem;color:var(--tm)}
+.engine-subtle-note{font-size:.5rem;color:var(--t);opacity:.6;width:100%}
 
 .focus-why{font-size:.5rem;color:var(--tm);font-style:italic;line-height:1.45;margin-top:.35rem}
 .focus-confidence{display:inline-flex;align-items:center;padding:.18rem .4rem;border-radius:999px;font-size:.45rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
@@ -1000,10 +1024,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;ba
 .focus-confidence-low{background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.22);color:var(--red)}
 .focus-confidence-unknown{background:rgba(90,106,122,.12);border:1px solid rgba(90,106,122,.22);color:var(--t)}
 
-.next-move{margin-top:.5rem;padding:.4rem .6rem;background:rgba(52,211,153,.06);border-left:2px solid rgba(52,211,153,.35);border-radius:0 4px 4px 0}
+.next-move{margin-top:.65rem;padding:.65rem .8rem;background:rgba(52,211,153,.08);border-left:3px solid rgba(52,211,153,.55);border-radius:0 6px 6px 0}
 .next-move-suggested{background:rgba(90,106,122,.06);border-left-color:rgba(90,106,122,.3)}
 .next-move-label{display:block;font-size:.42rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t);margin-bottom:.15rem}
-.next-move-text{font-size:.52rem;color:var(--tb);line-height:1.4}
+.next-move-text{font-size:.58rem;color:var(--tb);line-height:1.45}
 
 .system-note{font-size:.46rem;color:var(--ylw);margin-top:.35rem;font-style:italic}
 
@@ -1029,6 +1053,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;ba
 .aperture-item::before{content:'';position:absolute;left:0;top:.38rem;width:4px;height:4px;border-radius:50%}
 .aperture-legal::before{background:var(--grn)}
 .aperture-illegal::before{background:var(--red);opacity:.6}
+
+.status-ribbon{display:flex;flex-wrap:wrap;gap:.45rem;margin-top:.7rem;padding-top:.65rem;border-top:1px solid rgba(26,35,50,.45)}
+.ribbon-badge{display:inline-flex;align-items:center;padding:.32rem .55rem;border:1px solid var(--b);border-radius:999px;background:rgba(14,20,31,.72);color:var(--tm);text-decoration:none;font-size:.48rem;font-weight:600;line-height:1.2}
+.ribbon-badge-ok{border-color:rgba(52,211,153,.16);color:var(--t)}
+.ribbon-badge-active{border-color:rgba(251,191,36,.32);color:var(--tb);background:rgba(251,191,36,.07)}
+.ribbon-badge:hover{border-color:var(--b2);color:var(--tb)}
 
 .zone-item{display:flex;align-items:center;gap:.5rem;padding:.25rem 0}
 .zone-item-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0;background:var(--t)}
@@ -1060,6 +1090,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;ba
 .attn-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
 .attn-dot.y{background:var(--ylw)}
 .attn-dot.r{background:var(--red)}
+.waiting-meta{font-size:.5rem;color:var(--t);margin-top:.1rem}
+.waiting-empty{font-size:.58rem;color:var(--tm);font-style:italic}
 
 /* Section headers */
 .sh{font-size:.55rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--t);margin-bottom:.5rem;margin-top:1.5rem;opacity:.6}
@@ -1089,6 +1121,10 @@ summary::after{content:'\25b8';font-size:.6rem;color:var(--t);transition:transfo
 details[open] summary::after{transform:rotate(90deg)}
 .det-count{font-family:var(--m);font-size:.6rem;color:var(--t);font-weight:400}
 .det-body{padding:0 1rem .75rem;max-height:500px;overflow-y:auto}
+.timeline-lead{font-size:.58rem;color:var(--tb);margin:.2rem 0 .65rem}
+.timeline-loop-changes{margin-bottom:.5rem;padding:.45rem .65rem;border:1px solid rgba(26,35,50,.45);border-radius:8px;background:rgba(14,20,31,.5)}
+.timeline-loop-label{font-size:.45rem;text-transform:uppercase;letter-spacing:.08em;color:var(--t);margin-bottom:.2rem}
+.timeline-loop-item{font-family:var(--m);font-size:.5rem;color:var(--tm);padding:.08rem 0}
 
 /* Commits */
 .commit{display:flex;align-items:baseline;gap:.5rem;padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
@@ -1168,7 +1204,6 @@ details[open] summary::after{transform:rotate(90deg)}
 
 @media (max-width:860px){
   .stats,.rel{grid-template-columns:repeat(2,1fr)}
-  .zone-row{grid-template-columns:1fr}
   .nr{flex-direction:column}
   .today-line{grid-template-columns:72px 1fr}
   .today-line-sub{grid-column:2}
@@ -1177,7 +1212,6 @@ details[open] summary::after{transform:rotate(90deg)}
 @media (max-width:560px){
   body{padding:1rem}
   .stats,.rel{grid-template-columns:1fr}
-  .zone-row{grid-template-columns:1fr}
   .top-bar{flex-direction:column;align-items:flex-start;gap:.35rem}
   .surface-nav{margin-top:.15rem}
   .top-bar .beacon{margin-left:0}
@@ -1516,28 +1550,8 @@ def operator_vision_section(ov: dict, directional_boundary: dict, temporal_stand
       <div class="det-body">{built_rows}</div>
     </details>"""
 
-    # What is waiting on me
-    waiting_html = ""
-    wait_items = waiting.get("items", [])
-    waiting_total = floats + pending_ingress
-    if wait_items or waiting_total > 0:
-        wait_rows = ""
-        for w in wait_items:
-            dot_cls = "y" if w.get("disposition") == "awaiting_classification" else "y"
-            wait_rows += (
-                f'<div class="attn-item"><div class="attn-dot {dot_cls}"></div>'
-                f'{_h(w["file"])} — {_h(w["detail"])}</div>'
-            )
-        if not wait_rows:
-            wait_rows = f'<div style="font-size:.6rem;color:var(--t)">{waiting_total} waiting item(s)</div>'
-        waiting_html = f"""
-    <details open>
-      <summary>Waiting on Operator <span class="det-count">{waiting_total} waiting</span></summary>
-      <div class="det-body">{wait_rows}</div>
-    </details>"""
-
     return f"""
-    <div class="sh">Contribution History</div>
+    <div class="sh">Operator Vision</div>
     {stats}
     {split_html}
     {temporal_html}
@@ -1545,11 +1559,11 @@ def operator_vision_section(ov: dict, directional_boundary: dict, temporal_stand
     {recent_html}
     {trace_html}
     {built_html}
-    {waiting_html}"""
+    """
 
 
-def generate() -> str:
-    p = build_payload(compact=False)
+def generate(payload: dict | None = None) -> str:
+    p = payload if isinstance(payload, dict) else build_payload(compact=False)
 
     caps_data = p.get("capabilities", {"caps": {}, "count": 0})
     inv_counts = p.get("invocation_counts", {})
@@ -1569,6 +1583,7 @@ def generate() -> str:
 
     # Build sections
     sec_board = board_section(p)
+    sec_waiting = waiting_section(p)
     sec_vision = operator_vision_section(
         p.get("operator_vision", {}),
         p.get("directional_boundary", {}),
@@ -1579,13 +1594,22 @@ def generate() -> str:
     sec_roles = node_role_card(p["node_roles"])
     sec_exec = execution_host_section(p["node_roles"])
     sec_comms = comms_incident_card(p["work_state"]["comms_queue"])
-    sec_attn = attention_section(p["attention"])
-    sec_timeline = timeline_section(git_log)
+    sec_timeline = timeline_section(git_log, p.get("continuity", {}))
     sec_caps = capability_atlas(caps_data, inv_counts)
     sec_gates = gate_watch(gates_data)
     sec_auth = authority_explorer(manifest_data)
     sec_work = work_state_section(p["work_state"], p.get("active_loops", {}), p.get("active_handoffs", {}))
     sec_release = release_posture(p["git_refs"])
+    sec_infra = (
+        '<section id="infrastructure-drilldown">'
+        '<details>'
+        '<summary>Infrastructure <span class="det-count">machine + projection + release posture</span></summary>'
+        '<div class="det-body">'
+        f'{sec_comms}{sec_fresh}{sec_temporal}{sec_roles}{sec_exec}{sec_release}'
+        '</div>'
+        '</details>'
+        '</section>'
+    )
     stamps_str = _h(" \u00b7 ".join(source_stamps))
 
     # Top-bar beacon
@@ -1610,7 +1634,7 @@ def generate() -> str:
   <div class="top-bar">
     <div class="top-id">
       <div class="top-eyebrow">Operator Surface Family</div>
-      <h1>Spine Cockpit</h1>
+      <h1>spine.ronny.works</h1>
     </div>
     <div class="surface-nav" aria-label="Operator surface tabs">
       <span class="surface-tab active">Board <span class="surface-tab-hint">you are here</span></span>
@@ -1625,21 +1649,16 @@ def generate() -> str:
   </div>
 
   <!-- Board: the glanceable operator surface -->
-  {sec_attn}
-  {sec_comms}
   {sec_board}
 
   <!-- Drilldown: everything else, collapsed -->
   <hr class="drilldown-sep">
   <div class="drilldown-label">Drilldown</div>
-  {sec_work}
-  {sec_vision}
-  {sec_fresh}
-  {sec_temporal}
-  {sec_roles}
-  {sec_exec}
-  {sec_release}
+  {sec_waiting}
   {sec_timeline}
+  <section id="workstate-drilldown"><div class="sh">Work State</div>{sec_work}</section>
+  {sec_vision}
+  {sec_infra}
   {sec_caps}
   {sec_gates}
   {sec_auth}
