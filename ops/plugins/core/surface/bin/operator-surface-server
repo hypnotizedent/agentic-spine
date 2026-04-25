@@ -115,15 +115,12 @@ def _render_page(title: str, body: str) -> str:
       border-radius:10px; padding:.75rem; font:inherit; font-size:16px;
     }}
     textarea {{ min-height:220px; resize:vertical; }}
-    .row {{ display:grid; grid-template-columns:1fr 1fr; gap:.75rem; }}
-    @media (max-width:500px) {{ .row {{ grid-template-columns:1fr; }} }}
     .btn {{
       display:block; width:100%; background:var(--c); color:#001017; border:none;
       border-radius:10px; padding:.9rem 1rem; font-weight:700; font-size:1rem;
       cursor:pointer; margin-top:1rem; -webkit-appearance:none;
     }}
     .btn:disabled {{ opacity:.5; cursor:not-allowed; }}
-    .note {{ margin-top:1rem; font-size:.8rem; color:var(--m); }}
     .ok {{ border-color:rgba(52,211,153,.35); }}
     .err {{ border-color:rgba(248,113,113,.35); }}
     .flash {{
@@ -162,42 +159,29 @@ def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> 
     content_type = values.get("content_type", "note")
     hint = _H(values.get("operator_hint", ""))
     raw_content = _H(values.get("raw_content", ""))
-    source_app = _H(values.get("source_app", "browser"))
     body = f"""
     <div class="nav">
       <a href="/submit"><strong>Submit</strong></a>
-      <a href="/ingress">My Submissions</a>
-      <a href="/">Cockpit</a>
+      <a href="/ingress">Submissions</a>
     </div>
     <div class="card {'err' if error else ''}">
-      <h1>Operator Vision Submit</h1>
-      <p class="meta">Non-authoritative ingress. Preserves raw input. Does not execute or create packets.</p>
+      <h1>Submit</h1>
       {error_html}
       <form method="post" action="/submit" id="submitForm">
-        <div class="row">
-          <div>
-            <label for="content_type">Content Type</label>
-            <select name="content_type" id="content_type">
-              <option value="note" {'selected' if content_type == 'note' else ''}>note</option>
-              <option value="conversation" {'selected' if content_type == 'conversation' else ''}>conversation</option>
-              <option value="url" {'selected' if content_type == 'url' else ''}>url</option>
-              <option value="voice_transcript" {'selected' if content_type == 'voice_transcript' else ''}>voice_transcript</option>
-            </select>
-          </div>
-          <div>
-            <label for="source_app">Source App</label>
-            <input type="text" name="source_app" id="source_app" value="{source_app}">
-          </div>
-        </div>
-        <label for="operator_hint">Operator Hint (optional)</label>
+        <input type="hidden" name="source_app" value="browser">
+        <label for="content_type">Type</label>
+        <select name="content_type" id="content_type">
+          <option value="note" {'selected' if content_type == 'note' else ''}>note</option>
+          <option value="conversation" {'selected' if content_type == 'conversation' else ''}>conversation</option>
+          <option value="url" {'selected' if content_type == 'url' else ''}>url</option>
+          <option value="voice_transcript" {'selected' if content_type == 'voice_transcript' else ''}>voice_transcript</option>
+        </select>
+        <label for="operator_hint">Hint (optional)</label>
         <input type="text" name="operator_hint" id="operator_hint" value="{hint}" placeholder="One-line intent signal">
-        <label for="raw_content">Raw Content</label>
+        <label for="raw_content">Content</label>
         <textarea name="raw_content" id="raw_content" placeholder="Paste thought, note, conversation, transcript, or URL here.">{raw_content}</textarea>
-        <button class="btn" type="submit" id="submitBtn">Submit To Spine</button>
+        <button class="btn" type="submit" id="submitBtn">Submit</button>
       </form>
-      <div class="note">
-        After submit, view <a href="/ingress">your submissions</a> to confirm readback.
-      </div>
     </div>
     <script>
     (function(){{
@@ -227,7 +211,7 @@ def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> 
         }}).catch(function(err){{
           clearTimeout(timer);
           btn.disabled=false;
-          btn.textContent='Submit To Spine';
+          btn.textContent='Submit';
           var msg=err.name==='AbortError'?'Request timed out. Tap to retry.':err.message||'Network error. Tap to retry.';
           var flash=document.createElement('div');
           flash.className='flash err';
@@ -247,56 +231,28 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
     """Phone-readable readback of recent operator ingress objects."""
     data = oi.list_operator_ingress(state_root=state_root, limit=20)
     items = data.get("items", [])
-    count = data.get("count", 0)
 
     success_html = ""
     if submitted_id:
-        # Find the just-submitted item to show its details in the flash
-        submitted_item = next((i for i in items if str(i.get("ingress_id", "")) == submitted_id), None)
-        if submitted_item:
-            si_ctype = _H(str(submitted_item.get("content_type", "")))
-            si_disp = _H(str(submitted_item.get("disposition", "awaiting_classification")))
-            si_time = _H(str(submitted_item.get("submitted_at", "")))
-            success_html = (
-                f'<div class="flash ok">'
-                f'Submitted <strong>{_H(submitted_id)}</strong><br>'
-                f'<span style="font-size:.8rem;opacity:.85">{si_ctype} &middot; {si_disp} &middot; {si_time}</span>'
-                f'</div>'
-            )
-        else:
-            success_html = f'<div class="flash ok">Submitted <strong>{_H(submitted_id)}</strong> — preserved in runtime, awaiting classification.</div>'
+        success_html = f'<div class="flash ok">Accepted: <strong>{_H(submitted_id)}</strong></div>'
 
     rows = ""
     for item in items:
         iid = _H(str(item.get("ingress_id", "")))
         state = str(item.get("lifecycle_state", "submitted"))
-        disposition = _H(str(item.get("disposition", "")))
-        detail = _H(str(item.get("disposition_detail", "")))
         hint = _H(str(item.get("operator_hint", "")))
         ctype = _H(str(item.get("content_type", "")))
         submitted = _H(str(item.get("submitted_at", "")))
-        device = _H(str(item.get("source_device", "")))
-        app = _H(str(item.get("source_app", "")))
-        classification = _H(str(item.get("classification", "")))
-        next_stage = _H(str(item.get("next_stage", "")))
         badge_cls = f"badge-{state}" if state in ("submitted", "classified", "routed") else ""
-
-        # Classification line — shown only when item has been metabolized
-        class_line = ""
-        if classification:
-            route_part = f" &rarr; {next_stage}" if next_stage else ""
-            class_line = f'<div class="item-meta" style="color:var(--c)">{classification}{route_part}</div>'
 
         rows += f"""
         <div class="item">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.3rem">
+          <div style="display:flex;justify-content:space-between;align-items:center">
             <span class="item-id">{iid}</span>
             <span class="badge {badge_cls}">{_H(state)}</span>
           </div>
           {"<div class='item-hint'>" + hint + "</div>" if hint else ""}
-          <div class="item-meta">{ctype} &middot; {device}/{app} &middot; {submitted}</div>
-          {class_line}
-          <div class="item-meta">{disposition}: {detail}</div>
+          <div class="item-meta">{ctype} &middot; {submitted}</div>
         </div>
         """
     if not rows:
@@ -305,17 +261,15 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
     body = f"""
     <div class="nav">
       <a href="/submit">Submit</a>
-      <a href="/ingress"><strong>My Submissions</strong></a>
-      <a href="/">Cockpit</a>
+      <a href="/ingress"><strong>Submissions</strong></a>
     </div>
     <div class="card">
-      <h1>Recent Submissions</h1>
-      <p class="meta">{count} ingress object{"s" if count != 1 else ""} in runtime. Newest first.</p>
+      <h1>Submissions</h1>
       {success_html}
       {rows}
     </div>
     """
-    return _render_page("Operator Ingress", body)
+    return _render_page("Submissions", body)
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
