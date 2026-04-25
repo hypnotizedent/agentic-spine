@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# ops loops - Open Loop Engine (SQLite-backed, scope-file fallback)
+# ops loops - Expert loop surgery (SQLite-backed, scope-file fallback)
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # Usage:
@@ -11,7 +11,8 @@
 #   ops loops collect                         (deprecated) Legacy receipt scanner
 #
 # Canonical operator-facing current-work surface is `ops status`. This command
-# remains the raw loop-scope view for loop surgery and archival inspection.
+# remains expert drilldown for raw loop inspection, closeout surgery, and
+# archival inspection.
 # SQLite (loops_sql_authority) is the SSOT for loop state; scope files are
 # the fallback when the SQLite library is unavailable.
 # See: LOOP-MAILROOM-CONSOLIDATION-20260210 for the migration rationale.
@@ -33,7 +34,7 @@ DISPOSITION_CONTRACT="$SPINE_REPO/ops/bindings/closeout.disposition.contract.yam
 
 usage() {
     cat <<'EOF'
-ops loops - Open Loop Engine (SQLite-backed, scope-file fallback)
+ops loops - Expert loop surgery (SQLite-backed, scope-file fallback)
 
 Usage:
   ops loops list [--open|--closed|--all]   List loops from SQLite authority (default: open only)
@@ -45,8 +46,15 @@ Usage:
 Deprecated:
   ops loops collect                         Legacy receipt scanner (writes JSONL)
 
-Canonical source:
-  - operator front door: ./bin/ops status
+Normal operator path:
+  - ./bin/ops status
+
+Expert scope of this command:
+  - raw SQLite loop inspection
+  - scope-file drilldown
+  - manual closeout surgery
+
+Truth sources:
   - authority: SQLite via loops_sql_authority
   - fallback: .runtime/spine/state/loop-scopes/*.scope.md
 EOF

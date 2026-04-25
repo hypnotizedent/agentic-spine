@@ -982,7 +982,7 @@ EOF
 
 usage() {
   cat <<'EOF'
-ops wave - Manual wave lifecycle with lane-aware dispatch
+ops wave - Expert manual wave lifecycle with lane-aware dispatch
 
 Usage:
   ops wave start <WAVE_ID> --objective "<text>" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths "a,b"] [--worktree auto|off] [--repo <path>]
@@ -1001,9 +1001,11 @@ Usage:
   ops wave residue [--sweep] [--json]                Canonical wave-owned residue surface (report-only by default; --sweep is bounded)
 
 Ownership:
-  ops wave manages the manual wave lifecycle.
-  For the convenience wrapper that creates and runs a local dispatch wave, use:
+  ops wave is expert/surgery grammar.
+  Normal operator work-start should use:
     ops dispatch local --loop-id <LOOP_ID> --objective "<text>" --lane "<name>:<shell_command>"
+  Use ops wave directly only for explicit multi-terminal orchestration,
+  inspection, path-claim repair, or low-level closeout surgery.
 
 Wave IDs: use WAVE-YYYYMMDD-NN format (e.g. WAVE-20260222-01)
 
