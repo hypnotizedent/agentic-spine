@@ -60,63 +60,18 @@ def main() -> int:
 
     result = oi.list_operator_ingress(state_root=state_root, limit=args.limit)
 
-    # Always fetch metabolizer status for the summary
-    try:
-        metabolizer = oi.operator_ingress_auto_metabolizer_status(state_root)
-    except oi.OperatorIngressError:
-        metabolizer = None
-
     if args.json_output:
-        if metabolizer:
-            result["metabolizer"] = {
-                "status": metabolizer["status"],
-                "queue": metabolizer["queue"],
-                "worker_pid_alive": metabolizer["worker"]["pid_alive"],
-                "heartbeat_at": metabolizer["worker"]["heartbeat_at"],
-                "heartbeat_age_seconds": metabolizer["worker"]["heartbeat_age_seconds"],
-                "heartbeat_stale": metabolizer["worker"].get("heartbeat_stale", False),
-            }
         print(json.dumps(result, indent=2))
     else:
-        # Metabolizer health summary
-        if metabolizer:
-            q = metabolizer["queue"]
-            w = metabolizer["worker"]
-            status = metabolizer["status"]
-            age = w.get("heartbeat_age_seconds")
-            if status == "running":
-                label = "HEALTHY"
-            elif status == "recent":
-                label = "IDLE"
-            elif status == "stale":
-                label = "STALE"
-            elif w.get("heartbeat_at"):
-                label = "DEAD"
-            else:
-                label = "NEVER_RUN"
-            age_str = ""
-            if age is not None:
-                if age < 60:
-                    age_str = f" ({age}s ago)"
-                elif age < 3600:
-                    age_str = f" ({age // 60}m ago)"
-                else:
-                    age_str = f" ({age // 3600}h {(age % 3600) // 60}m ago)"
-            print(f"Metabolizer: {label}  heartbeat: {w['heartbeat_at'] or 'never'}{age_str}")
-            print(f"Queue: {q['pending']} pending / {q['classified']} classified / {q['routed']} routed / {q['total']} total")
-            print()
-
-        # Items listing
-        print(f"Recent items ({result['count']}):")
-        for item in result["items"]:
-            state_tag = item['lifecycle_state']
-            disp_tag = item['disposition']
-            print(
-                f"  {item['ingress_id']}  {item['content_type']:18s}  "
-                f"{state_tag:12s}  {disp_tag}"
-            )
-            if item["operator_hint"]:
-                print(f"    hint: {item['operator_hint']}")
+        if not result["items"]:
+            print("No ingress items.")
+        else:
+            print(f"Items ({result['count']}):")
+            for item in result["items"]:
+                print(
+                    f"  {item['ingress_id']}  {item['content_type']:18s}  "
+                    f"{item['lifecycle_state']:12s}  {item['disposition']}"
+                )
     return 0
 
 
