@@ -138,6 +138,7 @@ def run_curl(
     jump: dict[str, Any] | None,
     username: str | None = None,
     password: str | None = None,
+    weak_tls: bool = False,
 ) -> dict[str, Any]:
     curl_cmd = [
         "curl",
@@ -149,6 +150,8 @@ def run_curl(
         "-w",
         "\n__SPINE_HTTP_STATUS__=%{http_code}\n",
     ]
+    if weak_tls:
+        curl_cmd.extend(["--ciphers", "DEFAULT:@SECLEVEL=0"])
     if username and password:
         curl_cmd.extend(["-u", f"{username}:{password}"])
     curl_cmd.append(url)
@@ -166,13 +169,22 @@ def run_curl(
         except Exception:
             http_status = None
 
-    return {
+    result = {
         "ok": proc.returncode == 0,
         "exit_code": proc.returncode,
         "http_status": http_status,
         "body": body.strip(),
         "stderr": (proc.stderr or "").strip(),
     }
+
+    # Retry with weak TLS on SSL handshake failure (exit 35 = dh key too small)
+    if proc.returncode == 35 and not weak_tls:
+        return run_curl(
+            url, timeout=timeout, jump=jump,
+            username=username, password=password, weak_tls=True,
+        )
+
+    return result
 
 
 def run_ping(host: str, *, timeout: int, jump: dict[str, Any] | None) -> bool:
@@ -227,6 +239,19 @@ def collect_temperature_summary(thermal: dict[str, Any] | None) -> list[str]:
         if any(token.lower() in name.lower() for token in interesting):
             summary.append(f"{name} {reading}C")
     return summary[:8]
+
+
+def probe_idrac7(
+    target_host: str,
+    *,
+    timeout: int,
+    jump: dict[str, Any] | None,
+) -> bool:
+    """Probe /data/login to fingerprint pre-Redfish iDRAC7 web interface."""
+    url = f"https://{target_host}/data/login"
+    result = run_curl(url, timeout=timeout, jump=jump)
+    body = str(result.get("body") or "")
+    return "<status>ok</status>" in body.lower()
 
 
 def service_root_recognized(service_root: dict[str, Any] | None) -> bool:
@@ -414,12 +439,21 @@ def main() -> int:
 
     service_root_json = parse_json_blob(str(service_root_result.get("body") or ""))
     recognized = service_root_recognized(service_root_json)
+    bmc_generation = "redfish"
+
+    # iDRAC7 fingerprint: pre-Redfish BMCs return 404 for /redfish/v1
+    # but have a /data/login XML endpoint
+    if not recognized and access_path != "unreachable":
+        if probe_idrac7(target_host, timeout=args.timeout, jump=chosen_jump):
+            recognized = True
+            bmc_generation = "idrac7_pre_redfish"
 
     manager_result: dict[str, Any] | None = None
     system_result: dict[str, Any] | None = None
     thermal_result: dict[str, Any] | None = None
 
-    if access_path != "unreachable" and password:
+    # Redfish API calls only make sense on Redfish-capable BMCs
+    if access_path != "unreachable" and password and bmc_generation == "redfish":
         manager_result = run_curl(manager_url, timeout=args.timeout, jump=chosen_jump, username=username, password=password)
         system_result = run_curl(system_url, timeout=args.timeout, jump=chosen_jump, username=username, password=password)
         thermal_result = run_curl(thermal_url, timeout=args.timeout, jump=chosen_jump, username=username, password=password)
@@ -504,7 +538,7 @@ def main() -> int:
             "recognized_as_idrac": recognized,
             "credential_source": credential_source,
             "credential_status": credential_status,
-            "source": "redfish",
+            "source": bmc_generation,
         },
         "identity": identity,
         "health": health,
