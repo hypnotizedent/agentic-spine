@@ -273,6 +273,8 @@ outbox_dir = Path(sys.argv[6])
 
 shared_db_path = state_root / "shared_authority.db"
 loop_heartbeat_dir = state_root / "loop-heartbeats"
+terminal_liveness_dir = state_root / "terminals"
+terminal_custody_dir = state_root / "terminal-heartbeats"
 gaps_lib_dir = spine / "ops" / "plugins" / "core" / "lifecycle" / "lib"
 
 if str(gaps_lib_dir) not in sys.path:
@@ -402,23 +404,192 @@ def parse_iso_utc(value):
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
+def age_minutes_from(dt_value, now_utc):
+    if dt_value is None:
+        return None
+    return max(0.0, (now_utc - dt_value).total_seconds() / 60.0)
+
+telemetry_now_utc = datetime.now(timezone.utc)
+terminal_observation_window_minutes = 24 * 60
+default_terminal_liveness_ttl_minutes = 45
+
+def collect_terminal_telemetry():
+    liveness_by_terminal = {}
+    custody_by_terminal = {}
+
+    if terminal_liveness_dir.is_dir():
+        for hb_file in sorted(terminal_liveness_dir.glob("*.heartbeat")):
+            hb = parse_kv_yaml(hb_file)
+            terminal_id = str(hb.get("terminal_id") or hb_file.stem).strip()
+            if not terminal_id:
+                continue
+            liveness_by_terminal[terminal_id] = {
+                "last_heartbeat_utc": str(hb.get("last_heartbeat_utc") or "").strip(),
+                "last_capability": str(hb.get("last_capability") or "").strip(),
+                "last_exit_code": str(hb.get("last_exit_code") or "").strip(),
+                "source": str(hb.get("source") or "").strip(),
+            }
+
+    if terminal_custody_dir.is_dir():
+        for hb_file in sorted(terminal_custody_dir.glob("*.yaml")):
+            hb = parse_kv_yaml(hb_file)
+            terminal_id = str(hb.get("terminal_id") or hb_file.stem).strip()
+            if not terminal_id:
+                continue
+            custody_by_terminal[terminal_id] = {
+                "role": str(hb.get("role") or "").strip(),
+                "runtime_role": str(hb.get("runtime_role") or "").strip(),
+                "scope": str(hb.get("scope") or "").strip(),
+                "normalized_scope": str(hb.get("normalized_scope") or "").strip(),
+                "protected_hotspot_scope": str(hb.get("protected_hotspot_scope") or "").strip(),
+                "loop_id": str(hb.get("loop_id") or "").strip(),
+                "repo_root": str(hb.get("repo_root") or "").strip(),
+                "checkout_root": str(hb.get("checkout_root") or "").strip(),
+                "branch": str(hb.get("branch") or "").strip(),
+                "lane_type": str(hb.get("lane_type") or "").strip(),
+                "status": str(hb.get("status") or "").strip(),
+                "pid": str(hb.get("pid") or "").strip(),
+                "hostname": str(hb.get("hostname") or "").strip(),
+                "heartbeat_at": str(hb.get("heartbeat_at") or "").strip(),
+                "expires_at": str(hb.get("expires_at") or "").strip(),
+            }
+
+    rows = []
+    observed_ids = sorted(set(liveness_by_terminal) | set(custody_by_terminal))
+    for terminal_id in observed_ids:
+        live = liveness_by_terminal.get(terminal_id, {})
+        custody = custody_by_terminal.get(terminal_id, {})
+
+        live_dt = parse_iso_utc(live.get("last_heartbeat_utc"))
+        live_age = age_minutes_from(live_dt, telemetry_now_utc)
+        liveness_fresh = isinstance(live_age, (int, float)) and live_age <= default_terminal_liveness_ttl_minutes
+
+        custody_heartbeat_dt = parse_iso_utc(custody.get("heartbeat_at"))
+        custody_expires_dt = parse_iso_utc(custody.get("expires_at"))
+        custody_age = age_minutes_from(custody_heartbeat_dt, telemetry_now_utc)
+        if custody_expires_dt is not None:
+            custody_fresh = custody_expires_dt >= telemetry_now_utc
+        else:
+            custody_fresh = isinstance(custody_age, (int, float)) and custody_age <= default_terminal_liveness_ttl_minutes
+
+        last_seen_candidates = [dt for dt in (live_dt, custody_heartbeat_dt) if dt is not None]
+        last_seen_dt = max(last_seen_candidates) if last_seen_candidates else None
+        observed_recently = (
+            liveness_fresh
+            or custody_fresh
+            or (isinstance(live_age, (int, float)) and live_age <= terminal_observation_window_minutes)
+            or (isinstance(custody_age, (int, float)) and custody_age <= terminal_observation_window_minutes)
+            or terminal_id.startswith("SPINE-")
+        )
+        if not observed_recently:
+            continue
+
+        row = {
+            "terminal_id": terminal_id,
+            "last_heartbeat_utc": live.get("last_heartbeat_utc", ""),
+            "last_capability": live.get("last_capability", ""),
+            "last_exit_code": live.get("last_exit_code", ""),
+            "liveness_source": live.get("source", ""),
+            "liveness_fresh": bool(liveness_fresh),
+            "liveness_age_minutes": round(live_age, 1) if isinstance(live_age, (int, float)) else None,
+            "liveness_ttl_minutes": default_terminal_liveness_ttl_minutes,
+            "custody_heartbeat_at": custody.get("heartbeat_at", ""),
+            "custody_expires_at": custody.get("expires_at", ""),
+            "custody_fresh": bool(custody_fresh),
+            "custody_age_minutes": round(custody_age, 1) if isinstance(custody_age, (int, float)) else None,
+            "role": custody.get("role", ""),
+            "runtime_role": custody.get("runtime_role", ""),
+            "scope": custody.get("scope", ""),
+            "normalized_scope": custody.get("normalized_scope", ""),
+            "protected_hotspot_scope": custody.get("protected_hotspot_scope", ""),
+            "loop_id": custody.get("loop_id", ""),
+            "repo_root": custody.get("repo_root", ""),
+            "checkout_root": custody.get("checkout_root", ""),
+            "branch": custody.get("branch", ""),
+            "lane_type": custody.get("lane_type", ""),
+            "status": custody.get("status", ""),
+            "pid": custody.get("pid", ""),
+            "hostname": custody.get("hostname", ""),
+            "_sort_utc": last_seen_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if last_seen_dt else "",
+        }
+        rows.append(row)
+
+    rows.sort(key=lambda item: item.get("_sort_utc", ""), reverse=True)
+    for row in rows:
+        row.pop("_sort_utc", None)
+    return rows
+
+terminal_telemetry = collect_terminal_telemetry()
+fresh_terminals = [row for row in terminal_telemetry if row.get("liveness_fresh")]
+fresh_custody_terminals = [row for row in terminal_telemetry if row.get("custody_fresh")]
+fresh_custody_by_loop = {}
+for row in fresh_custody_terminals:
+    loop_id = str(row.get("loop_id") or "").strip()
+    if not loop_id:
+        continue
+    existing = fresh_custody_by_loop.get(loop_id)
+    existing_ts = str(existing.get("custody_heartbeat_at") or "") if existing else ""
+    current_ts = str(row.get("custody_heartbeat_at") or "")
+    if existing is None or current_ts > existing_ts:
+        fresh_custody_by_loop[loop_id] = row
+
 for loop in open_loops:
     loop_id = loop.get("loop_id", "")
     if not loop_id:
         continue
+    loop["loop_custody_fresh"] = False
+    loop["active_terminal_source"] = ""
     safe_loop_id = re.sub(r"[^A-Za-z0-9._-]", "_", loop_id)
     hb_file = loop_heartbeat_dir / f"{safe_loop_id}.yaml"
-    if not hb_file.exists():
-        continue
-    hb = parse_kv_yaml(hb_file)
-    if hb.get("last_heartbeat_utc"):
-        loop["last_heartbeat_utc"] = hb["last_heartbeat_utc"]
+    hb = parse_kv_yaml(hb_file) if hb_file.exists() else {}
+    heartbeat_raw = str(hb.get("last_heartbeat_utc") or "").strip()
+    ttl_raw = str(hb.get("heartbeat_ttl_minutes") or "").strip()
+    heartbeat_dt = parse_iso_utc(heartbeat_raw)
+    try:
+        ttl_minutes = int(ttl_raw) if ttl_raw else 45
+    except ValueError:
+        ttl_minutes = 45
+    heartbeat_age = age_minutes_from(heartbeat_dt, telemetry_now_utc)
+    heartbeat_fresh = isinstance(heartbeat_age, (int, float)) and heartbeat_age <= ttl_minutes
+    if heartbeat_raw:
+        loop["last_heartbeat_utc"] = heartbeat_raw
         loop["heartbeat_source"] = "runtime"
-    if hb.get("heartbeat_ttl_minutes"):
-        loop["heartbeat_ttl_minutes"] = hb["heartbeat_ttl_minutes"]
+    if ttl_raw:
+        loop["heartbeat_ttl_minutes"] = ttl_raw
         loop["heartbeat_source"] = "runtime"
     if hb.get("terminal_id"):
-        loop["active_terminal"] = hb["terminal_id"]
+        loop["active_terminal"] = str(hb["terminal_id"]).strip()
+        loop["active_terminal_source"] = "loop_heartbeat"
+    if heartbeat_fresh and loop.get("active_terminal"):
+        loop["loop_custody_fresh"] = True
+
+    if not loop.get("loop_custody_fresh"):
+        terminal_row = fresh_custody_by_loop.get(loop_id)
+        if terminal_row:
+            loop["active_terminal"] = str(terminal_row.get("terminal_id") or "").strip()
+            loop["active_terminal_source"] = "terminal_custody"
+            loop["loop_custody_fresh"] = bool(loop.get("active_terminal"))
+
+mapped_open_loops = sum(1 for loop in open_loops if loop.get("loop_custody_fresh"))
+unmapped_open_loops = sum(1 for loop in open_loops if not loop.get("loop_custody_fresh"))
+terminal_telemetry_status = "ok"
+if open_loops and fresh_terminals and mapped_open_loops == 0:
+    terminal_telemetry_status = "degraded"
+elif open_loops and fresh_custody_terminals and mapped_open_loops == 0:
+    terminal_telemetry_status = "stale"
+elif open_loops and not terminal_telemetry:
+    terminal_telemetry_status = "unavailable"
+
+terminal_telemetry_summary = {
+    "status": terminal_telemetry_status,
+    "observation_window_hours": terminal_observation_window_minutes // 60,
+    "fresh_terminals": len(fresh_terminals),
+    "fresh_custody_terminals": len(fresh_custody_terminals),
+    "observed_terminals": len(terminal_telemetry),
+    "mapped_open_loops": mapped_open_loops,
+    "unmapped_open_loops": unmapped_open_loops,
+    "terminals": terminal_telemetry,
+}
 
 # ── Parse gaps via shared authority ───────────────────────────────────────
 
@@ -708,8 +879,16 @@ if joined_state_summary.get("coherence_attention"):
         f" verify={joined_state_summary.get('verify_status', 'unknown')})"
     )
 
+if terminal_telemetry_status == "degraded":
+    anomalies.append(
+        "LOOP CUSTODY TELEMETRY DEGRADED:"
+        f" {len(fresh_terminals)} fresh terminal heartbeat(s),"
+        f" {len(fresh_custody_terminals)} fresh custody record(s),"
+        f" 0/{len(open_loops)} open loops mapped"
+    )
+
 # Check background loop heartbeat freshness
-now_utc = datetime.now(timezone.utc)
+now_utc = telemetry_now_utc
 stale_background_count = 0
 for loop in open_loops:
     if loop.get("execution_mode") != "background":
@@ -945,6 +1124,7 @@ if mode == "--json":
         "strict": strict_mode,
         "open_loops": open_loops,
         "planned_loops": planned_loops,
+        "terminal_telemetry": terminal_telemetry_summary,
         "open_gaps": open_gaps,
         "gap_state": {
             "status": gap_state.get("status", "degraded"),
@@ -980,6 +1160,9 @@ if mode == "--json":
             # Use joined-state as authoritative source so status --json and
             # status --context agree on the same open-loop count (H6 coherence).
             "open_loops": int(joined_state_summary.get("open_loops", len(open_loops))),
+            "mapped_open_loops": mapped_open_loops,
+            "fresh_terminals": len(fresh_terminals),
+            "fresh_custody_terminals": len(fresh_custody_terminals),
             "background_loops": sum(1 for loop in open_loops if loop.get("execution_mode") == "background"),
             "stale_background_loops": stale_background_count,
             "planned_loops": len(planned_loops),
@@ -1043,6 +1226,13 @@ if mode == "--brief":
         parts.append("Coherence: attention")
     if inbox_actionable:
         parts.append(f"Inbox: {inbox_actionable} actionable")
+    if terminal_telemetry:
+        parts.append(
+            "Terminals:"
+            f" {len(fresh_terminals)} fresh / {len(fresh_custody_terminals)} custody"
+        )
+        if terminal_telemetry_status != "ok":
+            parts.append(f"Custody: {terminal_telemetry_status}")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
@@ -1082,6 +1272,33 @@ if isinstance(_cs, dict):
     _cs_live = _cs.get("live_specimens", 0)
     print(f"  completion state:   {_cs_live} live ({', '.join(_cs_parts) if _cs_parts else 'all clear'})")
 print()
+
+if terminal_telemetry:
+    print("TERMINAL TELEMETRY")
+    print("-" * 72)
+    print(f"  status:             {terminal_telemetry_status}")
+    print(f"  fresh terminals:    {len(fresh_terminals)}")
+    print(f"  fresh custody:      {len(fresh_custody_terminals)}")
+    print(f"  mapped open loops:  {mapped_open_loops}/{len(open_loops)}")
+    print(f"  observed terminals: {len(terminal_telemetry)} (last {terminal_observation_window_minutes // 60}h)")
+    for term in terminal_telemetry[:6]:
+        term_bits = []
+        if term.get("liveness_fresh"):
+            term_bits.append("live")
+        elif term.get("last_heartbeat_utc"):
+            term_bits.append("stale-live")
+        if term.get("last_capability"):
+            term_bits.append(f"cap={term['last_capability']}")
+        if term.get("custody_fresh"):
+            term_bits.append("custody")
+        elif term.get("custody_heartbeat_at") or term.get("custody_expires_at"):
+            term_bits.append("stale-custody")
+        if term.get("loop_id"):
+            term_bits.append(f"loop={term['loop_id']}")
+        if term.get("branch"):
+            term_bits.append(f"branch={term['branch']}")
+        print(f"  {term['terminal_id']:18s} {' | '.join(term_bits) if term_bits else 'observed'}")
+    print()
 
 # ── Open Loops ──
 sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "-": 4, "unknown": 5}
