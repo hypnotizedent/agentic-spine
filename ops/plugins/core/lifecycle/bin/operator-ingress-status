@@ -7,6 +7,8 @@ import argparse
 import json
 import os
 import sys
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[5]
@@ -33,6 +35,16 @@ def main() -> int:
         help="Emit JSON output.",
     )
     parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="Read from canonical remote root (ai-consolidation) via API.",
+    )
+    parser.add_argument(
+        "--remote-url",
+        default="https://spine.ronny.works/ingress.json",
+        help="Canonical remote readback URL.",
+    )
+    parser.add_argument(
         "--self-check",
         action="store_true",
         help="Verify dependencies and exit.",
@@ -49,6 +61,45 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    # --- Remote readback: fetch from canonical root via /ingress.json ---
+    if args.remote:
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "operator-ingress-status/1.0",
+        }
+        cf_id = os.environ.get("CF_ACCESS_CLIENT_ID", "")
+        cf_secret = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
+        if cf_id and cf_secret:
+            headers["CF-Access-Client-Id"] = cf_id
+            headers["CF-Access-Client-Secret"] = cf_secret
+
+        req = urllib.request.Request(args.remote_url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            if args.json_output:
+                print(json.dumps({"status": "error", "error": f"remote readback failed: {exc}"}, indent=2))
+            else:
+                print(f"operator.ingress.status FAIL (remote): {exc}", file=sys.stderr)
+            return 1
+
+        read_root = result.get("state_root", "canonical (remote)")
+        if args.json_output:
+            print(json.dumps(result, indent=2))
+        else:
+            if not result.get("items"):
+                print(f"No ingress items.  [root: {read_root}]")
+            else:
+                print(f"Items ({result.get('count', '?')}):  [root: {read_root}]")
+                for item in result["items"]:
+                    print(
+                        f"  {item['ingress_id']}  {item.get('content_type', ''):18s}  "
+                        f"{item.get('lifecycle_state', ''):12s}  {item.get('disposition', '')}"
+                    )
+        return 0
+
+    # --- Local readback ---
     state_root = os.environ.get("SPINE_STATE", "")
     if not state_root:
         msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
@@ -61,12 +112,13 @@ def main() -> int:
     result = oi.list_operator_ingress(state_root=state_root, limit=args.limit)
 
     if args.json_output:
+        result["state_root"] = state_root
         print(json.dumps(result, indent=2))
     else:
         if not result["items"]:
-            print("No ingress items.")
+            print(f"No ingress items.  [root: {state_root} (local)]")
         else:
-            print(f"Items ({result['count']}):")
+            print(f"Items ({result['count']}):  [root: {state_root} (local)]")
             for item in result["items"]:
                 print(
                     f"  {item['ingress_id']}  {item['content_type']:18s}  "

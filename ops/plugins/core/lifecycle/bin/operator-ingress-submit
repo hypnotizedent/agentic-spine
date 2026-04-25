@@ -75,14 +75,14 @@ def main() -> int:
         help="Emit JSON output.",
     )
     parser.add_argument(
-        "--remote",
+        "--local",
         action="store_true",
-        help="POST to execution host via operator surface server instead of local write.",
+        help="Write to local SPINE_STATE instead of canonical remote root.",
     )
     parser.add_argument(
         "--remote-url",
         default="https://spine.ronny.works/submit",
-        help="Remote submit endpoint URL (default: https://spine.ronny.works/submit).",
+        help="Canonical remote submit endpoint URL (default: https://spine.ronny.works/submit).",
     )
     parser.add_argument(
         "--self-check",
@@ -103,8 +103,8 @@ def main() -> int:
 
     raw_content = sys.stdin.read() if args.stdin else args.raw_content
 
-    # --- Remote submission: POST to execution host operator surface server ---
-    if args.remote:
+    # --- Canonical remote submission (default): POST to execution host ---
+    if not args.local:
         payload = json.dumps({
             "content_type": args.content_type,
             "raw_content": raw_content,
@@ -165,19 +165,26 @@ def main() -> int:
                     print(f"operator.ingress.submit FAIL (remote): {msg}", file=sys.stderr)
                 return 1
         except Exception as exc:
+            hint = "Set CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET or use --local for local-only write." if "403" in str(exc) or "urlopen" in str(exc).lower() else ""
             if args.json_output:
-                print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+                err = {"status": "error", "error": str(exc), "write_root": "canonical (unreachable)"}
+                if hint:
+                    err["hint"] = hint
+                print(json.dumps(err, indent=2))
             else:
-                print(f"operator.ingress.submit FAIL (remote): {exc}", file=sys.stderr)
+                print(f"operator.ingress.submit FAIL (canonical root unreachable): {exc}", file=sys.stderr)
+                if hint:
+                    print(f"  hint: {hint}", file=sys.stderr)
             return 1
 
         if args.json_output:
+            result["write_root"] = "canonical (remote)"
             print(json.dumps(result, indent=2))
         else:
-            print(f"CREATED: {result.get('ingress_id', '?')}  [{args.content_type}]  state={result.get('lifecycle_state', '?')}")
+            print(f"CREATED: {result.get('ingress_id', '?')}  [{args.content_type}]  state={result.get('lifecycle_state', '?')}  root=canonical")
         return 0
 
-    # --- Local submission: write directly to SPINE_STATE ---
+    # --- Local submission (--local): write directly to SPINE_STATE ---
     state_root = os.environ.get("SPINE_STATE", "")
     if not state_root:
         msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
@@ -206,9 +213,10 @@ def main() -> int:
         return 1
 
     if args.json_output:
+        result["write_root"] = f"local ({state_root})"
         print(json.dumps(result, indent=2))
     else:
-        print(f"CREATED: {result['ingress_id']}  [{result.get('content_type', args.content_type)}]  state={result['lifecycle_state']}")
+        print(f"CREATED: {result['ingress_id']}  [{result.get('content_type', args.content_type)}]  state={result['lifecycle_state']}  root=local ({state_root})")
     return 0
 
 
