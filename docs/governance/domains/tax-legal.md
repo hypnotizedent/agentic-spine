@@ -3,9 +3,25 @@
 Canonical domain policy for `tax-legal`.
 
 - Authority: `docs/governance/SPINE.md`
+- **Canonical home:** subsurface inside `workbench/agents/finance/` (tax/compliance/legal-research)
+- **Spine mode:** projection (spine holds engine registrations; product truth governed under finance agent)
 - Runtime contracts: `ops/bindings/domains/tax-legal.bundle.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain tax-legal`
 - Runtime namespace: capability ids remain `taxlegal.*`; live runtime paths remain `ops/plugins/domains/taxlegal/` and `ops/bindings/domains/taxlegal/`.
+
+## Canonical Home Decision
+
+Decided 2026-04-25 (Packet 3: CANONICAL-HOME-MATRIX).
+
+Tax-legal is a sub-concern of finance, not an independent domain runtime.
+Product truth (1099 prep, DR-15 prep, tax calendar, compliance tracking,
+receipt/document retrieval, legal research) is governed under
+`workbench/agents/finance/`. Spine retains engine registrations, bindings
+(projection), and capability shims as L1/L2 infrastructure.
+
+No standalone `workbench/agents/tax-legal/` directory is justified by current
+or planned workload. If tax-legal grows into an independent operator surface,
+this decision can be revisited with a new canonical-home packet.
 
 ## Governed Capability Membership
 
