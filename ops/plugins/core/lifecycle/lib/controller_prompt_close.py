@@ -84,6 +84,7 @@ def _update_frontmatter(
     closed_at_utc: str,
     disposition: str,
     closed_by: str,
+    completion_level: str = "",
 ) -> str:
     """Update frontmatter fields in-place without rewriting the body."""
     fm, start, end = _parse_frontmatter(text)
@@ -91,6 +92,8 @@ def _update_frontmatter(
     fm["closed_at_utc"] = closed_at_utc
     fm["disposition"] = disposition
     fm["closed_by"] = closed_by
+    if completion_level:
+        fm["completion_level"] = completion_level
 
     new_fm = yaml.safe_dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
     body = text[end:]
@@ -139,6 +142,28 @@ def _active_packet_ids_for_loop(
         if status != "closed":
             active_ids.append(packet_id or path.name)
     return active_ids
+
+
+def _packet_ids_for_loop(
+    state_root: str,
+    loop_id: str,
+    *,
+    exclude_packet_id: str = "",
+) -> list[str]:
+    prompts_dir = Path(state_root) / "controller-prompts"
+    if not prompts_dir.is_dir():
+        return []
+
+    packet_ids: list[str] = []
+    for path in sorted(prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+        fm = _packet_frontmatter(path)
+        if str(fm.get("loop_id", "")).strip() != loop_id:
+            continue
+        packet_id = str(fm.get("packet_id", "")).strip() or path.name
+        if packet_id == exclude_packet_id:
+            continue
+        packet_ids.append(packet_id)
+    return packet_ids
 
 
 def _active_delegation_ids_for_loop(state_root: str, loop_id: str) -> list[str]:
@@ -257,13 +282,19 @@ def _evaluate_loop_auto_close(
                 "blockers": ["landed loop close requires completion_level"],
             }
         if completion_level == "slice_complete":
-            return {
-                "status": "preserved",
-                "loop_id": loop_id,
-                "loop_disposition": loop_disposition,
-                "completion_level": completion_level,
-                "reason": "slice_complete retains parent loop continuity",
-            }
+            sibling_packets = _packet_ids_for_loop(
+                state_root,
+                loop_id,
+                exclude_packet_id=packet_id,
+            )
+            if sibling_packets:
+                return {
+                    "status": "preserved",
+                    "loop_id": loop_id,
+                    "loop_disposition": loop_disposition,
+                    "completion_level": completion_level,
+                    "reason": "slice_complete retains parent loop continuity for multi-packet loops",
+                }
 
     scope_path = Path(state_root) / "loop-scopes" / f"{loop_id}.scope.md"
     archived_scope_path = Path(state_root) / "archive" / "closed-loop-scopes" / f"{loop_id}.scope.md"
@@ -555,6 +586,7 @@ def close_packet(
             closed_at_utc=now_utc,
             disposition=disposition,
             closed_by="controller_prompt.close",
+            completion_level=completion_level,
         )
         Path(packet_path).write_text(updated_text, encoding="utf-8")
         frontmatter_updated = True

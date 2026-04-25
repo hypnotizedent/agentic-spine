@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""controller-prompt-closeout-backfill — reconcile stale loop closeout after packet close.
+
+Scans active/open loops for single-packet controller loops whose packet is already
+closed, backfills missing completion_level from the receipt if available, and
+auto-chains loop closeout when the loop is now eligible.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import sys
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import controller_prompt_close as cpc
+
+
+def _resolved_state_root() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_STATE",
+            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+        )
+    )
+
+
+def _loop_rows(state_root: Path, loop_filter: str) -> list[tuple[str, str]]:
+    db_path = state_root / "shared_authority.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        if loop_filter:
+            rows = conn.execute(
+                "select loop_id, status from loops where loop_id = ? and status in ('open','active')",
+                (loop_filter,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "select loop_id, status from loops where status in ('open','active') order by loop_id"
+            ).fetchall()
+    finally:
+        conn.close()
+    return [(str(loop_id), str(status)) for loop_id, status in rows]
+
+
+def _packet_paths_for_loop(state_root: Path, loop_id: str) -> list[Path]:
+    prompts_dir = state_root / "controller-prompts"
+    paths: list[Path] = []
+    for path in sorted(prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+        fm = cpc._packet_frontmatter(path)
+        if str(fm.get("loop_id", "")).strip() == loop_id:
+            paths.append(path)
+    return paths
+
+
+def _safe_packet_id(packet_id: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "-", packet_id)
+
+
+def _receipt_payloads_for_packet(state_root: Path, packet_id: str) -> list[tuple[Path, dict]]:
+    receipt_dir = state_root / "domain-state"
+    safe_packet_id = _safe_packet_id(packet_id)
+    payloads: list[tuple[Path, dict]] = []
+    for path in sorted(receipt_dir.glob(f"EXEC_RECEIPT-CONTROLLER-PROMPT-{safe_packet_id}-*.yaml")):
+        doc = cpc._load_yaml_file(path)
+        if str(doc.get("packet_id", "")).strip() == packet_id:
+            payloads.append((path, doc))
+    return payloads
+
+
+def _latest_receipt_for_packet(state_root: Path, packet_id: str) -> tuple[Path | None, dict]:
+    payloads = _receipt_payloads_for_packet(state_root, packet_id)
+    if not payloads:
+        return None, {}
+    payloads.sort(key=lambda item: item[0].stat().st_mtime)
+    return payloads[-1]
+
+
+def _backfill_completion_level(
+    packet_path: Path,
+    fm: dict,
+    *,
+    completion_level: str,
+    dry_run: bool,
+) -> bool:
+    if not completion_level:
+        return False
+    if str(fm.get("completion_level", "")).strip():
+        return False
+    if dry_run:
+        return True
+    text = packet_path.read_text(encoding="utf-8")
+    updated = cpc._update_frontmatter(
+        text,
+        closed_at_utc=str(fm.get("closed_at_utc", "")).strip(),
+        disposition=str(fm.get("disposition", "")).strip(),
+        closed_by=str(fm.get("closed_by", "")).strip() or "controller_prompt.close",
+        completion_level=completion_level,
+    )
+    packet_path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def reconcile(state_root: Path, loop_filter: str = "", dry_run: bool = False) -> dict:
+    results: list[dict] = []
+    closed = 0
+    backfilled = 0
+
+    for loop_id, status in _loop_rows(state_root, loop_filter):
+        packet_paths = _packet_paths_for_loop(state_root, loop_id)
+        if len(packet_paths) != 1:
+            results.append({
+                "loop_id": loop_id,
+                "status": "skipped",
+                "reason": f"expected exactly 1 controller packet, found {len(packet_paths)}",
+            })
+            continue
+
+        packet_path = packet_paths[0]
+        fm = cpc._packet_frontmatter(packet_path)
+        packet_id = str(fm.get("packet_id", "")).strip() or packet_path.name
+        packet_status = str(fm.get("status", "")).strip().lower()
+        disposition = str(fm.get("disposition", "")).strip().lower()
+        completion_level = str(fm.get("completion_level", "")).strip()
+
+        if packet_status != "closed":
+            results.append({
+                "loop_id": loop_id,
+                "packet_id": packet_id,
+                "status": "skipped",
+                "reason": f"packet status is {packet_status or 'unknown'}",
+            })
+            continue
+
+        receipt_path, receipt_doc = _latest_receipt_for_packet(state_root, packet_id)
+        if not completion_level:
+            receipt_completion_level = str(receipt_doc.get("completion_level", "")).strip()
+            if _backfill_completion_level(
+                packet_path,
+                fm,
+                completion_level=receipt_completion_level,
+                dry_run=dry_run,
+            ):
+                backfilled += 1
+                completion_level = receipt_completion_level
+                if not dry_run:
+                    fm = cpc._packet_frontmatter(packet_path)
+
+        if dry_run:
+            decision = cpc._evaluate_loop_auto_close(
+                state_root=str(state_root),
+                loop_id=loop_id,
+                packet_id=packet_id,
+                disposition=disposition,
+                completion_level=completion_level,
+            )
+            if decision.get("status") == "eligible":
+                decision = {**decision, "status": "would_close"}
+        else:
+            decision = cpc._auto_close_loop_if_eligible(
+                state_root=str(state_root),
+                loop_id=loop_id,
+                packet_id=packet_id,
+                disposition=disposition,
+                completion_level=completion_level,
+                receipt_path=str(receipt_path or ""),
+                spine_repo=str(ROOT),
+                auto_close_loop=True,
+            )
+        row = {
+            "loop_id": loop_id,
+            "packet_id": packet_id,
+            "loop_status": status,
+            "packet_disposition": disposition,
+            "completion_level": completion_level,
+            "receipt_path": str(receipt_path or ""),
+            "decision": decision,
+        }
+        results.append(row)
+        if decision.get("status") in {"closed", "would_close"}:
+            closed += 1
+
+    return {
+        "status": "ok",
+        "dry_run": dry_run,
+        "evaluated": len(results),
+        "closed": closed,
+        "backfilled_completion_levels": backfilled,
+        "loops": results,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Reconcile stale loop closeout after controller packet close.")
+    parser.add_argument("--loop-id", default="", help="Limit to one loop_id")
+    parser.add_argument("--dry-run", action="store_true", help="Show actions without mutating state")
+    parser.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON output")
+    args = parser.parse_args()
+
+    state_root = _resolved_state_root()
+    result = reconcile(state_root, loop_filter=args.loop_id, dry_run=args.dry_run)
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print("controller-prompt-closeout-backfill")
+        if args.dry_run:
+            print("[DRY RUN]")
+        for row in result["loops"]:
+            decision = row.get("decision", {})
+            print(
+                f"{row['loop_id']}: {decision.get('status', row.get('status', 'unknown'))}"
+                f" ({decision.get('reason', '') or row.get('reason', '')})"
+            )
+        print(
+            f"evaluated={result['evaluated']} closed={result['closed']} "
+            f"backfilled_completion_levels={result['backfilled_completion_levels']}"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
