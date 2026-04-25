@@ -581,32 +581,121 @@ def render_text(result: dict[str, Any]) -> str:
     target = result["target"]
     artifact = result["artifact_custody"]
     controls = result["controls"]
+    discovery = result.get("discovery_summary", {})
+    access = result["access"]
+    status = result["status"]
+
+    ok = "PASS"
+    fail = "FAIL"
+    skip = "SKIP"
+
     lines = [
-        "baremetal.idrac.first-touch",
-        f"status:          {result['status']}",
-        f"target:          {target.get('label') or target.get('resolved_host') or 'unknown'}",
-        f"bmc_generation:  {target.get('bmc_generation') or 'unknown'}",
-        f"artifact_ref:    {artifact.get('resolved_ref') or 'not selected'}",
-        f"iso_on_host:     {'yes' if artifact.get('iso_exists_on_host') else 'no'}",
-        f"nfs_exported:    {'yes' if artifact.get('nfs_exported') else 'no'}",
-        f"access_method:   {result['access']['method']}",
-        f"credential_src:  {result['access']['credential_source']}",
+        "=" * 60,
+        "  baremetal.idrac.first-touch",
+        "=" * 60,
+        "",
+        "TARGET",
+        f"  label:          {target.get('label') or target.get('resolved_host') or 'unknown'}",
+        f"  host:           {target.get('resolved_host') or 'unknown'}",
+        f"  bmc_generation: {target.get('bmc_generation') or 'unknown'}",
     ]
+    if discovery.get("model"):
+        lines.append(f"  model:          {discovery['model']}")
+    if discovery.get("service_tag"):
+        lines.append(f"  service_tag:    {discovery['service_tag']}")
+
+    # Precondition checks
+    reachable = discovery.get("recognized_as_idrac", False)
+    cred_ok = discovery.get("credential_status") in ("authenticated", "present")
+    has_artifact = bool(artifact.get("resolved_ref"))
+    iso_on_host = bool(artifact.get("iso_exists_on_host"))
+    nfs_ok = bool(artifact.get("nfs_exported"))
+    has_jump = bool(access.get("jump_host"))
+
+    lines.extend([
+        "",
+        "PRECONDITION CHECKS",
+        f"  [{'x' if reachable else ' '}] BMC reachable + recognized   {ok if reachable else fail}",
+        f"  [{'x' if cred_ok else ' '}] Credentials resolved         {ok if cred_ok else fail}  (source: {access.get('credential_source', 'unknown')})",
+        f"  [{'x' if has_jump else ' '}] Jump host available          {ok if has_jump else fail}  (probe_via: {access.get('probe_via') or 'none'})",
+        f"  [{'x' if has_artifact else ' '}] Artifact selected            {ok if has_artifact else fail}  ({artifact.get('resolved_ref') or 'none'})",
+        f"  [{'x' if iso_on_host else ' '}] ISO present on custody host  {ok if iso_on_host else (fail if has_artifact else skip)}",
+        f"  [{'x' if nfs_ok else ' '}] NFS export active            {ok if nfs_ok else (fail if iso_on_host else skip)}",
+    ])
+
+    # Controls
+    lines.extend([
+        "",
+        "CONTROLS",
+        f"  access_method:  {access['method']}",
+    ])
     if controls.get("executed"):
-        lines.append(f"controls_done:   {', '.join(controls['executed'])}")
+        lines.append(f"  executed:       {', '.join(controls['executed'])}")
+    else:
+        lines.append(f"  executed:       none")
     if controls.get("nfs_image_location"):
-        lines.append(f"nfs_image:       {controls['nfs_image_location']}")
+        lines.append(f"  nfs_image:      {controls['nfs_image_location']}")
     if controls.get("power_action_taken"):
-        lines.append("power_cycle:     yes")
-    lines.append(f"reason:          {result['reason']}")
+        lines.append(f"  power_cycle:    yes")
+
+    # Blockers and errors
     if result.get("blockers"):
-        lines.append("blockers:")
+        lines.extend(["", "BLOCKERS"])
         for b in result["blockers"]:
             lines.append(f"  - {b}")
     if result.get("errors"):
-        lines.append("errors:")
+        lines.extend(["", "ERRORS"])
         for e in result["errors"]:
             lines.append(f"  - {e}")
+
+    # Result
+    lines.extend([
+        "",
+        "-" * 60,
+        f"  RESULT: {status}",
+        f"  {result['reason']}",
+        "-" * 60,
+    ])
+
+    # Next steps — explicit operator guidance
+    lines.extend(["", "NEXT STEPS"])
+    if status == "BLOCKED":
+        if not reachable:
+            lines.append("  1. Verify BMC network connectivity (check cables, power, IP assignment)")
+            lines.append("     Run: baremetal-idrac-discover --target-id <id> --probe-via <jump>")
+        if not cred_ok:
+            lines.append("  1. Fix BMC credentials: set IDRAC_ADMIN_USER/IDRAC_ADMIN_PASSWORD env vars")
+            lines.append("     or configure Infisical secret keys in the target binding")
+        if not has_artifact:
+            lines.append("  1. Select an installer ISO: re-run with --artifact-ref <path>")
+        if has_artifact and not iso_on_host:
+            lines.append("  1. Copy the ISO to the custody host at the resolved path")
+        if not has_jump:
+            lines.append("  1. Configure probe_via in the target's ssh.targets entry or pass --probe-via")
+    elif status == "READY":
+        lines.append("  1. Review preconditions above — all checks passed")
+        lines.append(f"  2. Execute boot-prep:  baremetal-idrac-first-touch --target-id {normalize_text(target.get('target_id')) or '<id>'} --artifact-ref {artifact.get('requested_ref') or '<iso>'} --execute")
+        lines.append(f"  3. Add --power-cycle to also power-cycle the host after boot override")
+    elif status == "DRY_RUN":
+        lines.append("  1. All preconditions satisfied — dry-run mode, no controls executed")
+        lines.append(f"  2. Execute for real:  add --execute to the command")
+    elif status == "DONE":
+        lines.append("  1. Boot-prep controls applied successfully")
+        if controls.get("power_action_taken"):
+            lines.append("  2. Host is power-cycling — monitor boot via iDRAC console")
+        else:
+            lines.append("  2. Power-cycle the host to boot from virtual media:")
+            lines.append(f"     baremetal-idrac-first-touch --target-id {normalize_text(target.get('target_id')) or '<id>'} --artifact-ref {artifact.get('requested_ref') or '<iso>'} --execute --power-cycle")
+            lines.append("     OR manually power-cycle via iDRAC web console")
+        lines.append("  3. After install completes: claim/admit is a separate rail (not this tool)")
+    elif status == "FAILED":
+        lines.append("  1. Review ERRORS above for the specific failure")
+        lines.append("  2. Fix the issue and re-run with --execute")
+
+    lines.append("")
+    lines.append("SCOPE BOUNDARY: This tool handles boot-prep only.")
+    lines.append("Claim and admit are separate rails — do not attempt them here.")
+
     return "\n".join(lines)
 
 

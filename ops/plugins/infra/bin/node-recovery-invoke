@@ -330,30 +330,63 @@ if $JSON_MODE; then
     bash "$underlying_script" $underlying_args 2>&1 || true
   fi
 else
-  echo "=== node.recovery.invoke ==="
-  echo "node: $NODE_ID"
-  echo "mode: $MODE"
-  echo "decision: admitted"
-  echo "underlying_capability: $underlying_capability"
-  echo "underlying_action: $underlying_action"
-  echo "recoverable_truth: $recoverable_truth"
-  echo "safe_to_mutate: $safe_to_mutate"
-  [[ -n "$physical_action" ]] && echo "physical_action_required: $physical_action"
+  echo "============================================================"
+  echo "  node.recovery.invoke"
+  echo "============================================================"
+  echo ""
+  echo "REQUEST"
+  echo "  node:        $NODE_ID"
+  echo "  mode:        $MODE"
+  echo "  decision:    admitted"
+  echo ""
+  echo "RECOVERY CONTEXT"
+  echo "  capability:  $underlying_capability"
+  echo "  action:      $underlying_action"
+  echo "  recoverable: $recoverable_truth"
+  echo "  safe_to_mutate: $safe_to_mutate"
+  [[ -n "$physical_action" ]] && echo "  physical_action_required: $physical_action"
   echo ""
 
   if [[ -n "$warnings" ]]; then
+    echo "WARNINGS"
     printf '%b' "$warnings"
     echo ""
   fi
 
   if $dry_run && [[ "$MODE" != "power_status" ]]; then
-    echo "DRY-RUN: Would execute: $underlying_capability $underlying_action"
-    echo "No mutation performed. Re-run with --execute to proceed."
+    echo "------------------------------------------------------------"
+    echo "  DRY-RUN: No mutation performed."
+    echo "  Would execute: $underlying_capability $underlying_action"
+    echo "------------------------------------------------------------"
     echo ""
     echo "--- dry-run output from underlying primitive ---"
     bash "$underlying_script" $underlying_args 2>&1 || true
+    echo ""
+    echo "NEXT STEPS"
+    echo "  1. Review output above — confirm this is the intended action"
+    echo "  2. Execute for real:  node-recovery-invoke --node $NODE_ID --mode $MODE --execute"
+    echo "  3. After execution: verify with node-recovery-status --node $NODE_ID"
   else
     echo "--- executing underlying primitive ---"
-    bash "$underlying_script" $underlying_args 2>&1 || true
+    primitive_output="$(bash "$underlying_script" $underlying_args 2>&1 || true)"
+    echo "$primitive_output"
+    echo ""
+    echo "------------------------------------------------------------"
+    if [[ "$MODE" == "power_status" ]]; then
+      echo "  RESULT: Read-only query complete (no mutation)"
+    else
+      echo "  RESULT: $underlying_action executed on $NODE_ID"
+    fi
+    echo "------------------------------------------------------------"
+    echo ""
+    echo "NEXT STEPS"
+    echo "  1. Verify result:  node-recovery-status --node $NODE_ID"
+    if [[ "$MODE" == "power_on" || "$MODE" == "power_cycle" ]]; then
+      echo "  2. Wait for host to boot, then check SSH reachability"
+    elif [[ "$MODE" == "power_off" || "$MODE" == "host_shutdown" ]]; then
+      echo "  2. Confirm host is down before proceeding with maintenance"
+    elif [[ "$MODE" == "power_status" ]]; then
+      echo "  2. If host is off, use: node-recovery-invoke --node $NODE_ID --mode power_on --execute"
+    fi
   fi
 fi

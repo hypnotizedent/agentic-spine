@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# idrac-health-status — Quick health check for the shop iDRAC (idrac-shop).
+# Delegates to baremetal-idrac-discover with legacy text output.
+# For full structured discovery, use: baremetal-idrac-discover --target-id idrac-shop
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
 DISCOVER_SCRIPT="$SPINE_ROOT/ops/plugins/infra/observability/bin/baremetal-idrac-discover"
@@ -10,4 +14,15 @@ if [[ ! -x "$DISCOVER_SCRIPT" ]]; then
     exit 2
 fi
 
-exec "$DISCOVER_SCRIPT" --target-id idrac-shop --legacy-text "$@"
+echo "--- idrac-health-status (target: idrac-shop) ---"
+echo ""
+"$DISCOVER_SCRIPT" --target-id idrac-shop --legacy-text "$@"
+exit_code=$?
+echo ""
+if [[ $exit_code -eq 0 ]]; then
+    echo "For full discovery detail: baremetal-idrac-discover --target-id idrac-shop"
+else
+    echo "Health check returned non-OK. For full diagnostics:"
+    echo "  baremetal-idrac-discover --target-id idrac-shop"
+fi
+exit $exit_code

@@ -289,29 +289,109 @@ def render_human(result: dict[str, Any]) -> str:
     recognition = result["recognition"]
     identity = result["identity"]
     health = result["health"]
+    artifacts = result.get("artifacts", {})
+    status = result["status"]
+
+    ok = "PASS"
+    fail = "FAIL"
+    skip = "SKIP"
+
     lines = [
-        "baremetal.idrac.discover",
-        f"target:       {target['label']}",
-        f"host:         {target['resolved_host']}",
-        f"access_path:  {access['access_path']}",
-        f"probe_via:    {access['probe_via'] or 'none'}",
-        f"reachable:    {'yes' if recognition['reachable'] else 'no'}",
-        f"recognizable: {'yes' if recognition['recognized_as_idrac'] else 'no'}",
-        f"auth:         {recognition['credential_status']}",
-        f"power:        {health['power_state'] or 'unknown'}",
-        f"health:       {health['system_health'] or health['manager_health'] or 'unknown'}",
-        f"hostname:     {identity['hostname'] or 'unknown'}",
-        f"manufacturer: {identity['manufacturer'] or 'unknown'}",
-        f"model:        {identity['model'] or 'unknown'}",
-        f"service_tag:  {identity['service_tag'] or 'unknown'}",
-        f"memory_gib:   {identity['memory_gib'] if identity['memory_gib'] is not None else 'unknown'}",
-        f"processors:   {identity['processor_count'] or '?'}x {identity['processor_model'] or 'unknown'}",
-        f"firmware:     {identity['firmware_version'] or 'unknown'}",
+        "=" * 60,
+        "  baremetal.idrac.discover",
+        "=" * 60,
+        "",
+        "TARGET",
+        f"  label:        {target['label']}",
+        f"  host:         {target['resolved_host']}",
+        f"  input_mode:   {target.get('input_mode', 'unknown')}",
     ]
+    if target.get("description"):
+        lines.append(f"  description:  {target['description']}")
+    if target.get("site"):
+        lines.append(f"  site:         {target['site']}")
+
+    lines.extend([
+        "",
+        "NETWORK REACHABILITY",
+        f"  access_path:  {access['access_path']}",
+        f"  probe_via:    {access['probe_via'] or 'none (direct)'}",
+        f"  ping:         {'yes' if access.get('ping_reachable') else 'no'}",
+        f"  http_status:  {access.get('service_root_http_status') or 'none'}",
+    ])
+
+    lines.extend([
+        "",
+        "REDFISH / BMC RECOGNITION",
+        f"  reachable:    {'yes' if recognition['reachable'] else 'no'}",
+        f"  recognized:   {'yes' if recognition['recognized_as_idrac'] else 'no'}",
+        f"  bmc_type:     {recognition.get('source', 'unknown')}",
+        f"  credentials:  {recognition['credential_status']}",
+        f"  cred_source:  {recognition.get('credential_source', 'unknown')}",
+    ])
+
+    lines.extend([
+        "",
+        "IDENTITY",
+        f"  hostname:     {identity['hostname'] or 'unknown'}",
+        f"  manufacturer: {identity['manufacturer'] or 'unknown'}",
+        f"  model:        {identity['model'] or 'unknown'}",
+        f"  service_tag:  {identity['service_tag'] or 'unknown'}",
+        f"  memory_gib:   {identity['memory_gib'] if identity['memory_gib'] is not None else 'unknown'}",
+        f"  processors:   {identity['processor_count'] or '?'}x {identity['processor_model'] or 'unknown'}",
+        f"  firmware:     {identity['firmware_version'] or 'unknown'}",
+    ])
+
+    lines.extend([
+        "",
+        "HEALTH",
+        f"  power:        {health['power_state'] or 'unknown'}",
+        f"  health:       {health['system_health'] or health['manager_health'] or 'unknown'}",
+    ])
     temps = health["temperatures"]
     if temps:
-        lines.append(f"temps:        {', '.join(temps)}")
-    lines.append(f"status:       {result['status']}")
+        lines.append(f"  temps:        {', '.join(temps)}")
+
+    # Checklist summary
+    reachable = recognition["reachable"]
+    recognized = recognition["recognized_as_idrac"]
+    cred_ok = recognition["credential_status"] == "authenticated"
+    has_identity = bool(identity["model"] or identity["manufacturer"])
+    has_health = bool(health["power_state"])
+
+    lines.extend([
+        "",
+        "DISCOVERY CHECKLIST",
+        f"  [{'x' if reachable else ' '}] Network reachable          {ok if reachable else fail}",
+        f"  [{'x' if recognized else ' '}] BMC recognized             {ok if recognized else (fail if reachable else skip)}",
+        f"  [{'x' if cred_ok else ' '}] Credentials authenticated  {ok if cred_ok else (fail if recognized else skip)}",
+        f"  [{'x' if has_identity else ' '}] Identity retrieved         {ok if has_identity else (fail if cred_ok else skip)}",
+        f"  [{'x' if has_health else ' '}] Health data available      {ok if has_health else (fail if cred_ok else skip)}",
+    ])
+
+    lines.extend([
+        "",
+        "-" * 60,
+        f"  RESULT: {status}",
+    ])
+
+    if status == "DOWN":
+        lines.append("  Host is unreachable. Check network, firewall, or BMC power.")
+    elif status == "UNRECOGNIZED":
+        lines.append("  Host responds but is not recognized as an iDRAC/Redfish BMC.")
+    elif status == "LIMITED":
+        reasons = []
+        if recognition["credential_status"] == "missing":
+            reasons.append("no credentials provided")
+        elif recognition["credential_status"] == "auth_failed":
+            reasons.append("credential authentication failed")
+        if not has_identity:
+            reasons.append("identity not retrieved")
+        lines.append(f"  Partial discovery: {'; '.join(reasons) if reasons else 'BMC recognized but not fully authenticated'}.")
+    elif status == "OK":
+        lines.append("  Full discovery successful. BMC is reachable and authenticated.")
+
+    lines.append("-" * 60)
     return "\n".join(lines)
 
 
