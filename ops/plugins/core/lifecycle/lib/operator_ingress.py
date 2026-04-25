@@ -372,6 +372,13 @@ def list_operator_ingress(
             item["classified_at"] = str(doc["classified_at"])
         if "routed_at" in doc:
             item["routed_at"] = str(doc["routed_at"])
+        # Adoption fields (written by reconciler, read-only here)
+        for af in (
+            "adoption_state", "adoption_ref", "adoption_ref_kind",
+            "adopted_at", "landed_at", "reconciled_at", "reconciliation_reason",
+        ):
+            if af in doc:
+                item[af] = doc[af]
         translator_workload = doc.get("translator_workload")
         if isinstance(translator_workload, dict):
             w1 = translator_workload.get("W1")
@@ -1498,4 +1505,193 @@ def process_promotable_operator_ingress(
         "deferred": deferred_count,
         "open_loops_checked": len(open_loops),
         "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Adoption reconciliation — post-routing truth
+# ---------------------------------------------------------------------------
+
+ADOPTION_STATES = ("unresolved", "adopted", "landed", "orphaned")
+
+_LOOP_REF_RE = re.compile(r"^LOOP-")
+
+# Adoption block field names — reconciler owns these exclusively
+_ADOPTION_FIELDS = (
+    "adoption_state",
+    "adoption_ref",
+    "adoption_ref_kind",
+    "adopted_at",
+    "landed_at",
+    "reconciled_at",
+    "reconciliation_reason",
+)
+
+
+def _extract_loop_candidate(doc: dict[str, Any]) -> str | None:
+    """Extract the best loop candidate from a routed OI's refs.
+
+    Preference: LOOP-* in downstream_refs first, then next_stage if LOOP-*.
+    """
+    downstream = doc.get("downstream_refs")
+    if isinstance(downstream, list):
+        for ref in downstream:
+            ref_str = str(ref).strip()
+            if _LOOP_REF_RE.match(ref_str):
+                return ref_str
+    next_stage = str(doc.get("next_stage", "")).strip()
+    if _LOOP_REF_RE.match(next_stage):
+        return next_stage
+    return None
+
+
+def _resolve_loop_adoption(
+    loop_id: str, state_root: str
+) -> tuple[str, str]:
+    """Resolve adoption state for a loop candidate.
+
+    Returns (adoption_state, reason).
+    """
+    sr = Path(state_root)
+
+    # 1. Live scope
+    live_scope = sr / "loop-scopes" / f"{loop_id}.scope.md"
+    if live_scope.is_file():
+        return "adopted", "live loop scope exists"
+
+    # 2. Archived closed scope
+    archived_scope = sr / "archive" / "closed-loop-scopes" / f"{loop_id}.scope.md"
+    if archived_scope.is_file():
+        try:
+            content = archived_scope.read_text(encoding="utf-8")
+            # Parse YAML frontmatter for disposition
+            if content.startswith("---"):
+                parts = content.split("---", 2)
+                if len(parts) >= 3:
+                    fm = yaml.safe_load(parts[1])
+                    if isinstance(fm, dict):
+                        disposition = str(fm.get("disposition", ""))
+                        if disposition in ("landed", "slice_complete", "complete"):
+                            return "landed", f"downstream loop closed {disposition}"
+                        return "landed", f"downstream loop closed with disposition: {disposition}"
+        except Exception:
+            pass
+        return "landed", "archived closed loop scope exists"
+
+    # 3. Orchestration — supporting evidence only
+    orch_dir = sr / "orchestration" / loop_id
+    closed_yaml = orch_dir / "closed.yaml"
+    manifest_yaml = orch_dir / "manifest.yaml"
+    if closed_yaml.is_file() and not archived_scope.is_file():
+        return "orphaned", "orchestration closed.yaml exists but no scope truth"
+    if manifest_yaml.is_file() and not archived_scope.is_file():
+        return "orphaned", "orchestration manifest exists but no scope truth"
+
+    # 4. Nothing found
+    return "orphaned", "downstream ref missing durable loop object"
+
+
+def reconcile_operator_ingress_adoption(
+    *,
+    state_root: str,
+) -> dict[str, Any]:
+    """Reconcile adoption state for all routed operator ingress objects.
+
+    Reads loop scope truth and writes adoption block fields on OI files.
+    Never mutates lifecycle_state or other membrane fields.
+    """
+    if not state_root or not os.path.isdir(state_root):
+        raise OperatorIngressError(f"state_root not found: {state_root}")
+
+    ingress_dir = _ingress_dir(state_root)
+    if not ingress_dir.is_dir():
+        return {"status": "ok", "reconciled": 0, "skipped": 0, "items": []}
+
+    reconciled_count = 0
+    skipped_count = 0
+    items: list[dict[str, Any]] = []
+    now = _iso_utc(_utcnow())
+
+    for path in sorted(ingress_dir.glob("OI-*.yaml")):
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(doc, dict):
+            continue
+
+        ingress_id = str(doc.get("ingress_id", path.stem))
+        lifecycle_state = str(doc.get("lifecycle_state", "submitted"))
+
+        # Only reconcile routed OIs
+        if lifecycle_state != "routed":
+            skipped_count += 1
+            items.append({
+                "ingress_id": ingress_id,
+                "action": "skipped",
+                "reason": f"lifecycle_state={lifecycle_state}, not routed",
+            })
+            continue
+
+        loop_candidate = _extract_loop_candidate(doc)
+        if loop_candidate is None:
+            # No loop ref — unresolved (advisory route only)
+            new_state = "unresolved"
+            reason = "no loop candidate in refs"
+            adoption_ref = ""
+        else:
+            new_state, reason = _resolve_loop_adoption(loop_candidate, state_root)
+            adoption_ref = loop_candidate
+
+        # Check existing adoption block for idempotency
+        old_state = doc.get("adoption_state")
+        changed = old_state != new_state
+
+        before_doc = copy.deepcopy(doc)
+
+        # Write adoption block
+        doc["adoption_state"] = new_state
+        if adoption_ref:
+            doc["adoption_ref"] = adoption_ref
+            doc["adoption_ref_kind"] = "loop"
+        doc["reconciled_at"] = now
+        doc["reconciliation_reason"] = reason
+
+        if new_state in ("adopted", "landed") and not doc.get("adopted_at"):
+            doc["adopted_at"] = now
+        if new_state == "landed" and not doc.get("landed_at"):
+            doc["landed_at"] = now
+
+        content = yaml.safe_dump(
+            doc,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+        _atomic_write(path, content)
+
+        _append_ingress_lifecycle_event(
+            state_root=state_root,
+            event="adoption_reconciled",
+            ingress_id=ingress_id,
+            path=path,
+            before=before_doc,
+            after=copy.deepcopy(doc),
+        )
+
+        reconciled_count += 1
+        items.append({
+            "ingress_id": ingress_id,
+            "action": "reconciled",
+            "adoption_state": new_state,
+            "adoption_ref": adoption_ref,
+            "changed": changed,
+            "reason": reason,
+        })
+
+    return {
+        "status": "ok",
+        "reconciled": reconciled_count,
+        "skipped": skipped_count,
+        "items": items,
     }

@@ -296,7 +296,17 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
         classification = _H(str(item.get("classification", "")))
         disposition_detail = _H(str(item.get("disposition_detail", "")))
         next_stage = _H(str(item.get("next_stage", "")))
-        badge_cls = f"badge-{state}" if state in ("submitted", "classified", "routed") else ""
+        adoption_state = str(item.get("adoption_state", ""))
+        adoption_ref = _H(str(item.get("adoption_ref", "")))
+        reconciliation_reason = _H(str(item.get("reconciliation_reason", "")))
+
+        # Badge: adoption_state is prominent when present, lifecycle_state secondary
+        if adoption_state:
+            badge_cls = f"badge-{adoption_state}"
+            badge_label = adoption_state
+        else:
+            badge_cls = f"badge-{state}" if state in ("submitted", "classified", "routed") else ""
+            badge_label = state
 
         # Outcome detail line: shows disposition and classification
         outcome_parts = []
@@ -306,21 +316,39 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
             outcome_parts.append(classification)
         outcome_line = " · ".join(outcome_parts)
 
+        # Adoption line (prominent when present)
+        adoption_line = ""
+        if adoption_state and adoption_ref:
+            adoption_line = f"<div class='item-meta'><strong>{_H(adoption_state)}</strong> via {adoption_ref}</div>"
+            if reconciliation_reason:
+                adoption_line += f"<div class='item-meta'>{reconciliation_reason}</div>"
+        elif adoption_state:
+            adoption_line = f"<div class='item-meta'><strong>{_H(adoption_state)}</strong></div>"
+            if reconciliation_reason:
+                adoption_line += f"<div class='item-meta'>{reconciliation_reason}</div>"
+
         # Next stage / detail line
         detail_line = ""
-        if next_stage:
-            detail_line = f"<div class='item-meta'>→ {next_stage}</div>"
-        elif disposition_detail:
-            detail_line = f"<div class='item-meta'>{disposition_detail}</div>"
+        if not adoption_line:
+            if next_stage:
+                detail_line = f"<div class='item-meta'>→ {next_stage}</div>"
+            elif disposition_detail:
+                detail_line = f"<div class='item-meta'>{disposition_detail}</div>"
+
+        # Membrane badge (secondary when adoption is present)
+        membrane_badge = ""
+        if adoption_state:
+            membrane_badge = f"<span class='badge badge-{state}' style='font-size:0.7em;opacity:0.7'>{_H(state)}</span>"
 
         rows += f"""
         <div class="item">
           <div style="display:flex;justify-content:space-between;align-items:center">
             <span class="item-id">{iid}</span>
-            <span class="badge {badge_cls}">{_H(state)}</span>
+            <span class="badge {badge_cls}">{_H(badge_label)}</span>
           </div>
           {"<div class='item-hint'>" + hint + "</div>" if hint else ""}
-          <div class="item-meta">{outcome_line}</div>
+          {adoption_line}
+          <div class="item-meta">{outcome_line}{(' ' + membrane_badge) if membrane_badge else ''}</div>
           {detail_line}
           <div class="item-meta">{ctype} · {submitted}</div>
         </div>

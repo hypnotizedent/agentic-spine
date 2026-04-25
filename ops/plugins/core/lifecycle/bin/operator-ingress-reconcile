@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""operator-ingress-reconcile — adoption reconciler for routed OI objects."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import operator_ingress as oi
+
+
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="operator-ingress-reconcile",
+        description="Reconcile adoption state for routed operator ingress objects.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit JSON output.",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Verify dependencies and exit.",
+    )
+
+    if "--self-check" in sys.argv:
+        try:
+            import yaml  # noqa: F401
+            print("operator.ingress.reconcile self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"operator.ingress.reconcile self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    args = parser.parse_args()
+
+    state_root = os.environ.get("SPINE_STATE", "")
+    if not state_root:
+        msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": msg}, indent=2))
+        else:
+            print(f"operator.ingress.reconcile FAIL: {msg}", file=sys.stderr)
+        return 1
+
+    try:
+        result = oi.reconcile_operator_ingress_adoption(state_root=state_root)
+    except oi.OperatorIngressError as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"operator.ingress.reconcile FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"[RECONCILE] reconciled={result['reconciled']} skipped={result['skipped']}")
+        for item in result["items"]:
+            if item["action"] == "skipped":
+                print(f"  {item['ingress_id']}  SKIP  {item['reason']}")
+            else:
+                changed = "CHANGED" if item["changed"] else "STABLE"
+                print(f"  {item['ingress_id']}  {item['adoption_state']}  {changed}  {item['reason']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
