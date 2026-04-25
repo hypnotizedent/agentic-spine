@@ -142,8 +142,9 @@ spine_job_run() {
   [[ "$rc" -eq 0 ]] || status_text="failed"
   execution_source="${SPINE_AUTONOMOUS_EXECUTION_CONTEXT:-manual}"
 
+  local log_line=""
   if command -v jq >/dev/null 2>&1; then
-    jq -cn \
+    log_line="$(jq -cn \
       --arg job_name "$job_name" \
       --arg started_at "$started_at" \
       --arg ended_at "$ended_at" \
@@ -151,10 +152,16 @@ spine_job_run() {
       --argjson exit_code "$rc" \
       --arg status "$status_text" \
       --arg execution_source "$execution_source" \
-      '{job_name:$job_name,started_at:$started_at,ended_at:$ended_at,duration_s:$duration_s,exit_code:$exit_code,status:$status,execution_source:$execution_source}' >> "$RUNTIME_JOB_LOG"
+      '{job_name:$job_name,started_at:$started_at,ended_at:$ended_at,duration_s:$duration_s,exit_code:$exit_code,status:$status,execution_source:$execution_source}')"
   else
-    printf '{"job_name":"%s","started_at":"%s","ended_at":"%s","duration_s":%s,"exit_code":%s,"status":"%s","execution_source":"%s"}\n' \
-      "$job_name" "$started_at" "$ended_at" "$duration_s" "$rc" "$status_text" "$execution_source" >> "$RUNTIME_JOB_LOG"
+    log_line="$(printf '{"job_name":"%s","started_at":"%s","ended_at":"%s","duration_s":%s,"exit_code":%s,"status":"%s","execution_source":"%s"}' \
+      "$job_name" "$started_at" "$ended_at" "$duration_s" "$rc" "$status_text" "$execution_source")"
+  fi
+
+  if command -v flock >/dev/null 2>&1; then
+    (flock -w 5 9 && printf '%s\n' "$log_line" >> "$RUNTIME_JOB_LOG") 9>"${RUNTIME_JOB_LOG}.lock"
+  else
+    printf '%s\n' "$log_line" >> "$RUNTIME_JOB_LOG"
   fi
 
   if command -v spine_log_event >/dev/null 2>&1; then

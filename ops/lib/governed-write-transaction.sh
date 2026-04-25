@@ -7,6 +7,7 @@ declare -ag SPINE_TX_TRACKED=()
 spine_tx_init() {
   SPINE_TX_TMPDIR="$(mktemp -d)"
   SPINE_TX_TRACKED=()
+  trap spine_tx_cleanup EXIT
 }
 
 spine_tx_track() {
