@@ -20,6 +20,7 @@
 #   E11 retired snapshot residue class absent (fail): network.inventory.snapshot / -build
 #   E12 execution identity parity: by_terminal_id role overrides must produce matching posture
 #   E13 cap.sh no silent widen-by-fallback to worker on missing SPINE_RUNTIME_ROLE
+#   E14 researcher→worker bridge continuity (warn): active loops have packet or handoff
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -616,6 +617,91 @@ check E13 "cap.sh no silent widen-by-fallback to worker" bash -c '
         grep -n "SPINE_RUNTIME_ROLE:-worker" "$cap_sh"
         exit 1
     fi
+'
+
+warn_check E14 "researcher→worker bridge continuity (active loops have packet or handoff)" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+import json, os, subprocess, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+spine_state = os.environ.get("SPINE_STATE", "")
+if not spine_state:
+    home = os.environ.get("HOME", "")
+    spine_state = os.path.join(home, "code/.runtime/spine/state")
+
+state = Path(spine_state)
+prompts_dir = state / "controller-prompts"
+handoffs_dir = state / "handoffs"
+db_path = state / "shared_authority.db"
+
+if not db_path.is_file():
+    raise SystemExit(0)
+
+import sqlite3
+conn = sqlite3.connect(str(db_path))
+conn.row_factory = sqlite3.Row
+rows = conn.execute(
+    "SELECT loop_id FROM loops WHERE status IN (?, ?)", ["active", "open"]
+).fetchall()
+conn.close()
+
+if not rows:
+    raise SystemExit(0)
+
+active_loops = set()
+for r in rows:
+    active_loops.add(r["loop_id"])
+
+# Check which loops have at least one packet
+loops_with_packet = set()
+if prompts_dir.is_dir():
+    for p in prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md"):
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+            for line in text.splitlines()[:30]:
+                if line.startswith("loop_id:"):
+                    lid = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    if lid in active_loops:
+                        loops_with_packet.add(lid)
+                    break
+        except Exception:
+            pass
+
+# Check which loops have at least one active handoff
+loops_with_handoff = set()
+valid_states = set(["active", "parked"])
+if handoffs_dir.is_dir():
+    for h in handoffs_dir.glob("HO-*.yaml"):
+        try:
+            text = h.read_text(encoding="utf-8", errors="ignore")
+            in_loops = False
+            for line in text.splitlines():
+                if line.startswith("state:"):
+                    s = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    if s not in valid_states:
+                        break
+                if line.strip() == "loops:":
+                    in_loops = True
+                    continue
+                if in_loops:
+                    if line.startswith("  - ") or line.startswith("- "):
+                        lid = line.strip().lstrip("- ").strip('"').strip("'")
+                        if lid in active_loops:
+                            loops_with_handoff.add(lid)
+                    else:
+                        in_loops = False
+        except Exception:
+            pass
+
+# Loops with neither packet nor handoff
+uncovered = active_loops - loops_with_packet - loops_with_handoff
+if uncovered:
+    print("%d active loop(s) without packet or handoff continuity:" % len(uncovered))
+    for lid in sorted(uncovered):
+        print("  %s" % lid)
+    raise SystemExit(1)
+PY
 '
 
 if [[ "$json_mode" -eq 1 ]]; then
