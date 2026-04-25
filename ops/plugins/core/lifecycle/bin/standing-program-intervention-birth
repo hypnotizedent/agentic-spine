@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Birth intervention packets from standing-program drift check results.
+
+Reads drift check JSON (from standing-program-drift-check --json), evaluates
+each program's health classification, and births/resolves intervention packets
+under $SPINE_STATE/interventions/.
+
+Usage:
+    standing-program-intervention-birth [--dry-run] [--drift-json FILE] [--stdin]
+
+Flags:
+    --dry-run        Show what would be birthed without writing
+    --drift-json F   Read drift check output from file
+    --stdin          Read drift check output from stdin (default if no --drift-json)
+    -h, --help       Show this help
+
+Trigger type mapping:
+    stale     -> stale
+    failed    -> failure
+    never_run -> never_run
+    unreachable -> unreachable
+    healthy   -> skip (no intervention)
+    unknown   -> skip (no intervention)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+def spine_state() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_STATE",
+            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+        )
+    )
+
+
+def interventions_dir() -> Path:
+    return spine_state() / "interventions"
+
+
+# ---------------------------------------------------------------------------
+# Trigger-type mapping
+# ---------------------------------------------------------------------------
+
+HEALTH_TO_TRIGGER: dict[str, str | None] = {
+    "stale": "stale",
+    "failed": "failure",
+    "never_run": "never_run",
+    "unreachable": "unreachable",
+    "healthy": None,
+    "unknown": None,
+}
+
+
+# ---------------------------------------------------------------------------
+# Intervention file helpers
+# ---------------------------------------------------------------------------
+
+def sanitize_label(label: str) -> str:
+    """Sanitize a label for use in filenames (keep dots and hyphens)."""
+    return label.replace("/", "-").replace(" ", "-")
+
+
+def intervention_filename(label: str, trigger_type: str) -> str:
+    return f"INT-{sanitize_label(label)}--{trigger_type}.yaml"
+
+
+def intervention_id(label: str, trigger_type: str) -> str:
+    return f"INT-{sanitize_label(label)}--{trigger_type}"
+
+
+def read_intervention(path: Path) -> dict | None:
+    """Read an existing intervention YAML file, returning None if missing."""
+    if not path.is_file():
+        return None
+    try:
+        with open(path) as f:
+            return yaml.safe_load(f)
+    except Exception:
+        return None
+
+
+def write_intervention(path: Path, data: dict, dry_run: bool = False) -> None:
+    """Write intervention YAML, creating parent dirs as needed."""
+    if dry_run:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
+    path.write_text(content)
+    os.chmod(path, 0o644)
+
+
+# ---------------------------------------------------------------------------
+# Timestamp helpers
+# ---------------------------------------------------------------------------
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def format_ts(ts: str) -> str:
+    """Pass through a timestamp string, ensuring it's quoted in YAML."""
+    return ts
+
+
+# ---------------------------------------------------------------------------
+# Core logic
+# ---------------------------------------------------------------------------
+
+def build_intervention_record(program: dict, trigger_type: str, now: str) -> dict:
+    """Build a new intervention record from a drift check program entry."""
+    label = program["label"]
+    iid = intervention_id(label, trigger_type)
+
+    record: dict = {
+        "intervention_id": iid,
+        "label": label,
+        "birth_mode": "standing_program",
+        "trigger_type": trigger_type,
+        "disposition": "active",
+        "triggered_at_utc": now,
+    }
+
+    # proof_channel — copy from program if present
+    if "proof_channel" in program:
+        record["proof_channel"] = program["proof_channel"]
+
+    # observed block
+    observed: dict = {
+        "health": program.get("health", "unknown"),
+    }
+    if "last_evidence_at_utc" in program:
+        observed["last_evidence_at_utc"] = program["last_evidence_at_utc"]
+    if "staleness_seconds" in program:
+        observed["staleness_seconds"] = program["staleness_seconds"]
+    if "detail" in program:
+        observed["detail"] = program["detail"]
+    # Fallback detail from health
+    if "detail" not in observed:
+        observed["detail"] = f"health classified as {program.get('health', 'unknown')}"
+
+    record["observed"] = observed
+    return record
+
+
+def process_programs(
+    programs: list[dict],
+    dry_run: bool = False,
+) -> dict:
+    """Process drift check results and birth/resolve interventions.
+
+    Returns a summary dict with counts and action log.
+    """
+    now = utc_now()
+    idir = interventions_dir()
+    actions: list[str] = []
+    birthed = 0
+    skipped = 0
+    resolved = 0
+    healthy_count = 0
+
+    # Collect labels that are healthy for auto-resolution
+    healthy_labels: set[str] = set()
+
+    for prog in programs:
+        label = prog.get("label", "")
+        health = prog.get("health", "unknown")
+        trigger_type = HEALTH_TO_TRIGGER.get(health)
+
+        if trigger_type is None:
+            # healthy or unknown — no intervention needed
+            healthy_count += 1
+            if health == "healthy":
+                healthy_labels.add(label)
+            continue
+
+        # Check dedupe
+        fname = intervention_filename(label, trigger_type)
+        fpath = idir / fname
+        existing = read_intervention(fpath)
+
+        if existing is not None and existing.get("disposition") == "active":
+            # Already tracked
+            iid = intervention_id(label, trigger_type)
+            actions.append(
+                f"[{now}] SKIP: {iid} (already active)"
+            )
+            skipped += 1
+            continue
+
+        # Birth new intervention (existing resolved/dismissed or doesn't exist)
+        record = build_intervention_record(prog, trigger_type, now)
+        write_intervention(fpath, record, dry_run=dry_run)
+
+        iid = record["intervention_id"]
+        detail_parts = [f"trigger={trigger_type}"]
+        if "staleness_seconds" in prog:
+            detail_parts.append(f"staleness={prog['staleness_seconds']}s")
+        actions.append(
+            f"[{now}] BIRTH: {iid} ({', '.join(detail_parts)})"
+        )
+        birthed += 1
+
+    # Auto-resolution: find active interventions for now-healthy labels
+    if idir.is_dir():
+        for label in healthy_labels:
+            prefix = f"INT-{sanitize_label(label)}--"
+            for fpath in sorted(idir.glob(f"{prefix}*.yaml")):
+                existing = read_intervention(fpath)
+                if existing is None:
+                    continue
+                if existing.get("disposition") != "active":
+                    continue
+                # Resolve it
+                existing["disposition"] = "resolved"
+                existing["resolved_at_utc"] = now
+                write_intervention(fpath, existing, dry_run=dry_run)
+                iid = existing.get("intervention_id", fpath.stem)
+                actions.append(
+                    f"[{now}] RESOLVE: {iid} (now healthy)"
+                )
+                resolved += 1
+
+    return {
+        "actions": actions,
+        "birthed": birthed,
+        "skipped": skipped,
+        "resolved": resolved,
+        "healthy": healthy_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Birth intervention packets from standing-program drift check results."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be birthed without writing",
+    )
+    parser.add_argument(
+        "--drift-json",
+        type=str,
+        default=None,
+        help="Read drift check output from file",
+    )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read drift check output from stdin (default if no --drift-json)",
+    )
+    # Cap framework passthrough separator
+    parser.add_argument("--", dest="passthrough_separator", nargs="?", help=argparse.SUPPRESS)
+    args, _unknown = parser.parse_known_args()
+
+    # Read input
+    raw: str = ""
+    if args.drift_json:
+        fpath = Path(args.drift_json)
+        if not fpath.is_file():
+            print(f"ERROR: drift-json file not found: {args.drift_json}", file=sys.stderr)
+            return 1
+        raw = fpath.read_text()
+    else:
+        # Default: read from stdin
+        if sys.stdin.isatty() and not args.stdin:
+            print(
+                "ERROR: no input. Use --drift-json FILE or pipe drift check output via stdin.",
+                file=sys.stderr,
+            )
+            return 1
+        raw = sys.stdin.read()
+
+    if not raw.strip():
+        print("ERROR: empty input", file=sys.stderr)
+        return 1
+
+    # Parse JSON
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: invalid JSON input: {e}", file=sys.stderr)
+        return 1
+
+    # Accept either a list of programs or a dict with a "programs" key
+    if isinstance(data, list):
+        programs = data
+    elif isinstance(data, dict) and "programs" in data:
+        programs = data["programs"]
+    else:
+        print(
+            "ERROR: expected a JSON array or an object with a 'programs' key",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.dry_run:
+        print("[DRY RUN]")
+        print()
+
+    result = process_programs(programs, dry_run=args.dry_run)
+
+    for action in result["actions"]:
+        print(action)
+
+    print(
+        f"Summary: {result['birthed']} birthed, "
+        f"{result['skipped']} skipped, "
+        f"{result['resolved']} resolved, "
+        f"{result['healthy']} healthy"
+    )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

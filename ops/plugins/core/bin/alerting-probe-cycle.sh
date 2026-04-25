@@ -149,40 +149,59 @@ _watcher_write_cycle_state() {
       "The watcher alerting-probe-cycle has failed ${new_consecutive_failures} consecutive times. Health: ${health}. Last failure: ${cycle_at}. Manual investigation required." \
       "watcher-cycle-state"
 
+    # Generic intervention packet — shared schema with standing-program-intervention-birth
     local intervention_dir="${SPINE_STATE:-${HOME}/code/.runtime/spine/state}/interventions"
     mkdir -p "$intervention_dir"
-    local intervention_file="${intervention_dir}/INTERVENTION-watcher-$(date -u +%Y%m%dT%H%M%SZ).yaml"
-    cat > "$intervention_file" <<INTERVENTION
-intervention_id: "watcher-failure-$(date -u +%Y%m%dT%H%M%SZ)"
-created_at: "${cycle_at}"
-source: "watcher-cycle-state"
-node: "watcher_node"
-program: "alerting-probe-cycle"
-trigger: "consecutive_failures >= ${WATCHER_THRESHOLD_INTERVENTION}"
-consecutive_failures: ${new_consecutive_failures}
-health: "${health}"
-suggested_actions:
-  - "Check systemd journal on proxmox-home: journalctl -u spine-watcher-alerting-probe-cycle"
-  - "Verify HA reachability from watcher node"
-  - "Check watcher secrets: /etc/spine/watcher-secrets.env"
-  - "Run manual probe: ops cap run alerting.probe"
-disposition: "pending"
+    local _trigger_at
+    _trigger_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local intervention_file="${intervention_dir}/INT-com.ronny.alerting-probe-cycle--failure.yaml"
+
+    # Dedupe: only birth if no active intervention exists for this label::trigger_type
+    local _skip=false
+    if [[ -f "$intervention_file" ]]; then
+      local _existing_disp
+      _existing_disp="$(grep -m1 '^disposition:' "$intervention_file" 2>/dev/null | awk '{print $2}' | tr -d '"' || true)"
+      if [[ "$_existing_disp" == "active" ]]; then
+        _skip=true
+      fi
+    fi
+
+    if ! $_skip; then
+      cat > "$intervention_file" <<INTERVENTION
+intervention_id: "INT-com.ronny.alerting-probe-cycle--failure"
+label: "com.ronny.alerting-probe-cycle"
+birth_mode: "standing_program"
+trigger_type: "failure"
+disposition: "active"
+triggered_at_utc: "${_trigger_at}"
+proof_channel:
+  type: "cycle_state"
+  host: "proxmox-home"
+  stale_threshold_seconds: 1200
+observed:
+  health: "${health}"
+  last_evidence_at_utc: "${cycle_at}"
+  consecutive_failures: ${new_consecutive_failures}
+  detail: "consecutive_failures >= ${WATCHER_THRESHOLD_INTERVENTION}"
 INTERVENTION
-    echo "[alerting-probe-cycle] INTERVENTION scaffolded: ${intervention_file}"
+      echo "[alerting-probe-cycle] INTERVENTION birthed: ${intervention_file}"
+    else
+      echo "[alerting-probe-cycle] INTERVENTION already active, skipping dedupe"
+    fi
   fi
 
-  # Count pending interventions (after any new one was created above)
+  # Count active interventions (generic schema — all INT-*.yaml files)
   local intervention_dir="${SPINE_STATE:-${HOME}/code/.runtime/spine/state}/interventions"
   local pending_count=0
   if [[ -d "$intervention_dir" ]]; then
     while IFS= read -r _f; do
       [[ -f "$_f" ]] || continue
       local _disp
-      _disp="$(grep -m1 '^disposition:' "$_f" 2>/dev/null | awk '{print $2}' || true)"
-      if [[ "$_disp" == *pending* ]]; then
+      _disp="$(grep -m1 '^disposition:' "$_f" 2>/dev/null | awk '{print $2}' | tr -d '"' || true)"
+      if [[ "$_disp" == "active" ]]; then
         pending_count=$((pending_count + 1))
       fi
-    done < <(find "$intervention_dir" -name 'INTERVENTION-watcher-*.yaml' -type f 2>/dev/null || true)
+    done < <(find "$intervention_dir" -name 'INT-*.yaml' -type f 2>/dev/null || true)
   fi
 
   # Write cycle state with embedded intervention count
