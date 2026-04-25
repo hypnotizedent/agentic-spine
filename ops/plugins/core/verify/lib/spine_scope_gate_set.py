@@ -36,6 +36,8 @@ CORE_ENGINE_COVERAGE = {
     },
 }
 
+# D127 uses declare -A (bash 4+) which fails on macOS bash 3.2.
+# Conceptually L1 (topology meta-integrity), excluded for runtime compat only.
 OUT_OF_SPINE_SCOPE = {"D127"}
 
 
