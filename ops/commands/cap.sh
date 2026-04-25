@@ -142,10 +142,6 @@ evaluate_role_policy() {
 
     reset_role_policy_state
 
-    if ! cap_safety_requires_mutation_policy "$safety"; then
-        return 0
-    fi
-
     CAP_ROLE_POLICY_ENFORCED="true"
     override_env="$(role_policy_override_env_name '.runtime_roles.execution_policy.override_env' 'SPINE_ROLE_POLICY_OVERRIDE_REF')"
     override_reason_env="$(role_policy_override_env_name '.runtime_roles.execution_policy.override_reason_env' 'SPINE_ROLE_POLICY_OVERRIDE_REASON')"
@@ -164,12 +160,21 @@ evaluate_role_policy() {
         CAP_ROLE_POLICY_OVERRIDE_USED="true"
     fi
 
+    # ── Translator posture: full execution block ──────────────────────────
+    # translator.authority.contract.yaml forbids ALL capability execution,
+    # verification authority, loop advancement, and dispatch — not just
+    # mutating caps. This gate fires before the safety-class check so that
+    # translator sessions cannot run ANY cap without explicit override.
     session_posture="${SPINE_SESSION_POSTURE:-}"
     if [[ "$session_posture" == "translator" && "$CAP_ROLE_POLICY_OVERRIDE_USED" != "true" ]]; then
-        CAP_BLOCKER_REASON="translator_posture_mutation_forbidden"
+        CAP_BLOCKER_REASON="translator_posture_execution_forbidden"
         CAP_ROLE_POLICY_BLOCK_REASON="$CAP_BLOCKER_REASON"
-        CAP_ROLE_POLICY_BLOCK_MESSAGE="session posture 'translator' cannot execute mutating capabilities"
+        CAP_ROLE_POLICY_BLOCK_MESSAGE="session posture 'translator' cannot execute capabilities — re-enter on a controller or worker surface"
         return 1
+    fi
+
+    if ! cap_safety_requires_mutation_policy "$safety"; then
+        return 0
     fi
 
     if [[ ! -f "$ROLE_POLICY_CONTRACT" ]]; then
@@ -217,7 +222,7 @@ emit_role_policy_stop() {
 
     next_step="rerun from a worker-bound execution surface or set $override_env and $override_reason_env with governed justification"
     if [[ "$session_posture" == "translator" ]]; then
-        next_step="re-enter on a controller or worker surface; translator posture remains read/draft only for mutating work. Override only with governed justification via $override_env and $override_reason_env"
+        next_step="re-enter on a controller or worker surface; translator posture cannot execute any capability. Override only with governed justification via $override_env and $override_reason_env"
     fi
 
     cat <<EOF
