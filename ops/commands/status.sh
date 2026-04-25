@@ -259,6 +259,7 @@ exec python3 - "$SPINE_REPO" "$MODE" "$STRICT" "$SPINE_STATE" "$SPINE_INBOX" "$S
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from collections import Counter
@@ -656,6 +657,140 @@ def collect_gap_state():
     return state
 
 
+def run_json_command(cmd: list[str], *, timeout: int = 20) -> dict:
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=os.environ.copy(),
+        )
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+    if proc.returncode != 0:
+        return {
+            "status": "error",
+            "error": (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip(),
+        }
+
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except Exception as exc:
+        return {"status": "error", "error": f"invalid json: {exc}"}
+
+    return payload if isinstance(payload, dict) else {"status": "error", "error": "non-object json payload"}
+
+
+def collect_standing_program_health():
+    result = {
+        "status": "unavailable",
+        "evaluated_at_utc": "",
+        "summary": {
+            "total": 0,
+            "healthy": 0,
+            "stale": 0,
+            "failed": 0,
+            "unreachable": 0,
+            "never_run": 0,
+            "unknown": 0,
+        },
+        "programs": [],
+        "active_interventions": 0,
+        "intervention_labels": [],
+    }
+
+    drift_bin = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "standing-program-drift-check"
+    if not drift_bin.exists():
+        result["error"] = f"missing proof evaluator: {drift_bin}"
+        return result
+
+    data = run_json_command([sys.executable, str(drift_bin), "--json"])
+    if data.get("status") == "error":
+        result["error"] = data.get("error", "standing-program-drift-check failed")
+        return result
+
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    programs = data.get("programs") if isinstance(data.get("programs"), list) else []
+    normalized_summary = {
+        "total": int(summary.get("total", 0) or 0),
+        "healthy": int(summary.get("healthy", 0) or 0),
+        "stale": int(summary.get("stale", 0) or 0),
+        "failed": int(summary.get("failed", 0) or 0),
+        "unreachable": int(summary.get("unreachable", 0) or 0),
+        "never_run": int(summary.get("never_run", 0) or 0),
+        "unknown": int(summary.get("unknown", 0) or 0),
+    }
+    degraded = sum(
+        normalized_summary[key]
+        for key in ("stale", "failed", "unreachable", "never_run", "unknown")
+    )
+    result.update({
+        "status": "ok" if normalized_summary["total"] > 0 and degraded == 0 else "degraded",
+        "evaluated_at_utc": str(data.get("evaluated_at_utc") or "").strip(),
+        "summary": normalized_summary,
+        "programs": programs,
+    })
+
+    interventions_dir = state_root / "interventions"
+    if interventions_dir.is_dir():
+        try:
+            import yaml as _yaml_sp  # type: ignore
+            for yf in sorted(interventions_dir.glob("*.yaml")) + sorted(interventions_dir.glob("*.yml")):
+                try:
+                    doc = _yaml_sp.safe_load(yf.read_text(encoding="utf-8")) or {}
+                except Exception:
+                    continue
+                if not isinstance(doc, dict):
+                    continue
+                if str(doc.get("disposition", "")).strip() != "active":
+                    continue
+                result["active_interventions"] += 1
+                label = str(doc.get("source_label") or doc.get("label") or yf.stem).strip()
+                if label:
+                    result["intervention_labels"].append(label)
+        except Exception:
+            pass
+
+    return result
+
+
+def collect_delegation_summary():
+    result = {
+        "status": "unavailable",
+        "count": 0,
+        "active": 0,
+        "by_state": {},
+        "delegations": [],
+    }
+    delegation_bin = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "delegation-status"
+    if not delegation_bin.exists():
+        result["error"] = f"missing delegation status surface: {delegation_bin}"
+        return result
+
+    data = run_json_command([sys.executable, str(delegation_bin), "--json"])
+    if data.get("status") == "error":
+        result["error"] = data.get("error", "delegation-status failed")
+        return result
+
+    delegations = data.get("delegations") if isinstance(data.get("delegations"), list) else []
+    by_state = Counter(
+        str(item.get("delegation_state") or "").strip() or "unknown"
+        for item in delegations
+        if isinstance(item, dict)
+    )
+    result.update({
+        "status": "ok",
+        "count": int(data.get("count", len(delegations)) or 0),
+        "active": sum(by_state.get(name, 0) for name in ("delegated", "picked_up", "executing")),
+        "by_state": dict(by_state),
+        "delegations": delegations,
+    })
+    return result
+
+
 gap_state = collect_gap_state()
 gaps_available = gap_state.get("status") == "ok"
 open_gaps = gap_state.get("open_gaps", []) if gaps_available else []
@@ -664,6 +799,8 @@ unlinked_gaps = gap_state.get("unlinked_gaps", []) if gaps_available else []
 open_gap_count = len(open_gaps) if gaps_available else None
 linked_gap_count = len(linked_gaps) if gaps_available else None
 unlinked_gap_count = len(unlinked_gaps) if gaps_available else None
+standing_program_health = collect_standing_program_health()
+delegation_summary = collect_delegation_summary()
 
 # ── Parse inbox lanes ─────────────────────────────────────────────────────
 
@@ -1156,13 +1293,22 @@ if mode == "--json":
         "coherence_summary": joined_state_summary,
         "daemons": daemons_summary,
         "temporal_truth": temporal_truth_payload,
+        "standing_program_health": standing_program_health,
+        "delegations": delegation_summary,
         "counts": {
             # Use joined-state as authoritative source so status --json and
             # status --context agree on the same open-loop count (H6 coherence).
             "open_loops": int(joined_state_summary.get("open_loops", len(open_loops))),
             "mapped_open_loops": mapped_open_loops,
+            "standing_programs_total": int((standing_program_health.get("summary") or {}).get("total", 0) or 0),
+            "standing_programs_healthy": int((standing_program_health.get("summary") or {}).get("healthy", 0) or 0),
+            "standing_programs_degraded": sum(
+                int((standing_program_health.get("summary") or {}).get(key, 0) or 0)
+                for key in ("stale", "failed", "unreachable", "never_run", "unknown")
+            ),
             "fresh_terminals": len(fresh_terminals),
             "fresh_custody_terminals": len(fresh_custody_terminals),
+            "active_delegations": int(delegation_summary.get("active", 0) or 0),
             "background_loops": sum(1 for loop in open_loops if loop.get("execution_mode") == "background"),
             "stale_background_loops": stale_background_count,
             "planned_loops": len(planned_loops),
@@ -1233,6 +1379,14 @@ if mode == "--brief":
         )
         if terminal_telemetry_status != "ok":
             parts.append(f"Custody: {terminal_telemetry_status}")
+    _sp_summary = standing_program_health.get("summary") if isinstance(standing_program_health.get("summary"), dict) else {}
+    _sp_total = int(_sp_summary.get("total", 0) or 0)
+    if _sp_total:
+        _sp_healthy = int(_sp_summary.get("healthy", 0) or 0)
+        _sp_degraded = sum(int(_sp_summary.get(key, 0) or 0) for key in ("stale", "failed", "unreachable", "never_run", "unknown"))
+        parts.append(f"Standing: {_sp_healthy} healthy / {_sp_degraded} drift")
+    if int(delegation_summary.get("active", 0) or 0):
+        parts.append(f"Delegations: {int(delegation_summary.get('active', 0) or 0)} active")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
@@ -1298,6 +1452,42 @@ if terminal_telemetry:
         if term.get("branch"):
             term_bits.append(f"branch={term['branch']}")
         print(f"  {term['terminal_id']:18s} {' | '.join(term_bits) if term_bits else 'observed'}")
+    print()
+
+_sp_summary = standing_program_health.get("summary") if isinstance(standing_program_health.get("summary"), dict) else {}
+_sp_total = int(_sp_summary.get("total", 0) or 0)
+if _sp_total:
+    print("STANDING PROGRAMS")
+    print("-" * 72)
+    print(f"  status:             {standing_program_health.get('status', 'unknown')}")
+    print(f"  total:              {_sp_total}")
+    print(f"  healthy:            {int(_sp_summary.get('healthy', 0) or 0)}")
+    print(f"  stale:              {int(_sp_summary.get('stale', 0) or 0)}")
+    print(f"  failed:             {int(_sp_summary.get('failed', 0) or 0)}")
+    print(f"  unreachable:        {int(_sp_summary.get('unreachable', 0) or 0)}")
+    print(f"  never run:          {int(_sp_summary.get('never_run', 0) or 0)}")
+    print(f"  unknown:            {int(_sp_summary.get('unknown', 0) or 0)}")
+    print(f"  interventions:      {int(standing_program_health.get('active_interventions', 0) or 0)} active")
+    _problem_programs = [
+        item for item in standing_program_health.get("programs", [])
+        if isinstance(item, dict) and str(item.get("health") or "") not in ("healthy", "")
+    ]
+    for item in _problem_programs[:6]:
+        label = str(item.get("label") or "?").strip()
+        health = str(item.get("health") or "unknown").strip()
+        detail = str(item.get("detail") or "").strip()
+        print(f"  {label:30s} {health:12s} {detail}")
+    print()
+
+if int(delegation_summary.get("count", 0) or 0):
+    print("DELEGATIONS")
+    print("-" * 72)
+    print(f"  total:              {int(delegation_summary.get('count', 0) or 0)}")
+    print(f"  active:             {int(delegation_summary.get('active', 0) or 0)}")
+    for state_name in ("delegated", "picked_up", "executing", "needs_review", "landed", "cancelled"):
+        state_count = int((delegation_summary.get('by_state') or {}).get(state_name, 0) or 0)
+        if state_count:
+            print(f"  {state_name:18s} {state_count}")
     print()
 
 # ── Open Loops ──
