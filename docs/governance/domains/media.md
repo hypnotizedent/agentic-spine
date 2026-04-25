@@ -22,7 +22,7 @@ Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
 
 ## Spine Engine-Facing Surfaces (retained)
 
-- Capability registrations: `ops/capabilities.yaml` (all `media.*` IDs)
+- Capability registrations: `ops/capabilities.yaml` (47 `media.*` IDs, all `implementation_repo: workbench`)
 - Compatibility projections: `ops/bindings/domains/media/` (23 files, marked do-not-edit-here)
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain media`
 
