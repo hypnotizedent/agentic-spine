@@ -207,25 +207,22 @@ if command -v yq >/dev/null 2>&1 && [[ -f "$WORKTREE_CONTRACT" ]]; then
   LEASE_FILENAME="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$WORKTREE_CONTRACT" 2>/dev/null || echo "$LEASE_FILENAME")"
 fi
 if git -C "$DIRTY_TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  DIRTY_FILE_COUNT="$(
-    git -C "$DIRTY_TARGET" status --porcelain --untracked-files=all 2>/dev/null \
-      | python3 - "$LEASE_FILENAME" <<'PY'
+  _dirty_porcelain="$(git -C "$DIRTY_TARGET" status --porcelain --untracked-files=all 2>/dev/null || true)"
+  DIRTY_FILE_COUNT="$(printf '%s\n' "$_dirty_porcelain" | python3 -c "
 import sys
-
 lease_name = sys.argv[1]
 count = 0
 for raw in sys.stdin:
-    line = raw.rstrip("\n")
+    line = raw.rstrip('\n')
     if not line.strip():
         continue
     path = line[3:].strip() if len(line) >= 4 else line.strip()
-    path = path.strip('"')
+    path = path.strip('\"')
     if path == lease_name:
         continue
     count += 1
 print(count)
-PY
-  )"
+" "$LEASE_FILENAME")"
 fi
 
 if [[ "$DIRTY_FILE_COUNT" -gt 0 ]]; then
