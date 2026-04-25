@@ -655,6 +655,72 @@ def collect_work_state(status: dict) -> dict:
     }
 
 
+def collect_terminal_telemetry(status: dict) -> dict:
+    raw = status.get("terminal_telemetry", {})
+    if not isinstance(raw, dict):
+        return {"available": False, "status": "unavailable", "terminals": [], "focus_terminals": []}
+
+    terminals_raw = raw.get("terminals", [])
+    terminals: list[dict] = []
+    for row in terminals_raw if isinstance(terminals_raw, list) else []:
+        if not isinstance(row, dict):
+            continue
+        terminals.append(
+            {
+                "terminal_id": str(row.get("terminal_id", "")),
+                "role": str(row.get("role", "")),
+                "runtime_role": str(row.get("runtime_role", "")),
+                "lane_type": str(row.get("lane_type", "")),
+                "loop_id": str(row.get("loop_id", "")),
+                "branch": str(row.get("branch", "")),
+                "status": str(row.get("status", "")),
+                "last_capability": str(row.get("last_capability", "")),
+                "last_heartbeat_utc": str(row.get("last_heartbeat_utc", "")),
+                "custody_heartbeat_at": str(row.get("custody_heartbeat_at", "")),
+                "liveness_fresh": bool(row.get("liveness_fresh", False)),
+                "custody_fresh": bool(row.get("custody_fresh", False)),
+            }
+        )
+
+    def _focus_key(item: dict) -> tuple[int, int, int, int, str]:
+        terminal_id = str(item.get("terminal_id", ""))
+        return (
+            0 if item.get("liveness_fresh") else 1,
+            0 if item.get("custody_fresh") else 1,
+            0 if item.get("loop_id") else 1,
+            0 if terminal_id.startswith("SPINE-") else 1,
+            terminal_id,
+        )
+
+    sorted_terminals = sorted(terminals, key=_focus_key)
+    interesting_terminals = [
+        item
+        for item in sorted_terminals
+        if item.get("liveness_fresh")
+        or item.get("custody_fresh")
+        or item.get("loop_id")
+        or str(item.get("terminal_id", "")).startswith("SPINE-")
+    ]
+    focus_terminals = interesting_terminals[:8] if interesting_terminals else sorted_terminals[:8]
+    mapped_open_loops = int(raw.get("mapped_open_loops", 0) or 0)
+    unmapped_open_loops = int(raw.get("unmapped_open_loops", 0) or 0)
+
+    return {
+        "available": True,
+        "status": str(raw.get("status", "unknown") or "unknown"),
+        "observation_window_hours": int(raw.get("observation_window_hours", 0) or 0),
+        "fresh_terminals": int(raw.get("fresh_terminals", 0) or 0),
+        "fresh_custody_terminals": int(raw.get("fresh_custody_terminals", 0) or 0),
+        "observed_terminals": int(raw.get("observed_terminals", len(terminals)) or 0),
+        "mapped_open_loops": mapped_open_loops,
+        "unmapped_open_loops": unmapped_open_loops,
+        "coverage_summary": f"{mapped_open_loops} mapped / {mapped_open_loops + unmapped_open_loops} open loops",
+        "terminals": terminals,
+        "focus_terminals": focus_terminals,
+        "hidden_terminal_count": max(0, len(terminals) - len(focus_terminals)),
+    }
+
+
 def collect_node_roles(status: dict) -> dict:
     daemons = status.get("daemons", {})
     exec_host = daemons.get("execution_host", {})
@@ -787,6 +853,7 @@ def collect_operator_front_door(payload: dict) -> dict:
     loops_data = payload.get("active_loops", {})
     handoffs = payload.get("active_handoffs", {})
     attention = payload.get("attention", [])
+    terminal_telemetry = payload.get("terminal_telemetry", {})
 
     # --- inspect ---
     total_standing = int(sph.get("total", 0) or 0)
@@ -803,11 +870,15 @@ def collect_operator_front_door(payload: dict) -> dict:
     if degraded:
         inspect_parts.append(f"{degraded} degraded")
     inspect_parts.append(f"{open_loops} loops")
+    telemetry_status = str(terminal_telemetry.get("status", "") or "")
+    if telemetry_status and telemetry_status != "ok":
+        inspect_parts.append(f"telemetry {telemetry_status}")
     inspect = {
         "healthy_standing": healthy,
         "degraded_standing": degraded,
         "human_session_only": human_session_only,
         "open_loops": open_loops,
+        "terminal_telemetry_status": telemetry_status or "unknown",
         "summary": ", ".join(inspect_parts),
     }
 
@@ -1583,6 +1654,7 @@ def build_payload(compact: bool = False) -> dict:
     attention = collect_attention(status, refs)
     active_handoffs = collect_active_handoffs()
     work_state = collect_work_state(status)
+    terminal_telemetry = collect_terminal_telemetry(status)
     temporal_standing = collect_temporal_standing(
         generated_utc,
         projection_freshness,
@@ -1612,7 +1684,7 @@ def build_payload(compact: bool = False) -> dict:
     continuity = collect_continuity(previous_payload, active_loops.get("items", []))
 
     payload: dict = {
-        "version": 4,
+        "version": 5,
         "generated_utc": generated_utc,
         "continuity": continuity,
         "operator_vision": operator_vision,
@@ -1623,6 +1695,7 @@ def build_payload(compact: bool = False) -> dict:
         "active_loops": active_loops,
         "active_handoffs": active_handoffs,
         "work_state": work_state,
+        "terminal_telemetry": terminal_telemetry,
         "git_refs": refs,
         "node_roles": collect_node_roles(status),
         "current_posture": current_posture,

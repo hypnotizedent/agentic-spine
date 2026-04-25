@@ -613,6 +613,92 @@ def birth_mode_section(audit: dict) -> str:
     </details>"""
 
 
+def terminal_telemetry_section(telemetry: dict) -> str:
+    if not telemetry or not telemetry.get("available", False):
+        return ""
+
+    status = str(telemetry.get("status", "unknown") or "unknown")
+    fresh = int(telemetry.get("fresh_terminals", 0) or 0)
+    custody = int(telemetry.get("fresh_custody_terminals", 0) or 0)
+    observed = int(telemetry.get("observed_terminals", 0) or 0)
+    mapped = int(telemetry.get("mapped_open_loops", 0) or 0)
+    unmapped = int(telemetry.get("unmapped_open_loops", 0) or 0)
+    hidden = int(telemetry.get("hidden_terminal_count", 0) or 0)
+    window = int(telemetry.get("observation_window_hours", 0) or 0)
+
+    if status == "ok":
+        badge_color = "var(--grn)"
+        badge_label = "OK"
+    elif status == "degraded":
+        badge_color = "var(--ylw)"
+        badge_label = "DEGRADED"
+    elif status in {"stale", "unavailable"}:
+        badge_color = "var(--red)"
+        badge_label = status.upper()
+    else:
+        badge_color = "var(--ylw)"
+        badge_label = status.upper()
+
+    badge = (
+        f'<span style="color:{badge_color};font-weight:600;font-size:.5rem;'
+        f'padding:.1rem .3rem;border-radius:3px;background:rgba(42,52,68,.75)">'
+        f'{_h(badge_label)}</span>'
+    )
+
+    rows: list[str] = []
+    for item in telemetry.get("focus_terminals", []) or []:
+        terminal_id = str(item.get("terminal_id", "") or "unknown")
+        loop_id = str(item.get("loop_id", "") or "")
+        role = " / ".join(
+            bit for bit in (str(item.get("role", "") or ""), str(item.get("runtime_role", "") or "")) if bit
+        ) or "role unknown"
+        meta_bits = [role]
+        if item.get("lane_type"):
+            meta_bits.append(str(item.get("lane_type", "")))
+        if item.get("branch"):
+            meta_bits.append(str(item.get("branch", "")))
+        if item.get("last_capability"):
+            meta_bits.append(str(item.get("last_capability", "")))
+        status_bits = []
+        status_bits.append("live" if item.get("liveness_fresh") else "stale")
+        status_bits.append("custody" if item.get("custody_fresh") else "no custody")
+        if loop_id:
+            status_bits.append(loop_id)
+        rows.append(
+            f'<div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(terminal_id)}</span>'
+            f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;'
+            f'background:rgba(42,52,68,.75);color:{badge_color}">{_h(" · ".join(status_bits))}</span>'
+            f'</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(" · ".join(meta_bits))}</div>'
+            f'</div>'
+        )
+    if hidden:
+        rows.append(
+            f'<div style="font-size:.5rem;color:var(--t);opacity:.7;padding-top:.35rem">'
+            f'+ {hidden} older terminal record{"s" if hidden != 1 else ""} hidden'
+            f'</div>'
+        )
+
+    details_body = (
+        f'<div style="font-size:.5rem;color:var(--tm);padding-bottom:.45rem">'
+        f'{fresh} fresh live heartbeat{"s" if fresh != 1 else ""} · '
+        f'{custody} fresh custody record{"s" if custody != 1 else ""} · '
+        f'{mapped}/{mapped + unmapped} open loops mapped · '
+        f'{observed} observed in last {window}h'
+        f'</div>'
+        f'{"".join(rows) if rows else "<div style=\"font-size:.5rem;color:var(--t)\">no terminal records visible</div>"}'
+    )
+
+    return f"""
+    <div class="sh">Terminal Telemetry</div>
+    <details{"" if status == "ok" else ' open'}>
+      <summary>{_h(telemetry.get("coverage_summary", "telemetry"))} <span class="det-count">{badge}</span></summary>
+      <div class="det-body">{details_body}</div>
+    </details>"""
+
+
 def comms_incident_card(cq: dict) -> str:
     slo = cq.get("slo_status", "ok")
     pending = int(cq.get("pending", 0) or 0)
@@ -1630,7 +1716,7 @@ def operator_front_door_section(fd: dict) -> str:
     execute = fd.get("execute", {})
 
     # Color logic: inspect
-    if int(inspect.get("degraded_standing", 0) or 0) > 0:
+    if int(inspect.get("degraded_standing", 0) or 0) > 0 or str(inspect.get("terminal_telemetry_status", "") or "") != "ok":
         inspect_css = "fd-cell-ylw"
     else:
         inspect_css = "fd-cell-grn"
@@ -1663,6 +1749,9 @@ def operator_front_door_section(fd: dict) -> str:
     if degraded:
         inspect_parts.append(f"{degraded} degraded")
     inspect_parts.append(f"{loops} loops")
+    telemetry_status = str(inspect.get("terminal_telemetry_status", "") or "")
+    if telemetry_status and telemetry_status != "ok":
+        inspect_parts.append(f"telemetry {telemetry_status}")
     inspect_count = " &middot; ".join(inspect_parts)
 
     pending_i = int(approve.get("pending_ingress", 0) or 0)
@@ -1755,6 +1844,7 @@ def generate(payload: dict | None = None) -> str:
     sec_roles = node_role_card(p["node_roles"])
     sec_exec = execution_host_section(p["node_roles"])
     sec_birth = birth_mode_section(p.get("birth_mode_audit", {}))
+    sec_terminal = terminal_telemetry_section(p.get("terminal_telemetry", {}))
     sec_comms = comms_incident_card(p["work_state"]["comms_queue"])
     sec_timeline = timeline_section(git_log, p.get("continuity", {}))
     sec_caps = capability_atlas(caps_data, inv_counts)
@@ -1765,9 +1855,9 @@ def generate(payload: dict | None = None) -> str:
     sec_infra = (
         '<section id="infrastructure-drilldown">'
         '<details>'
-        '<summary>Infrastructure <span class="det-count">machine + projection + release posture</span></summary>'
+        '<summary>Infrastructure <span class="det-count">machine + telemetry + projection + release posture</span></summary>'
         '<div class="det-body">'
-        f'{sec_comms}{sec_fresh}{sec_temporal}{sec_roles}{sec_exec}{sec_birth}{sec_release}'
+        f'{sec_comms}{sec_fresh}{sec_temporal}{sec_roles}{sec_exec}{sec_terminal}{sec_birth}{sec_release}'
         '</div>'
         '</details>'
         '</section>'
