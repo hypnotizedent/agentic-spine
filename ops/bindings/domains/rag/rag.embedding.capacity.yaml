@@ -1,0 +1,100 @@
+# RAG Embedding Capacity Isolation Contract
+#
+# Documents the shared Ollama contention seam and defines isolation
+# policy for embedding vs inference workloads on automation-stack
+# (VM 202, 100.98.70.70:11434).
+#
+# Problem: Ollama serves both embedding (mxbai-embed-large for RAG reindex)
+# and inference (chat models for Open WebUI, agents). No isolation exists --
+# embedding during reindex can starve inference responsiveness.
+#
+# This contract bounds embedding behavior to protect inference availability
+# WITHOUT changing host placement or adding GPU capacity.
+#
+# Authority: operational contract (no governance doc yet)
+# Consumers:
+# - ops/plugins/infra/rag/bin/rag-capacity-status
+# - ops/plugins/infra/rag/bin/rag (sync pacing)
+# - ops/plugins/infra/rag/bin/rag-reindex-remote-start
+# References:
+# - ops/bindings/domains/rag/rag.workspace.contract.yaml (sync_policy.load_shaping)
+# - ops/bindings/domains/rag/rag.embedding.backend.yaml (probe SLOs)
+# - ops/bindings/services.health.yaml (ollama endpoint)
+
+schema_version: "1.0"
+updated_at: "2026-04-25"
+owner: "@ronny"
+status: authoritative
+
+# Shared resource description
+shared_resource:
+  host: automation-stack
+  vm_id: 202
+  service: ollama
+  url: "http://100.98.70.70:11434"
+  # Ollama serves both workload classes on a single GPU with no built-in
+  # priority or isolation mechanism. Contention is temporal -- whichever
+  # request arrives first holds GPU compute until completion.
+  contention_model: temporal_exclusive
+
+# Workload classes competing for Ollama GPU time
+workloads:
+  embedding:
+    model: "mxbai-embed-large:latest"
+    description: "RAG document embedding during reindex"
+    pattern: batch
+    # Embedding requests are large, slow, and deferrable
+    priority: low
+  inference:
+    models:
+      - "llama3.1:latest"
+      - "qwen2.5:latest"
+      - "deepseek-coder-v2:latest"
+    description: "Chat/agent inference via Open WebUI and agent tools"
+    pattern: interactive
+    # Inference requests are latency-sensitive and operator-facing
+    priority: high
+
+# Embedding concurrency and rate limits
+embedding_limits:
+  # Maximum concurrent embedding requests allowed.
+  # Ollama serializes GPU work anyway, but this prevents request queuing
+  # from building up and starving inference connection slots.
+  max_concurrent: 1
+  # Advisory: maximum embedding requests per minute during reindex.
+  # Enforced by sync_policy.load_shaping.inter_doc_pace_sec in
+  # rag.workspace.contract.yaml, not by Ollama itself.
+  max_per_minute_advisory: 30
+  # Reference to existing load-shaping knobs that implement pacing
+  pacing_source: "ops/bindings/domains/rag/rag.workspace.contract.yaml#sync_policy.load_shaping"
+
+# Inference priority policy
+inference_priority:
+  # When both workloads contend, embedding should yield to inference.
+  # Current mechanism: embedding backs off when latency degrades,
+  # giving inference requests a window to complete.
+  policy: embedding_yields
+  # Embedding must not be scheduled during known high-inference windows.
+  # Currently advisory -- no automated enforcement.
+  peak_avoidance_advisory: true
+
+# Contention detection thresholds
+contention_detection:
+  # Baseline SLO from rag.embedding.backend.yaml probe settings
+  embedding_slo_ms: 5000
+  # Contention levels derived from SLO multiples
+  levels:
+    clear:
+      description: "Embedding latency within SLO"
+      latency_ceiling_ms: 5000
+    elevated:
+      description: "Embedding latency between 1x and 2x SLO -- inference may be affected"
+      latency_ceiling_ms: 10000
+    saturated:
+      description: "Embedding latency exceeds 2x SLO -- back off immediately"
+      latency_floor_ms: 10000
+  # When saturated, embedding should pause for this duration before retrying
+  backoff_pause_sec: 30
+  # After this many consecutive saturated probes, halt embedding entirely
+  # and require operator intervention
+  max_consecutive_saturated: 3

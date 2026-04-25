@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# RAG Capacity Status
+# Read-only status surface for Ollama embedding/inference contention.
+# Reports loaded models, running models, embedding latency, and
+# contention level (clear/elevated/saturated).
+#
+# Reads configuration from rag.embedding.capacity.yaml binding.
+# Outputs deterministic key=value lines for machine consumption.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${git_root:-}" && "${git_root:-}" != "null" ]]; then
+  SP="${SPINE_ROOT:-$git_root}"
+else
+  SP="${SPINE_ROOT:-$(cd "$script_dir/../../../../.." && pwd)}"
+fi
+
+CAPACITY_BINDING="$SP/ops/bindings/domains/rag/rag.embedding.capacity.yaml"
+BACKEND_BINDING="$SP/ops/bindings/domains/rag/rag.embedding.backend.yaml"
+SERVICES_BINDING="$SP/ops/bindings/services.health.yaml"
+
+fail() { echo "status=error"; echo "error=$*" >&2; exit 1; }
+
+for t in yq curl jq; do
+  command -v "$t" >/dev/null 2>&1 || fail "missing required tool: $t"
+done
+
+[[ -f "$CAPACITY_BINDING" ]] || fail "capacity binding not found: $CAPACITY_BINDING"
+[[ -f "$BACKEND_BINDING" ]] || fail "backend binding not found: $BACKEND_BINDING"
+
+# --- Read capacity contract values ---
+SLO_MS="$(yq -r '.contention_detection.embedding_slo_ms // 5000' "$CAPACITY_BINDING")"
+CLEAR_CEILING="$(yq -r '.contention_detection.levels.clear.latency_ceiling_ms // 5000' "$CAPACITY_BINDING")"
+ELEVATED_CEILING="$(yq -r '.contention_detection.levels.elevated.latency_ceiling_ms // 10000' "$CAPACITY_BINDING")"
+MAX_CONCURRENT="$(yq -r '.embedding_limits.max_concurrent // 1' "$CAPACITY_BINDING")"
+PRIORITY_POLICY="$(yq -r '.inference_priority.policy // "unknown"' "$CAPACITY_BINDING")"
+
+# --- Read embedding model from backend binding ---
+EMBED_MODEL="$(yq -r '.active.model // ""' "$BACKEND_BINDING")"
+TEST_PROMPT="$(yq -r '.probe.test_prompt // "test"' "$BACKEND_BINDING")"
+
+# --- Resolve Ollama URL ---
+OLLAMA_URL="${OLLAMA_URL:-${OLLAMA_BASE_URL:-}}"
+if [[ -z "$OLLAMA_URL" ]]; then
+  if [[ -f "$SERVICES_BINDING" ]]; then
+    tags_url="$(yq -r '.endpoints[] | select(.id=="ollama") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
+    if [[ -n "$tags_url" && "$tags_url" != "null" ]]; then
+      OLLAMA_URL="${tags_url%/api/tags}"
+    fi
+  fi
+  OLLAMA_URL="${OLLAMA_URL:-http://100.98.70.70:11434}"
+fi
+
+# --- Output contract metadata ---
+echo "capacity_contract=present"
+echo "embedding_slo_ms=$SLO_MS"
+echo "max_concurrent_embedding=$MAX_CONCURRENT"
+echo "inference_priority_policy=$PRIORITY_POLICY"
+echo "ollama_url=$OLLAMA_URL"
+echo "embed_model=$EMBED_MODEL"
+
+# --- Probe /api/tags: available models ---
+tags_resp=""
+tags_http="$(curl -sS --max-time 10 -o /dev/null -w "%{http_code}" \
+  "${OLLAMA_URL}/api/tags" 2>/dev/null || echo "000")"
+
+if [[ "$tags_http" == "200" ]]; then
+  echo "ollama_reachable=true"
+  tags_resp="$(curl -sS --max-time 10 "${OLLAMA_URL}/api/tags" 2>/dev/null || true)"
+  available_models="$(echo "$tags_resp" | jq -r '[.models[].name] | join(",")' 2>/dev/null || echo "parse_error")"
+  model_count="$(echo "$tags_resp" | jq -r '.models | length' 2>/dev/null || echo "0")"
+  echo "available_models=$available_models"
+  echo "available_model_count=$model_count"
+else
+  echo "ollama_reachable=false"
+  echo "ollama_http_status=$tags_http"
+  echo "contention_status=unknown"
+  echo "probe_latency_ms=0"
+  echo "status=degraded"
+  exit 0
+fi
+
+# --- Probe /api/ps: running models and memory ---
+ps_http="$(curl -sS --max-time 10 -o /dev/null -w "%{http_code}" \
+  "${OLLAMA_URL}/api/ps" 2>/dev/null || echo "000")"
+
+if [[ "$ps_http" == "200" ]]; then
+  ps_resp="$(curl -sS --max-time 10 "${OLLAMA_URL}/api/ps" 2>/dev/null || true)"
+  running_models="$(echo "$ps_resp" | jq -r '[.models[].name] | join(",")' 2>/dev/null || echo "none")"
+  running_count="$(echo "$ps_resp" | jq -r '.models | length' 2>/dev/null || echo "0")"
+  total_vram="$(echo "$ps_resp" | jq -r '[.models[].size_vram] | add // 0' 2>/dev/null || echo "0")"
+  echo "running_models=${running_models:-none}"
+  echo "running_model_count=$running_count"
+  echo "total_vram_bytes=$total_vram"
+else
+  echo "running_models=unavailable"
+  echo "running_model_count=0"
+  echo "total_vram_bytes=0"
+fi
+
+# --- Single embedding latency probe ---
+start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+
+probe_file="$(mktemp)"
+probe_http="$(curl -sS --max-time 30 \
+  -o "$probe_file" -w "%{http_code}" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -cn --arg model "$EMBED_MODEL" --arg prompt "$TEST_PROMPT" '{model:$model,prompt:$prompt}')" \
+  "${OLLAMA_URL}/api/embeddings" 2>/dev/null || echo "000")"
+rm -f "$probe_file"
+
+end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+latency=$((end_ms - start_ms))
+
+echo "probe_http_status=$probe_http"
+echo "probe_latency_ms=$latency"
+
+# --- Determine contention status ---
+if [[ "$probe_http" != "200" ]]; then
+  contention="saturated"
+elif [[ "$latency" -le "$CLEAR_CEILING" ]]; then
+  contention="clear"
+elif [[ "$latency" -le "$ELEVATED_CEILING" ]]; then
+  contention="elevated"
+else
+  contention="saturated"
+fi
+
+echo "contention_status=$contention"
+
+# --- Overall status ---
+if [[ "$contention" == "clear" ]]; then
+  echo "status=healthy"
+elif [[ "$contention" == "elevated" ]]; then
+  echo "status=degraded"
+else
+  echo "status=critical"
+fi
