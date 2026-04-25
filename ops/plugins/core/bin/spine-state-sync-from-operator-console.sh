@@ -58,6 +58,7 @@ rsync -az --delete \
     --exclude='*.db-shm' \
     --exclude='*.db-wal' \
     --exclude='shared_authority.db' \
+    --exclude='inputs/operator-ingress/' \
     -e "ssh ${SSH_OPTS}" \
     "${MBP_USER}@${MBP_HOST}:${REMOTE_STATE_ROOT}/" \
     "${LOCAL_STATE_ROOT}/"
