@@ -111,6 +111,15 @@ BASE_TOOLS = [
                         {"type": "string"}
                     ]
                 },
+                "argv": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Explicit argv array. Preferred when the client can send structured arrays."
+                },
+                "shell_args": {
+                    "type": "string",
+                    "description": "Shell-style argument string. Use when the client cannot send argv arrays."
+                },
                 "confirm": {
                     "type": "boolean",
                     "description": "Set true to forward 'yes' for manual approval prompts"
@@ -122,6 +131,27 @@ BASE_TOOLS = [
                 "max_chars": {
                     "type": "integer",
                     "description": "Optional cap on interactive response size when full_output is false"
+                }
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "cap_info",
+        "description": (
+            "Return full capability registry metadata for one governed capability, "
+            "including arg protocol, declared flags/examples, and optional best-effort help output."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Capability name from the active capability registry"
+                },
+                "include_help": {
+                    "type": "boolean",
+                    "description": "Set true to append best-effort '--help' output from the underlying capability command"
                 }
             },
             "required": ["name"]
@@ -318,11 +348,12 @@ def run_cmd(
     args: List[str],
     *,
     stdin_text: Optional[str] = None,
+    cwd: Optional[str] = None,
     timeout: int = 180,
 ) -> Tuple[int, str, str]:
     result = subprocess.run(
         args,
-        cwd=SPINE_ROOT,
+        cwd=cwd or SPINE_ROOT,
         input=stdin_text,
         capture_output=True,
         text=True,
@@ -366,14 +397,47 @@ def load_agents_registry() -> Dict[str, Any]:
     return parsed
 
 
-def normalize_cap_args(raw: Any) -> List[str]:
+def _normalize_legacy_cap_args(raw: Any) -> List[str]:
     if raw is None:
         return []
     if isinstance(raw, list):
         return [str(x) for x in raw]
     if isinstance(raw, str):
-        return shlex.split(raw)
+        text = raw.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed]
+            inner = text[1:-1].strip()
+            if inner:
+                items = []
+                for part in inner.split(","):
+                    cleaned = part.strip().strip("\"'")
+                    if cleaned:
+                        items.append(cleaned)
+                if items:
+                    return items
+        return shlex.split(text)
     raise RuntimeError("args must be an array of strings or a string")
+
+
+def normalize_cap_args(raw: Any, *, argv: Any = None, shell_args: Any = None) -> List[str]:
+    if argv is not None and shell_args is not None:
+        raise RuntimeError("pass either argv or shell_args, not both")
+    if argv is not None:
+        if not isinstance(argv, list):
+            raise RuntimeError("argv must be an array of strings")
+        return [str(x) for x in argv]
+    if shell_args is not None:
+        if not isinstance(shell_args, str):
+            raise RuntimeError("shell_args must be a string")
+        return shlex.split(shell_args)
+    return _normalize_legacy_cap_args(raw)
 
 
 def _extract_cap_metadata(text: str, prefix: str) -> str:
@@ -498,6 +562,31 @@ def run_capability(
     return bounded
 
 
+def _meta_command_help(meta: Dict[str, Any]) -> str:
+    command = str(meta.get("command", "")).strip()
+    if not command:
+        return ""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return ""
+    if not argv:
+        return ""
+
+    cwd = str(meta.get("cwd", "")).strip() or SPINE_ROOT
+    cwd = os.path.expandvars(os.path.expanduser(cwd))
+    if not os.path.isabs(cwd):
+        cwd = os.path.join(SPINE_ROOT, cwd)
+
+    code, out, err = run_cmd(argv + ["--help"], timeout=20, cwd=cwd)
+    text = sanitize_noise("\n".join(part for part in (out, err) if part).strip())
+    if not text:
+        return ""
+    if code == 0 or "usage" in text.lower() or "--help" in text.lower():
+        return text
+    return ""
+
+
 def list_capabilities(filter_text: Optional[str], safety: Optional[str]) -> str:
     capabilities = load_capabilities()
     rows = []
@@ -519,6 +608,9 @@ def list_capabilities(filter_text: Optional[str], safety: Optional[str]) -> str:
             "safety": cap_safety,
             "approval": str(meta.get("approval", "")).strip(),
             "description": str(meta.get("description", "")).strip(),
+            "arg_protocol": str(meta.get("arg_protocol", "")).strip() or "passthrough",
+            "flags": meta.get("flags") or [],
+            "examples": meta.get("examples") or [],
         })
 
     return json.dumps(
@@ -529,6 +621,29 @@ def list_capabilities(filter_text: Optional[str], safety: Optional[str]) -> str:
         indent=2,
         sort_keys=False,
     )
+
+
+def capability_info(name: str, *, include_help: bool = False) -> str:
+    name = (name or "").strip()
+    if not SAFE_NAME.match(name):
+        raise RuntimeError("invalid capability name")
+
+    capabilities = load_capabilities()
+    meta = capabilities.get(name)
+    if not isinstance(meta, dict):
+        raise RuntimeError(f"unknown capability: {name}")
+
+    info = dict(meta)
+    info["name"] = name
+    info["arg_protocol"] = str(meta.get("arg_protocol", "")).strip() or "passthrough"
+    info["flags"] = meta.get("flags") or []
+    info["examples"] = meta.get("examples") or []
+    if include_help:
+        help_text = _meta_command_help(meta)
+        if help_text:
+            info["help_output"] = help_text
+
+    return json.dumps(info, indent=2, sort_keys=False)
 
 
 def list_agents(filter_text: Optional[str], domain: Optional[str], status: Optional[str]) -> str:
@@ -675,7 +790,11 @@ def handle_tools_call(msg: Dict[str, Any]) -> Dict[str, Any]:
             )
         elif name == "cap_run":
             cap_name = arguments.get("name", "")
-            cap_args = normalize_cap_args(arguments.get("args"))
+            cap_args = normalize_cap_args(
+                arguments.get("args"),
+                argv=arguments.get("argv"),
+                shell_args=arguments.get("shell_args"),
+            )
             confirm_raw = arguments.get("confirm", False)
             if not isinstance(confirm_raw, bool):
                 raise RuntimeError("confirm must be a boolean")
@@ -692,6 +811,14 @@ def handle_tools_call(msg: Dict[str, Any]) -> Dict[str, Any]:
                 confirm,
                 full_output=full_output_raw,
                 max_chars=max_chars_raw,
+            )
+        elif name == "cap_info":
+            include_help_raw = arguments.get("include_help", False)
+            if not isinstance(include_help_raw, bool):
+                raise RuntimeError("include_help must be a boolean")
+            text = capability_info(
+                str(arguments.get("name", "")),
+                include_help=include_help_raw,
             )
         elif name == "agent_list":
             text = list_agents(

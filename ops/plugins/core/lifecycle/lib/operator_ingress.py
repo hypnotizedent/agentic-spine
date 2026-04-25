@@ -21,6 +21,7 @@ This is a narrow governed write:
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -173,6 +174,10 @@ def _auto_metabolizer_runtime_paths(state_root: str) -> dict[str, Path]:
     }
 
 
+def _ingress_lifecycle_journal_path(state_root: str) -> Path:
+    return _ingress_dir(state_root) / "lifecycle.ndjson"
+
+
 def _derive_ingress_id(now: datetime | None = None) -> str:
     now = now or _utcnow()
     return f"OI-{now.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
@@ -191,6 +196,39 @@ def _atomic_write(path: Path, content: str) -> None:
         except OSError:
             pass
         raise OperatorIngressError(f"filesystem write failed: {exc}") from exc
+
+
+def _append_ingress_lifecycle_event(
+    *,
+    state_root: str,
+    event: str,
+    ingress_id: str,
+    path: Path,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+) -> str:
+    journal_path = _ingress_lifecycle_journal_path(state_root)
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload: dict[str, Any] = {
+        "recorded_at": _iso_utc(_utcnow()),
+        "event": event,
+        "ingress_id": ingress_id,
+        "path": str(path),
+    }
+    if before is not None:
+        payload["before"] = before
+    if after is not None:
+        payload["after"] = after
+
+    line = json.dumps(payload, ensure_ascii=False, sort_keys=False) + "\n"
+    try:
+        with journal_path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+    except OSError as exc:
+        raise OperatorIngressError(f"lifecycle journal write failed: {exc}") from exc
+
+    return str(journal_path)
 
 
 def _validate_inputs(raw_content: str, content_type: str, state_root: str) -> None:
@@ -263,11 +301,19 @@ def create_operator_ingress(
         allow_unicode=True,
     )
     _atomic_write(target, content)
+    journal_path = _append_ingress_lifecycle_event(
+        state_root=state_root,
+        event="submitted",
+        ingress_id=ingress_id,
+        path=target,
+        after=copy.deepcopy(doc),
+    )
 
     return {
         "status": "ok",
         "ingress_id": ingress_id,
         "path": str(target),
+        "journal_path": journal_path,
         "lifecycle_state": doc["lifecycle_state"],
         "disposition": doc["disposition"],
         "disposition_detail": doc["disposition_detail"],
@@ -987,6 +1033,7 @@ def metabolize_operator_ingress(
         raise OperatorIngressError(f"failed to read ingress object: {exc}") from exc
     if not isinstance(doc, dict):
         raise OperatorIngressError(f"ingress object is not a valid YAML dict: {path}")
+    before_doc = copy.deepcopy(doc)
 
     now = _utcnow()
 
@@ -1036,11 +1083,20 @@ def metabolize_operator_ingress(
         allow_unicode=True,
     )
     _atomic_write(path, content)
+    journal_path = _append_ingress_lifecycle_event(
+        state_root=state_root,
+        event="metabolized",
+        ingress_id=str(doc.get("ingress_id", path.stem)),
+        path=path,
+        before=before_doc,
+        after=copy.deepcopy(doc),
+    )
 
     return {
         "status": "ok",
         "ingress_id": str(doc.get("ingress_id", path.stem)),
         "path": str(path),
+        "journal_path": journal_path,
         "lifecycle_state": doc["lifecycle_state"],
         "classification": classification,
         "disposition": disposition,

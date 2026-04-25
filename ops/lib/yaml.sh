@@ -37,6 +37,45 @@
 
 set -eo pipefail
 
+_YAML_QUERY_CACHE_DIR="${TMPDIR:-/tmp}/yaml_query_cache.$$"
+
+_yaml_query_mtime() {
+  local path="$1"
+  if [[ ! -e "$path" ]]; then
+    echo "0"
+    return 0
+  fi
+  stat -f '%m' "$path" 2>/dev/null || stat -c '%Y' "$path" 2>/dev/null || echo "0"
+}
+
+_yaml_query_cache_path() {
+  local file="$1"
+  local digest
+  digest="$(printf '%s' "$file" | cksum | awk '{print $1}')"
+  printf '%s/%s.json\n' "$_YAML_QUERY_CACHE_DIR" "$digest"
+}
+
+_yaml_query_cached_json() {
+  local file="$1"
+  local cache_file cache_tmp source_mtime cache_mtime
+
+  cache_file="$(_yaml_query_cache_path "$file")"
+  cache_tmp="${cache_file}.tmp"
+  source_mtime="$(_yaml_query_mtime "$file")"
+  cache_mtime="$(_yaml_query_mtime "$cache_file")"
+
+  if [[ ! -f "$cache_file" ]] || [[ "$cache_mtime" -lt "$source_mtime" ]]; then
+    mkdir -p "$_YAML_QUERY_CACHE_DIR"
+    yq -o=json '.' "$file" > "$cache_tmp" 2>/dev/null || {
+      rm -f "$cache_tmp" 2>/dev/null || true
+      return 1
+    }
+    mv -f "$cache_tmp" "$cache_file"
+  fi
+
+  printf '%s\n' "$cache_file"
+}
+
 # ── Dependency check ──
 _yaml_query_check_deps() {
   if ! command -v yq >/dev/null 2>&1; then
@@ -58,15 +97,24 @@ _yaml_query_core() {
   local file="$1"
   local expr="$2"
   local mode="${3:-value}"
+  local cache_file
 
   if [[ ! -f "$file" ]]; then
     echo "ERROR: File not found: $file" >&2
     return 1
   fi
 
+  cache_file="$(_yaml_query_cached_json "$file")" || {
+    if [[ "$mode" == "exists" ]]; then
+      return 1
+    fi
+    echo ""
+    return 0
+  }
+
   local json_result
-  json_result="$(yq -o=json "$expr" "$file" 2>/dev/null)" || {
-    # yq failed - likely invalid expression or file
+  json_result="$(jq -c "$expr" "$cache_file" 2>/dev/null)" || {
+    # jq failed - likely invalid expression or cached payload
     if [[ "$mode" == "exists" ]]; then
       return 1
     fi
@@ -230,6 +278,7 @@ yaml_bool() {
 yaml_list() {
   local file="$1"
   local path="$2"
+  local cache_file
 
   _yaml_query_check_deps || return 1
 
@@ -237,7 +286,8 @@ yaml_list() {
   local expr=".$(echo "$path" | sed 's/\./\./g')"
 
   local json_result
-  json_result="$(yq -o=json "$expr" "$file" 2>/dev/null)" || return 1
+  cache_file="$(_yaml_query_cached_json "$file")" || return 1
+  json_result="$(jq -c "$expr" "$cache_file" 2>/dev/null)" || return 1
 
   if [[ "$json_result" == "null" ]] || [[ -z "$json_result" ]]; then
     return 0

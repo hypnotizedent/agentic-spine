@@ -64,6 +64,29 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 2
 fi
 
+BINDING_JSON="$(mktemp)"
+SHOP_DEVICE_REGISTRY_JSON="$(mktemp)"
+OPERATOR_HARDWARE_JSON="$(mktemp)"
+cleanup_tmp() {
+  rm -f "$BINDING_JSON" "$SHOP_DEVICE_REGISTRY_JSON" "$OPERATOR_HARDWARE_JSON" 2>/dev/null || true
+}
+trap cleanup_tmp EXIT
+
+yq -o=json '.' "$BINDING_FILE" > "$BINDING_JSON" 2>/dev/null || {
+  echo "STOP (2): failed to parse binding file: $BINDING_FILE"
+  exit 2
+}
+if [[ -f "$SHOP_DEVICE_REGISTRY_FILE" ]]; then
+  yq -o=json '.' "$SHOP_DEVICE_REGISTRY_FILE" > "$SHOP_DEVICE_REGISTRY_JSON" 2>/dev/null || echo '{}' > "$SHOP_DEVICE_REGISTRY_JSON"
+else
+  echo '{}' > "$SHOP_DEVICE_REGISTRY_JSON"
+fi
+if [[ -f "$OPERATOR_HARDWARE_FILE" ]]; then
+  yq -o=json '.' "$OPERATOR_HARDWARE_FILE" > "$OPERATOR_HARDWARE_JSON" 2>/dev/null || echo '{}' > "$OPERATOR_HARDWARE_JSON"
+else
+  echo '{}' > "$OPERATOR_HARDWARE_JSON"
+fi
+
 TARGET_FILTER=""
 TARGET_FILTER_FOUND=0
 JSON_MODE=0
@@ -75,7 +98,7 @@ ENABLE_PROXYJUMP=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --list)
-      yq -r '.ssh.targets[].id' "$BINDING_FILE"
+      jq -r '.ssh.targets[]?.id // empty' "$BINDING_JSON"
       exit 0
       ;;
     --id)
@@ -127,14 +150,14 @@ done
 (( ATTEMPTS >= 1 )) || { echo "STOP (2): --attempts must be >= 1"; exit 2; }
 
 # Read defaults
-DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$BINDING_FILE")"
-DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$BINDING_FILE")"
-DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$BINDING_FILE")"
-DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$BINDING_FILE")"
-DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$BINDING_FILE")"
-DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$BINDING_FILE")"
+DEF_USER="$(jq -r '.ssh.defaults.user // "root"' "$BINDING_JSON")"
+DEF_PORT="$(jq -r '.ssh.defaults.port // 22' "$BINDING_JSON")"
+DEF_TO="$(jq -r '.ssh.defaults.connect_timeout_sec // 5' "$BINDING_JSON")"
+DEF_BATCH="$(jq -r '.ssh.defaults.batch_mode // true' "$BINDING_JSON")"
+DEF_STRICT="$(jq -r '.ssh.defaults.strict_host_key_checking // "no"' "$BINDING_JSON")"
+DEF_KNOWN_HOSTS="$(jq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$BINDING_JSON")"
 
-COUNT="$(yq -r '.ssh.targets | length' "$BINDING_FILE" 2>/dev/null || echo "0")"
+COUNT="$(jq -r '.ssh.targets | length' "$BINDING_JSON" 2>/dev/null || echo "0")"
 if [[ "$COUNT" == "0" ]]; then
   echo "STOP (2): no ssh.targets configured in $BINDING_FILE"
   exit 2
@@ -185,21 +208,17 @@ resolve_probe_family() {
   local shop_os=""
   local operator_platform=""
 
-  if [[ -f "$SHOP_DEVICE_REGISTRY_FILE" ]]; then
-    shop_os="$(yq -r ".devices[] | select(.id == \"$id\") | .os // \"\"" "$SHOP_DEVICE_REGISTRY_FILE" 2>/dev/null | head -1)"
-    case "${shop_os,,}" in
-      windows*) echo "windows"; return ;;
-      linux*|mac*) echo "unix"; return ;;
-    esac
-  fi
+  shop_os="$(jq -r --arg id "$id" '.devices[]? | select(.id == $id) | .os // ""' "$SHOP_DEVICE_REGISTRY_JSON" 2>/dev/null | head -1)"
+  case "${shop_os,,}" in
+    windows*) echo "windows"; return ;;
+    linux*|mac*) echo "unix"; return ;;
+  esac
 
-  if [[ -f "$OPERATOR_HARDWARE_FILE" ]]; then
-    operator_platform="$(yq -r ".machines[] | select(.device_id == \"$id\") | .platform // \"\"" "$OPERATOR_HARDWARE_FILE" 2>/dev/null | head -1)"
-    case "${operator_platform,,}" in
-      windows) echo "windows"; return ;;
-      linux|mac) echo "unix"; return ;;
-    esac
-  fi
+  operator_platform="$(jq -r --arg id "$id" '.machines[]? | select(.device_id == $id) | .platform // ""' "$OPERATOR_HARDWARE_JSON" 2>/dev/null | head -1)"
+  case "${operator_platform,,}" in
+    windows) echo "windows"; return ;;
+    linux|mac) echo "unix"; return ;;
+  esac
 
   echo "unix"
 }
@@ -312,16 +331,25 @@ if [[ "$JSON_MODE" -eq 0 ]]; then
 fi
 
 for i in $(seq 0 $((COUNT-1))); do
-  id="$(yq -r ".ssh.targets[$i].id" "$BINDING_FILE")"
-  host="$(yq -r ".ssh.targets[$i].host" "$BINDING_FILE")"
-  user="$(yq -r ".ssh.targets[$i].user // \"${DEF_USER}\"" "$BINDING_FILE")"
-  port="$(yq -r ".ssh.targets[$i].port // ${DEF_PORT}" "$BINDING_FILE")"
-  timeout="$(yq -r ".ssh.targets[$i].connect_timeout_sec // ${DEF_TO}" "$BINDING_FILE")"
-  optional="$(yq -r ".ssh.targets[$i].optional // false" "$BINDING_FILE")"
-  access_method="$(yq -r ".ssh.targets[$i].access_method // \"ssh\"" "$BINDING_FILE")"
-  access_policy="$(yq -r ".ssh.targets[$i].access_policy // \"lan_first\"" "$BINDING_FILE")"
-  tailscale_ip="$(yq -r ".ssh.targets[$i].tailscale_ip // \"\"" "$BINDING_FILE")"
-  probe_via="$(yq -r ".ssh.targets[$i].probe_via // \"\"" "$BINDING_FILE")"
+  target_row="$(jq -r \
+    --argjson i "$i" \
+    --arg def_user "$DEF_USER" \
+    --argjson def_port "$DEF_PORT" \
+    --argjson def_to "$DEF_TO" \
+    '.ssh.targets[$i] |
+      [
+        (.id // ""),
+        (.host // ""),
+        (.user // $def_user),
+        ((.port // $def_port) | tostring),
+        ((.connect_timeout_sec // $def_to) | tostring),
+        ((.optional // false) | tostring),
+        (.access_method // "ssh"),
+        (.access_policy // "lan_first"),
+        (.tailscale_ip // ""),
+        (.probe_via // "")
+      ] | @tsv' "$BINDING_JSON")"
+  IFS=$'\t' read -r id host user port timeout optional access_method access_policy tailscale_ip probe_via <<< "$target_row"
 
   # Resolve auth-origin telemetry
   auth_origin_detail="$(ssh_resolve_machine_auth_origin_detail "$id" 2>/dev/null)" || auth_origin_detail="ambient none"
@@ -392,9 +420,13 @@ for i in $(seq 0 $((COUNT-1))); do
     candidate_jumps+=("")
 
     if [[ "$ENABLE_PROXYJUMP" -eq 1 ]]; then
-      jump_host="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .host // \"\"" "$BINDING_FILE")"
-      jump_user="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .user // \"$DEF_USER\"" "$BINDING_FILE")"
-      jump_port="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .port // $DEF_PORT" "$BINDING_FILE")"
+      jump_row="$(jq -r \
+        --arg probe_via "$probe_via" \
+        --arg def_user "$DEF_USER" \
+        --argjson def_port "$DEF_PORT" \
+        '.ssh.targets[]? | select(.id == $probe_via) |
+          [(.host // ""), (.user // $def_user), ((.port // $def_port) | tostring)] | @tsv' "$BINDING_JSON" | head -1)"
+      IFS=$'\t' read -r jump_host jump_user jump_port <<< "$jump_row"
       if [[ -n "$jump_host" && "$jump_host" != "null" ]]; then
         candidate_labels+=("proxyjump")
         candidate_hosts+=("$host")
@@ -413,9 +445,13 @@ for i in $(seq 0 $((COUNT-1))); do
     fi
 
     if [[ "$ENABLE_PROXYJUMP" -eq 1 && -n "$probe_via" && "$probe_via" != "null" ]]; then
-      jump_host="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .host // \"\"" "$BINDING_FILE")"
-      jump_user="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .user // \"$DEF_USER\"" "$BINDING_FILE")"
-      jump_port="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .port // $DEF_PORT" "$BINDING_FILE")"
+      jump_row="$(jq -r \
+        --arg probe_via "$probe_via" \
+        --arg def_user "$DEF_USER" \
+        --argjson def_port "$DEF_PORT" \
+        '.ssh.targets[]? | select(.id == $probe_via) |
+          [(.host // ""), (.user // $def_user), ((.port // $def_port) | tostring)] | @tsv' "$BINDING_JSON" | head -1)"
+      IFS=$'\t' read -r jump_host jump_user jump_port <<< "$jump_row"
       if [[ -n "$jump_host" && "$jump_host" != "null" ]]; then
         candidate_labels+=("proxyjump")
         candidate_hosts+=("$host")
@@ -488,7 +524,7 @@ for i in $(seq 0 $((COUNT-1))); do
   fi
 
   if [[ "$JSON_MODE" -eq 0 ]]; then
-    local auth_tag="auth=${auth_origin_mode}"
+    auth_tag="auth=${auth_origin_mode}"
     if [[ "$auth_origin_mode" != "ambient" && "$auth_origin_identity_exists" == "false" ]]; then
       auth_tag="auth=${auth_origin_mode}(MISSING)"
     fi

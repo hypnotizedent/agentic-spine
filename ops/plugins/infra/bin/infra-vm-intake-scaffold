@@ -11,6 +11,7 @@ VM_LIFECYCLE_DERIVED="$ROOT/ops/bindings/vm.lifecycle.derived.yaml"
 PLATFORM_CONTROL="$ROOT/ops/bindings/platform.control.surfaces.yaml"
 VM_DERIVED_CHECK="$ROOT/ops/plugins/infra/vm/bin/vm-lifecycle-derived-check"
 CONTROL_RECONCILE="$ROOT/ops/plugins/core/authority/bin/platform-control-surface-reconcile"
+WORKBENCH_SSH_GENERATOR="$ROOT/bin/generators/gen-workbench-ssh-config.sh"
 
 # shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/git-lock.sh
 source "$ROOT/ops/lib/git-lock.sh"
@@ -175,6 +176,7 @@ for f in "$VM_LIFECYCLE" "$SSH_TARGETS" "$BACKUP_INV" "$VM_LIFECYCLE_DERIVED" "$
 done
 [[ -x "$VM_DERIVED_CHECK" ]] || fail "missing helper: $VM_DERIVED_CHECK"
 [[ -x "$CONTROL_RECONCILE" ]] || fail "missing helper: $CONTROL_RECONCILE"
+[[ -x "$WORKBENCH_SSH_GENERATOR" ]] || fail "missing helper: $WORKBENCH_SSH_GENERATOR"
 
 if yq -e ".vms[] | select(.id == ${VMID} or .hostname == \"${HOSTNAME}\")" "$VM_LIFECYCLE" >/dev/null 2>&1; then
   fail "vm.lifecycle already contains vmid=$VMID or hostname=$HOSTNAME"
@@ -237,7 +239,7 @@ if [[ "$EXECUTE" -eq 0 ]]; then
   echo "destination_lane: $DEST_LANE"
   echo "target_enabled: $TARGET_ENABLED"
   echo "ssh_host: $SSH_HOST"
-  echo "reconcile: vm.lifecycle.derived + platform.control.surfaces"
+  echo "reconcile: vm.lifecycle.derived + platform.control.surfaces + workbench.ssh"
   echo "authority_followup: update the runtime service surfaces when service/stack truth is known"
   echo "apply: rerun with --execute"
   exit 0
@@ -364,6 +366,7 @@ PY
   "$CONTROL_RECONCILE" --write >/dev/null
   "$CONTROL_RECONCILE" --check >/dev/null
   require_projection_parity
+  "$WORKBENCH_SSH_GENERATOR" --write >/dev/null
 }; then
   rollback_transaction
   fail "intake transaction rolled back"
@@ -375,6 +378,6 @@ echo "vmid: $VMID"
 echo "hostname: $HOSTNAME"
 echo "backup_target: $BACKUP_TARGET"
 echo "target_enabled: $TARGET_ENABLED"
-echo "reconcile: vm.lifecycle.derived + platform.control.surfaces"
+echo "reconcile: vm.lifecycle.derived + platform.control.surfaces + workbench.ssh"
 echo "next: update the runtime service surfaces when service/stack truth exists"
 echo "status: OK"

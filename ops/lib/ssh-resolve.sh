@@ -88,11 +88,17 @@ ssh_resolve_access_policy() {
 # Returns: explicit | ambient
 ssh_resolve_machine_auth_origin() {
   local target_id="$1"
-  local per_target default_origin
+  local per_target per_target_file default_origin
   per_target="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .machine_auth_origin // \"\"" \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || true)"
+  per_target_file="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .machine_identity_file // \"\"" \
     "$_SSH_RESOLVE_BINDING" 2>/dev/null || true)"
   if [[ -n "$per_target" ]]; then
     printf '%s\n' "$per_target"
+    return
+  fi
+  if [[ -n "$per_target_file" ]]; then
+    printf 'explicit\n'
     return
   fi
   default_origin="$(yq -r '.ssh.defaults.machine_auth_origin // "explicit"' \
@@ -134,7 +140,7 @@ ssh_resolve_machine_auth_origin_detail() {
     return
   fi
 
-  if [[ -n "$per_target_origin" ]]; then
+  if [[ -n "$per_target_origin" || -n "$per_target_file" ]]; then
     identity_file="$(ssh_resolve_machine_identity_file "$target_id")"
     printf 'explicit %s\n' "${identity_file:-none}"
     return

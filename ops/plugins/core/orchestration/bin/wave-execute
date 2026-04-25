@@ -33,6 +33,7 @@ WAVE_SH="$SP/ops/commands/wave.sh"
 CAP_SH="$SP/ops/commands/cap.sh"
 AUTHORITY_RESOLVE="$SP/ops/plugins/core/orchestration/bin/authority-resolve"
 WAVE_FINISH="$SP/ops/plugins/core/orchestration/bin/wave-finish"
+ORCHESTRATION_LOOP_CLOSE="$SP/ops/plugins/core/orchestration/bin/orchestration-loop-close"
 WORKTREE_REHYDRATE="$SP/ops/plugins/core/lifecycle/bin/worktree-lifecycle-rehydrate"
 WORKTREE_LIFECYCLE_CONTRACT="$SP/ops/bindings/worktree.lifecycle.contract.yaml"
 
@@ -278,6 +279,69 @@ _resolve_close_head() {
   if [[ -n "$checkout_repo" ]]; then
     git -C "$checkout_repo" rev-parse HEAD 2>/dev/null || true
   fi
+}
+
+_wave_state_summary() {
+  local state_file="${1:?state file required}"
+  python3 - "$state_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    state = json.load(handle)
+
+dispatches = state.get("dispatches")
+if not isinstance(dispatches, list):
+    dispatches = []
+
+print(
+    "%s|%s"
+    % (
+        str(state.get("wave_kind") or "production").strip() or "production",
+        len(dispatches),
+    )
+)
+PY
+}
+
+_maybe_force_close_orchestration_manifest() {
+  local loop_id="${1:?loop id required}"
+  local disposition="${2:?disposition required}"
+  local completion_level="${3:-}"
+  local wave_id="${4:-}"
+  local manifest="$SPINE_STATE/orchestration/$loop_id/manifest.yaml"
+
+  # Controller-direct manifest close is a landed-only compatibility path.
+  # Deferred/superseded/abandoned waves must not synthesize integration state.
+  [[ "$disposition" == "landed" ]] || return 0
+
+  [[ -f "$manifest" ]] || return 0
+
+  local manifest_status=""
+  manifest_status="$(yq e -r '.status // ""' "$manifest" 2>/dev/null || true)"
+  if [[ "$manifest_status" == "closed" ]]; then
+    return 0
+  fi
+
+  local -a close_args=(
+    --loop-id "$loop_id"
+    --disposition "$disposition"
+    --force
+    --manifest-only
+    --controller-direct
+    --close-summary "Controller-direct manifest close for $wave_id"
+  )
+  if [[ -n "$completion_level" ]]; then
+    close_args+=(--completion-level "$completion_level")
+  fi
+
+  local output=""
+  output="$(env -u SPINE_ROOT -u SPINE_REPO -u SPINE_TARGET_REPO -u OPS_WORKTREE_IDENTITY \
+    bash "$ORCHESTRATION_LOOP_CLOSE" "${close_args[@]}" 2>&1)" || {
+      echo "$output"
+      return 1
+    }
+  echo "$output"
 }
 
 _resolve_canonical_worktree_prefix() {
@@ -1130,8 +1194,6 @@ cmd_close() {
 
   [[ -n "$wave_id" ]] || _fail_args "--wave-id required"
 
-  completion_level="$(_normalize_completion_level "$completion_level")"
-
   _header "close"
 
   # Step 1: Read authority binding
@@ -1195,6 +1257,20 @@ for p in pending:
     fi
   fi
 
+  local wave_kind="production"
+  local dispatch_total="0"
+  if [[ -f "$state_file" ]]; then
+    IFS='|' read -r wave_kind dispatch_total <<< "$(_wave_state_summary "$state_file")"
+  fi
+
+  if [[ "$disposition" == "landed" && -z "$completion_level" && "$wave_kind" == "engineering" ]]; then
+    completion_level="slice_complete"
+    echo "Engineering wave: defaulting completion_level=slice_complete"
+    echo ""
+  fi
+
+  completion_level="$(_normalize_completion_level "$completion_level")"
+
   # Step 4: Delegate to wave.sh close
   local close_head=""
   local effective_fixed_in=""
@@ -1245,6 +1321,16 @@ for p in pending:
     _fail "wave.sh close failed"
   }
   echo ""
+
+  if [[ "$disposition" == "landed" && "$dispatch_total" == "0" ]]; then
+    if [[ "$controller_only" -eq 1 || "$wave_kind" == "engineering" ]]; then
+      echo "Closing orchestration manifest through controller-direct compatibility path..."
+      _maybe_force_close_orchestration_manifest "$loop_id" "$disposition" "$completion_level" "$wave_id" || {
+        _fail "orchestration manifest close failed"
+      }
+      echo ""
+    fi
+  fi
 
   # Step 5: Propagate closure with wave.finish unless explicitly deferred.
   if [[ -n "$disposition" ]]; then

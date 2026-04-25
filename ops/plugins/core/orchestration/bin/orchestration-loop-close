@@ -10,7 +10,7 @@ usage() {
 orchestration-loop-close - Close an orchestration loop when lanes are integrated
 
 Usage:
-  orchestration-loop-close --loop-id <id> [--disposition <state>] [--completion-level <level>] [--close-summary "<text>"] [--force]
+  orchestration-loop-close --loop-id <id> [--disposition <state>] [--completion-level <level>] [--close-summary "<text>"] [--force] [--manifest-only] [--controller-direct]
 
 Closes both the orchestration manifest AND the loop scope (via ops loops close).
 USAGE
@@ -19,6 +19,8 @@ USAGE
 ROOT="$(orchestration_root)"
 LOOP_ID=""
 FORCE=0
+MANIFEST_ONLY=0
+CONTROLLER_DIRECT=0
 DISPOSITION="landed"
 COMPLETION_LEVEL="slice_complete"
 CLOSE_SUMMARY=""
@@ -30,6 +32,8 @@ while [[ $# -gt 0 ]]; do
     --completion-level) COMPLETION_LEVEL="${2:-}"; shift 2 ;;
     --close-summary) CLOSE_SUMMARY="${2:-}"; shift 2 ;;
     --force) FORCE=1; shift ;;
+    --manifest-only) MANIFEST_ONLY=1; shift ;;
+    --controller-direct) CONTROLLER_DIRECT=1; MANIFEST_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) orchestration_fail "unknown argument: $1" ;;
   esac
@@ -42,9 +46,15 @@ orchestration_assert_id "$LOOP_ID" "loop id"
 orchestration_need yq
 orchestration_ensure_manifest "$ROOT" "$LOOP_ID"
 
+if [[ "$CONTROLLER_DIRECT" -eq 1 && "$FORCE" -ne 1 ]]; then
+  orchestration_fail "--controller-direct requires --force"
+fi
+
 manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
 loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
 mkdir -p "$loop_dir"
+closed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+closed_by="$(orchestration_actor)"
 
 mapfile -t sequence_lanes < <(yq e -r '.sequence[]?' "$manifest" | sed '/^$/d')
 if ((${#sequence_lanes[@]} == 0)) && [[ "$FORCE" -ne 1 ]]; then
@@ -63,9 +73,27 @@ if ((${#missing[@]} > 0)) && [[ "$FORCE" -ne 1 ]]; then
   orchestration_fail "cannot close loop; lanes not integrated: ${missing[*]}"
 fi
 
+if [[ "$CONTROLLER_DIRECT" -eq 1 && "${#missing[@]}" -gt 0 ]]; then
+  mkdir -p "$loop_dir/integrations"
+  for lane in "${missing[@]}"; do
+    integration_file="$loop_dir/integrations/$lane.yaml"
+    if [[ ! -f "$integration_file" ]]; then
+      {
+        echo "loop_id: $LOOP_ID"
+        echo "lane: $lane"
+        echo "commit: \"\""
+        echo "status: applied"
+        echo "mode: controller_direct"
+        echo "applied_by: \"$closed_by\""
+        echo "applied_at: $closed_at"
+      } > "$integration_file"
+    fi
+    yq e -i ".lanes.\"$lane\".status = \"integrated\"" "$manifest"
+    yq e -i ".lanes.\"$lane\".integrated_commit = (.lanes.\"$lane\".integrated_commit // \"controller-direct\")" "$manifest"
+  done
+fi
+
 closed_file="$loop_dir/closed.yaml"
-closed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-closed_by="$(orchestration_actor)"
 
 {
   echo "loop_id: $LOOP_ID"
@@ -76,6 +104,16 @@ closed_by="$(orchestration_actor)"
     echo "forced: true"
   else
     echo "forced: false"
+  fi
+  if [[ "$MANIFEST_ONLY" -eq 1 ]]; then
+    echo "manifest_only: true"
+  else
+    echo "manifest_only: false"
+  fi
+  if [[ "$CONTROLLER_DIRECT" -eq 1 ]]; then
+    echo "controller_direct: true"
+  else
+    echo "controller_direct: false"
   fi
   echo "missing_lanes:"
   if ((${#missing[@]} > 0)); then
@@ -94,38 +132,44 @@ manifest_updated_before="$(yq e -r '.updated_at // ""' "$manifest")"
 yq e -i '.status = "closed"' "$manifest"
 yq e -i ".updated_at = \"$closed_at\"" "$manifest"
 
-# Chain into loops close to update scope file + SQLite authority.
-# This MUST succeed — if it fails, roll back the manifest close so both
-# authorities stay consistent.  A half-closed state (manifest closed, scope
-# open) causes session.v3.attach to route into a phantom open loop.
-loops_close_args=("$LOOP_ID" "--disposition" "$DISPOSITION")
-if [[ -n "$COMPLETION_LEVEL" ]]; then
-  loops_close_args+=("--completion-level" "$COMPLETION_LEVEL")
-fi
-if [[ -n "$CLOSE_SUMMARY" ]]; then
-  loops_close_args+=("--close-summary" "$CLOSE_SUMMARY")
-fi
-loops_close_output=""
-if loops_close_output="$("$ROOT/ops/commands/loops.sh" close "${loops_close_args[@]}" 2>&1)"; then
-  loops_close_status="chained"
-else
-  loops_close_status="chain_failed"
-  echo "ERROR: loops close chain failed — rolling back manifest close to prevent split-brain" >&2
-  echo "$loops_close_output" >&2
-  # Roll back manifest to pre-close state.
-  yq e -i ".status = \"$manifest_status_before\"" "$manifest"
-  if [[ -n "$manifest_updated_before" ]]; then
-    yq e -i ".updated_at = \"$manifest_updated_before\"" "$manifest"
+loops_close_status="deferred"
+if [[ "$MANIFEST_ONLY" -ne 1 ]]; then
+  # Chain into loops close to update scope file + SQLite authority.
+  # This MUST succeed — if it fails, roll back the manifest close so both
+  # authorities stay consistent.  A half-closed state (manifest closed, scope
+  # open) causes session.v3.attach to route into a phantom open loop.
+  loops_close_args=("$LOOP_ID" "--disposition" "$DISPOSITION")
+  if [[ -n "$COMPLETION_LEVEL" ]]; then
+    loops_close_args+=("--completion-level" "$COMPLETION_LEVEL")
   fi
-  # Remove the closed.yaml we just wrote — this loop is NOT closed.
-  rm -f "$closed_file"
-  orchestration_fail "loops close chain failed; manifest rolled back. Fix the scope/SQLite issue and retry."
+  if [[ -n "$CLOSE_SUMMARY" ]]; then
+    loops_close_args+=("--close-summary" "$CLOSE_SUMMARY")
+  fi
+  loops_close_output=""
+  if loops_close_output="$("$ROOT/ops/commands/loops.sh" close "${loops_close_args[@]}" 2>&1)"; then
+    loops_close_status="chained"
+  else
+    loops_close_status="chain_failed"
+    echo "ERROR: loops close chain failed — rolling back manifest close to prevent split-brain" >&2
+    echo "$loops_close_output" >&2
+    # Roll back manifest to pre-close state.
+    yq e -i ".status = \"$manifest_status_before\"" "$manifest"
+    if [[ -n "$manifest_updated_before" ]]; then
+      yq e -i ".updated_at = \"$manifest_updated_before\"" "$manifest"
+    fi
+    # Remove the closed.yaml we just wrote — this loop is NOT closed.
+    rm -f "$closed_file"
+    orchestration_fail "loops close chain failed; manifest rolled back. Fix the scope/SQLite issue and retry."
+  fi
 fi
 
 echo "orchestration.loop.close"
 echo "loop_id: $LOOP_ID"
 echo "closed_file: $closed_file"
 echo "loops_close: $loops_close_status"
+if [[ "$MANIFEST_ONLY" -eq 1 ]]; then
+  echo "loop_scope_close: deferred"
+fi
 if [[ "$FORCE" -eq 1 ]]; then
   echo "status: CLOSED_FORCED"
 else

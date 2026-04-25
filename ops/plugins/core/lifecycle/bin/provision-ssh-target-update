@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -140,6 +141,60 @@ def dump_yaml_preserving(data: dict, path: Path) -> None:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
+def resolve_workbench_ssh_projection_artifacts(spine_root: Path) -> tuple[Path, Path]:
+    contract_path = spine_root / "ops" / "bindings" / "workbench.ssh.attach.contract.yaml"
+    with open(contract_path, encoding="utf-8") as f:
+        contract = yaml.safe_load(f) or {}
+
+    generator_rel = str(
+        contract.get("generator_script") or "bin/generators/gen-workbench-ssh-config.sh"
+    ).strip()
+    workbench_root_raw = str(contract.get("workbench_root") or "").strip()
+    if not workbench_root_raw:
+        raise RuntimeError(f"missing workbench_root in {contract_path}")
+    workbench_root = Path(os.path.expanduser(workbench_root_raw))
+    projection_rel = str(
+        contract.get("workbench_ssh_config") or "dotfiles/ssh/config.d/tailscale.conf"
+    ).strip()
+
+    generator_path = spine_root / generator_rel
+    projection_path = workbench_root / projection_rel
+    return generator_path, projection_path
+
+
+def capture_file_snapshot(path: Path) -> tuple[bool, str]:
+    if path.exists():
+        return True, path.read_text(encoding="utf-8")
+    return False, ""
+
+
+def restore_file_snapshot(path: Path, existed: bool, content: str) -> None:
+    if existed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return
+    if path.exists():
+        path.unlink()
+
+
+def regenerate_workbench_ssh_projection(generator_path: Path, spine_root: Path) -> None:
+    if not generator_path.is_file():
+        raise RuntimeError(f"missing generator script: {generator_path}")
+    if not os.access(generator_path, os.X_OK):
+        raise RuntimeError(f"generator is not executable: {generator_path}")
+
+    proc = subprocess.run(
+        [str(generator_path), "--write"],
+        cwd=str(spine_root),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip() or f"exit={proc.returncode}"
+        raise RuntimeError(f"workbench ssh projection regenerate failed: {detail}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Update existing SSH target entry")
     parser.add_argument("--target-id", required=True, help="Target ID to update")
@@ -158,7 +213,8 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    ssh_path = spine_code() / "ops" / "bindings" / "ssh.targets.yaml"
+    spine_root = spine_code()
+    ssh_path = spine_root / "ops" / "bindings" / "ssh.targets.yaml"
     data = load_ssh_targets(ssh_path)
     target = find_target(data, args.target_id)
 
@@ -185,14 +241,53 @@ def main() -> int:
             "mode": mode,
             "changes": changes,
         }
-        if args.execute:
+        if not args.execute:
+            result["status"] = "dry_run"
+            print(json.dumps(result, indent=2, default=str))
+            return 0
+
+        generator_path, projection_path = resolve_workbench_ssh_projection_artifacts(spine_root)
+        original_text = ssh_path.read_text(encoding="utf-8")
+        projection_existed, projection_text = capture_file_snapshot(projection_path)
+        try:
             apply_changes(target, changes)
             dump_yaml_preserving(data, ssh_path)
+            regenerate_workbench_ssh_projection(generator_path, spine_root)
             receipt_path = write_receipt(args, changes, spine_state() / "provision-receipts")
-            result["receipt"] = str(receipt_path)
-            result["status"] = "applied"
-        else:
-            result["status"] = "dry_run"
+        except Exception as exc:
+            rollback_errors: list[str] = []
+            try:
+                ssh_path.write_text(original_text, encoding="utf-8")
+            except Exception as rollback_exc:
+                rollback_errors.append(f"ssh.targets restore failed: {rollback_exc}")
+            try:
+                restore_file_snapshot(projection_path, projection_existed, projection_text)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"projection restore failed: {rollback_exc}")
+
+            error_detail = str(exc)
+            status = "rolled_back"
+            if rollback_errors:
+                status = "rollback_failed"
+                error_detail = f"{error_detail}; {'; '.join(rollback_errors)}"
+            print(
+                json.dumps(
+                    {
+                        "capability": "provision.ssh-target.update",
+                        "target_id": args.target_id,
+                        "mode": mode,
+                        "status": status,
+                        "error": error_detail,
+                    },
+                    indent=2,
+                    default=str,
+                )
+            )
+            return 1
+
+        result["receipt"] = str(receipt_path)
+        result["projection_reconciled"] = True
+        result["status"] = "applied"
         print(json.dumps(result, indent=2, default=str))
     else:
         print(f"provision.ssh-target.update: {args.target_id}  [{mode}]")
@@ -202,13 +297,37 @@ def main() -> int:
             print(f"    before: {c['before']}")
             print(f"    after:  {c['after']}")
 
-        if args.execute:
+        if not args.execute:
+            print(f"\n  (dry-run — add --execute to apply)")
+            return 0
+
+        generator_path, projection_path = resolve_workbench_ssh_projection_artifacts(spine_root)
+        original_text = ssh_path.read_text(encoding="utf-8")
+        projection_existed, projection_text = capture_file_snapshot(projection_path)
+        try:
             apply_changes(target, changes)
             dump_yaml_preserving(data, ssh_path)
+            regenerate_workbench_ssh_projection(generator_path, spine_root)
             receipt_path = write_receipt(args, changes, spine_state() / "provision-receipts")
-            print(f"\n✓ Applied. Receipt: {receipt_path}")
-        else:
-            print(f"\n  (dry-run — add --execute to apply)")
+        except Exception as exc:
+            rollback_errors: list[str] = []
+            try:
+                ssh_path.write_text(original_text, encoding="utf-8")
+            except Exception as rollback_exc:
+                rollback_errors.append(f"ssh.targets restore failed: {rollback_exc}")
+            try:
+                restore_file_snapshot(projection_path, projection_existed, projection_text)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"projection restore failed: {rollback_exc}")
+
+            message = f"{exc}"
+            if rollback_errors:
+                message = f"{message}; {'; '.join(rollback_errors)}"
+            print(f"\nERROR: execute transaction rolled back: {message}", file=sys.stderr)
+            return 1
+
+        print(f"\n✓ Applied. Receipt: {receipt_path}")
+        print("✓ Workbench SSH projection reconciled")
 
     return 0
 

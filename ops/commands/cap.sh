@@ -61,6 +61,11 @@ check_deps() {
         echo "Install: brew install yq"
         exit 1
     fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "ERROR: jq required for YAML parsing"
+        echo "Install: brew install jq"
+        exit 1
+    fi
 }
 
 ensure_runtime_dirs() {
@@ -85,6 +90,74 @@ list_caps() {
         done
     echo ""
     echo "Run: ops cap run <name> [args...]"
+}
+
+expand_runtime_value() {
+    local raw="${1:-}"
+    [[ -n "$raw" && "$raw" != "null" ]] || return 0
+    eval echo "$raw"
+}
+
+derive_command_target() {
+    local command_str="${1:-}"
+    local script_path="${2:-}"
+
+    python3 - "$command_str" "$script_path" <<'PY'
+import shlex
+import sys
+
+command_str = sys.argv[1]
+script_path = sys.argv[2]
+
+if script_path and script_path != "null":
+    print(script_path)
+    raise SystemExit(0)
+
+try:
+    tokens = shlex.split(command_str)
+except ValueError:
+    print("")
+    raise SystemExit(0)
+
+if not tokens:
+    print("")
+    raise SystemExit(0)
+
+interpreters = {
+    "python", "python3", "bash", "sh", "zsh", "node", "ruby", "perl",
+}
+
+head = tokens[0]
+if "/" in head or head.startswith(".") or head.startswith("$"):
+    print(head)
+elif head in interpreters and len(tokens) > 1:
+    print(tokens[1])
+else:
+    print("")
+PY
+}
+
+validate_cap_target() {
+    local name="$1"
+    local command_str="$2"
+    local script_path="$3"
+    local cwd="$4"
+    local target=""
+
+    target="$(derive_command_target "$command_str" "$script_path")"
+    [[ -n "$target" ]] || return 0
+    target="$(expand_runtime_value "$target")"
+    [[ -n "$target" ]] || return 0
+
+    if [[ "$target" != /* ]]; then
+        target="$cwd/$target"
+    fi
+
+    if [[ ! -e "$target" ]]; then
+        echo "ERROR: capability '$name' target not found: $target"
+        echo "Check ops/capabilities.yaml registration for command/script_path drift."
+        exit 1
+    fi
 }
 
 show_cap() {
@@ -483,17 +556,21 @@ run_cap() {
     fi
 
     local requires_list=()
+    local requires_json
+    requires_json="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".requires")"
     while IFS= read -r req; do
         [[ -z "${req:-}" || "${req:-}" == "null" ]] && continue
         requires_list+=("$req")
-    done < <(yq e -r ".capabilities.\"$name\".requires[]?" "$CAP_FILE" 2>/dev/null || true)
+    done < <(printf '%s\n' "${requires_json:-[]}" | jq -r '.[]?' 2>/dev/null || true)
 
     local cmd
     cmd="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".command")"
+    local script_path
+    script_path="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".script_path")"
     local cwd
     cwd="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".cwd")"
     [[ -z "$cwd" || "$cwd" == "null" ]] && cwd="$HOME"
-    cwd="$(eval echo "$cwd")"
+    cwd="$(expand_runtime_value "$cwd")"
 
     local safety
     safety="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".safety")"
@@ -529,6 +606,8 @@ run_cap() {
             fi
         done
     fi
+
+    validate_cap_target "$name" "$cmd" "$script_path" "$cwd"
 
     local ts rand run_key
     ts="$(date +%Y%m%d-%H%M%S)"
@@ -647,7 +726,7 @@ main() {
         show)
             shift
             [[ $# -ge 1 ]] || { usage >&2; exit 2; }
-            show_cap "$1"
+            show_cap "$@"
             ;;
         -h|--help|"")
             usage

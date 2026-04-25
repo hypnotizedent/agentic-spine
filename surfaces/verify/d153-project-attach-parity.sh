@@ -20,19 +20,21 @@ for file in "$WORKBENCH_ATTACH_CONTRACT" "$PROJECT_ATTACH_POLICY" "$DOMAIN_PROFI
 done
 command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
 
-python3 - "$WORKBENCH_ATTACH_CONTRACT" "$PROJECT_ATTACH_POLICY" "$DOMAIN_PROFILES" "$AGENT_PROFILES" <<'PY'
+python3 - "$ROOT" "$WORKBENCH_ATTACH_CONTRACT" "$PROJECT_ATTACH_POLICY" "$DOMAIN_PROFILES" "$AGENT_PROFILES" <<'PY'
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import yaml
 
-contract_path = Path(sys.argv[1])
-policy_path = Path(sys.argv[2])
-domain_profiles_path = Path(sys.argv[3])
-agent_profiles_path = Path(sys.argv[4])
+root = Path(sys.argv[1])
+contract_path = Path(sys.argv[2])
+policy_path = Path(sys.argv[3])
+domain_profiles_path = Path(sys.argv[4])
+agent_profiles_path = Path(sys.argv[5])
 
 
 def fail(msg: str) -> None:
@@ -65,6 +67,33 @@ contract = load_yaml(contract_path)
 policy_doc = load_yaml(policy_path)
 domain_profiles = load_yaml(domain_profiles_path)
 agent_profiles = load_yaml(agent_profiles_path)
+
+workbench_root_raw = str(contract.get("workbench_root") or "").strip()
+if not workbench_root_raw:
+    fail("workbench.ssh.attach.contract workbench_root is required")
+workbench_root = Path(workbench_root_raw).expanduser()
+if not workbench_root.is_dir():
+    fail(f"workbench root not found: {workbench_root}")
+
+generator_rel = str(contract.get("generator_script") or "").strip()
+if not generator_rel:
+    fail("workbench.ssh.attach.contract generator_script is required")
+generator_path = root / generator_rel
+if not generator_path.is_file():
+    fail(f"missing generator script: {generator_path}")
+if not os.access(generator_path, os.X_OK):
+    fail(f"generator script is not executable: {generator_path}")
+
+generator_proc = subprocess.run(
+    [str(generator_path), "--check"],
+    text=True,
+    capture_output=True,
+    check=False,
+    cwd=str(root),
+)
+if generator_proc.returncode != 0:
+    detail = (generator_proc.stderr or generator_proc.stdout or "").strip()
+    fail(f"workbench ssh projection drift detected: {detail or 'generator check failed'}")
 
 attach_filename = str(contract.get("attach_file") or "").strip()
 policy_attach_filename = str(((policy_doc.get("policy") or {}).get("attach_filename")) or "").strip()
@@ -147,5 +176,5 @@ for attach_path in attach_paths:
     if not verify_command.startswith("./bin/ops cap run verify.pack.run "):
         fail(f"{attach_path}: verify_command must use verify.pack.run")
 
-print(f"D153 PASS: project attach parity valid for {checked} attach file(s)")
+print(f"D153 PASS: project attach parity valid for {checked} attach file(s); workbench ssh projection in sync")
 PY
