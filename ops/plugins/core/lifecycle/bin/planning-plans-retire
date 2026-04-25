@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# planning.plans.retire — Mark deferred intent plan as retired (non-destructive terminal state).
+# planning.plans.retire — Set a plan to a terminal state (retired or canceled).
 #
 # Usage:
 #   planning-plans-retire --plan-id PLAN-ID --reason "..."
+#   planning-plans-retire --plan-id PLAN-ID --reason "..." --terminal-status canceled
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/git-lock.sh"
 
 PLAN_ID=""
 REASON=""
+TERMINAL_STATUS="retired"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,11 +21,14 @@ while [[ $# -gt 0 ]]; do
     --plan-id=*) PLAN_ID="${1#*=}"; shift ;;
     --reason) REASON="${2:-}"; shift 2 ;;
     --reason=*) REASON="${1#*=}"; shift ;;
+    --terminal-status) TERMINAL_STATUS="${2:-}"; shift 2 ;;
+    --terminal-status=*) TERMINAL_STATUS="${1#*=}"; shift ;;
     -h|--help)
       cat <<'EOF'
-Usage: planning-plans-retire --plan-id PLAN-ID --reason "..."
+Usage: planning-plans-retire --plan-id PLAN-ID --reason "..." [--terminal-status retired|canceled]
 
-Sets plan status to retired without deleting historical intent.
+Sets plan to a terminal state without deleting historical intent.
+Default terminal status is "retired".
 EOF
       exit 0
       ;;
@@ -33,12 +38,13 @@ done
 
 [[ -n "$PLAN_ID" ]] || { echo "FAIL: --plan-id required" >&2; exit 2; }
 [[ -n "$REASON" ]] || { echo "FAIL: --reason required" >&2; exit 2; }
+[[ "$TERMINAL_STATUS" == "retired" || "$TERMINAL_STATUS" == "canceled" ]] || { echo "FAIL: --terminal-status must be retired or canceled" >&2; exit 2; }
 ACTOR="${SPINE_AGENT_ID:-${USER:-unknown}}"
 
 acquire_git_lock plans || exit 1
 trap 'release_git_lock' EXIT INT TERM
 
-python3 - "$ROOT" "$PLAN_ID" "$REASON" "$ACTOR" <<'PY'
+python3 - "$ROOT" "$PLAN_ID" "$REASON" "$ACTOR" "$TERMINAL_STATUS" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -47,6 +53,10 @@ root = Path(sys.argv[1])
 plan_id = sys.argv[2].strip()
 reason = sys.argv[3].strip()
 actor = sys.argv[4].strip() or "unknown"
+terminal_status = sys.argv[5].strip() if len(sys.argv) > 5 else "retired"
+TERMINAL_STATUSES = {"retired", "canceled"}
+if terminal_status not in TERMINAL_STATUSES:
+    raise SystemExit(f"FAIL: invalid terminal status: {terminal_status}")
 
 if not re.fullmatch(r"PLAN-[A-Z0-9-]+", plan_id):
     raise SystemExit(f"FAIL: invalid plan_id: {plan_id}")
@@ -82,26 +92,26 @@ if previous_status == "active_blocked":
 if previous_status == "completed":
     previous_status = "retired"
 
-if previous_status == "retired":
-    raise SystemExit(f"FAIL: plan already retired: {plan_id}")
-if previous_status == "canceled":
-    raise SystemExit(f"FAIL: cannot retire canceled plan: {plan_id}")
+if previous_status in TERMINAL_STATUSES:
+    if previous_status == terminal_status:
+        raise SystemExit(f"FAIL: plan already {terminal_status}: {plan_id}")
+    raise SystemExit(f"FAIL: cannot {terminal_status} {previous_status} plan: {plan_id}")
 if previous_status not in {"deferred", "promoted"}:
-    raise SystemExit(f"FAIL: unsupported plan status transition {previous_status}->retired for {plan_id}")
+    raise SystemExit(f"FAIL: unsupported plan status transition {previous_status}->{terminal_status} for {plan_id}")
 
-plan["status"] = "retired"
-plan["retired_reason"] = reason
-plan["retired_by"] = actor
-plan["retired_from_status"] = previous_status
-plan["retired_at_utc"] = utc_now_text()
+plan["status"] = terminal_status
+plan[f"{terminal_status}_reason"] = reason
+plan[f"{terminal_status}_by"] = actor
+plan[f"{terminal_status}_from_status"] = previous_status
+plan[f"{terminal_status}_at_utc"] = utc_now_text()
 
 upsert_plan(conn, plan)
 insert_event(
     conn,
     plan_id=plan_id,
-    event_type="retired",
+    event_type=terminal_status,
     from_status=previous_status,
-    to_status="retired",
+    to_status=terminal_status,
     reason=reason,
     actor=actor,
     payload={"reason": reason},
@@ -115,10 +125,11 @@ project_to_surfaces(
 )
 conn.commit()
 
-print("planning.plans.retire")
+cap_name = "planning.plans.retire" if terminal_status == "retired" else "planning.plans.cancel"
+print(cap_name)
 print(f"authority: {_db_path}")
 print(f"index: {index_path}")
 print(f"plan_id: {plan_id}")
 print(f"previous_status: {previous_status}")
-print("status: retired")
+print(f"status: {terminal_status}")
 PY
