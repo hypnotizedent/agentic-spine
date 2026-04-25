@@ -131,7 +131,15 @@ wave_require_valid_lane() {
 
 resolve_wave_claimed_paths() {
   local terminal_id="${1:-}"
+  local wave_kind="${2:-production}"
   [[ -n "$terminal_id" ]] || return 0
+  # Engineering waves are controller-direct / runtime-state-only and should not
+  # claim broad repo paths that collide with production waves on the same
+  # terminal.  Give them a narrow isolated namespace instead.
+  if [[ "$wave_kind" == "engineering" ]]; then
+    printf 'runtime/state\n'
+    return 0
+  fi
   # Known controller terminals get a sensible default claimed path so wave start
   # does not require explicit --claimed-paths for single-terminal local dispatch.
   case "$terminal_id" in
@@ -1159,7 +1167,7 @@ deadline = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=max(1, hours))
 print(deadline.strftime("%Y-%m-%dT%H:%M:%SZ"))
 PYDEADLINE
 )"
-  [[ -n "$claimed_paths_raw" ]] || claimed_paths_raw="$(resolve_wave_claimed_paths "$owner_terminal")"
+  [[ -n "$claimed_paths_raw" ]] || claimed_paths_raw="$(resolve_wave_claimed_paths "$owner_terminal" "$wave_kind")"
   if [[ -z "$claimed_paths_raw" ]]; then
     echo "FAIL: not in a governed terminal (OPS_TERMINAL_ROLE='$owner_terminal' has no claimed paths)." >&2
     echo "  Run: ops cap run session.v3.attach" >&2
