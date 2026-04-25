@@ -21,6 +21,7 @@ GAPS_SQL_LIB="$ROOT/ops/plugins/core/lifecycle/lib"
 CLOSEOUT_BIN="$ROOT/ops/plugins/core/loops/bin/loop-closeout-finalize"
 WORKTREE_CLEANUP_BIN="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-cleanup"
 WORKTREE_LIFECYCLE_CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+OPERATOR_SURFACE_REGENERATE_BIN="$ROOT/ops/plugins/core/surface/bin/operator-surface-regenerate"
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
 
 # ── Usage ────────────────────────────────────────────────────────
@@ -262,6 +263,26 @@ PY
   rm -f "$report_json"
 }
 
+refresh_operator_surfaces() {
+  [[ -x "$OPERATOR_SURFACE_REGENERATE_BIN" ]] || {
+    echo "wave.finish FAIL: operator surface regenerate unavailable at $OPERATOR_SURFACE_REGENERATE_BIN" >&2
+    return 1
+  }
+
+  local refresh_output=""
+  refresh_output="$(python3 "$OPERATOR_SURFACE_REGENERATE_BIN" 2>&1)" || {
+    echo "wave.finish FAIL: operator surface regeneration failed after canonical closeout" >&2
+    echo "$refresh_output" >&2
+    echo "The canonical mutation has landed, but cockpit/mobile leaves are stale." >&2
+    echo "Run: python3 $OPERATOR_SURFACE_REGENERATE_BIN" >&2
+    return 1
+  }
+
+  echo "Refreshing operator surfaces..."
+  echo "$refresh_output"
+  echo ""
+}
+
 # ── Parse args ───────────────────────────────────────────────────
 
 LOOP_ID=""
@@ -323,6 +344,7 @@ while [[ $# -gt 0 ]]; do
       done
       [[ -f "$CLOSEOUT_BIN" ]] || { echo "wave.finish self-check FAIL: missing loop-closeout-finalize" >&2; exit 1; }
       [[ -f "$GAPS_BRIDGE" ]] || { echo "wave.finish self-check FAIL: missing gaps-authority-bridge" >&2; exit 1; }
+      [[ -f "$OPERATOR_SURFACE_REGENERATE_BIN" ]] || { echo "wave.finish self-check FAIL: missing operator-surface-regenerate" >&2; exit 1; }
       echo "wave.finish self-check PASS"
       exit 0
       ;;
@@ -1208,6 +1230,10 @@ if [[ "$parity_result" != "pass" ]]; then
   echo "wave.finish FAIL: transition parity $parity_result after closeout" >&2
   echo "The canonical mutation has landed, but derived projection surfaces do not agree." >&2
   echo "Run: transition.parity.check for details. Do NOT re-close the loop." >&2
+  exit 1
+fi
+
+if ! refresh_operator_surfaces; then
   exit 1
 fi
 
