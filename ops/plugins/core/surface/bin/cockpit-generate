@@ -113,9 +113,13 @@ def board_section(payload: dict) -> str:
     spine = payload["spine_now"]
     work = payload["work_state"]
     refs = payload["git_refs"]
-    loops = payload.get("active_loops", {}).get("items", [])
+    loops_data = payload.get("active_loops", {})
+    loops = loops_data.get("items", [])
+    focus = loops_data.get("focus", {}) if isinstance(loops_data.get("focus"), dict) else {}
     handoffs = payload.get("active_handoffs", {}).get("count", 0)
     attention = payload.get("attention", [])
+    posture = payload.get("current_posture", {}) if isinstance(payload.get("current_posture"), dict) else {}
+    aperture = payload.get("aperture", {}) if isinstance(payload.get("aperture"), dict) else {}
     ov = payload.get("operator_vision", {})
     mhw = ov.get("my_human_work_now", {}) if isinstance(ov, dict) else {}
     waiting_data = ov.get("what_is_waiting_on_me", {}) if isinstance(ov, dict) else {}
@@ -164,32 +168,104 @@ def board_section(payload: dict) -> str:
 
     # NOW zone ��� hero loop(s)
     if loops:
-        first = loops[0]
-        loop_title = first.get("title") or first.get("id") or "Open loop"
+        primary_id = str(focus.get("primary", "") or "")
+        primary = next((l for l in loops if l.get("id") == primary_id), None)
+        if primary is None:
+            primary = loops[0]
+        secondary_ids = [str(lid) for lid in (focus.get("secondary") or []) if str(lid or "").strip()]
+        secondaries = [l for l in loops if l.get("id") in secondary_ids]
+
+        loop_title = primary.get("title") or primary.get("id") or "Open loop"
         loop_meta = " \u00b7 ".join(bit for bit in (
-            first.get("status"), first.get("readiness"),
-            first.get("horizon"), first.get("severity"),
+            primary.get("status"), primary.get("readiness"),
+            primary.get("horizon"), primary.get("severity"),
         ) if bit)
+
+        # Why line (humanized)
+        why_human = str(focus.get("why_human", "") or "").strip()
+        why_html = ""
+        if why_human:
+            why_html = f'<div class="focus-why">{_h(why_human)}</div>'
+
+        # Confidence badge (only show when not high)
+        confidence = str(focus.get("confidence", "") or "").strip().lower()
+        confidence_html = ""
+        if confidence and confidence != "high":
+            confidence_css = confidence if confidence in ("medium", "low") else "unknown"
+            confidence_html = (
+                f'<span class="focus-confidence focus-confidence-{confidence_css}">'
+                f'{_h(confidence)} confidence</span>'
+            )
+
+        # Next move — operator intent primary, machine suggestion fallback only
+        next_action = str(primary.get("next_action", "") or "").strip()
+        next_move_html = ""
+        if next_action:
+            next_move_html = (
+                f'<div class="next-move">'
+                f'<span class="next-move-label">Next move</span>'
+                f'<span class="next-move-text">{_h(next_action)}</span>'
+                f'</div>'
+            )
+        else:
+            routing_action = str(posture.get("recommended_action", "") or "").strip()
+            if routing_action:
+                next_move_html = (
+                    f'<div class="next-move next-move-suggested">'
+                    f'<span class="next-move-label">Suggested next move</span>'
+                    f'<span class="next-move-text">{_h(routing_action)}</span>'
+                    f'</div>'
+                )
+
+        # System constraint note (blocked, ambiguous posture)
+        constraint_parts = []
+        if primary.get("blocked_by"):
+            constraint_parts.append(f"blocked by {_h(primary['blocked_by'])}")
+        if posture.get("available") and posture.get("routing_state") == "ambiguous":
+            constraint_parts.append("session posture is ambiguous")
+        constraint_html = ""
+        if constraint_parts:
+            constraint_html = (
+                f'<div class="system-note">'
+                f'{" \u00b7 ".join(constraint_parts)}'
+                f'</div>'
+            )
+
         hero_html = f'''
         <div class="hero-loop">
           <div class="hero-loop-title">{_h(loop_title)}</div>
-          <div class="hero-loop-meta">{_h(loop_meta)}</div>
+          <div class="hero-loop-meta-wrap">
+            <div class="hero-loop-meta">{_h(loop_meta)}</div>
+            {confidence_html}
+          </div>
+          {why_html}
+          {next_move_html}
+          {constraint_html}
         </div>'''
-        # Show additional loops (up to 3 total), then collapse remainder
-        for extra_loop in loops[1:3]:
-            extra_title = extra_loop.get("title") or extra_loop.get("id") or "loop"
-            extra_meta = " \u00b7 ".join(bit for bit in (
-                extra_loop.get("status"), extra_loop.get("readiness"),
-            ) if bit)
-            hero_html += (
-                f'<div style="padding-top:.4rem;margin-top:.4rem;border-top:1px solid rgba(26,35,50,.4)">'
-                f'<div style="font-family:var(--m);font-size:.65rem;font-weight:600;color:var(--tb)">{_h(extra_title)}</div>'
-                f'<div style="font-family:var(--m);font-size:.5rem;color:var(--tm);margin-top:.15rem">{_h(extra_meta)}</div>'
+
+        # Also live — compressed secondary loops
+        also_live_html = ""
+        if secondaries:
+            also_items = []
+            for sl in secondaries[:5]:
+                sl_title = sl.get("title") or sl.get("id") or "loop"
+                sl_meta = " \u00b7 ".join(bit for bit in (
+                    sl.get("status"), sl.get("readiness"),
+                ) if bit)
+                also_items.append(
+                    f'<div class="also-live-item">'
+                    f'<div class="also-live-title">{_h(sl_title)}</div>'
+                    f'<div class="also-live-meta">{_h(sl_meta)}</div>'
+                    f'</div>'
+                )
+            also_live_html = (
+                f'<div class="also-live">'
+                f'<div class="also-live-label">Also live</div>'
+                f'{"".join(also_items)}'
                 f'</div>'
             )
-        if len(loops) > 3:
-            remaining = len(loops) - 3
-            hero_html += f'<div style="font-size:.5rem;color:var(--t);margin-top:.35rem">+ {remaining} more</div>'
+
+        hero_html += also_live_html
         now_css = "zone-now"
     else:
         hero_html = (
@@ -210,11 +286,53 @@ def board_section(payload: dict) -> str:
       {sys_line}
     </div>'''
 
+    # Current Posture block
+    posture_html = ""
+    if posture.get("available"):
+        routing = _h(posture.get("routing_state", ""))
+        container = _h(posture.get("container", ""))
+        p_why = _h(posture.get("why", ""))
+        posture_html = f'''
+    <div class="posture-block">
+      <div class="posture-block-label">Current Posture <span class="posture-block-sub">if you attached now</span></div>
+      <div class="posture-block-row"><span class="posture-field">Route</span> <span class="posture-value">{routing}</span></div>
+      <div class="posture-block-row"><span class="posture-field">Container</span> <span class="posture-value">{container}</span></div>
+      <div class="posture-block-row"><span class="posture-field">Why</span> <span class="posture-value">{p_why}</span></div>
+    </div>'''
+    elif aperture.get("available"):
+        posture_html = '''
+    <div class="posture-block posture-block-fallback">
+      <div class="posture-block-label">Current Posture <span class="posture-block-sub">routing unavailable \u2014 aperture only</span></div>
+    </div>'''
+
+    # Aperture block
+    aperture_html = ""
+    if aperture.get("available"):
+        ap_name = _h(aperture.get("name", ""))
+        legal_items = aperture.get("legal", [])
+        illegal_items = aperture.get("illegal", [])
+        legal_html = "".join(
+            f'<div class="aperture-item aperture-legal">{_h(item)}</div>'
+            for item in legal_items
+        )
+        illegal_html = "".join(
+            f'<div class="aperture-item aperture-illegal">{_h(item)}</div>'
+            for item in illegal_items
+        )
+        aperture_html = f'''
+    <div class="aperture-block">
+      <div class="aperture-block-label">Aperture <span class="aperture-name">{ap_name}</span></div>
+      {legal_html}
+      {illegal_html}
+    </div>'''
+
     now_zone = f'''
     <div class="zone {now_css}">
-      <div class="zone-label">{"Now" if loops else "Now \u2014 idle"}</div>
+      <div class="zone-label">{"Today" if loops else "Now \u2014 idle"}</div>
       {hero_html}
       {engine_line}
+      {posture_html}
+      {aperture_html}
     </div>'''
 
     # WAITING zone — only real operator asks, not system noise
@@ -862,6 +980,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;ba
 .hero-loop{margin-bottom:.35rem}
 .hero-loop-title{font-family:var(--m);font-size:.9rem;font-weight:700;color:var(--tb);line-height:1.3;overflow-wrap:break-word;word-break:break-word}
 .hero-loop-meta{font-family:var(--m);font-size:.55rem;color:var(--tm);margin-top:.35rem}
+.hero-loop-meta-wrap{display:flex;align-items:center;gap:.6rem;margin-top:.35rem;flex-wrap:wrap}
 .hero-loop-none{font-size:.7rem;color:var(--tm);font-style:italic}
 .hero-loop-cta-wrap{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap;margin-top:.75rem}
 .hero-loop-cta{display:inline-flex;align-items:center;padding:.48rem .75rem;border:1px solid rgba(34,211,238,.28);border-radius:999px;background:rgba(34,211,238,.08);color:var(--cyn);text-decoration:none;font-size:.52rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
@@ -874,6 +993,42 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;ba
 .engine-dot.ylw{background:var(--ylw);box-shadow:0 0 6px rgba(251,191,36,.4)}
 .engine-dot.red{background:var(--red);box-shadow:0 0 6px rgba(248,113,113,.4)}
 .engine-text{font-size:.6rem;color:var(--tm)}
+
+.focus-why{font-size:.5rem;color:var(--tm);font-style:italic;line-height:1.45;margin-top:.35rem}
+.focus-confidence{display:inline-flex;align-items:center;padding:.18rem .4rem;border-radius:999px;font-size:.45rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.focus-confidence-medium{background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.22);color:var(--ylw)}
+.focus-confidence-low{background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.22);color:var(--red)}
+.focus-confidence-unknown{background:rgba(90,106,122,.12);border:1px solid rgba(90,106,122,.22);color:var(--t)}
+
+.next-move{margin-top:.5rem;padding:.4rem .6rem;background:rgba(52,211,153,.06);border-left:2px solid rgba(52,211,153,.35);border-radius:0 4px 4px 0}
+.next-move-suggested{background:rgba(90,106,122,.06);border-left-color:rgba(90,106,122,.3)}
+.next-move-label{display:block;font-size:.42rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t);margin-bottom:.15rem}
+.next-move-text{font-size:.52rem;color:var(--tb);line-height:1.4}
+
+.system-note{font-size:.46rem;color:var(--ylw);margin-top:.35rem;font-style:italic}
+
+.also-live{margin-top:.6rem;padding-top:.5rem;border-top:1px solid rgba(26,35,50,.4)}
+.also-live-label{font-size:.42rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t);margin-bottom:.3rem}
+.also-live-item{padding:.25rem 0;border-bottom:1px solid rgba(26,35,50,.25)}
+.also-live-item:last-child{border-bottom:none}
+.also-live-title{font-family:var(--m);font-size:.55rem;font-weight:600;color:var(--tm)}
+.also-live-meta{font-family:var(--m);font-size:.45rem;color:var(--t);margin-top:.1rem}
+
+.posture-block{margin-top:.75rem;padding:.6rem .75rem;background:rgba(15,23,42,.4);border:1px solid rgba(26,35,50,.5);border-radius:6px}
+.posture-block-fallback{opacity:.6}
+.posture-block-label{font-size:.46rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t);margin-bottom:.4rem}
+.posture-block-sub{font-weight:400;letter-spacing:0;text-transform:none;color:var(--tm);margin-left:.4rem;font-style:italic}
+.posture-block-row{display:flex;gap:.5rem;padding:.15rem 0;font-size:.5rem}
+.posture-field{color:var(--t);min-width:5rem;flex-shrink:0}
+.posture-value{color:var(--tb)}
+
+.aperture-block{margin-top:.5rem;padding:.5rem .75rem;background:rgba(15,23,42,.3);border:1px solid rgba(26,35,50,.4);border-radius:6px}
+.aperture-block-label{font-size:.46rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t);margin-bottom:.3rem}
+.aperture-name{font-weight:400;letter-spacing:0;text-transform:none;color:var(--cyn);margin-left:.3rem}
+.aperture-item{font-size:.46rem;color:var(--tm);padding:.1rem 0;padding-left:.6rem;position:relative}
+.aperture-item::before{content:'';position:absolute;left:0;top:.38rem;width:4px;height:4px;border-radius:50%}
+.aperture-legal::before{background:var(--grn)}
+.aperture-illegal::before{background:var(--red);opacity:.6}
 
 .zone-item{display:flex;align-items:center;gap:.5rem;padding:.25rem 0}
 .zone-item-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0;background:var(--t)}

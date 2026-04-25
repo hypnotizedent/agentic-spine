@@ -68,6 +68,24 @@ def _run_json(cmd: list[str]) -> dict:
         return {"status": "fail", "stdout": out}
 
 
+def _read_scope_frontmatter(path: str | Path) -> dict:
+    """Parse YAML frontmatter from a loop scope file."""
+    try:
+        text = Path(path).read_text()
+    except Exception:
+        return {}
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    if end < 0:
+        return {}
+    try:
+        import yaml
+        return yaml.safe_load(text[3:end]) or {}
+    except Exception:
+        return {}
+
+
 def _yaml_load(path: Path) -> dict | list | None:
     try:
         import yaml
@@ -279,19 +297,182 @@ def collect_attention(status: dict, refs: dict) -> list[dict]:
 
 def collect_active_loops(status: dict) -> dict:
     open_loops = status.get("open_loops", [])
+    items = []
+    for loop in open_loops[:10]:
+        scope_file = loop.get("file", "")
+        front = _read_scope_frontmatter(scope_file) if scope_file else {}
+        items.append({
+            "id": loop.get("loop_id", ""),
+            "title": loop.get("title", "")[:120],
+            "status": loop.get("status", ""),
+            "horizon": loop.get("horizon", ""),
+            "readiness": loop.get("execution_readiness", ""),
+            "severity": loop.get("severity", ""),
+            "owner": loop.get("owner", ""),
+            "execution_mode": loop.get("execution_mode", ""),
+            "blocked_by": loop.get("blocked_by", ""),
+            "operator_note": loop.get("operator_note", ""),
+            "last_heartbeat_utc": loop.get("last_heartbeat_utc", ""),
+            "next_action": str(front.get("next_action") or "").strip(),
+            "file": scope_file,
+        })
+    # Focus selection deferred until posture is available (see build_payload).
     return {
         "count": len(open_loops),
-        "items": [
-            {
-                "id": loop.get("loop_id", ""),
-                "title": loop.get("title", "")[:120],
-                "status": loop.get("status", ""),
-                "horizon": loop.get("horizon", ""),
-                "readiness": loop.get("execution_readiness", ""),
-                "severity": loop.get("severity", ""),
-            }
-            for loop in open_loops[:10]
-        ],
+        "items": items,
+    }
+
+
+def _select_focus(loops: list[dict], router_primary_id: str = "") -> dict:
+    """Deterministic focus selector — pick today's primary loop.
+
+    When the router provides a primary loop ID (from compute_routing),
+    that loop is used as the canonical focus. This ensures the cockpit
+    and a fresh session.v3.attach always agree on which loop is primary.
+
+    When no router result is available, falls back to local severity
+    ranking as a best-effort approximation.
+    """
+    if not loops:
+        return {"primary": None, "secondary": [], "why": ["no open loops"],
+                "why_human": "No open loops", "confidence": "none"}
+
+    primary = None
+    if router_primary_id:
+        primary = next((l for l in loops if l.get("id") == router_primary_id), None)
+
+    if primary is None:
+        # Fallback: local sort by severity then alphabetical id.
+        _prio = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        scored = sorted(loops, key=lambda l: (_prio.get(l.get("severity", ""), 99), l.get("id", "")))
+        primary = scored[0]
+
+    primary_id = primary.get("id", "")
+    secondary = [l for l in loops if l.get("id") != primary_id]
+
+    # Build human-readable why fragments (descriptive only)
+    why_parts: list[str] = []
+    if router_primary_id:
+        why_parts.append("router primary")
+    if primary.get("blocked_by"):
+        why_parts.append(f"blocked by {primary['blocked_by']}")
+    if primary.get("readiness") == "runnable":
+        why_parts.append("Runnable now")
+    elif primary.get("readiness") == "ready":
+        why_parts.append("Ready")
+    if primary.get("severity") and primary["severity"] != "-":
+        why_parts.append(f"{primary['severity']} severity")
+    if primary.get("owner") == "@ronny":
+        why_parts.append("assigned to you")
+    if len(loops) > 1:
+        why_parts.append(f"outranks {len(loops) - 1} other loop{'s' if len(loops) > 2 else ''}")
+    if not why_parts:
+        why_parts.append("only open loop" if len(loops) == 1 else "highest ranked")
+
+    confidence = "high" if router_primary_id else ("medium" if len(loops) == 1 else "low")
+
+    return {
+        "primary": primary_id,
+        "secondary": [l["id"] for l in secondary],
+        "why": why_parts,
+        "why_human": " \u00b7 ".join(why_parts),
+        "confidence": confidence,
+    }
+
+
+def collect_current_posture() -> dict:
+    """Derive what a fresh session attach would resolve to right now."""
+    try:
+        import sys as _sys
+        router_lib = REPO / "ops" / "plugins" / "core" / "lifecycle" / "lib"
+        router_path = router_lib / "post_attach_router.py"
+        if str(router_lib) not in _sys.path:
+            _sys.path.insert(0, str(router_lib))
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("post_attach_router", str(router_path))
+        spec = importlib.util.spec_from_loader("post_attach_router", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        # Use SPINE_RUNTIME_ROOT if set, else derive from SPINE_STATE.
+        # The canonical contract (runtime-paths.sh) puts state at
+        # $runtime_root/state, but SPINE_STATE can be overridden
+        # independently, so we strip a trailing /state component if
+        # present and fall back to the parent directory otherwise.
+        runtime_root = os.environ.get("SPINE_RUNTIME_ROOT", "").strip()
+        if not runtime_root:
+            state_path = Path(os.environ.get("SPINE_STATE", "").strip()) if os.environ.get("SPINE_STATE") else STATE_ROOT
+            if state_path.name == "state":
+                runtime_root = str(state_path.parent)
+            else:
+                # SPINE_STATE points somewhere non-standard; runtime_root
+                # is one level up (best-effort when contract diverges).
+                runtime_root = str(state_path.parent)
+        if not runtime_root:
+            return {"available": False}
+        result = mod.compute_routing(
+            runtime_root=runtime_root,
+            state_root=str(STATE_ROOT),
+        )
+        return {
+            "available": True,
+            "routing_state": str(result.get("routing_state", "")),
+            "recommended_action": str(result.get("recommended_next_action", "")),
+            "recommended_command": str(result.get("recommended_command") or ""),
+            "container": str(result.get("recommended_container", "")),
+            "why": str(result.get("why", "")),
+        }
+    except Exception:
+        return {"available": False}
+
+
+def collect_aperture_summary() -> dict:
+    """Read the current aperture from AGENTS.md."""
+    agents_path = REPO / "AGENTS.md"
+    try:
+        text = agents_path.read_text()
+    except Exception:
+        return {"available": False}
+    # Extract aperture name
+    name = ""
+    import re as _re
+    m = _re.search(r"in `([^`]+)` *\n*aperture", text)
+    if m:
+        name = m.group(1)
+    # Extract legal/illegal work summaries (join continuation lines)
+    legal: list[str] = []
+    illegal: list[str] = []
+    in_legal = False
+    in_illegal = False
+    for line in text.splitlines():
+        if line.startswith("Legal work"):
+            in_legal = True
+            in_illegal = False
+            continue
+        if line.startswith("Illegal work"):
+            in_illegal = True
+            in_legal = False
+            continue
+        if line.startswith("#") or (line.strip() and not line.startswith("-") and not line.startswith(" ")):
+            in_legal = False
+            in_illegal = False
+            continue
+        if not line.strip():
+            continue
+        target = legal if in_legal else (illegal if in_illegal else None)
+        if target is None:
+            continue
+        if line.startswith("- "):
+            target.append(line.strip().lstrip("- ").strip())
+        elif target and (line.startswith("  ") or line.startswith("\t")):
+            target[-1] = target[-1] + " " + line.strip()
+        else:
+            target.append(line.strip())
+    return {
+        "available": True,
+        "name": name,
+        "legal": legal[:6],
+        "illegal": illegal[:6],
     }
 
 
@@ -1143,6 +1324,25 @@ def build_payload(compact: bool = False) -> dict:
         work_state,
     )
 
+    # Compute posture first — the router's primary loop drives focus selection.
+    current_posture = collect_current_posture()
+
+    active_loops = collect_active_loops(status)
+
+    # Extract the router's recommended loop ID from posture to ensure focus
+    # structurally agrees with compute_routing(), not just coincidentally.
+    # Only treat the router's choice as canonical when routing_state is
+    # healthy — ambiguous/degraded routing emits provisional hints that
+    # must not be promoted to high-confidence focus.
+    router_primary_id = ""
+    routing_state = current_posture.get("routing_state", "") if current_posture.get("available") else ""
+    if routing_state and routing_state not in ("ambiguous", "degraded", "error"):
+        cmd = current_posture.get("recommended_command", "")
+        parts = cmd.split()
+        if parts and parts[-1].startswith("LOOP-"):
+            router_primary_id = parts[-1]
+    active_loops["focus"] = _select_focus(active_loops.get("items", []), router_primary_id)
+
     payload: dict = {
         "version": 3,
         "generated_utc": generated_utc,
@@ -1151,11 +1351,13 @@ def build_payload(compact: bool = False) -> dict:
         "temporal_truth": collect_temporal_truth(status),
         "projection_freshness": projection_freshness,
         "attention": attention,
-        "active_loops": collect_active_loops(status),
+        "active_loops": active_loops,
         "active_handoffs": active_handoffs,
         "work_state": work_state,
         "git_refs": refs,
         "node_roles": collect_node_roles(status),
+        "current_posture": current_posture,
+        "aperture": collect_aperture_summary(),
         "proposals": collect_proposals(),
         "directional_boundary": collect_directional_boundary(
             operator_vision, active_handoffs, attention
