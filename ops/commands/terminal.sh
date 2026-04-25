@@ -133,6 +133,17 @@ resolve_runtime_role() {
     fi
 }
 
+resolve_terminal_type() {
+    local terminal_name="${1:-}"
+    [[ -n "$terminal_name" ]] || return 0
+    [[ -f "$ROLE_CONTRACT" ]] || return 0
+    command -v yq >/dev/null 2>&1 || return 0
+
+    yq e ".roles[] | select(.id == \"$terminal_name\") | .type" "$ROLE_CONTRACT" 2>/dev/null || true
+}
+
+TERMINAL_TYPE="$(resolve_terminal_type "$TERMINAL_NAME")"
+[[ -n "$TERMINAL_TYPE" && "$TERMINAL_TYPE" != "null" ]] || TERMINAL_TYPE=""
 RUNTIME_ROLE="$(resolve_runtime_role "$TERMINAL_NAME")"
 
 # ── Resolve session posture (node type + posture + source) ─────────��─────
@@ -194,6 +205,11 @@ build_entry_cmd() {
     # Set terminal birth identity
     if [[ -n "$terminal_name" ]]; then
         parts+=("export OPS_TERMINAL_ROLE=$(printf '%q' "$terminal_name")")
+        parts+=("export SPINE_TERMINAL_NAME=$(printf '%q' "$terminal_name")")
+        parts+=("export SPINE_HEARTBEAT_FILE=$(printf '%q' "$SPINE_STATE/terminal-heartbeats/${terminal_name}.yaml")")
+    fi
+    if [[ -n "$TERMINAL_TYPE" ]]; then
+        parts+=("export SPINE_TERMINAL_TYPE=$(printf '%q' "$TERMINAL_TYPE")")
     fi
     parts+=("export SPINE_RUNTIME_ROLE=$(printf '%q' "$runtime_role")")
 
@@ -212,6 +228,7 @@ POSTURE_EOF
     if [[ -n "$loop_id" ]]; then
         parts+=("export SPINE_LOOP_ID=$(printf '%q' "$loop_id")")
         parts+=("export OPS_WORKTREE_IDENTITY=$(printf '%q' "$loop_id")")
+        parts+=("export SPINE_LOOP_HEARTBEAT_FILE=$(printf '%q' "$SPINE_STATE/loop-heartbeats/${loop_id}.yaml")")
     fi
 
     # Session attach at terminal birth (best-effort, never blocks)

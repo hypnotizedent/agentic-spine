@@ -39,6 +39,8 @@ export SPINE_INBOX SPINE_OUTBOX SPINE_STATE SPINE_LOCKS SPINE_LOGS SPINE_RECEIPT
 CAP_FILE="$SPINE_CODE/$CAP_FILE_REL"
 ROLE_POLICY_CONTRACT_REL="ops/bindings/role.runtime.control.contract.yaml"
 ROLE_POLICY_CONTRACT="$SPINE_CODE/$ROLE_POLICY_CONTRACT_REL"
+TERMINAL_ROLE_CONTRACT_REL="ops/bindings/terminal.role.contract.yaml"
+TERMINAL_ROLE_CONTRACT="$SPINE_CODE/$TERMINAL_ROLE_CONTRACT_REL"
 
 CAP_BLOCKER_REASON="none"
 CAP_ROLE_POLICY_ENFORCED="false"
@@ -342,6 +344,127 @@ show_cap() {
     yq e ".capabilities.\"$name\"" "$CAP_FILE"
 }
 
+resolve_terminal_type_for_telemetry() {
+    local terminal_id="${1:-}"
+    [[ -n "$terminal_id" ]] || return 0
+    [[ -f "$TERMINAL_ROLE_CONTRACT" ]] || return 0
+    command -v yq >/dev/null 2>&1 || return 0
+
+    yq e ".roles[] | select(.id == \"$terminal_id\") | .type" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true
+}
+
+resolve_lane_type_for_telemetry() {
+    local checkout_root="${1:-}"
+    local branch="${2:-unknown}"
+    local main_root="${3:-}"
+
+    if [[ -n "$checkout_root" && -n "$main_root" && "$checkout_root" == "$main_root" ]]; then
+        if [[ "$branch" == "<detached>" ]]; then
+            printf 'root_checkout_detached\n'
+        elif [[ "$branch" == "main" ]]; then
+            printf 'root_main_integration\n'
+        else
+            printf 'root_checkout_non_main\n'
+        fi
+        return 0
+    fi
+
+    printf 'managed_worktree_or_branch\n'
+}
+
+write_terminal_custody_heartbeat() {
+    local terminal_id="${1:-}"
+    [[ -n "$terminal_id" ]] || return 0
+
+    local heartbeat_dir="$SPINE_STATE/terminal-heartbeats"
+    local heartbeat_file="${SPINE_HEARTBEAT_FILE:-$heartbeat_dir/${terminal_id}.yaml}"
+    local now_utc expires_at
+    local runtime_role="${SPINE_RUNTIME_ROLE:-researcher}"
+    local loop_id="${SPINE_LOOP_ID:-}"
+    local terminal_type="${SPINE_TERMINAL_TYPE:-}"
+    local terminal_scope="${SPINE_TERMINAL_SCOPE:-}"
+    local normalized_scope="${SPINE_TERMINAL_SCOPE:-}"
+    local protected_hotspot_scope="${SPINE_TERMINAL_PROTECTED_HOTSPOT_SCOPE:-}"
+    local target_repo="${SPINE_TARGET_REPO:-${SPINE_REPO:-$PWD}}"
+    local checkout_root repo_root branch main_root lane_type git_common_dir git_index_path
+    local pid_value="${TERMINAL_PID:-${PPID:-$$}}"
+    local hostname_value
+
+    mkdir -p "$heartbeat_dir" 2>/dev/null || true
+
+    if [[ -z "$terminal_type" || "$terminal_type" == "null" ]]; then
+        terminal_type="$(resolve_terminal_type_for_telemetry "$terminal_id")"
+    fi
+    [[ -n "$terminal_type" && "$terminal_type" != "null" ]] || terminal_type="unknown"
+    if [[ -z "$loop_id" && "${OPS_WORKTREE_IDENTITY:-}" == LOOP-* ]]; then
+        loop_id="${OPS_WORKTREE_IDENTITY:-}"
+    fi
+
+    if [[ -f "$heartbeat_file" ]]; then
+        if [[ -z "$terminal_scope" ]]; then
+            terminal_scope="$(awk -F': ' '/^scope:/{print $2; exit}' "$heartbeat_file" 2>/dev/null | tr -d '"')"
+        fi
+        if [[ -z "$normalized_scope" ]]; then
+            normalized_scope="$(awk -F': ' '/^normalized_scope:/{print $2; exit}' "$heartbeat_file" 2>/dev/null | tr -d '"')"
+        fi
+        if [[ -z "$protected_hotspot_scope" ]]; then
+            protected_hotspot_scope="$(awk -F': ' '/^protected_hotspot_scope:/{print $2; exit}' "$heartbeat_file" 2>/dev/null | tr -d '"')"
+        fi
+    fi
+    [[ -n "$normalized_scope" ]] || normalized_scope="$terminal_scope"
+
+    checkout_root="$(git -C "$target_repo" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$checkout_root" ]] || checkout_root="$target_repo"
+    repo_root="$checkout_root"
+    branch="$(git -C "$checkout_root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    [[ "$branch" == "HEAD" ]] && branch="<detached>"
+    main_root="$(git -C "$SPINE_CODE" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$SPINE_CODE")"
+    lane_type="$(resolve_lane_type_for_telemetry "$checkout_root" "$branch" "$main_root")"
+    git_common_dir="$(git -C "$checkout_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$git_common_dir" ]]; then
+        git_index_path="${GIT_INDEX_FILE:-$git_common_dir/index}"
+    else
+        git_index_path=""
+    fi
+
+    now_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    expires_at="$(python3 - "$now_utc" <<'PY'
+from datetime import datetime, timedelta, timezone
+import sys
+
+raw = (sys.argv[1] or "").strip()
+dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+print((dt.astimezone(timezone.utc) + timedelta(minutes=45)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
+    hostname_value="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)"
+
+    {
+        printf 'version: 1\n'
+        printf 'terminal_id: "%s"\n' "$terminal_id"
+        printf 'role: "%s"\n' "$terminal_type"
+        printf 'runtime_role: "%s"\n' "$runtime_role"
+        printf 'scope: "%s"\n' "$terminal_scope"
+        printf 'normalized_scope: "%s"\n' "$normalized_scope"
+        printf 'protected_hotspot_scope: "%s"\n' "$protected_hotspot_scope"
+        printf 'loop_id: "%s"\n' "$loop_id"
+        printf 'repo_root: "%s"\n' "$repo_root"
+        printf 'checkout_root: "%s"\n' "$checkout_root"
+        printf 'branch: "%s"\n' "$branch"
+        printf 'lane_type: "%s"\n' "$lane_type"
+        printf 'git_common_dir: "%s"\n' "$git_common_dir"
+        printf 'git_index_path: "%s"\n' "$git_index_path"
+        printf 'status: "active"\n'
+        printf 'pid: %s\n' "$pid_value"
+        printf 'hostname: "%s"\n' "$hostname_value"
+        printf 'heartbeat_at: "%s"\n' "$now_utc"
+        printf 'expires_at: "%s"\n' "$expires_at"
+    } > "$heartbeat_file" 2>/dev/null || \
+        echo "WARN: failed to write terminal custody heartbeat for $terminal_id" >&2
+}
+
 append_telemetry() {
     local name="$1"
     local safety="$2"
@@ -376,6 +499,7 @@ append_telemetry() {
         printf 'source: cap.run\n'
     } > "$terminals_dir/$terminal_id.heartbeat" 2>/dev/null || \
         echo "WARN: failed to write terminal heartbeat for $terminal_id" >&2
+    write_terminal_custody_heartbeat "$terminal_id"
     printf '%s\t%s\t%s\t%s\t%s\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       "$name" \
