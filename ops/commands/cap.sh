@@ -37,6 +37,16 @@ spine_runtime_resolve_paths
 export SPINE_INBOX SPINE_OUTBOX SPINE_STATE SPINE_LOCKS SPINE_LOGS SPINE_RECEIPTS SPINE_VERIFY_ROOT SPINE_DOMAIN_STATE SPINE_TARGET_REPO
 
 CAP_FILE="$SPINE_CODE/$CAP_FILE_REL"
+ROLE_POLICY_CONTRACT_REL="ops/bindings/role.runtime.control.contract.yaml"
+ROLE_POLICY_CONTRACT="$SPINE_CODE/$ROLE_POLICY_CONTRACT_REL"
+
+CAP_BLOCKER_REASON="none"
+CAP_ROLE_POLICY_ENFORCED="false"
+CAP_ROLE_POLICY_OVERRIDE_USED="false"
+CAP_ROLE_POLICY_OVERRIDE_REF="none"
+CAP_ROLE_POLICY_OVERRIDE_REASON="none"
+CAP_ROLE_POLICY_BLOCK_REASON="none"
+CAP_ROLE_POLICY_BLOCK_MESSAGE=""
 
 usage() {
     cat <<'EOF'
@@ -66,6 +76,160 @@ check_deps() {
         echo "Install: brew install jq"
         exit 1
     fi
+}
+
+reset_role_policy_state() {
+    CAP_BLOCKER_REASON="none"
+    CAP_ROLE_POLICY_ENFORCED="false"
+    CAP_ROLE_POLICY_OVERRIDE_USED="false"
+    CAP_ROLE_POLICY_OVERRIDE_REF="none"
+    CAP_ROLE_POLICY_OVERRIDE_REASON="none"
+    CAP_ROLE_POLICY_BLOCK_REASON="none"
+    CAP_ROLE_POLICY_BLOCK_MESSAGE=""
+}
+
+cap_safety_requires_mutation_policy() {
+    case "${1:-}" in
+        mutating|destructive) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+role_policy_override_env_name() {
+    local field="$1"
+    local default_value="$2"
+
+    if [[ ! -f "$ROLE_POLICY_CONTRACT" ]]; then
+        printf '%s\n' "$default_value"
+        return 0
+    fi
+
+    yq e -r "$field // \"$default_value\"" "$ROLE_POLICY_CONTRACT" 2>/dev/null || printf '%s\n' "$default_value"
+}
+
+runtime_role_is_read_only() {
+    local runtime_role="$1"
+    local read_only_roles=""
+    [[ -f "$ROLE_POLICY_CONTRACT" ]] || return 1
+
+    read_only_roles="$(yq e -r '.runtime_roles.read_only_roles[]?' "$ROLE_POLICY_CONTRACT" 2>/dev/null || true)"
+    if printf '%s\n' "$read_only_roles" | grep -Fxq -- "$runtime_role"; then
+        return 0
+    fi
+
+    return 1
+}
+
+capability_in_role_mutation_allowlist() {
+    local runtime_role="$1"
+    local capability_name="$2"
+    local allowlist=""
+    [[ -f "$ROLE_POLICY_CONTRACT" ]] || return 1
+
+    allowlist="$(yq e -r ".runtime_roles.mutating_capability_allowlist_by_role.\"$runtime_role\"[]?" "$ROLE_POLICY_CONTRACT" 2>/dev/null || true)"
+    if printf '%s\n' "$allowlist" | grep -Fxq -- "$capability_name"; then
+        return 0
+    fi
+
+    return 1
+}
+
+evaluate_role_policy() {
+    local capability_name="$1"
+    local safety="$2"
+    local override_env override_reason_env override_ref override_reason
+    local session_posture runtime_role enforce_mutation_block
+
+    reset_role_policy_state
+
+    if ! cap_safety_requires_mutation_policy "$safety"; then
+        return 0
+    fi
+
+    CAP_ROLE_POLICY_ENFORCED="true"
+    override_env="$(role_policy_override_env_name '.runtime_roles.execution_policy.override_env' 'SPINE_ROLE_POLICY_OVERRIDE_REF')"
+    override_reason_env="$(role_policy_override_env_name '.runtime_roles.execution_policy.override_reason_env' 'SPINE_ROLE_POLICY_OVERRIDE_REASON')"
+    override_ref="$(printenv "$override_env" 2>/dev/null || true)"
+    override_reason="$(printenv "$override_reason_env" 2>/dev/null || true)"
+
+    if [[ -n "$override_ref" || -n "$override_reason" ]]; then
+        CAP_ROLE_POLICY_OVERRIDE_REF="${override_ref:-none}"
+        CAP_ROLE_POLICY_OVERRIDE_REASON="${override_reason:-none}"
+        if [[ -z "$override_ref" || -z "$override_reason" ]]; then
+            CAP_BLOCKER_REASON="role_policy_override_incomplete"
+            CAP_ROLE_POLICY_BLOCK_REASON="$CAP_BLOCKER_REASON"
+            CAP_ROLE_POLICY_BLOCK_MESSAGE="override requires both $override_env and $override_reason_env"
+            return 1
+        fi
+        CAP_ROLE_POLICY_OVERRIDE_USED="true"
+    fi
+
+    session_posture="${SPINE_SESSION_POSTURE:-}"
+    if [[ "$session_posture" == "translator" && "$CAP_ROLE_POLICY_OVERRIDE_USED" != "true" ]]; then
+        CAP_BLOCKER_REASON="translator_posture_mutation_forbidden"
+        CAP_ROLE_POLICY_BLOCK_REASON="$CAP_BLOCKER_REASON"
+        CAP_ROLE_POLICY_BLOCK_MESSAGE="session posture 'translator' cannot execute mutating capabilities"
+        return 1
+    fi
+
+    if [[ ! -f "$ROLE_POLICY_CONTRACT" ]]; then
+        CAP_BLOCKER_REASON="role_policy_contract_missing"
+        CAP_ROLE_POLICY_BLOCK_REASON="$CAP_BLOCKER_REASON"
+        CAP_ROLE_POLICY_BLOCK_MESSAGE="role policy contract missing: $ROLE_POLICY_CONTRACT"
+        return 1
+    fi
+
+    if [[ "$CAP_ROLE_POLICY_OVERRIDE_USED" == "true" ]]; then
+        return 0
+    fi
+
+    enforce_mutation_block="$(yq e -r '.runtime_roles.execution_policy.enforce_read_only_mutation_block // "false"' "$ROLE_POLICY_CONTRACT" 2>/dev/null || echo "false")"
+    if [[ "$enforce_mutation_block" != "true" ]]; then
+        CAP_ROLE_POLICY_ENFORCED="false"
+        return 0
+    fi
+
+    runtime_role="${SPINE_RUNTIME_ROLE:-worker}"
+    if ! runtime_role_is_read_only "$runtime_role"; then
+        return 0
+    fi
+
+    if capability_in_role_mutation_allowlist "$runtime_role" "$capability_name"; then
+        return 0
+    fi
+
+    CAP_BLOCKER_REASON="runtime_role_mutation_forbidden"
+    CAP_ROLE_POLICY_BLOCK_REASON="$CAP_BLOCKER_REASON"
+    CAP_ROLE_POLICY_BLOCK_MESSAGE="runtime role '$runtime_role' is read-only and '$capability_name' is not allowlisted for mutation"
+    return 1
+}
+
+emit_role_policy_stop() {
+    local capability_name="$1"
+    local safety="$2"
+    local override_env override_reason_env runtime_role session_posture terminal_role next_step
+
+    override_env="$(role_policy_override_env_name '.runtime_roles.execution_policy.override_env' 'SPINE_ROLE_POLICY_OVERRIDE_REF')"
+    override_reason_env="$(role_policy_override_env_name '.runtime_roles.execution_policy.override_reason_env' 'SPINE_ROLE_POLICY_OVERRIDE_REASON')"
+    runtime_role="${SPINE_RUNTIME_ROLE:-worker}"
+    session_posture="${SPINE_SESSION_POSTURE:-unset}"
+    terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-unset}}}"
+
+    next_step="rerun from a worker-bound execution surface or set $override_env and $override_reason_env with governed justification"
+    if [[ "$session_posture" == "translator" ]]; then
+        next_step="re-enter on a controller or worker surface; translator posture remains read/draft only for mutating work. Override only with governed justification via $override_env and $override_reason_env"
+    fi
+
+    cat <<EOF
+STOP: runtime role policy blocked capability execution
+  capability: $capability_name
+  safety:     $safety
+  runtime:    $runtime_role
+  posture:    $session_posture
+  terminal:   $terminal_role
+  reason:     ${CAP_ROLE_POLICY_BLOCK_MESSAGE:-runtime role policy blocked capability execution}
+  next:       $next_step
+EOF
 }
 
 ensure_runtime_dirs() {
@@ -298,6 +462,11 @@ write_cap_receipt() {
     local governance_last_verified=""
     local execution_host=""
     local execution_mode="${SPINE_EXECUTION_MODE:-capability}"
+    local blocker_reason="${CAP_BLOCKER_REASON:-none}"
+    local role_policy_enforced="${CAP_ROLE_POLICY_ENFORCED:-false}"
+    local role_policy_override_used="${CAP_ROLE_POLICY_OVERRIDE_USED:-false}"
+    local role_policy_override_ref="${CAP_ROLE_POLICY_OVERRIDE_REF:-none}"
+    local role_policy_override_reason="${CAP_ROLE_POLICY_OVERRIDE_REASON:-none}"
 
     mkdir -p "$receipt_dir"
     cp "$output_file" "$output_path"
@@ -329,12 +498,12 @@ write_cap_receipt() {
 | Generated | $end_time |
 | Model | local (capability) |
 | Context | $safety |
-| Blocker Reason | none |
+| Blocker Reason | $blocker_reason |
 | Runtime Role | ${runtime_role:-unknown} |
-| Role Policy Enforced | false |
-| Role Policy Override Used | false |
-| Role Policy Override Ref | none |
-| Role Policy Override Reason | none |
+| Role Policy Enforced | $role_policy_enforced |
+| Role Policy Override Used | $role_policy_override_used |
+| Role Policy Override Ref | $role_policy_override_ref |
+| Role Policy Override Reason | $role_policy_override_reason |
 | Prompt Set ID | ${PROMPT_LINEAGE_SET:-unregistered} |
 | Prompt Version | ${PROMPT_LINEAGE_VERSION:-none} |
 | Prompt Source Hash | ${PROMPT_LINEAGE_HASH:-none} |
@@ -628,6 +797,29 @@ run_cap() {
     echo "Command:     $cmd ${args[*]:-}"
     echo "CWD:         $cwd"
     echo ""
+
+    if ! evaluate_role_policy "$name" "$safety"; then
+        rc=3
+        emit_role_policy_stop "$name" "$safety" | tee "$output_file"
+        end_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        resolve_prompt_lineage "$name"
+        write_cap_receipt "$name" "$safety" "$cmd" "$cwd" "$run_key" "$start_time" "$end_time" "$rc" "$output_file" "${args[@]}"
+        receipt_path="$SPINE_RECEIPTS/R${run_key}/receipt.md"
+        output_path="$SPINE_RECEIPTS/R${run_key}/output.txt"
+        rm -f "$output_file"
+        append_telemetry "$name" "$safety" "$rc"
+
+        echo ""
+        echo "════════════════════════════════════════"
+        echo "FAILED"
+        echo "════════════════════════════════════════"
+        echo "Run Key:  $run_key"
+        echo "Receipt:  $receipt_path"
+        echo "Output:   $output_path"
+        echo "Exit:     $rc"
+
+        return "$rc"
+    fi
 
     local previous_stack="${OPS_CAP_STACK:-}"
     local cycle_stack=",${previous_stack},${name},"
