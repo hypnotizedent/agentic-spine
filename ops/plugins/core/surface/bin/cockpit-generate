@@ -32,6 +32,7 @@ build_payload = _mod.build_payload
 
 RUNTIME_STATE = Path(os.environ.get("SPINE_STATE", Path.home() / "code" / ".runtime" / "spine" / "state"))
 OUTPUT = RUNTIME_STATE / "domain-state" / "SPINE_COCKPIT.html"
+OPERATOR_SURFACE_ROOT = os.environ.get("SPINE_OPERATOR_SURFACE_ROOT", "https://spine.ronny.works").rstrip("/")
 
 
 def _h(s: str) -> str:
@@ -105,6 +106,166 @@ def engine_posture(payload: dict) -> str:
         <div class="p-sub">{_h(' · '.join(reasons))}</div>
       </div>
     </div>"""
+
+
+def board_section(payload: dict) -> str:
+    """The main visual board — zones for NOW / WAITING / BACKGROUND."""
+    spine = payload["spine_now"]
+    work = payload["work_state"]
+    refs = payload["git_refs"]
+    loops = payload.get("active_loops", {}).get("items", [])
+    handoffs = payload.get("active_handoffs", {}).get("count", 0)
+    attention = payload.get("attention", [])
+    ov = payload.get("operator_vision", {})
+    mhw = ov.get("my_human_work_now", {}) if isinstance(ov, dict) else {}
+    waiting_data = ov.get("what_is_waiting_on_me", {}) if isinstance(ov, dict) else {}
+
+    pending_ingress = int(mhw.get("pending_ingress", 0) or 0)
+    float_risk = int(mhw.get("float_risk_count", 0) or 0)
+    parked_without = int(waiting_data.get("parked_without_lifecycle", 0) or 0)
+    parked_inbox = int(work.get("inbox_lanes", {}).get("parked", 0) or 0)
+
+    # Split attention: real operator asks vs system noise (repo dirty, etc.)
+    real_attention = [a for a in attention if a.get("type") != "repo_dirty"]
+    system_notes = [a for a in attention if a.get("type") == "repo_dirty"]
+
+    # Engine status
+    verify = spine.get("verify_status", "unknown")
+    anomalies = int(spine.get("anomaly_count", 0) or 0)
+    gaps = int(work.get("open_gaps", 0) or 0)
+    waves = int(work.get("active_waves", 0) or 0)
+
+    if verify == "pass" and anomalies == 0:
+        engine_css = "grn"
+        engine_label = "All clear"
+    elif verify != "pass":
+        engine_css = "red"
+        engine_label = "Degraded"
+    else:
+        engine_css = "ylw"
+        engine_label = "Mixed signals"
+
+    engine_bits = f"verify {verify} \u00b7 {gaps} gaps \u00b7 {waves} waves \u00b7 {anomalies} anomalies"
+
+    # System status line (repo dirty, mirror diverged — not operator work)
+    sys_parts = []
+    if refs.get("is_dirty"):
+        sys_parts.append("repo dirty")
+    if not refs.get("github_ok"):
+        sys_parts.append("mirror unavailable")
+    elif refs.get("local_head") != refs.get("github_head") and refs.get("github_ok"):
+        sys_parts.append("mirror diverged")
+    sys_line = ""
+    if sys_parts:
+        sys_line = (
+            f'<div style="font-size:.5rem;color:var(--t);opacity:.6;margin-top:.25rem">'
+            f'{_h(" \u00b7 ".join(sys_parts))}</div>'
+        )
+
+    # NOW zone ��� hero loop(s)
+    if loops:
+        first = loops[0]
+        loop_title = first.get("title") or first.get("id") or "Open loop"
+        loop_meta = " \u00b7 ".join(bit for bit in (
+            first.get("status"), first.get("readiness"),
+            first.get("horizon"), first.get("severity"),
+        ) if bit)
+        hero_html = f'''
+        <div class="hero-loop">
+          <div class="hero-loop-title">{_h(loop_title)}</div>
+          <div class="hero-loop-meta">{_h(loop_meta)}</div>
+        </div>'''
+        # Show additional loops (up to 3 total), then collapse remainder
+        for extra_loop in loops[1:3]:
+            extra_title = extra_loop.get("title") or extra_loop.get("id") or "loop"
+            extra_meta = " \u00b7 ".join(bit for bit in (
+                extra_loop.get("status"), extra_loop.get("readiness"),
+            ) if bit)
+            hero_html += (
+                f'<div style="padding-top:.4rem;margin-top:.4rem;border-top:1px solid rgba(26,35,50,.4)">'
+                f'<div style="font-family:var(--m);font-size:.65rem;font-weight:600;color:var(--tb)">{_h(extra_title)}</div>'
+                f'<div style="font-family:var(--m);font-size:.5rem;color:var(--tm);margin-top:.15rem">{_h(extra_meta)}</div>'
+                f'</div>'
+            )
+        if len(loops) > 3:
+            remaining = len(loops) - 3
+            hero_html += f'<div style="font-size:.5rem;color:var(--t);margin-top:.35rem">+ {remaining} more</div>'
+        now_css = "zone-now"
+    else:
+        submit_href = f"{OPERATOR_SURFACE_ROOT}/submit"
+        hero_html = (
+            '<div class="hero-loop">'
+            '<div class="hero-loop-none">No live work</div>'
+            '<div class="hero-loop-cta-wrap">'
+            f'<a class="hero-loop-cta" href="{_h(submit_href)}">Submit a note</a>'
+            '<span class="hero-loop-cta-sub">park raw operator ingress</span>'
+            '</div>'
+            '</div>'
+        )
+        now_css = "zone-now zone-idle"
+
+    engine_line = f'''
+    <div class="engine-line">
+      <div class="engine-dot {engine_css}"></div>
+      <div class="engine-text">{_h(engine_label)} \u2014 {_h(engine_bits)}</div>
+      {sys_line}
+    </div>'''
+
+    now_zone = f'''
+    <div class="zone {now_css}">
+      <div class="zone-label">{"Now" if loops else "Now \u2014 idle"}</div>
+      {hero_html}
+      {engine_line}
+    </div>'''
+
+    # WAITING zone — only real operator asks, not system noise
+    needs_now = handoffs + len(real_attention) + pending_ingress
+    if needs_now > 0:
+        wait_items = []
+        if handoffs:
+            wait_items.append(f'<div class="zone-item"><div class="zone-item-dot active"></div><span class="zone-item-count">{handoffs}</span><span class="zone-item-text">handoff{"s" if handoffs != 1 else ""} from agents</span></div>')
+        if real_attention:
+            wait_items.append(f'<div class="zone-item"><div class="zone-item-dot active"></div><span class="zone-item-count">{len(real_attention)}</span><span class="zone-item-text">surfaced attention</span></div>')
+        if pending_ingress:
+            wait_items.append(f'<div class="zone-item"><div class="zone-item-dot active"></div><span class="zone-item-count">{pending_ingress}</span><span class="zone-item-text">pending ingress</span></div>')
+        wait_body = "\n".join(wait_items)
+    else:
+        wait_body = '<div class="zone-calm">Nothing waiting on you</div>'
+
+    waiting_zone = f'''
+    <div class="zone zone-waiting{" zone-empty" if needs_now == 0 else ""}">
+      <div class="zone-label">Waiting on you</div>
+      {wait_body}
+    </div>'''
+
+    # BACKGROUND zone
+    bg_total = float_risk + parked_inbox + parked_without
+    if bg_total > 0:
+        bg_items = []
+        if float_risk:
+            bg_items.append(f'<div class="zone-item"><div class="zone-item-dot"></div><span class="zone-item-count">{float_risk}</span><span class="zone-item-text">float-risk items</span></div>')
+        if parked_without:
+            bg_items.append(f'<div class="zone-item"><div class="zone-item-dot"></div><span class="zone-item-count">{parked_without}</span><span class="zone-item-text">parked without lifecycle</span></div>')
+        if parked_inbox:
+            bg_items.append(f'<div class="zone-item"><div class="zone-item-dot"></div><span class="zone-item-count">{parked_inbox}</span><span class="zone-item-text">parked inbox</span></div>')
+        bg_body = "\n".join(bg_items)
+    else:
+        bg_body = '<div class="zone-calm">No background residue</div>'
+
+    bg_zone = f'''
+    <div class="zone zone-background{" zone-empty" if bg_total == 0 else ""}">
+      <div class="zone-label">Background</div>
+      {bg_body}
+    </div>'''
+
+    return f'''
+    <div class="board">
+      {now_zone}
+      <div class="zone-row">
+        {waiting_zone}
+        {bg_zone}
+      </div>
+    </div>'''
 
 
 def freshness_card(payload: dict) -> str:
@@ -556,7 +717,7 @@ def authority_explorer(manifest: dict) -> str:
     </details>"""
 
 
-def work_state_section(ws: dict) -> str:
+def work_state_section(ws: dict, active_loops: dict, active_handoffs: dict) -> str:
     items = [
         ("Loops", str(ws["open_loops"]), "open"),
         ("Gaps", str(ws["open_gaps"]), "open"),
@@ -570,9 +731,64 @@ def work_state_section(ws: dict) -> str:
     for label, val, sub in items:
         stat_cards += f'<div class="stat"><div class="stat-v">{_h(val)}</div><div class="stat-l">{_h(label)}</div><div class="stat-sub">{_h(sub)}</div></div>'
 
+    live_rows = []
+    for item in (active_loops.get("items", []) or [])[:3]:
+        detail = " · ".join(
+            bit
+            for bit in (
+                item.get("status"),
+                item.get("readiness"),
+                item.get("horizon"),
+                item.get("severity"),
+            )
+            if bit
+        )
+        live_rows.append(
+            f'<div class="today-line">'
+            f'<span class="today-line-k">loop</span>'
+            f'<span class="today-line-v">{_h(item.get("title", item.get("id", "")))}</span>'
+            f'<span class="today-line-sub">{_h(detail)}</span>'
+            f'</div>'
+        )
+
+    handoff_count = int(active_handoffs.get("count", 0) or 0)
+    if handoff_count:
+        live_rows.append(
+            f'<div class="today-line">'
+            f'<span class="today-line-k">handoffs</span>'
+            f'<span class="today-line-v">{handoff_count} active</span>'
+            f'<span class="today-line-sub">agent asks/blockers waiting on operator</span>'
+            f'</div>'
+        )
+    else:
+        live_rows.append(
+            '<div class="today-line">'
+            '<span class="today-line-k">handoffs</span>'
+            '<span class="today-line-v">0 active</span>'
+            '<span class="today-line-sub">no agent-side asks waiting right now</span>'
+            '</div>'
+        )
+
+    handoff_count = int(active_handoffs.get("count", 0) or 0)
+    orphaned = int(ws.get("orphaned_waves", 0) or 0)
+    summary_parts = [
+        f"{int(ws['open_loops'])} loops",
+        f"{int(ws['open_gaps'])} gaps",
+        f"{int(ws['active_waves'])} waves",
+    ]
+    if orphaned:
+        summary_parts.append(f"{orphaned} orphaned")
+    if handoff_count:
+        summary_parts.append(f"{handoff_count} handoffs")
+
     return f"""
-    <div class="sh">Work State</div>
-    <div class="stats">{stat_cards}</div>"""
+    <details>
+      <summary>Execution Ledger <span class="det-count">{_h(' \u00b7 '.join(summary_parts))}</span></summary>
+      <div class="det-body">
+        <div class="stats" style="margin-top:.5rem">{stat_cards}</div>
+        <div class="today-list">{''.join(live_rows)}</div>
+      </div>
+    </details>"""
 
 
 def release_posture(refs: dict) -> str:
@@ -615,13 +831,70 @@ CSS = r"""
   --m:'SF Mono','Fira Code',monospace;
 }
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;background:var(--bg);color:var(--t);min-height:100vh;padding:1.5rem}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;background:var(--bg);color:var(--t);min-height:100vh;padding:2rem}
 .c{max-width:960px;margin:0 auto}
 
-.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem}
-.top h1{font-size:.65rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--tm)}
-.top span{font-size:.55rem;opacity:.4}
+/* Top bar — inline title + beacon + timestamp */
+.top-bar{display:flex;align-items:center;gap:1rem;margin-bottom:2rem;padding-bottom:1rem;border-bottom:1px solid var(--b)}
+.top-id{display:flex;flex-direction:column;gap:.2rem}
+.top-eyebrow{font-size:.48rem;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--tm);opacity:.72}
+.top-bar h1{font-size:.7rem;font-weight:600;letter-spacing:.15em;text-transform:uppercase;color:var(--tm)}
+.surface-nav{display:flex;align-items:center;gap:.45rem;flex-wrap:wrap}
+.surface-tab{display:inline-flex;align-items:center;gap:.35rem;padding:.45rem .65rem;border:1px solid var(--b);border-radius:999px;background:rgba(14,20,31,.72);color:var(--tb);text-decoration:none;font-size:.52rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;transition:border-color .15s ease, background .15s ease, color .15s ease}
+.surface-tab:hover{border-color:var(--b2);background:rgba(20,29,44,.9);color:var(--t)}
+.surface-tab.active{border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08);color:var(--grn)}
+.surface-tab-hint{font-size:.46rem;font-weight:500;letter-spacing:0;text-transform:none;color:var(--tm)}
+.top-bar .beacon{display:flex;align-items:center;gap:.5rem;margin-left:auto}
+.beacon-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.beacon-dot.grn{background:var(--grn);box-shadow:0 0 12px rgba(52,211,153,.5)}
+.beacon-dot.ylw{background:var(--ylw);box-shadow:0 0 12px rgba(251,191,36,.5)}
+.beacon-dot.red{background:var(--red);box-shadow:0 0 12px rgba(248,113,113,.5)}
+.beacon-label{font-size:.6rem;font-weight:600;color:var(--tb)}
+.top-bar .ts{font-size:.5rem;color:var(--t);opacity:.5}
 
+/* Board — zone layout */
+.board{display:flex;flex-direction:column;gap:.75rem;margin-bottom:2.5rem}
+.zone{background:var(--s);border:1px solid var(--b);border-radius:12px;padding:1.25rem 1.5rem;border-left:3px solid var(--b)}
+.zone-now{border-left-color:var(--grn);background:linear-gradient(135deg,rgba(52,211,153,.04),var(--s) 60%)}
+.zone-now.zone-idle{border-left-color:var(--t);background:var(--s)}
+.zone-waiting{border-left-color:var(--ylw)}
+.zone-background{border-left-color:var(--b2)}
+.zone-empty{opacity:.55}
+.zone-label{font-size:.5rem;font-weight:700;text-transform:uppercase;letter-spacing:.14em;margin-bottom:.75rem}
+.zone-now .zone-label{color:var(--grn)}
+.zone-waiting .zone-label{color:var(--ylw)}
+.zone-background .zone-label{color:var(--t)}
+.zone-row{display:grid;grid-template-columns:1fr 1fr;gap:.75rem}
+
+.hero-loop{margin-bottom:.35rem}
+.hero-loop-title{font-family:var(--m);font-size:.9rem;font-weight:700;color:var(--tb);line-height:1.3;overflow-wrap:break-word;word-break:break-word}
+.hero-loop-meta{font-family:var(--m);font-size:.55rem;color:var(--tm);margin-top:.35rem}
+.hero-loop-none{font-size:.7rem;color:var(--tm);font-style:italic}
+.hero-loop-cta-wrap{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap;margin-top:.75rem}
+.hero-loop-cta{display:inline-flex;align-items:center;padding:.48rem .75rem;border:1px solid rgba(34,211,238,.28);border-radius:999px;background:rgba(34,211,238,.08);color:var(--cyn);text-decoration:none;font-size:.52rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+.hero-loop-cta:hover{background:rgba(34,211,238,.14);border-color:rgba(34,211,238,.42)}
+.hero-loop-cta-sub{font-size:.52rem;color:var(--t)}
+
+.engine-line{display:flex;align-items:center;gap:.5rem;padding-top:.65rem;border-top:1px solid rgba(26,35,50,.5);margin-top:.35rem}
+.engine-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.engine-dot.grn{background:var(--grn);box-shadow:0 0 6px rgba(52,211,153,.4)}
+.engine-dot.ylw{background:var(--ylw);box-shadow:0 0 6px rgba(251,191,36,.4)}
+.engine-dot.red{background:var(--red);box-shadow:0 0 6px rgba(248,113,113,.4)}
+.engine-text{font-size:.6rem;color:var(--tm)}
+
+.zone-item{display:flex;align-items:center;gap:.5rem;padding:.25rem 0}
+.zone-item-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0;background:var(--t)}
+.zone-item-dot.active{background:var(--ylw);box-shadow:0 0 4px rgba(251,191,36,.3)}
+.zone-item-dot.ok{background:var(--grn)}
+.zone-item-text{font-size:.6rem;color:var(--tm)}
+.zone-item-count{font-family:var(--m);font-size:.75rem;font-weight:700;color:var(--tb);min-width:18px}
+.zone-calm{font-size:.6rem;color:var(--t);font-style:italic}
+
+/* Drilldown separator */
+.drilldown-sep{border:none;border-top:1px solid var(--b);margin:0 0 1.5rem;opacity:.4}
+.drilldown-label{font-size:.45rem;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--t);opacity:.35;margin-bottom:1rem}
+
+/* Posture (used in drilldown temporal cards) */
 .posture{display:flex;align-items:center;gap:.75rem;padding:.85rem 1.1rem;border-radius:10px;margin-bottom:.5rem}
 .posture.grn{background:var(--grn2);border:1px solid rgba(52,211,153,.2)}
 .posture.ylw{background:var(--ylw2);border:1px solid rgba(251,191,36,.2)}
@@ -633,34 +906,49 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;ba
 .p-text{font-size:.8rem;font-weight:600;color:var(--tb)}
 .p-sub{font-size:.65rem;color:var(--tm);margin-top:.1rem}
 
-.attn{margin-bottom:1.5rem}
+/* Attention */
+.attn{margin-bottom:1rem}
 .attn-item{display:flex;align-items:center;gap:.5rem;padding:.45rem .85rem;background:var(--s);border:1px solid var(--b);border-radius:7px;margin-top:3px;font-size:.65rem;color:var(--tm)}
 .attn-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
 .attn-dot.y{background:var(--ylw)}
 .attn-dot.r{background:var(--red)}
 
+/* Section headers */
 .sh{font-size:.55rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--t);margin-bottom:.5rem;margin-top:1.5rem;opacity:.6}
 
+/* Stats grid */
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:.25rem}
 .stat{background:var(--s);border:1px solid var(--b);border-radius:10px;padding:.75rem .85rem;text-align:center}
 .stat-v{font-family:var(--m);font-size:1.5rem;font-weight:800;color:var(--tb);line-height:1}
 .stat-l{font-size:.5rem;text-transform:uppercase;letter-spacing:.07em;color:var(--t);margin-top:.25rem}
 .stat-sub{font-size:.45rem;color:var(--t);margin-top:.15rem;font-family:var(--m)}
 
+/* Today list (used in work_state_section) */
+.today-list{background:var(--s);border:1px solid var(--b);border-radius:10px;padding:.2rem .9rem;margin-bottom:.35rem}
+.today-line{display:grid;grid-template-columns:84px 1fr auto;gap:.6rem;padding:.45rem 0;border-bottom:1px solid rgba(26,35,50,.5);align-items:baseline}
+.today-line:last-child{border:none}
+.today-line-k{font-size:.45rem;text-transform:uppercase;letter-spacing:.06em;color:var(--t);opacity:.7}
+.today-line-v{font-family:var(--m);font-size:.57rem;color:var(--tb)}
+.today-line-sub{font-size:.5rem;color:var(--tm)}
+.today-note{font-size:.56rem;color:var(--tm);margin:.35rem 0 .75rem;line-height:1.45}
+
+/* Details/Drilldown */
 details{background:var(--s);border:1px solid var(--b);border-radius:10px;margin-bottom:.5rem}
 details[open]{border-color:var(--b2)}
 summary{padding:.65rem 1rem;font-size:.7rem;font-weight:600;color:var(--tb);cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center}
 summary::-webkit-details-marker{display:none}
-summary::after{content:'▸';font-size:.6rem;color:var(--t);transition:transform .15s}
+summary::after{content:'\25b8';font-size:.6rem;color:var(--t);transition:transform .15s}
 details[open] summary::after{transform:rotate(90deg)}
 .det-count{font-family:var(--m);font-size:.6rem;color:var(--t);font-weight:400}
 .det-body{padding:0 1rem .75rem;max-height:500px;overflow-y:auto}
 
+/* Commits */
 .commit{display:flex;align-items:baseline;gap:.5rem;padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
 .commit:last-child{border:none}
 .c-hash{font-family:var(--m);font-size:.55rem;color:var(--blu);flex-shrink:0;width:68px}
 .c-msg{font-size:.6rem;color:var(--tm);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
+/* Capabilities */
 .cap{display:flex;align-items:baseline;gap:.4rem;padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
 .cap:last-child{border:none}
 .cap-name{font-family:var(--m);font-size:.55rem;color:var(--tb);flex-shrink:0;min-width:220px;display:flex;align-items:center;gap:.35rem}
@@ -673,6 +961,7 @@ details[open] summary::after{transform:rotate(90deg)}
 .cap-f{font-size:.5rem;padding:.2rem .45rem;border-radius:4px;border:1px solid var(--b);color:var(--t);cursor:pointer;background:none;transition:all .15s}
 .cap-f:hover,.cap-f.active{color:var(--blu);border-color:rgba(96,165,250,.3);background:var(--blu2)}
 
+/* Surfaces */
 .surf{padding:.4rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
 .surf:last-child{border:none}
 .surf-top{display:flex;align-items:baseline;gap:.4rem}
@@ -684,6 +973,7 @@ details[open] summary::after{transform:rotate(90deg)}
 .surf-hist{background:rgba(42,52,68,.5);color:var(--t)}
 .surf-meta{font-family:var(--m);font-size:.45rem;color:var(--t);margin-top:.15rem;opacity:.6}
 
+/* Gates */
 .gate{display:flex;align-items:center;gap:.4rem;padding:.25rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
 .gate:last-child{border:none}
 .gate-id{font-family:var(--m);font-size:.5rem;color:var(--t);width:36px;flex-shrink:0}
@@ -691,6 +981,7 @@ details[open] summary::after{transform:rotate(90deg)}
 .gate-mode{font-size:.45rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:.1rem .3rem;border-radius:3px;flex-shrink:0}
 .gate-enforce{background:var(--blu2);color:var(--blu)}
 
+/* Release posture */
 .rel{display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;margin-bottom:1.5rem}
 .rel-c{background:var(--s);border:1px solid var(--b);border-radius:8px;padding:.5rem .6rem;text-align:center}
 .rel-l{font-size:.45rem;text-transform:uppercase;letter-spacing:.06em;color:var(--t);opacity:.5}
@@ -700,18 +991,21 @@ details[open] summary::after{transform:rotate(90deg)}
 .sdot.y{background:var(--ylw);box-shadow:0 0 3px rgba(251,191,36,.4)}
 .sdot.r{background:var(--red);box-shadow:0 0 3px rgba(248,113,113,.4)}
 
+/* Node roles */
 .nr{display:flex;gap:.5rem;margin-bottom:.75rem}
 .nr-row{flex:1;background:var(--s);border:1px solid var(--b);border-radius:10px;padding:.65rem .85rem}
 .nr-label{font-size:.45rem;text-transform:uppercase;letter-spacing:.07em;color:var(--t);opacity:.5}
 .nr-value{font-family:var(--m);font-size:.7rem;font-weight:600;color:var(--tb);margin-top:.15rem;display:flex;align-items:center;gap:.5rem}
 .nr-sub{font-size:.5rem;font-weight:400;color:var(--t)}
 
+/* Execution host */
 .eh-lbl{font-family:var(--m);font-size:.55rem;color:var(--tm);padding:.3rem 0;border-bottom:1px solid rgba(26,35,50,.5)}
 .eh-lbl:last-child{border:none}
 .eh-purpose{font-size:.45rem;color:var(--t);opacity:.55;margin-top:.1rem;font-weight:400}
 .eh-other{color:var(--t);opacity:.6}
 .eh-access{font-family:var(--m);font-size:.5rem;color:var(--t);opacity:.5;padding-bottom:.35rem;border-bottom:1px solid var(--b);margin-bottom:.25rem}
 
+/* Comms queue */
 .cq{padding:.65rem 1rem;border-radius:10px;margin-bottom:.75rem}
 .cq-ylw{background:var(--ylw2);border:1px solid rgba(251,191,36,.2)}
 .cq-red{background:var(--red2);border:1px solid rgba(248,113,113,.2)}
@@ -723,6 +1017,25 @@ details[open] summary::after{transform:rotate(90deg)}
 .cq-evidence{font-family:var(--m);font-size:.55rem;color:var(--tm);margin-top:.3rem}
 
 .foot{font-size:.5rem;color:var(--t);opacity:.25;text-align:center;margin-top:2rem;line-height:1.6}
+
+@media (max-width:860px){
+  .stats,.rel{grid-template-columns:repeat(2,1fr)}
+  .zone-row{grid-template-columns:1fr}
+  .nr{flex-direction:column}
+  .today-line{grid-template-columns:72px 1fr}
+  .today-line-sub{grid-column:2}
+}
+
+@media (max-width:560px){
+  body{padding:1rem}
+  .stats,.rel{grid-template-columns:1fr}
+  .zone-row{grid-template-columns:1fr}
+  .top-bar{flex-direction:column;align-items:flex-start;gap:.35rem}
+  .surface-nav{margin-top:.15rem}
+  .top-bar .beacon{margin-left:0}
+  .today-line{grid-template-columns:1fr}
+  .today-line-sub{grid-column:auto}
+}
 """
 
 JS = r"""
@@ -976,7 +1289,7 @@ def operator_vision_section(ov: dict, directional_boundary: dict, temporal_stand
     if not recent_rows:
         recent_rows = '<div style="font-size:.6rem;color:var(--t)">no live operator ingress objects yet</div>'
     recent_html = f"""
-    <details open>
+    <details>
       <summary>Recent Ingress <span class="det-count">{len(recent)} visible</span></summary>
       <div class="det-body">{recent_rows}</div>
     </details>"""
@@ -1069,7 +1382,7 @@ def operator_vision_section(ov: dict, directional_boundary: dict, temporal_stand
     </details>"""
 
     return f"""
-    <div class="sh" style="color:var(--cyn)">Ronny ↔ Agents</div>
+    <div class="sh">Contribution History</div>
     {stats}
     {split_html}
     {temporal_html}
@@ -1099,13 +1412,13 @@ def generate() -> str:
         f"freshness: {p['projection_freshness']['freshness']}",
     ]
 
-    # Lead story: operator vision contribution
+    # Build sections
+    sec_board = board_section(p)
     sec_vision = operator_vision_section(
         p.get("operator_vision", {}),
         p.get("directional_boundary", {}),
         p.get("temporal_standing", {}),
     )
-    sec_posture = engine_posture(p)
     sec_temporal = temporal_truth_section(p)
     sec_fresh = freshness_card(p)
     sec_roles = node_role_card(p["node_roles"])
@@ -1116,9 +1429,21 @@ def generate() -> str:
     sec_caps = capability_atlas(caps_data, inv_counts)
     sec_gates = gate_watch(gates_data)
     sec_auth = authority_explorer(manifest_data)
-    sec_work = work_state_section(p["work_state"])
+    sec_work = work_state_section(p["work_state"], p.get("active_loops", {}), p.get("active_handoffs", {}))
     sec_release = release_posture(p["git_refs"])
-    stamps_str = _h(" · ".join(source_stamps))
+    stamps_str = _h(" \u00b7 ".join(source_stamps))
+
+    # Top-bar beacon
+    verify = p["spine_now"]["verify_status"]
+    anomalies = p["spine_now"]["anomaly_count"]
+    if verify == "pass" and anomalies == 0:
+        beacon_css, beacon_text = "grn", "Healthy"
+    elif verify != "pass":
+        beacon_css, beacon_text = "red", "Degraded"
+    else:
+        beacon_css, beacon_text = "ylw", "Mixed"
+    submit_href = f"{OPERATOR_SURFACE_ROOT}/submit"
+    ingress_href = f"{OPERATOR_SURFACE_ROOT}/ingress"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1130,20 +1455,33 @@ def generate() -> str:
 </head>
 <body>
 <div class="c">
-  <div class="top">
-    <h1>Spine Cockpit</h1>
-    <span>generated {_h(p['generated_utc'])}</span>
+  <div class="top-bar">
+    <div class="top-id">
+      <div class="top-eyebrow">Operator Surface Family</div>
+      <h1>Spine Cockpit</h1>
+    </div>
+    <div class="surface-nav" aria-label="Operator surface tabs">
+      <span class="surface-tab active">Board <span class="surface-tab-hint">you are here</span></span>
+      <a class="surface-tab" href="{_h(submit_href)}">Submit <span class="surface-tab-hint">operator ingress</span></a>
+      <a class="surface-tab" href="{_h(ingress_href)}">Submissions <span class="surface-tab-hint">readback</span></a>
+    </div>
+    <div class="beacon">
+      <div class="beacon-dot {beacon_css}"></div>
+      <span class="beacon-label">{_h(beacon_text)}</span>
+    </div>
+    <span class="ts">{_h(p['generated_utc'])}</span>
   </div>
 
-  <!-- NEEDS ATTENTION: what requires operator action now -->
-  {sec_posture}
+  <!-- Board: the glanceable operator surface -->
   {sec_attn}
   {sec_comms}
-  {sec_vision}
+  {sec_board}
 
-  <!-- SYSTEM BACKGROUND: context available on demand -->
-  <div class="sh" style="margin-top:2rem;opacity:.35">System Background</div>
+  <!-- Drilldown: everything else, collapsed -->
+  <hr class="drilldown-sep">
+  <div class="drilldown-label">Drilldown</div>
   {sec_work}
+  {sec_vision}
   {sec_fresh}
   {sec_temporal}
   {sec_roles}
@@ -1155,7 +1493,7 @@ def generate() -> str:
   {sec_auth}
 
   <div class="foot">
-    cockpit.generate v3 · shared operator-overview-payload · static snapshot<br>
+    cockpit.generate v4 \u00b7 shared operator-overview-payload \u00b7 static snapshot<br>
     sources: {stamps_str}
   </div>
 </div>
