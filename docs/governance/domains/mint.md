@@ -21,13 +21,14 @@ Mint status/proof capability registration is now complete for the governed read 
 - `mint.modules.health` — read-only health summary via mint-modules shim
 - `mint.runtime.proof` — read-only deep runtime proof via mint-modules shim
 
-## Residue Notice
+## Extraction Status
 
-Older schema (`ops/plugins/domains/mint/schema/`), runtime state (36 subdirs under
-`/Users/ronnyworks/code/.runtime/spine/state/mint/`), unregistered bins (53 scripts in
-`ops/plugins/domains/mint/bin/`), and lib files (1 in `ops/plugins/domains/mint/lib/`)
-remain parked in spine pending a fresh aperture lift and fresh loop.
-This doc does not authorize migration.
+L1 subtraction complete (2026-04-25). 48 unregistered scripts, lib/, schema/,
+contracts/, and storage/ directories removed. 5 thin shims remain in
+`ops/plugins/domains/mint/bin/` — each delegates via `exec` to `mint-modules`.
+All 4 read capabilities now carry `implementation_repo: mint-modules`.
+Runtime state (36 subdirs under `/Users/ronnyworks/code/.runtime/spine/state/mint/`)
+remains external to the repo and is not subject to extraction.
 
 ## Order Truth
 
