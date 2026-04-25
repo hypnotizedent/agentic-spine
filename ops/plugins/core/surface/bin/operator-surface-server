@@ -251,7 +251,20 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
 
     success_html = ""
     if submitted_id:
-        success_html = f'<div class="flash ok">Submitted <strong>{_H(submitted_id)}</strong> — preserved in runtime, awaiting classification.</div>'
+        # Find the just-submitted item to show its details in the flash
+        submitted_item = next((i for i in items if str(i.get("ingress_id", "")) == submitted_id), None)
+        if submitted_item:
+            si_ctype = _H(str(submitted_item.get("content_type", "")))
+            si_disp = _H(str(submitted_item.get("disposition", "awaiting_classification")))
+            si_time = _H(str(submitted_item.get("submitted_at", "")))
+            success_html = (
+                f'<div class="flash ok">'
+                f'Submitted <strong>{_H(submitted_id)}</strong><br>'
+                f'<span style="font-size:.8rem;opacity:.85">{si_ctype} &middot; {si_disp} &middot; {si_time}</span>'
+                f'</div>'
+            )
+        else:
+            success_html = f'<div class="flash ok">Submitted <strong>{_H(submitted_id)}</strong> — preserved in runtime, awaiting classification.</div>'
 
     rows = ""
     for item in items:
@@ -264,7 +277,16 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
         submitted = _H(str(item.get("submitted_at", "")))
         device = _H(str(item.get("source_device", "")))
         app = _H(str(item.get("source_app", "")))
+        classification = _H(str(item.get("classification", "")))
+        next_stage = _H(str(item.get("next_stage", "")))
         badge_cls = f"badge-{state}" if state in ("submitted", "classified", "routed") else ""
+
+        # Classification line — shown only when item has been metabolized
+        class_line = ""
+        if classification:
+            route_part = f" &rarr; {next_stage}" if next_stage else ""
+            class_line = f'<div class="item-meta" style="color:var(--c)">{classification}{route_part}</div>'
+
         rows += f"""
         <div class="item">
           <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.3rem">
@@ -273,6 +295,7 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
           </div>
           {"<div class='item-hint'>" + hint + "</div>" if hint else ""}
           <div class="item-meta">{ctype} &middot; {device}/{app} &middot; {submitted}</div>
+          {class_line}
           <div class="item-meta">{disposition}: {detail}</div>
         </div>
         """
