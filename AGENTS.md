@@ -16,47 +16,47 @@ This is the canonical agent entry surface for the current aperture.
 
 <!-- Section: VOLATILE — operator-controlled, changes when Ronny lifts or narrows aperture -->
 
-As of 2026-04-16, the spine is in `post-stabilization operator surfaces`
-aperture.
+As of 2026-04-25, Ronny lifted the prior `post-stabilization operator
+surfaces` aperture. The spine is now in `lean spine subtraction and
+control-plane reconciliation` aperture.
 
-The bounded `verify truth-plane separation` lane is closed. Its resulting
-distinctions remain canonical read doctrine, but that lane is no longer the
-active aperture. Spine-core stabilization remains complete. The engine stays
-conservative; change is limited to provable bug fixes unless Ronny explicitly
-widen scope. The baseline is commit `f0a74693` (manifest knowledge layer,
-2026-04-12).
+The remaining problems are no longer primarily spine-core authority bugs. The
+active work is now the exposed compatibility shell around the kernel:
+public-vs-expert drift, fragmented telemetry/readback, workflow over-visibility,
+doctrine/runtime contradiction, migration residue, and unresolved control-plane
+truth.
 
 Legal work:
-- read-heavy operator product surfaces (cockpit, dashboards, status views) that
-  consume existing authority without mutating it
-- classification of operator vision artifacts into existing governed intake
-  posture, without authority promotion or new mutation-path creation
-- parking operator notes with explicit promotion conditions; no authority
-  promotion under this aperture
-- release and distribution hygiene
-- verify, status, and reconcile operations
-- bug fixes to existing spine-core surfaces when provably broken
+- public vs expert boundary work across existing surfaces, including demoting
+  `ops loops`, `ops wave`, raw scope/receipt surgery, and similar expert paths
+  from taught operator grammar while preserving them as drilldown/surgery tools
+- operator read-model collapse across `status`, operator payload, cockpit/mobile,
+  standing-program health, interventions, OI readback, handoffs, loops, waves,
+  and foundational verify truth
+- workflow closure and concealment work that makes waves/handoffs/closeout more
+  engine-internal and less operator-public, including execute-path automation
+- doctrine/runtime reconciliation across `AGENTS.md`, `NORTH_STAR.md`,
+  `docs/governance/SPINE.md`, `docs/governance/SESSION_PROTOCOL.md`,
+  `docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`, and existing public
+  help text
+- control-plane truth decisions and implementation, including node/control-plane
+  topology, custody/attestation semantics, and whether `operator_console` or a
+  promoted control node is the long-term governing control plane
+- bounded governance/contract updates required to make the above truthful
+- subtraction cleanup of migration residue, stale references, stale loops,
+  stale parked operator-visible artifacts, and visible compatibility shells
+- verify, status, reconcile, release/distribution hygiene, and provable bug
+  fixes anywhere needed to support this aperture
 
-Bounded lane widening (operator-approved):
-- STANDING-PROGRAM-BIRTH-RULES: classify existing recurring inventory by birth
-  mode, add birth_mode field to scheduler registry, wire enforcement gate into
-  verify, surface result in status. Scope: birth-mode vocabulary
-  (standing_program, exception_only, migration_project, human_session_only),
-  one new verify check, one registry field. No new node types, no plane
-  restructuring, no authority promotion beyond this lane.
-  Approved: 2026-04-25 by Ronny.
-
-Illegal work until Ronny lifts this aperture:
-- net-new governance surfaces, doctrine shelves, or surface type vocabulary
-- broad architecture reopening (node topology, plane restructuring, fleet
-  ontology)
-- authority promotion of parked intake artifacts; classification is legal,
-  promotion is not
-- host assignments
-- L3 domain creation or extraction
-- worldview reconstruction or re-litigation of what the spine is
-- new governed mutation paths unless explicitly scoped, narrowly bounded, and
-  approved by Ronny
+Illegal work under this aperture:
+- unrelated product/domain feature expansion that does not serve lean-spine
+  subtraction or control-plane reconciliation
+- gratuitous new doctrine shelves, surface types, or mutation paths that add
+  operator decisions instead of removing them
+- authority promotion of parked intake artifacts without a canonical home and
+  explicit operator reason
+- host/workload changes that are unrelated to telemetry, custody,
+  control-plane truth, or subtraction of exposed compatibility paths
 
 Only Ronny may invoke, change, or lift this aperture.
 
