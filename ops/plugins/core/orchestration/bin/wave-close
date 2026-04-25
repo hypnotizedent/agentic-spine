@@ -40,6 +40,7 @@ allowed_lanes_csv="${WAVE_CLOSE_ALLOWED_LANES_CSV:-control,execution,audit,watch
 _spine_state="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
 path_claims_file="${WAVE_CLOSE_PATH_CLAIMS_FILE:-$_spine_state/path.claims.yaml}"
 traffic_index_file="${WAVE_CLOSE_TRAFFIC_INDEX_FILE:-$_spine_state/traffic.index.yaml}"
+operator_surface_regenerate_bin="${spine_repo}/ops/plugins/core/surface/bin/operator-surface-regenerate"
 
 controller_verify_receipt="${WAVE_CLOSE_VERIFY_RECEIPT:-}"
 fixed_in="${WAVE_CLOSE_FIXED_IN:-}"
@@ -1321,3 +1322,19 @@ for k in [
 out.append("---")
 lease_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 PYLEASE
+
+if [[ ! -x "$operator_surface_regenerate_bin" ]]; then
+  echo "FAIL: operator surface regenerate helper not found: $operator_surface_regenerate_bin" >&2
+  echo "The wave close landed, but cockpit/mobile leaves were not refreshed." >&2
+  exit 1
+fi
+
+surface_refresh_output="$(python3 "$operator_surface_regenerate_bin" 2>&1)" || {
+  echo "FAIL: operator surface regeneration failed after wave close" >&2
+  echo "$surface_refresh_output" >&2
+  echo "The wave close landed, but cockpit/mobile leaves are stale." >&2
+  exit 1
+}
+
+echo "Refreshing operator surfaces..."
+echo "$surface_refresh_output"
