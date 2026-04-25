@@ -76,7 +76,13 @@ allowed_lanes = {
 } or {"control", "execution", "audit", "watcher"}
 disposition_contract_path = sys.argv[11] if len(sys.argv) > 11 else ""
 completion_level = (sys.argv[12] if len(sys.argv) > 12 else "").strip()
-controller_only = (sys.argv[13] if len(sys.argv) > 13 else "").strip().lower() == "true"
+_controller_only_explicit = (sys.argv[13] if len(sys.argv) > 13 else "").strip().lower() == "true"
+_session_posture = os.environ.get("SPINE_SESSION_POSTURE", "").strip().lower()
+controller_only = _controller_only_explicit
+controller_only_inferred = False
+if not _controller_only_explicit and _session_posture == "controller":
+    controller_only = True
+    controller_only_inferred = True
 controller_verify_receipt = (sys.argv[14] if len(sys.argv) > 14 else "").strip()
 fixed_in = (sys.argv[15] if len(sys.argv) > 15 else "").strip()
 cleanup_ref = os.environ.get("WAVE_CLOSE_CLEANUP_REF", "").strip()
@@ -544,6 +550,7 @@ try:
                     "wave_id": state.get("wave_id", ""),
                     "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "mode": "controller_only_close_precheck",
+                    "inferred_from_posture": controller_only_inferred,
                     "eligible": controller_context["eligible"],
                     "minimal_shell": controller_context["minimal_shell"],
                     "fixed_in": controller_context["fixed_in"],
@@ -635,6 +642,8 @@ try:
 
     if gate.blocked:
         print("BLOCKED: Wave close contract not met:")
+        if controller_only_inferred:
+            print(f"  (controller-only mode auto-inferred from SPINE_SESSION_POSTURE=controller)")
         if gate.infra_violations:
             print("Infra violations:")
             for v in gate.infra_violations:
@@ -659,6 +668,9 @@ try:
                 f"ops wave close {state['wave_id']} --dod-override \"<reason>\""
             )
         sys.exit(1)
+
+    if controller_only_inferred and controller_only:
+        print("NOTE: controller-only mode auto-inferred from SPINE_SESSION_POSTURE=controller")
 
     if gate.force_used:
         print(f"WARNING: Forcing close with {len(gate.infra_violations)} infra violation(s):")
@@ -687,6 +699,7 @@ try:
     state["lock_overridden"] = bool(lock_override_reason)
     state["lock_override_reason"] = lock_override_reason
     state["controller_only"] = bool(controller_only)
+    state["controller_only_inferred"] = controller_only_inferred
     state["controller_precheck_path"] = controller_precheck_path if controller_only else ""
     state[config.state_field] = "closed"
     state["lifecycle_state"] = "closed"
