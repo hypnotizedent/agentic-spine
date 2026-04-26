@@ -569,7 +569,13 @@ write_cap_receipt() {
     local exit_code="$8"
     local output_file="$9"
     shift 9
-    local args=("$@")
+    # Bash 3.2 + nounset can trip on local array assignment with zero args.
+    local -a args=()
+    local arg_count=0
+    if [[ "$#" -gt 0 ]]; then
+        args=("$@")
+        arg_count=${#args[@]}
+    fi
 
     local receipt_dir="$SPINE_RECEIPTS/R${run_key}"
     local receipt_path="$receipt_dir/receipt.md"
@@ -840,9 +846,16 @@ run_cap() {
     local name="$1"
     shift || true
 
-    local args=("$@")
+    # Bash 3.2 + nounset can trip on local array assignment with zero args.
+    local -a args=()
+    local arg_count=0
+    if [[ "$#" -gt 0 ]]; then
+        args=("$@")
+        arg_count=${#args[@]}
+    fi
     if [[ "${#args[@]}" -gt 0 && "${args[0]}" == "--" ]]; then
         args=("${args[@]:1}")
+        arg_count=${#args[@]}
     fi
 
     ensure_runtime_dirs
@@ -932,7 +945,11 @@ run_cap() {
         emit_role_policy_stop "$name" "$safety" | tee "$output_file"
         end_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         resolve_prompt_lineage "$name"
-        write_cap_receipt "$name" "$safety" "$cmd" "$cwd" "$run_key" "$start_time" "$end_time" "$rc" "$output_file" "${args[@]}"
+        if (( arg_count > 0 )); then
+            write_cap_receipt "$name" "$safety" "$cmd" "$cwd" "$run_key" "$start_time" "$end_time" "$rc" "$output_file" "${args[@]}"
+        else
+            write_cap_receipt "$name" "$safety" "$cmd" "$cwd" "$run_key" "$start_time" "$end_time" "$rc" "$output_file"
+        fi
         receipt_path="$SPINE_RECEIPTS/R${run_key}/receipt.md"
         output_path="$SPINE_RECEIPTS/R${run_key}/output.txt"
         rm -f "$output_file"
@@ -980,7 +997,11 @@ run_cap() {
     fi
 
     local command_string
-    command_string="$(build_command_string "$cmd" "${args[@]}")"
+    if (( arg_count > 0 )); then
+        command_string="$(build_command_string "$cmd" "${args[@]}")"
+    else
+        command_string="$(build_command_string "$cmd")"
+    fi
 
     echo "Executing..."
     echo "────────────────────────────────────────"
@@ -1008,7 +1029,11 @@ run_cap() {
 
     end_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     resolve_prompt_lineage "$name"
-    write_cap_receipt "$name" "$safety" "$cmd" "$cwd" "$run_key" "$start_time" "$end_time" "$rc" "$output_file" "${args[@]}"
+    if (( arg_count > 0 )); then
+        write_cap_receipt "$name" "$safety" "$cmd" "$cwd" "$run_key" "$start_time" "$end_time" "$rc" "$output_file" "${args[@]}"
+    else
+        write_cap_receipt "$name" "$safety" "$cmd" "$cwd" "$run_key" "$start_time" "$end_time" "$rc" "$output_file"
+    fi
     receipt_path="$SPINE_RECEIPTS/R${run_key}/receipt.md"
     output_path="$SPINE_RECEIPTS/R${run_key}/output.txt"
     rm -f "$output_file"
