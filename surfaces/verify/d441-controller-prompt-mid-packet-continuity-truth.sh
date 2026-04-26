@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # TRIAGE: controller-prompt work must have one governed mid-packet continuity
 #         seam, entry-compile must recover a live packet from that seam without
-#         tracker glue, and closed-loop delegations must not read back as
-#         active execution.
+#         tracker glue, and close paths must terminalize unclaimed delegations
+#         instead of leaving them in stale continuity residue.
 set -euo pipefail
 
 SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -45,6 +45,7 @@ sys.path.insert(0, str(repo / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 
 import controller_prompt_amend as cpa
 import controller_prompt_create as cpc
+import controller_prompt_close as cpc_close
 import delegation_broker as db
 import loops_sql_authority as lsa
 
@@ -138,7 +139,7 @@ finally:
 stale_packet = cpc.create_packet(
     packet_id="PACKET-02-D441-STALE",
     loop_id="LOOP-D441-STALE",
-    concern="verify stale delegation",
+    concern="verify unclaimed delegation terminalization",
     state_root=str(state_root),
     owner="@test",
 )
@@ -152,7 +153,7 @@ delegation_path.write_text(
             "packet_id": "PACKET-02-D441-STALE",
             "packet_path": stale_packet["packet_path"],
             "packet_kind": "controller_prompt",
-            "objective": "stale delegation specimen",
+            "objective": "unclaimed delegation specimen",
             "delegation_state": "delegated",
             "delegated_at_utc": "2026-04-26T00:00:00Z",
             "delegator_terminal": "TEST-CONTROL-01",
@@ -167,21 +168,24 @@ delegation_path.write_text(
     ),
     encoding="utf-8",
 )
-conn = lsa.connect(state_root / "shared_authority.db")
-try:
-    lsa.close_loop(
-        conn,
-        "LOOP-D441-STALE",
-        status="closed",
-        completion_level="loop_complete",
-        disposition="landed",
-        actor="gate",
-        reason="verify stale delegation classification",
-        mutation_source="d441",
-    )
-    conn.commit()
-finally:
-    conn.close()
+
+head = subprocess.check_output(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    text=True,
+).strip()
+close_result = cpc_close.close_packet(
+    stale_packet["packet_path"],
+    "superseded",
+    "verify unclaimed delegation terminalization",
+    str(repo),
+    starting_head=head,
+    ending_head=head,
+    verify_result="not_checked",
+    auto_close_loop=False,
+)
+retired = close_result.get("terminalized_unclaimed_delegations") or []
+if not retired or retired[0].get("delegation_id") != delegation_id:
+    raise SystemExit("close path did not record terminalized unclaimed delegation")
 
 status_doc = db.status(
     str(state_root),
@@ -189,12 +193,16 @@ status_doc = db.status(
 )
 row = status_doc["delegations"][0]
 if row.get("continuity_live") is not False:
-    raise SystemExit("closed-loop delegation still marked continuity_live")
-if row.get("effective_state") != "stale":
+    raise SystemExit("terminalized delegation still marked continuity_live")
+if row.get("delegation_state") != "cancelled":
+    raise SystemExit(f"unexpected delegation_state: {row.get('delegation_state')}")
+if row.get("effective_state") != "cancelled":
     raise SystemExit(f"unexpected effective_state: {row.get('effective_state')}")
-if "linked loop not active" not in str(row.get("continuity_reason", "")):
-    raise SystemExit("stale delegation continuity reason missing loop-closed explanation")
+if row.get("disposition") != "superseded":
+    raise SystemExit(f"unexpected terminal disposition: {row.get('disposition')}")
+if row.get("close_terminalized_by") != "controller_prompt.close":
+    raise SystemExit("terminalization source missing from delegation row")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, entry-compile recovers packet continuity without tracker glue, and closed-loop delegations no longer read back as active execution"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, entry-compile recovers packet continuity without tracker glue, and close paths terminalize unclaimed delegations instead of leaving stale residue"
 exit 0

@@ -209,6 +209,38 @@ elif [[ "$RECEIPT_PATH" != /* ]]; then
   RECEIPT_PATH="$ROOT/$RECEIPT_PATH"
 fi
 mkdir -p "$(dirname "$RECEIPT_PATH")"
+
+RETIRED_DELEGATIONS_JSON="$(
+python3 - "$ROOT" "$SPINE_STATE" "$LOOP_ID" "$DISPOSITION" "$close_note" "$RECEIPT_PATH" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+root = Path(sys.argv[1])
+state_root = sys.argv[2]
+loop_id = sys.argv[3]
+close_disposition = sys.argv[4]
+close_reason = sys.argv[5]
+receipt_ref = sys.argv[6]
+
+sys.path.insert(0, str(root / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+import delegation_broker as db
+
+retired = db.retire_unclaimed_close_residue(
+    state_root,
+    loop_id=loop_id,
+    close_disposition=close_disposition,
+    close_reason=close_reason,
+    close_source="loop.closeout.finalize",
+    receipt_ref=receipt_ref,
+)
+print(json.dumps(retired))
+PY
+)" || {
+  echo "loop.closeout.finalize FAIL: unable to terminalize unclaimed delegations for $LOOP_ID" >&2
+  exit 1
+}
+
 cat > "$RECEIPT_PATH" <<EOF
 # Loop Closeout Receipt
 
@@ -225,10 +257,38 @@ cat > "$RECEIPT_PATH" <<EOF
 - generated_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
+python3 - "$RETIRED_DELEGATIONS_JSON" >> "$RECEIPT_PATH" <<'PY'
+import json
+import sys
+
+try:
+    retired = json.loads(sys.argv[1])
+except json.JSONDecodeError:
+    retired = []
+
+if retired:
+    print("\n## Terminalized Unclaimed Delegations\n")
+    for item in retired:
+        delegation_id = str(item.get("delegation_id", "")).strip() or "<unknown>"
+        disposition = str(item.get("terminal_disposition", "")).strip() or "cancelled"
+        reason = str(item.get("close_reason", "")).strip() or "closed by loop.closeout.finalize"
+        print(f"- {delegation_id}: state=cancelled disposition={disposition} reason={reason}")
+PY
+
 echo "loop.closeout.finalize"
 echo "loop_id=$LOOP_ID"
 echo "disposition=$DISPOSITION"
 echo "completion_level=${COMPLETION_LEVEL:-n/a}"
 echo "linked_gaps_closed=$closed_gap_count"
+echo "retired_unclaimed_delegations=$(python3 - "$RETIRED_DELEGATIONS_JSON" <<'PY'
+import json
+import sys
+try:
+    retired = json.loads(sys.argv[1])
+except json.JSONDecodeError:
+    retired = []
+print(len(retired))
+PY
+)"
 echo "receipt=$RECEIPT_PATH"
 echo "archived_scope_file=$ARCHIVED_SCOPE_FILE"

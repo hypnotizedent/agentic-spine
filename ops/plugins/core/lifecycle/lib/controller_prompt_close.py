@@ -28,6 +28,7 @@ from typing import Any
 import yaml
 
 import packet_receipt_writer as prw
+import delegation_broker as db
 
 
 LEGAL_DISPOSITIONS = frozenset({"delivered", "deferred", "abandoned", "superseded"})
@@ -752,6 +753,22 @@ def close_packet(
     if not starting_head:
         starting_head = ending_head  # no mutation range available
 
+    spine_state = os.environ.get("SPINE_STATE", "")
+    if not spine_state:
+        raise ControllerPromptCloseError("SPINE_STATE not set; call spine_runtime_resolve_paths first")
+
+    close_reason = (
+        f"linked packet {packet_id} closed via controller_prompt.close "
+        f"(packet disposition={disposition})"
+    )
+    retirement_preview = db.preview_unclaimed_close_retirements(
+        spine_state,
+        packet_id=packet_id,
+        packet_path=packet_path,
+        close_disposition=disposition,
+        close_reason=close_reason,
+    )
+
     # ── Compose receipt fields ────────────────────────────────────
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     utc_date = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -781,12 +798,10 @@ def close_packet(
         receipt_fields["completion_level"] = completion_level
     if handoff_refs:
         receipt_fields["handoff_refs"] = handoff_refs
+    if retirement_preview:
+        receipt_fields["terminalized_unclaimed_delegations"] = retirement_preview
 
     # ── Write 1: Receipt (stronger validation, first) ─────────────
-    spine_state = os.environ.get("SPINE_STATE", "")
-    if not spine_state:
-        raise ControllerPromptCloseError("SPINE_STATE not set; call spine_runtime_resolve_paths first")
-
     receipt_dir = os.path.join(spine_state, "domain-state")
     receipt_path = os.path.join(
         receipt_dir,
@@ -801,6 +816,8 @@ def close_packet(
     # ── Write 2: Packet frontmatter update ────────────────────────
     frontmatter_updated = False
     frontmatter_error = ""
+    terminalized_delegations: list[dict[str, Any]] = []
+    retirement_error = ""
     try:
         updated_text = _update_frontmatter(
             text,
@@ -814,8 +831,22 @@ def close_packet(
     except (OSError, ControllerPromptCloseError) as exc:
         frontmatter_error = str(exc)
 
-    # ── Result ────────────────────────────────────────────────────
     if frontmatter_updated:
+        try:
+            terminalized_delegations = db.retire_unclaimed_close_residue(
+                spine_state,
+                packet_id=packet_id,
+                packet_path=packet_path,
+                close_disposition=disposition,
+                close_reason=close_reason,
+                close_source="controller_prompt.close",
+                receipt_ref=receipt_path,
+            )
+        except db.DelegationError as exc:
+            retirement_error = str(exc)
+
+    # ── Result ────────────────────────────────────────────────────
+    if frontmatter_updated and not retirement_error:
         loop_closeout = _auto_close_loop_if_eligible(
             state_root=spine_state,
             loop_id=loop_id,
@@ -834,6 +865,7 @@ def close_packet(
             "receipt_path": receipt_path,
             "disposition": disposition,
             "closed_at_utc": now_utc,
+            "terminalized_unclaimed_delegations": terminalized_delegations,
             "loop_closeout": loop_closeout,
             "message": "packet closed successfully",
         }
@@ -847,13 +879,23 @@ def close_packet(
             "disposition": disposition,
             "closed_at_utc": now_utc,
             "frontmatter_error": frontmatter_error,
+            "retirement_error": retirement_error,
+            "terminalized_unclaimed_delegations": terminalized_delegations,
             "loop_closeout": {
                 "status": "not_attempted",
-                "reason": "packet frontmatter update failed; loop closeout skipped",
+                "reason": (
+                    "packet frontmatter update failed; loop closeout skipped"
+                    if frontmatter_error
+                    else "delegation terminalization failed; loop closeout skipped"
+                ),
             },
             "message": (
-                "receipt written but frontmatter update failed; "
-                "packet still shows status: draft. "
-                "Retry or manually update frontmatter."
+                "receipt written but close finalization was partial; "
+                + (
+                    "packet frontmatter update failed; packet still shows status: draft. "
+                    "Retry or manually update frontmatter."
+                    if frontmatter_error
+                    else "delegation terminalization failed after receipt write."
+                )
             ),
         }

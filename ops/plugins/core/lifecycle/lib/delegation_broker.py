@@ -57,6 +57,14 @@ INTERVENTION_TERMINAL_DISPOSITIONS = frozenset({
     "cancelled", "dismissed", "landed", "resolved", "superseded",
 })
 OPERATIONAL_TERMINAL_STATES = frozenset({"done", "failed", "cancelled"})
+CLOSE_DISPOSITION_TO_DELEGATION_DISPOSITION = {
+    "landed": "superseded",
+    "delivered": "superseded",
+    "superseded": "superseded",
+    "deferred": "cancelled",
+    "abandoned": "cancelled",
+    "cancelled": "cancelled",
+}
 
 
 class DelegationError(Exception):
@@ -143,6 +151,34 @@ def _loop_status(loop_id: str, state_root: str) -> str:
     return str(row[0] or "").strip().lower()
 
 
+def _loop_metadata(loop_id: str, state_root: str) -> dict[str, str]:
+    if not loop_id:
+        return {}
+    db_path = Path(
+        os.environ.get("LOOPS_DB_PATH", str(Path(state_root) / "shared_authority.db"))
+    )
+    if not db_path.is_file():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5)
+        row = conn.execute(
+            "SELECT status, disposition, completion_level, closed_at "
+            "FROM loops WHERE loop_id = ? LIMIT 1",
+            (loop_id,),
+        ).fetchone()
+        conn.close()
+    except sqlite3.Error:
+        return {}
+    if not row:
+        return {}
+    return {
+        "status": str(row[0] or "").strip().lower(),
+        "disposition": str(row[1] or "").strip().lower(),
+        "completion_level": str(row[2] or "").strip(),
+        "closed_at": str(row[3] or "").strip(),
+    }
+
+
 def _linked_packet_status(packet_path: str) -> str:
     if not packet_path:
         return ""
@@ -171,6 +207,28 @@ def _linked_packet_status(packet_path: str) -> str:
     if not isinstance(doc, dict):
         return ""
     return str(doc.get("disposition", "")).strip().lower()
+
+
+def _linked_packet_frontmatter(packet_path: str) -> dict[str, Any]:
+    if not packet_path:
+        return {}
+    path = Path(packet_path)
+    if not path.exists():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    if not text.startswith("---"):
+        return {}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        fm = yaml.safe_load(parts[1])
+    except yaml.YAMLError:
+        return {}
+    return fm if isinstance(fm, dict) else {}
 
 
 def _classify_delegation_continuity(data: dict[str, Any], state_root: str) -> dict[str, Any]:
@@ -202,6 +260,127 @@ def _classify_delegation_continuity(data: dict[str, Any], state_root: str) -> di
     if reason:
         enriched["continuity_reason"] = reason
     return enriched
+
+
+def _terminal_disposition_for_close(disposition: str) -> str:
+    return CLOSE_DISPOSITION_TO_DELEGATION_DISPOSITION.get(
+        str(disposition or "").strip().lower(),
+        "cancelled",
+    )
+
+
+def preview_unclaimed_close_retirements(
+    state_root: str,
+    *,
+    loop_id: str = "",
+    packet_id: str = "",
+    packet_path: str = "",
+    close_disposition: str = "",
+    close_reason: str = "",
+) -> list[dict[str, Any]]:
+    del_dir = _delegations_dir(state_root)
+    previews: list[dict[str, Any]] = []
+    terminal_disposition = _terminal_disposition_for_close(close_disposition)
+    for path in sorted(del_dir.glob("DEL-*.yaml")):
+        try:
+            data = _read_delegation(path)
+        except DelegationError:
+            continue
+        if str(data.get("delegation_state", "")).strip().lower() != "delegated":
+            continue
+        if data.get("picked_up_by") or data.get("picked_up_at_utc") or data.get("wave_id"):
+            continue
+        if loop_id and str(data.get("loop_id", "")).strip() != loop_id:
+            continue
+        if packet_id and str(data.get("packet_id", "")).strip() != packet_id:
+            continue
+        if packet_path and str(data.get("packet_path", "")).strip() != packet_path:
+            continue
+
+        linked_loop_id = str(data.get("loop_id", "")).strip()
+        linked_packet_path = str(data.get("packet_path", "")).strip()
+        loop_meta = _loop_metadata(linked_loop_id, state_root)
+        packet_fm = _linked_packet_frontmatter(linked_packet_path)
+        previews.append({
+            "delegation_id": str(data.get("delegation_id", "")).strip() or path.stem,
+            "loop_id": linked_loop_id,
+            "packet_id": str(data.get("packet_id", "")).strip(),
+            "packet_path": linked_packet_path,
+            "previous_state": "delegated",
+            "terminal_state": "cancelled",
+            "terminal_disposition": terminal_disposition,
+            "close_reason": close_reason,
+            "loop_status": str(loop_meta.get("status", "")).strip(),
+            "loop_disposition": str(loop_meta.get("disposition", "")).strip(),
+            "packet_status": str(packet_fm.get("status", "")).strip().lower(),
+            "packet_disposition": str(packet_fm.get("disposition", "")).strip().lower(),
+        })
+    return previews
+
+
+def retire_unclaimed_close_residue(
+    state_root: str,
+    *,
+    loop_id: str = "",
+    packet_id: str = "",
+    packet_path: str = "",
+    close_disposition: str = "",
+    close_reason: str = "",
+    close_source: str = "",
+    receipt_ref: str = "",
+) -> list[dict[str, Any]]:
+    previews = preview_unclaimed_close_retirements(
+        state_root,
+        loop_id=loop_id,
+        packet_id=packet_id,
+        packet_path=packet_path,
+        close_disposition=close_disposition,
+        close_reason=close_reason,
+    )
+    if not previews:
+        return []
+
+    retired: list[dict[str, Any]] = []
+    now = _now_utc()
+    for preview in previews:
+        delegation_id = str(preview.get("delegation_id", "")).strip()
+        if not delegation_id:
+            continue
+        path = _delegations_dir(state_root) / f"{delegation_id}.yaml"
+        if not path.exists():
+            continue
+        data = _read_delegation(path)
+        if str(data.get("delegation_state", "")).strip().lower() != "delegated":
+            continue
+        if data.get("picked_up_by") or data.get("picked_up_at_utc") or data.get("wave_id"):
+            continue
+
+        data["delegation_state"] = "cancelled"
+        data["disposition"] = str(preview.get("terminal_disposition", "")).strip().lower() or "cancelled"
+        data["completed_at_utc"] = now
+        data["close_terminalized_by"] = close_source or "delegation_broker"
+        data["close_terminalized_reason"] = close_reason
+        if receipt_ref:
+            data["close_receipt_ref"] = receipt_ref
+        _atomic_write(str(path), data)
+
+        linked_packet_path = str(data.get("packet_path", "")).strip()
+        if linked_packet_path and os.path.isfile(linked_packet_path):
+            _update_packet_frontmatter(
+                linked_packet_path,
+                delegation_id,
+                "cancelled",
+                loop_id=str(data.get("loop_id", "")),
+            )
+
+        retired.append({
+            **preview,
+            "completed_at_utc": now,
+            "close_terminalized_by": data.get("close_terminalized_by"),
+            "close_receipt_ref": data.get("close_receipt_ref", ""),
+        })
+
+    return retired
 
 
 def _validate_loop_active(loop_id: str, state_root: str) -> None:
@@ -811,6 +990,8 @@ def transition(
     wave_id: str = "",
     disposition: str = "",
     terminal: str = "",
+    packet_terminal_disposition: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Transition a delegation to a new state.
 
@@ -847,6 +1028,12 @@ def transition(
         data["wave_id"] = wave_id
     if disposition:
         data["disposition"] = disposition
+    if metadata:
+        for key, value in metadata.items():
+            if value is None:
+                data.pop(key, None)
+            else:
+                data[key] = value
     if new_state in TERMINAL_STATES:
         data["completed_at_utc"] = now
 
@@ -855,7 +1042,9 @@ def transition(
     # ── Update packet frontmatter ────────────────────────────────
     packet_path = str(data.get("packet_path", ""))
     terminal_disposition = ""
-    if new_state == "landed":
+    if packet_terminal_disposition is not None:
+        terminal_disposition = packet_terminal_disposition
+    elif new_state == "landed":
         terminal_disposition = "landed"
     elif new_state == "cancelled":
         terminal_disposition = "cancelled"
