@@ -6,6 +6,14 @@ lifecycle: when a wave is closed and its workspace.lifecycle_state is
 is residue. This module enumerates residue deterministically and sweeps
 only items it can prove are safe.
 
+Authority hierarchy for wave closure truth:
+  - Active waves: state.json is the mutable lifecycle cache (sole source)
+  - Closed waves: EXEC_RECEIPT-WAVE-CLOSE-*.yaml is canonical proof
+    (immutable, fingerprinted, governed writer). state.json may be stale
+    or missing post-close.
+  - Reconstruction rule: if state.json is missing but a matching
+    EXEC_RECEIPT exists in domain-state/, the wave is provably closed.
+
 Residue classes:
   - stale_worktree: worktree dir exists for a closed wave
   - stale_wave_branch: local codex/WAVE-* branch exists for a closed wave
@@ -161,6 +169,28 @@ def _canonical_worktree_prefix(runtime_root: str, repo_path: str) -> str:
 
 def _wave_state_path(runtime_root: str, wave_id: str) -> str:
     return os.path.join(runtime_root, "waves", wave_id, "state.json")
+
+
+def _has_exec_receipt(wave_id: str) -> bool:
+    """Check if EXEC_RECEIPT-WAVE-CLOSE-{wave_id}-*.yaml exists in domain-state.
+
+    This is the immutable canonical proof that a wave closed. When state.json
+    is missing or stale, a matching EXEC_RECEIPT proves the wave is closed.
+    """
+    state_root = os.environ.get("SPINE_STATE", "")
+    if not state_root:
+        return False
+    domain_state = os.path.join(state_root, "domain-state")
+    if not os.path.isdir(domain_state):
+        return False
+    prefix = f"EXEC_RECEIPT-WAVE-CLOSE-{wave_id}-"
+    try:
+        return any(
+            name.startswith(prefix) and name.endswith(".yaml")
+            for name in os.listdir(domain_state)
+        )
+    except OSError:
+        return False
 
 
 def _load_wave_state(runtime_root: str, wave_id: str) -> dict[str, Any] | None:
@@ -388,6 +418,35 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
             continue
 
         if not wave_id or wave_state is None:
+            # Reconstruction: if state.json is missing but EXEC_RECEIPT exists,
+            # the wave is provably closed — treat residue as sweepable.
+            if wave_id and _has_exec_receipt(wave_id):
+                dirty, dirty_err = _worktree_is_dirty(full_path)
+                if dirty_err is not None or dirty:
+                    items.append(_make_item(
+                        "stale_worktree",
+                        wave_id=wave_id,
+                        path=full_path,
+                        branch=None,
+                        wave_status="closed (reconstructed from EXEC_RECEIPT)",
+                        workspace_lifecycle_state=None,
+                        safe_to_sweep=False,
+                        ambiguous_reason=dirty_err or "worktree has uncommitted changes",
+                        identity=identity,
+                    ))
+                else:
+                    items.append(_make_item(
+                        "stale_worktree",
+                        wave_id=wave_id,
+                        path=full_path,
+                        branch=None,
+                        wave_status="closed (reconstructed from EXEC_RECEIPT)",
+                        workspace_lifecycle_state="cleaned",
+                        safe_to_sweep=True,
+                        ambiguous_reason=None,
+                        identity=identity,
+                    ))
+                continue
             items.append(_make_item(
                 "stale_worktree",
                 wave_id=wave_id,
