@@ -68,14 +68,24 @@ def _now_id() -> str:
 
 
 def _atomic_write(path: str, data: dict[str, Any]) -> None:
-    """Atomically write YAML via tmp+rename."""
+    """Atomically write YAML via tmp+rename with round-trip validation."""
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     tmp_path = f"{path}.tmp"
     try:
+        raw = yaml.safe_dump(data, sort_keys=False, allow_unicode=True,
+                             default_flow_style=False)
+        # Round-trip validation: catch any serialization that would break readers
+        try:
+            yaml.safe_load(raw)
+        except yaml.YAMLError as parse_exc:
+            raise DelegationError(
+                f"YAML round-trip validation failed for {os.path.basename(path)}: "
+                f"{parse_exc}"
+            ) from parse_exc
         with open(tmp_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
+            f.write(raw)
         os.replace(tmp_path, path)
     except OSError as exc:
         try:
