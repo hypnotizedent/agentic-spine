@@ -290,7 +290,7 @@ load_spine_helper_json() {
 run_spine_scope() {
   local helper_json declared_json executed_json already_json missing_json stale_json out_json helper_exec_paths_json component_json
   local overall_rc=0
-  local engine_rc=0 honesty_rc=0 gate_rc=0
+  local engine_rc=0 gate_rc=0
 
   helper_json="$(load_spine_helper_json)"
   declared_json="$(jq -c '.declared_core_gate_ids' <<<"$helper_json")"
@@ -303,25 +303,18 @@ run_spine_scope() {
   component_json="$(jq -n \
     --argjson helper_exec "$helper_exec_paths_json" \
     --arg engine "$VERIFY_ENGINE" \
-    --arg honesty "$VERIFY_ENGINE_HONESTY" \
-    '$helper_exec + [$engine, $honesty]')"
+    '$helper_exec + [$engine]')"
 
   if [[ "$json_mode" -eq 1 ]]; then
     set +e
     "$VERIFY_ENGINE" --json >/dev/null 2>&1
     engine_rc=$?
     set -e
-
-    set +e
-    "$VERIFY_ENGINE_HONESTY" --json >/dev/null 2>&1
-    honesty_rc=$?
-    set -e
   else
     echo "verify.run spine"
-    echo "  curated spine-only verify scope"
-    echo "  note: spine answers spine/object truth and excludes estate/workload health gates"
+    echo "  foundational spine-only verify scope"
+    echo "  note: spine answers spine/object truth; for orchestration proof use: verify-run honesty"
     echo "  engine: $VERIFY_ENGINE"
-    echo "  honesty: $VERIFY_ENGINE_HONESTY"
     echo "  executable surfaces:"
     echo "$component_json" | jq -r '.[]' | sed 's/^/    - /'
 
@@ -329,15 +322,9 @@ run_spine_scope() {
     "$VERIFY_ENGINE"
     engine_rc=$?
     set -e
-
-    set +e
-    "$VERIFY_ENGINE_HONESTY"
-    honesty_rc=$?
-    set -e
   fi
 
   [[ "$engine_rc" -eq 0 ]] || overall_rc=1
-  [[ "$honesty_rc" -eq 0 ]] || overall_rc=1
 
   # Build warn-only surface path set from gate registry metadata
   local warn_only_paths
