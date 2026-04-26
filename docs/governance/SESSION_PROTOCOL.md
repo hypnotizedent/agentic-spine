@@ -141,6 +141,10 @@ If the normal wave-finish close path cannot complete and a control-plane recover
 
 ## Receipt Classes
 
+This section is the canonical authority home for the RECEIPT primitive in the
+kernel coordination protocol (see
+[`KERNEL_PRIMITIVE_CANON.md`](KERNEL_PRIMITIVE_CANON.md) for the full matrix).
+
 The word "receipt" appears across the spine but names five distinct object
 classes with different write paths, governance levels, and authority roles.
 They are not interchangeable.

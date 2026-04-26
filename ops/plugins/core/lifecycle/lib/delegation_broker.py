@@ -4,6 +4,10 @@ Implements the V1 delegation state model:
   delegated → picked_up → executing → landed | needs_review
   delegated → cancelled
 
+Kernel primitive role: This module is the canonical authority home for the
+CLAIM primitive (delegated → picked_up transition = claim). See
+docs/governance/KERNEL_PRIMITIVE_CANON.md for the full primitive matrix.
+
 Design authority: CONTROL-SURFACE-DELEGATION-V1-DESIGN-20260425.md
 """
 

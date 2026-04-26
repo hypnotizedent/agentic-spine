@@ -34,6 +34,10 @@ The core protocol every node and model must obey:
 - failure
 - receipt
 
+The canonical authority matrix for these primitives — what each one is, where it
+lives, and what is canonical vs derived vs undefined — is in
+[`docs/governance/KERNEL_PRIMITIVE_CANON.md`](docs/governance/KERNEL_PRIMITIVE_CANON.md).
+
 Any model, terminal, or node must speak this same protocol even if it reasons
 differently.
 
