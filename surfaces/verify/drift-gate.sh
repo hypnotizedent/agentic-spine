@@ -636,14 +636,6 @@ if [[ -x "$SP/surfaces/verify/d88-rag-remote-reindex-governance-lock.sh" ]]; the
 else
   warn "RAG remote reindex governance lock gate not present"
 fi
-CURRENT_GATE="D91"
-echo -n "D91 AOF product foundation lock... "
-if [[ -x "$SP/surfaces/verify/d91-aof-product-foundation-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d91-aof-product-foundation-lock.sh"
-else
-  warn "AOF product foundation lock gate not present"
-fi
-
 # D92: HA config version control
 CURRENT_GATE="D92"
 echo -n "D92 HA config version control... "

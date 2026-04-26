@@ -363,7 +363,7 @@ curl -s http://automation-stack:5678/healthz
 
 ### Automation-Stack Latency Thresholds (Self-Driving Cadence)
 
-Source of truth: `ops/bindings/automation.stack.latency.slo.yaml`
+Source of truth: `~/code/workbench/agents/home/bindings/automation.stack.latency.slo.yaml`
 
 | Metric | Warn | Incident | Notes |
 |--------|------|----------|-------|
@@ -372,7 +372,7 @@ Source of truth: `ops/bindings/automation.stack.latency.slo.yaml`
 | `n8n.infra.health.quick` duration | 2000ms | 5000ms | Control-loop readiness signal |
 | Failed samples | 1+ | 3+ | Any failed endpoint sample counts against budget |
 
-This budget is consumed by `stability.control.snapshot` via `automation.stack.latency.status`, and appears in the daily briefing stability section.
+This budget is consumed by `stability.control.snapshot` via `automation.stack.latency.status`.
 
 ### VM Status Check (Proxmox)
 
