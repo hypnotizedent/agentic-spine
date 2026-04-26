@@ -26,6 +26,20 @@ OPENCODE_REQUIRED_WATCHER_IGNORES = [
     ".evidence/**",
 ]
 
+OPENCODE_REQUIRED_DISABLED_MCPS = [
+    "context7",
+    "grep_app",
+    "websearch",
+]
+
+OPENCODE_MANAGED_MODEL_DEFAULTS = {
+    "zai-coding-plan": {
+        "glm-5": {
+            "maxTokens": 8192,
+        },
+    },
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate managed provider-aware tool configs in the workbench repo.")
@@ -159,7 +173,26 @@ def opencode_catalog_providers(contract: dict, selected_provider_id: str) -> lis
     return ordered
 
 
-def build_opencode_provider_entry(contract: dict, provider_id: str) -> tuple[str, dict]:
+def merge_opencode_model_entries(
+    existing_entry: object,
+    models: list[str],
+    managed_defaults: dict[str, dict] | None = None,
+) -> dict[str, dict]:
+    existing_models = existing_entry.get("models") if isinstance(existing_entry, dict) else None
+    managed_defaults = managed_defaults if isinstance(managed_defaults, dict) else {}
+    merged: dict[str, dict] = {}
+    for model in models:
+        current = existing_models.get(model) if isinstance(existing_models, dict) else None
+        defaults = managed_defaults.get(model)
+        entry = dict(defaults) if isinstance(defaults, dict) else {}
+        if isinstance(current, dict):
+            entry.update(current)
+        entry["name"] = model
+        merged[model] = entry
+    return merged
+
+
+def build_opencode_provider_entry(contract: dict, provider_id: str, existing_entry: object | None = None) -> tuple[str, dict]:
     provider_alias = opencode_provider_id(contract, provider_id)
     base_url = opencode_base_url(contract, provider_id)
     provider = contract["providers"][provider_id]
@@ -179,10 +212,11 @@ def build_opencode_provider_entry(contract: dict, provider_id: str) -> tuple[str
             "timeout": 300000,
         },
         "models": {
-            model: {
-                "name": model,
-            }
-            for model in opencode_catalog_models(contract, provider_id)
+            **merge_opencode_model_entries(
+                existing_entry,
+                opencode_catalog_models(contract, provider_id),
+                OPENCODE_MANAGED_MODEL_DEFAULTS.get(provider_alias),
+            )
         },
     }
 
@@ -198,10 +232,16 @@ def build_opencode_config(workbench_root: Path, contract: dict, provider_id: str
     current["$schema"] = "https://opencode.ai/config.json"
     current["model"] = opencode_model
     current["small_model"] = small_model
+    current_provider_entries = current.get("provider") if isinstance(current.get("provider"), dict) else {}
     provider_entries: dict[str, dict] = {}
     enabled_providers: list[str] = []
     for catalog_provider in opencode_catalog_providers(contract, provider_id):
-        alias, entry = build_opencode_provider_entry(contract, catalog_provider)
+        alias = opencode_provider_id(contract, catalog_provider)
+        alias, entry = build_opencode_provider_entry(
+            contract,
+            catalog_provider,
+            current_provider_entries.get(alias),
+        )
         provider_entries[alias] = entry
         enabled_providers.append(alias)
     current["provider"] = provider_entries
@@ -221,6 +261,13 @@ def build_opencode_config(workbench_root: Path, contract: dict, provider_id: str
     opencode_text = json.dumps(current, indent=2) + "\n"
 
     ohmy = json.loads(ohmy_path.read_text(encoding="utf-8")) if ohmy_path.exists() else {}
+    ohmy["disabled_mcps"] = merge_unique_strings(
+        ohmy.get("disabled_mcps"),
+        OPENCODE_REQUIRED_DISABLED_MCPS,
+    )
+    claude_code = ohmy.get("claude_code") if isinstance(ohmy.get("claude_code"), dict) else {}
+    claude_code["mcp"] = False
+    ohmy["claude_code"] = claude_code
     agents = ohmy.get("agents") if isinstance(ohmy.get("agents"), dict) else {}
     for cfg in agents.values():
         if isinstance(cfg, dict) and "model" in cfg:

@@ -473,6 +473,19 @@ def collect_terminal_telemetry():
         else:
             custody_fresh = isinstance(custody_age, (int, float)) and custody_age <= default_terminal_liveness_ttl_minutes
 
+        repo_root = str(custody.get("repo_root") or "").strip()
+        checkout_root = str(custody.get("checkout_root") or "").strip()
+        repo_root_exists = Path(repo_root).exists() if repo_root else None
+        checkout_root_exists = Path(checkout_root).exists() if checkout_root else None
+        custody_anomaly = ""
+        if custody_fresh:
+            if checkout_root and checkout_root_exists is False:
+                custody_fresh = False
+                custody_anomaly = "missing_checkout_root"
+            elif repo_root and repo_root_exists is False:
+                custody_fresh = False
+                custody_anomaly = "missing_repo_root"
+
         last_seen_candidates = [dt for dt in (live_dt, custody_heartbeat_dt) if dt is not None]
         last_seen_dt = max(last_seen_candidates) if last_seen_candidates else None
         observed_recently = (
@@ -504,11 +517,14 @@ def collect_terminal_telemetry():
             "normalized_scope": custody.get("normalized_scope", ""),
             "protected_hotspot_scope": custody.get("protected_hotspot_scope", ""),
             "loop_id": custody.get("loop_id", ""),
-            "repo_root": custody.get("repo_root", ""),
-            "checkout_root": custody.get("checkout_root", ""),
+            "repo_root": repo_root,
+            "repo_root_exists": repo_root_exists,
+            "checkout_root": checkout_root,
+            "checkout_root_exists": checkout_root_exists,
             "branch": custody.get("branch", ""),
             "lane_type": custody.get("lane_type", ""),
             "status": custody.get("status", ""),
+            "custody_anomaly": custody_anomaly,
             "pid": custody.get("pid", ""),
             "hostname": custody.get("hostname", ""),
             "_sort_utc": last_seen_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if last_seen_dt else "",
