@@ -997,7 +997,7 @@ Usage:
   ops wave preflight <domain>                        Fast non-blocking preflight
   ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
   ops wave emit-agent-receipt <WAVE_ID> --lane <L>|--dispatch D<N> --result "<text>" [--file-read <p>]... [--run-key <key>]... [--commit-ref <sha>]... [--loop-id <LOOP_ID>] [--completion-level <level>] [--task-id <id>]
-                                                    Bridge: emit worker-class EXEC_RECEIPT JSON for an in-band Agent-tool subagent result
+                                                    Expert bridge: emit worker-class EXEC_RECEIPT JSON for an externally produced lane result; does not spawn agents
   ops wave residue [--sweep] [--json]                Canonical wave-owned residue surface (report-only by default; --sweep is bounded)
 
 Ownership:
@@ -1953,6 +1953,11 @@ _dispatch_operational_mailroom() {
     exit 1
   }
 
+  echo "FAIL: wave operational mailroom dispatch previously targeted a deferred agent-tool bridge, but no governed bridge is delivered." >&2
+  echo "  Current operational mailroom worker supports capability-backed tasks only." >&2
+  echo "  Use delegate.to.execution --execution-lane operational --route-capability <capability>, or use interactive worker handoff." >&2
+  exit 1
+
   local dispatch_ctx_json=""
   dispatch_ctx_json="$(python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" <<'PYMAILROOMCTX'
 import hashlib
@@ -2095,7 +2100,7 @@ PYMAILROOMCTX
   local enqueue_json=""
   enqueue_json="$("$enqueue_script" \
     --summary "$summary" \
-    --route-target agent_tool \
+    --route-target capability \
     --payload "$payload_json" \
     --json)"
 
@@ -2161,7 +2166,7 @@ try:
         "mailroom_task_id": str(queue_data.get("task_id") or ""),
         "mailroom_task_file": str(queue_data.get("file") or ""),
         "mailroom_task_state": str(queue_data.get("state") or "queued"),
-        "mailroom_route_target": str(queue_data.get("route_target") or "agent_tool"),
+        "mailroom_route_target": str(queue_data.get("route_target") or "capability"),
         "mailroom_required_agents": queue_data.get("required_agents") if isinstance(queue_data.get("required_agents"), list) else [],
         "mailroom_summary": str(queue_data.get("summary") or ""),
         "mailroom_route_input": str(ctx.get("route_input") or ""),
@@ -2256,7 +2261,7 @@ PYMAILROOMDISP
   echo "  Queue File: ${mailroom_task_file}"
   echo "  Status: dispatched"
   if [[ -n "$route_input" ]]; then
-    echo "  Route: agent_tool/route_resolve input=${route_input}"
+    echo "  Route: deferred-agent-tool/route_resolve input=${route_input}"
   fi
   if [[ -n "$from_role" || -n "$to_role" ]]; then
     echo "  Role transition: ${from_role:-?} -> ${to_role:-?} (gate=${transition_gate:-none})"
@@ -4020,12 +4025,13 @@ cmd_close_v2() {
   "$close_surface" "$sf" "$force" "$dod_override_reason" "$lock_override_reason" "$disposition" "$completion_level" "$controller_only"
 }
 
-# ── Agent-result -> EXEC_RECEIPT bridge ────────────────────────────────
-# Controller boundary: converts an in-band Agent-tool subagent result into a
+# ── External lane-result -> EXEC_RECEIPT bridge ─────────────────────────
+# Controller boundary: converts an externally produced lane result into a
 # worker-class EXEC_RECEIPT JSON artifact under waves/<WAVE_ID>/evidence/.
 # Preserves the single receipt model so `ops wave receipt-validate` remains
 # authoritative for every dispatch, regardless of whether the worker was a
-# shell lane or an Agent-tool subagent.
+# shell lane or an external/manual lane. This surface records a result; it does
+# not spawn an AI agent or inject a prompt into one.
 cmd_emit_agent_receipt() {
   local emitter="$SPINE_REPO/ops/plugins/core/orchestration/bin/wave-emit-agent-receipt"
   [[ -x "$emitter" ]] || { echo "FAIL: wave emit-agent-receipt helper not found: $emitter" >&2; exit 1; }

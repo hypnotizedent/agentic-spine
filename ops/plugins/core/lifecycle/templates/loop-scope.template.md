@@ -7,7 +7,7 @@ scope: {{SCOPE}}
 priority: {{PRIORITY}}
 horizon: now
 execution_readiness: runnable
-execution_mode: orchestrator_subagents
+execution_mode: single_worker
 objective: "{{OBJECTIVE}}"
 next_action: ""
 evidence_refs: []

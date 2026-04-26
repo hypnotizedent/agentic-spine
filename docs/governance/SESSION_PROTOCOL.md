@@ -144,7 +144,7 @@ operator or system intent
   → task admitted to mailroom queue          [governed: mailroom.task.enqueue]
     → autonomous worker claims task          [governed: mailroom.task.claim]
       → worker proves liveness               [governed: mailroom.task.heartbeat]
-      → worker executes route target         [governed: autonomous worker lane]
+      → worker executes allowlisted capability [governed: autonomous worker lane]
       → task reaches terminal result         [governed: mailroom.task.complete|mailroom.task.fail]
 ```
 

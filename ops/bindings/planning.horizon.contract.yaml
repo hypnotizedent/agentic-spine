@@ -88,32 +88,35 @@ transitions:
 # Execution Mode Enum
 # ─────────────────────────────────────────────────────────────────────────
 # Every execution loop SHOULD declare an execution_mode.
-# Default: orchestrator_subagents (multi-agent with worktree isolation).
-# Decision: LOOP-ORCHESTRATOR-SUBAGENT-DEFAULT-ENFORCEMENT-20260303
+# Default: single_worker.
+# Decision: LOOP-AGENT-EXECUTION-BRIDGE-TRUTH-20260426.
+# `orchestrator_subagents` remains an expert compatibility topology for
+# governed lane/worktree orchestration. It is not proof that the engine spawns
+# Claude/OpenAI/API subagents.
 
 execution_modes:
   - id: single_worker
-    description: "Single agent executes all work in the primary worktree."
+    description: "Single governed worker/session owns execution unless an explicit lane surface is invoked."
     worktree_requirement: none
     packet_required: false
 
   - id: orchestrator_subagents
-    description: "Coordinator dispatches to isolated subagents with dedicated worktrees."
+    description: "Expert compatibility topology for isolated orchestration lanes/worktrees; field names may say subagent, but no AI-agent spawn bridge is implied or delivered by this mode."
     worktree_requirement: one_per_subagent
     packet_required: true
     packet_contract: ops/bindings/orchestration.packet.contract.yaml
 
-default_execution_mode: orchestrator_subagents
+default_execution_mode: single_worker
 
 execution_mode_policy:
-  new_loop_default: orchestrator_subagents
+  new_loop_default: single_worker
   fallback_when_missing: single_worker
   enforcement: report
   description: |
-    New execution loops default to orchestrator_subagents.
-    Loops created without an explicit execution_mode fall back to
-    single_worker for backward compatibility. D330 reports mismatches
-    between declared mode and observed execution receipts.
+    New execution loops default to single_worker. `orchestrator_subagents`
+    must be selected explicitly for expert orchestration-lane work and must
+    not be read as automatic Claude/OpenAI/API subagent execution. D330 reports
+    mismatches between declared mode and observed execution receipts.
 
 # ─────────────────────────────────────────────────────────────────────────
 # Agent Eligibility (auto-selection filter)
@@ -177,7 +180,7 @@ scope_fields:
   execution_mode:
     type: enum
     values: [single_worker, orchestrator_subagents]
-    default: orchestrator_subagents
+    default: single_worker
     required: false
     description: "Execution topology for this loop. Defaults per execution_mode_policy."
 

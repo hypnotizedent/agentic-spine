@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Bridge an in-band agent result into a wave EXEC_RECEIPT artifact."""
+"""Bridge an externally produced lane result into a wave EXEC_RECEIPT artifact.
+
+This records evidence for a lane result. It does not spawn an AI agent or inject
+the packet prompt into one.
+"""
 
 from __future__ import annotations
 
@@ -138,7 +142,7 @@ def main(argv: list[str]) -> int:
     selected = None
     if dispatch_id and dispatch_id.startswith("D"):
         if not dispatches:
-            print("ERROR: --dispatch requires existing dispatches; use --lane for subagent lanes", file=sys.stderr)
+            print("ERROR: --dispatch requires existing dispatches; use --lane for external/manual lanes", file=sys.stderr)
             return 1
         try:
             index = int(dispatch_id[1:]) - 1
@@ -152,10 +156,10 @@ def main(argv: list[str]) -> int:
             if dispatch.get("lane") == lane:
                 selected = dispatch
         if selected is None:
-            # Subagent bridge: no dispatch ceremony occurred. Synthesize a
+            # External lane bridge: no dispatch ceremony occurred. Synthesize a
             # dispatch entry so the receipt pipeline works. Real evidence
             # (commit refs, run keys) is still required — this is a bridge,
-            # not a bypass.
+            # not a bypass and not an agent spawn path.
             #
             # The read-modify-write must happen inside one locked section to
             # avoid overwriting concurrent mutations from collect/status/close.
@@ -184,10 +188,10 @@ def main(argv: list[str]) -> int:
                     selected = {
                         "task_id": synth_task_id,
                         "lane": lane,
-                        "task": f"subagent-bridged lane ({lane})",
+                        "task": f"externally bridged lane ({lane})",
                         "from_role": "researcher",
                         "to_role": "worker",
-                        "transition_gate": "subagent_bridge",
+                        "transition_gate": "external_lane_bridge",
                         "input_refs": {},
                         "expected_output_refs": {},
                         "status": "done",
@@ -203,7 +207,7 @@ def main(argv: list[str]) -> int:
                             ),
                         ),
                         "completed_at": now,
-                        "result": "subagent_bridged",
+                        "result": "external_lane_bridged",
                         "run_key": None,
                         "receipt_validated": False,
                         "synthetic": True,
@@ -227,7 +231,7 @@ def main(argv: list[str]) -> int:
                         except OSError:
                             pass
                         raise
-                    print(f"Synthesized subagent-bridge dispatch {synth_task_id} on lane '{lane}'", file=sys.stderr)
+                    print(f"Synthesized external-lane bridge dispatch {synth_task_id} on lane '{lane}'", file=sys.stderr)
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 os.close(lock_fd)
