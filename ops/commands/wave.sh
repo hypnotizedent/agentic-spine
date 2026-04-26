@@ -2136,6 +2136,8 @@ try:
         state["dispatches"] = dispatches
 
     idx = len(dispatches) + 1
+    # D{idx} is a wave-local display index, not a stable cross-system identity.
+    # For mailroom correlation, use mailroom_task_id. For evidence, use run_key.
     task_id = f"D{idx}"
     dispatch = {
         "task_id": task_id,
