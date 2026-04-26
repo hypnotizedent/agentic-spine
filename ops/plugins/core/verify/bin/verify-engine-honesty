@@ -71,10 +71,33 @@ SYNTHETIC_WAVE_ID=""
 SYNTHETIC_EVIDENCE_DIR=""
 SYNTHETIC_SCOPE_FILE=""
 SYNTHETIC_SCOPE_CREATED=0
+frontmatter_value() {
+    local file="${1:-}"
+    local key="${2:-}"
+    [[ -n "$file" && -n "$key" && -f "$file" ]] || return 1
+    awk -v wanted="$key" '
+        /^---$/ {
+            fences += 1
+            in_meta = (fences == 1)
+            if (fences >= 2) exit
+            next
+        }
+        in_meta && index($0, ":") > 0 {
+            field = substr($0, 1, index($0, ":") - 1)
+            if (field == wanted) {
+                value = substr($0, index($0, ":") + 1)
+                sub(/^[[:space:]]+/, "", value)
+                print value
+                exit
+            }
+        }
+    ' "$file"
+}
 SYNTHETIC_LOOP_ID="${SPINE_LOOP_ID:-}"
 if [[ -n "$SYNTHETIC_LOOP_ID" ]]; then
     synthetic_scope_file="${SPINE_STATE}/loop-scopes/${SYNTHETIC_LOOP_ID}.scope.md"
-    if [[ ! -f "$synthetic_scope_file" ]]; then
+    synthetic_scope_mode="$(frontmatter_value "$synthetic_scope_file" "execution_mode" 2>/dev/null || true)"
+    if [[ ! -f "$synthetic_scope_file" || "$synthetic_scope_mode" != "orchestrator_subagents" ]]; then
         SYNTHETIC_LOOP_ID=""
     fi
 fi
