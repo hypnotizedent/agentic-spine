@@ -14,10 +14,14 @@ Canonical domain policy for `tax-legal`.
 Decided 2026-04-25 (Packet 3: CANONICAL-HOME-MATRIX).
 
 Tax-legal is a sub-concern of finance, not an independent domain runtime.
-Product truth (1099 prep, DR-15 prep, tax calendar, compliance tracking,
+Product truth (1099 prep, DR-15 prep, finance compliance cadence,
 receipt/document retrieval, legal research) is governed under
-`workbench/agents/finance/`. Spine retains engine registrations (bundle, capability registry) as L1/L2
-infrastructure. All 10 domain binding contracts and 1 stub script extracted.
+`workbench/agents/finance/`. Case envelopes remain modeled under
+`runtime/domain-state/taxlegal/cases`, canonical documents live in
+Paperless-NGX under the case tag, and case-bound secret refs stay under
+`/spine/services/finance/taxlegal/`. Spine retains engine registrations
+(bundle, capability registry) as L1/L2 infrastructure. All 10 domain binding
+contracts and 1 stub script extracted.
 
 No standalone `workbench/agents/tax-legal/` directory is justified by current
 or planned workload. If tax-legal grows into an independent operator surface,
