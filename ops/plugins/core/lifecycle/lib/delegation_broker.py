@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,6 +119,89 @@ def _read_delegation(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise DelegationError(f"malformed delegation file: {path.name}")
     return data
+
+
+def _loop_status(loop_id: str, state_root: str) -> str:
+    if not loop_id:
+        return ""
+    db_path = Path(
+        os.environ.get("LOOPS_DB_PATH", str(Path(state_root) / "shared_authority.db"))
+    )
+    if not db_path.is_file():
+        return ""
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5)
+        row = conn.execute(
+            "SELECT status FROM loops WHERE loop_id = ? LIMIT 1",
+            (loop_id,),
+        ).fetchone()
+        conn.close()
+    except sqlite3.Error:
+        return ""
+    if not row:
+        return ""
+    return str(row[0] or "").strip().lower()
+
+
+def _linked_packet_status(packet_path: str) -> str:
+    if not packet_path:
+        return ""
+    path = Path(packet_path)
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            return ""
+        try:
+            fm = yaml.safe_load(parts[1])
+        except yaml.YAMLError:
+            return ""
+        if not isinstance(fm, dict):
+            return ""
+        return str(fm.get("status", "")).strip().lower()
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return ""
+    if not isinstance(doc, dict):
+        return ""
+    return str(doc.get("disposition", "")).strip().lower()
+
+
+def _classify_delegation_continuity(data: dict[str, Any], state_root: str) -> dict[str, Any]:
+    enriched = dict(data)
+    raw_state = str(data.get("delegation_state", "")).strip().lower() or "unknown"
+    loop_id = str(data.get("loop_id", "")).strip()
+    packet_path = str(data.get("packet_path", "")).strip()
+
+    loop_status = _loop_status(loop_id, state_root)
+    packet_status = _linked_packet_status(packet_path)
+    continuity_live = raw_state not in TERMINAL_STATES
+    effective_state = raw_state
+    reason = ""
+
+    if continuity_live:
+        if loop_status and loop_status not in ACTIVE_LOOP_STATUSES:
+            continuity_live = False
+            effective_state = "stale"
+            reason = f"linked loop not active (status={loop_status})"
+        elif packet_status == "closed":
+            continuity_live = False
+            effective_state = "stale"
+            reason = "linked packet is already closed"
+
+    enriched["loop_status"] = loop_status or "unknown"
+    enriched["packet_status"] = packet_status or "unknown"
+    enriched["continuity_live"] = continuity_live
+    enriched["effective_state"] = effective_state
+    if reason:
+        enriched["continuity_reason"] = reason
+    return enriched
 
 
 def _validate_loop_active(loop_id: str, state_root: str) -> None:
@@ -812,13 +896,13 @@ def status(
         path = del_dir / f"{delegation_id}.yaml"
         if not path.exists():
             raise DelegationError(f"delegation '{delegation_id}' not found")
-        data = _read_delegation(path)
+        data = _classify_delegation_continuity(_read_delegation(path), state_root)
         return {"status": "ok", "count": 1, "delegations": [data]}
 
     items: list[dict[str, Any]] = []
     for path in sorted(del_dir.glob("DEL-*.yaml")):
         try:
-            data = _read_delegation(path)
+            data = _classify_delegation_continuity(_read_delegation(path), state_root)
         except DelegationError:
             continue
         if state_filter:

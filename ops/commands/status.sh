@@ -803,6 +803,7 @@ def collect_delegation_summary():
         "status": "unavailable",
         "count": 0,
         "active": 0,
+        "stale": 0,
         "by_state": {},
         "delegations": [],
     }
@@ -822,10 +823,23 @@ def collect_delegation_summary():
         for item in delegations
         if isinstance(item, dict)
     )
+    active = 0
+    stale = 0
+    for item in delegations:
+        if not isinstance(item, dict):
+            continue
+        raw_state = str(item.get("delegation_state") or "").strip()
+        if raw_state not in ("delegated", "picked_up", "executing"):
+            continue
+        if bool(item.get("continuity_live", True)):
+            active += 1
+        else:
+            stale += 1
     result.update({
         "status": "ok",
         "count": int(data.get("count", len(delegations)) or 0),
-        "active": sum(by_state.get(name, 0) for name in ("delegated", "picked_up", "executing")),
+        "active": active,
+        "stale": stale,
         "by_state": dict(by_state),
         "delegations": delegations,
     })
@@ -1433,8 +1447,15 @@ if mode == "--brief":
         _sp_healthy = int(_sp_summary.get("healthy", 0) or 0)
         _sp_degraded = sum(int(_sp_summary.get(key, 0) or 0) for key in ("stale", "failed", "unreachable", "never_run", "unknown"))
         parts.append(f"Standing: {_sp_healthy} healthy / {_sp_degraded} drift")
-    if int(delegation_summary.get("active", 0) or 0):
-        parts.append(f"Delegations: {int(delegation_summary.get('active', 0) or 0)} active")
+    _delegation_active = int(delegation_summary.get("active", 0) or 0)
+    _delegation_stale = int(delegation_summary.get("stale", 0) or 0)
+    if _delegation_active or _delegation_stale:
+        if _delegation_active and _delegation_stale:
+            parts.append(f"Delegations: {_delegation_active} active / {_delegation_stale} stale")
+        elif _delegation_active:
+            parts.append(f"Delegations: {_delegation_active} active")
+        else:
+            parts.append(f"Delegations: {_delegation_stale} stale")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
@@ -1532,6 +1553,7 @@ if int(delegation_summary.get("count", 0) or 0):
     print("-" * 72)
     print(f"  total:              {int(delegation_summary.get('count', 0) or 0)}")
     print(f"  active:             {int(delegation_summary.get('active', 0) or 0)}")
+    print(f"  stale:              {int(delegation_summary.get('stale', 0) or 0)}")
     for state_name in ("delegated", "picked_up", "executing", "needs_review", "landed", "cancelled"):
         state_count = int((delegation_summary.get('by_state') or {}).get(state_name, 0) or 0)
         if state_count:

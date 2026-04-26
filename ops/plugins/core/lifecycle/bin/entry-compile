@@ -73,6 +73,21 @@ def _normalize_tracker_value(value: object) -> str | None:
     return text
 
 
+def _normalize_string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        items = value
+    elif value is None:
+        items = []
+    else:
+        items = [value]
+    result: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
+
+
 # Authority: SQLite (scope-file fallback)
 def _find_active_loop(state_root: str) -> dict | None:
     """Find the active loop from SQLite authority. Falls back to scope files."""
@@ -330,6 +345,49 @@ def _find_packet_prompt(state_root: str, packet_id: str) -> dict | None:
     return result
 
 
+def _find_live_packet_for_loop(state_root: str, loop_id: str) -> dict | None:
+    """Recover one live controller packet directly from packet truth.
+
+    Used when no execution tracker is present but one draft packet remains the
+    authoritative continuity seam for the active loop.
+    """
+    prompts_dir = os.path.join(state_root, "controller-prompts")
+    if not os.path.isdir(prompts_dir):
+        return None
+
+    candidates: list[dict] = []
+    try:
+        for name in sorted(os.listdir(prompts_dir)):
+            if not name.endswith(".md"):
+                continue
+            path = os.path.join(prompts_dir, name)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            fm = _parse_frontmatter(text)
+            if str(fm.get("loop_id", "")).strip() != loop_id:
+                continue
+            packet_id = str(fm.get("packet_id", "")).strip()
+            status = str(fm.get("status", "")).strip().lower()
+            if not packet_id or status == "closed":
+                continue
+            candidates.append({
+                "_path": path,
+                "packet_id": packet_id,
+                "frontmatter": fm,
+            })
+    except OSError:
+        return None
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        return {"_ambiguous": True, "_candidates": candidates}
+    return None
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def compile_assignment(state_root: str) -> dict:
@@ -387,6 +445,55 @@ def compile_assignment(state_root: str) -> dict:
     tracker = _find_execution_tracker(state_root, loop_id=loop_id)
 
     if not tracker:
+        packet_continuity = _find_live_packet_for_loop(state_root, loop_id)
+        if packet_continuity and packet_continuity.get("_ambiguous"):
+            candidates = packet_continuity.get("_candidates", [])
+            assignment["compilation_state"] = "packet_ambiguous"
+            assignment["packet_candidates"] = [
+                {"packet_id": c.get("packet_id"), "path": c.get("_path")}
+                for c in candidates
+            ]
+            assignment["packet_id"] = None
+            assignment["context_sources"] = loop_result.get("evidence_refs")
+            assignment["active_artifacts"] = None
+            assignment["stop_condition"] = None
+            assignment["mutation_ground"] = {
+                "mutation_permitted": loop_result.get("mutation_permitted", "false").lower() == "true",
+                "execution_class": os.environ.get("SPINE_EXECUTION_CLASS") or os.environ.get("SPINE_RUNTIME_ROLE"),
+                "runtime_role": os.environ.get("SPINE_RUNTIME_ROLE"),
+            }
+            assignment["handoff_target"] = None
+            return assignment
+
+        if packet_continuity:
+            active_packet = packet_continuity.get("packet_id")
+            packet_prompt = _find_packet_prompt(state_root, active_packet) if active_packet else None
+            packet_fm = packet_continuity.get("frontmatter", {})
+            packet_refs = _normalize_string_list(packet_fm.get("evidence_refs"))
+            assignment["compilation_state"] = "packet_continuity"
+            assignment["packet_id"] = active_packet
+            assignment["active_artifacts"] = None
+            assignment["handoff_target"] = None
+            assignment["context_sources"] = (
+                (packet_prompt or {}).get("context_sources")
+                or packet_refs
+                or loop_result.get("evidence_refs")
+            )
+            stop_lines = (packet_prompt or {}).get("stop_condition_lines", [])
+            assignment["stop_condition"] = stop_lines[0] if len(stop_lines) == 1 else (stop_lines or None)
+            assignment["mutation_ground"] = {
+                "mutation_permitted": str(packet_fm.get("mutation_permitted", "false")).lower() == "true",
+                "execution_class": os.environ.get("SPINE_EXECUTION_CLASS") or os.environ.get("SPINE_RUNTIME_ROLE"),
+                "runtime_role": os.environ.get("SPINE_RUNTIME_ROLE"),
+            }
+            assignment["packet_next_action"] = str(packet_fm.get("next_action", "")).strip() or None
+            assignment["packet_continuity_summary"] = str(packet_fm.get("continuity_summary", "")).strip() or None
+            assignment["packet_evidence_refs"] = packet_refs or None
+            assignment["packet_last_amended_at_utc"] = str(packet_fm.get("last_amended_at_utc", "")).strip() or None
+            assignment["packet_last_amendment_id"] = str(packet_fm.get("last_amendment_id", "")).strip() or None
+            assignment["packet_checkpoint_status"] = str(packet_fm.get("checkpoint_status", "")).strip() or None
+            return assignment
+
         assignment["compilation_state"] = "loop_only"
         assignment["packet_id"] = None
         assignment["context_sources"] = loop_result.get("evidence_refs")
@@ -473,33 +580,48 @@ def main() -> None:
     # If active delegations exist, surface them as primary next-action
     # context. Delegation state is more specific than raw packet/handoff.
     delegations_dir = os.path.join(state_root, "delegations")
-    if os.path.isdir(delegations_dir):
+    current_loop_id = str(assignment.get("loop_id") or "").strip()
+    if current_loop_id and os.path.isdir(delegations_dir):
         try:
-            import yaml
+            import delegation_broker as db
             active_dels = []
-            for fname in sorted(os.listdir(delegations_dir)):
-                if not fname.endswith(".yaml"):
-                    continue
-                fpath = os.path.join(delegations_dir, fname)
-                try:
-                    with open(fpath) as f:
-                        doc = yaml.safe_load(f)
-                except Exception:
-                    continue
+            stale_dels = []
+            result = db.status(state_root=state_root)
+            for doc in result.get("delegations", []):
                 if not isinstance(doc, dict):
                     continue
+                if str(doc.get("loop_id") or "").strip() != current_loop_id:
+                    continue
                 ds = str(doc.get("delegation_state", "")).strip()
-                if ds not in ("landed", "needs_review", "cancelled"):
+                if ds in ("landed", "needs_review", "cancelled"):
+                    continue
+                payload = {
+                    "delegation_id": doc.get("delegation_id"),
+                    "delegation_state": ds,
+                    "effective_state": doc.get("effective_state"),
+                    "loop_id": doc.get("loop_id"),
+                    "packet_id": doc.get("packet_id"),
+                    "objective": doc.get("objective"),
+                }
+                if bool(doc.get("continuity_live", True)):
                     active_dels.append({
-                        "delegation_id": doc.get("delegation_id"),
-                        "delegation_state": ds,
-                        "loop_id": doc.get("loop_id"),
-                        "packet_id": doc.get("packet_id"),
-                        "objective": doc.get("objective"),
+                        **payload,
+                        "continuity_live": True,
+                    })
+                else:
+                    stale_dels.append({
+                        **payload,
+                        "continuity_live": False,
+                        "continuity_reason": doc.get("continuity_reason"),
                     })
             if active_dels:
                 assignment["active_delegations"] = active_dels
                 assignment["delegation_preferred"] = True
+            else:
+                assignment["active_delegations"] = []
+                assignment["delegation_preferred"] = False
+            if stale_dels:
+                assignment["stale_delegations"] = stale_dels
         except ImportError:
             pass
     else:
@@ -507,7 +629,6 @@ def main() -> None:
         assignment["delegation_preferred"] = False
 
     prompts_dir = os.path.join(state_root, "controller-prompts")
-    current_loop_id = str(assignment.get("loop_id") or "").strip()
     active_operational = []
     if current_loop_id and os.path.isdir(prompts_dir):
         try:

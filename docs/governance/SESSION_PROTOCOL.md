@@ -263,7 +263,6 @@ not as a fix list.
 
 - **Loop auto-attach at session start** — terminal birth (`ops terminal launch`) auto-attaches the active loop when exactly one exists; standalone `session.v3.attach` is orientation-only and does not create admission, bind identity, or attach loops
 - **Membrane-to-controller handoff** — no governed artifact between what the membrane understood and what the controller executes
-- **Controller-prompt packet amend/checkpoint** — no governed mid-packet surface between birth (`controller_prompt.create`) and death (`controller_prompt.close`); the execution phase is ungoverned by design
 
 ## Deferred Plans
 
@@ -285,6 +284,7 @@ active deferred intent belongs in the governed plans authority above.
 These seams were previously absent and have been addressed.
 
 - **Control-surface delegation** — `delegate.to.execution` bridges control surface intent to worker execution custody without manual terminal switching as an explicit interactive handoff (landed 2026-04-25). It is not autonomous queue admission.
+- **Controller-prompt packet amend/checkpoint** — `controller_prompt.amend` is the governed mid-packet continuity seam between birth (`controller_prompt.create`) and death (`controller_prompt.close`). It preserves packet next action, continuity summary, and evidence refs, and `entry-compile` can recover one live packet from loop plus packet continuity when the execution tracker is absent.
 
 ## Desktop
 
