@@ -50,6 +50,11 @@ def main() -> int:
         help="Declare intended wave kind (e.g. 'proof') for pre-wave custody authorization",
     )
     parser.add_argument(
+        "--execution-lane", default="interactive",
+        choices=["interactive", "operational"],
+        help="Execution-lane realization to admit into (default: interactive)",
+    )
+    parser.add_argument(
         "--json", action="store_true", dest="json_output",
         help="Emit JSON output",
     )
@@ -87,6 +92,7 @@ def main() -> int:
             objective=args.objective or "",
             target_role=args.target_role,
             wave_kind_intent=args.wave_kind_intent or "",
+            execution_lane=args.execution_lane or "interactive",
         )
     except db.DelegationError as exc:
         if args.json_output:
@@ -98,12 +104,18 @@ def main() -> int:
     if args.json_output:
         print(json.dumps(result, indent=2))
     else:
-        print(f"DELEGATED: {result.get('delegation_id', '')}")
+        status = str(result.get("status", "")).strip()
+        label = "ADMITTED" if status == "admitted" else "DELEGATED"
+        identifier = result.get("delegation_id", "") or result.get("task_id", "")
+        print(f"{label}: {identifier}")
         print(f"  loop:     {result.get('loop_id', '')}")
         print(f"  packet:   {result.get('packet_id', '')}")
         print(f"  objective: {result.get('objective', '')}")
         print(f"  target:   {result.get('target_role', '')}")
-        print(f"  path:     {result.get('delegation_path', '')}")
+        if result.get("delegation_path"):
+            print(f"  path:     {result.get('delegation_path', '')}")
+        if result.get("task_file"):
+            print(f"  task:     {result.get('task_file', '')}")
 
     return 0
 

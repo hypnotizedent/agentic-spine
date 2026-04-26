@@ -71,7 +71,7 @@ A valid request must declare:
 | Request Class | Meaning | Birth Surface | Canonical Artifact | Canonical Read Surface |
 |---|---|---|---|---|
 | `work_request` | This bounded work should exist | `loops.create` | SQLite loop row + loop scope projection | `loops.status`, `ops status` |
-| `execution_request` | This bounded work should be executed by a governed execution lane | `delegate.to.execution` (interactive), `mailroom.task.enqueue` (operational) | dispatch envelope lifecycle via realization-specific queue artifact | `delegation.status` (interactive); operational task readback remains subsystem-local today |
+| `execution_request` | This bounded work should be executed by a governed execution lane | `delegate.to.execution` (interactive or operational admission), `mailroom.task.enqueue` (operational) | dispatch envelope lifecycle via realization-specific queue artifact | `delegation.status` (interactive); controller packet runtime state + task envelope (operational) |
 
 **What is canonical:** work-request class via loop birth and loop authority;
 execution-request class via dispatch envelope contract and its execution-lane
@@ -95,8 +95,9 @@ scope differences without reducing truth fracture.
 Interactive delegation and operational mailroom execution are realizations of
 one execution-request contract, not competing kernels. Interactive delegation
 remains manual/explicit today. Operational mailroom execution remains the
-autonomous realization, but it does not yet carry the full loop/packet/wave
-closeout semantics of controller-prompt work.
+autonomous realization. Controller-prompt work can now enter that lane
+truthfully with synchronized packet runtime state, but packet closeout remains
+explicit rather than autonomous.
 
 ### 2. CLAIM
 

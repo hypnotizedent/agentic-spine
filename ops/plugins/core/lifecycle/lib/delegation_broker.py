@@ -19,8 +19,10 @@ Design authority: CONTROL-SURFACE-DELEGATION-V1-DESIGN-20260425.md
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -53,6 +55,7 @@ ACTIVE_LOOP_STATUSES = frozenset({"active", "open", "draft"})
 INTERVENTION_TERMINAL_DISPOSITIONS = frozenset({
     "cancelled", "dismissed", "landed", "resolved", "superseded",
 })
+OPERATIONAL_TERMINAL_STATES = frozenset({"done", "failed", "cancelled"})
 
 
 class DelegationError(Exception):
@@ -230,6 +233,8 @@ def _update_packet_frontmatter(
     *,
     loop_id: str = "",
     terminal_disposition: str = "",
+    extra_fields: dict[str, Any] | None = None,
+    clear_fields: list[str] | None = None,
 ) -> None:
     """Update delegation metadata on a controller packet or intervention YAML."""
     try:
@@ -244,11 +249,22 @@ def _update_packet_frontmatter(
             return
         if not isinstance(fm, dict):
             return
-        fm["delegation_state"] = delegation_state
-        fm["delegation_id"] = delegation_id
+        if delegation_state:
+            fm["delegation_state"] = delegation_state
+        if delegation_id:
+            fm["delegation_id"] = delegation_id
         if loop_id:
             fm["linked_loop_id"] = loop_id
-        fm["escalation_state"] = _intervention_escalation_state(delegation_state)
+        if delegation_state:
+            fm["escalation_state"] = _intervention_escalation_state(delegation_state)
+        if extra_fields:
+            for key, value in extra_fields.items():
+                if value is None:
+                    fm.pop(key, None)
+                else:
+                    fm[key] = value
+        for key in clear_fields or []:
+            fm.pop(key, None)
         if terminal_disposition:
             fm["disposition"] = terminal_disposition
             fm["closed_at"] = _now_utc()
@@ -266,10 +282,20 @@ def _update_packet_frontmatter(
     if not isinstance(fm, dict):
         return
 
-    fm["delegation_state"] = delegation_state
-    fm["delegation_id"] = delegation_id
+    if delegation_state:
+        fm["delegation_state"] = delegation_state
+    if delegation_id:
+        fm["delegation_id"] = delegation_id
     if loop_id:
         fm["loop_id"] = loop_id
+    if extra_fields:
+        for key, value in extra_fields.items():
+            if value is None:
+                fm.pop(key, None)
+            else:
+                fm[key] = value
+    for key in clear_fields or []:
+        fm.pop(key, None)
 
     new_fm = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True)
     new_text = "---\n" + new_fm + "---" + parts[2]
@@ -288,6 +314,135 @@ def _update_packet_frontmatter(
         raise DelegationError(f"packet update failed: {exc}") from exc
 
 
+def _mailroom_enqueue(
+    state_root: str,
+    *,
+    loop_id: str,
+    packet_id: str,
+    packet_path: str,
+    objective: str,
+    target_role: str,
+    route_target: str = "agent_tool",
+) -> dict[str, Any]:
+    """Admit a controller packet into the operational mailroom lane."""
+    enqueue_bin = (
+        Path(__file__).resolve().parents[3]
+        / "infra"
+        / "mailroom-bridge"
+        / "bin"
+        / "mailroom-task-enqueue"
+    )
+    if not enqueue_bin.exists():
+        raise DelegationError(f"mailroom enqueue surface missing: {enqueue_bin}")
+
+    payload = json.dumps(
+        {
+            "kind": "controller_prompt_execution_request",
+            "loop_id": loop_id,
+            "packet_id": packet_id,
+            "packet_path": packet_path,
+            "objective": objective,
+            "target_role": target_role,
+            "execution_lane_id": "operational_mailroom_task",
+        },
+        sort_keys=True,
+    )
+    cmd = [
+        str(enqueue_bin),
+        "--summary", objective,
+        "--route-target", route_target,
+        "--payload", payload,
+        "--loop-id", loop_id,
+        "--packet-id", packet_id,
+        "--packet-path", packet_path,
+        "--execution-lane-id", "operational_mailroom_task",
+        "--json",
+    ]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "SPINE_STATE": state_root},
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"mailroom enqueue exited {proc.returncode}"
+        raise DelegationError(f"operational admission failed: {detail}")
+    try:
+        payload_doc = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise DelegationError(
+            f"operational admission returned invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(payload_doc, dict):
+        raise DelegationError("operational admission returned non-object payload")
+    data = payload_doc.get("data")
+    if not isinstance(data, dict):
+        raise DelegationError("operational admission result missing data envelope")
+    return data
+
+
+def sync_operational_packet(
+    packet_path: str,
+    *,
+    loop_id: str = "",
+    task_id: str = "",
+    task_state: str = "",
+    task_file: str = "",
+    claimed_by: str = "",
+    claimed_at_utc: str = "",
+    heartbeat_at_utc: str = "",
+    progress: str = "",
+    completed_at_utc: str = "",
+    failed_at_utc: str = "",
+    result: str = "",
+    failure_reason: str = "",
+) -> None:
+    """Synchronize controller-prompt packet truth with operational lane state."""
+    extra_fields: dict[str, Any] = {
+        "execution_mode": "operational",
+        "transport": "mailroom",
+        "execution_lane_id": "operational_mailroom_task",
+    }
+    if task_id:
+        extra_fields["execution_request_id"] = task_id
+    if task_state:
+        extra_fields["execution_request_state"] = task_state
+    if task_file:
+        extra_fields["execution_request_artifact"] = task_file
+    if claimed_by:
+        extra_fields["execution_claimed_by"] = claimed_by
+    if claimed_at_utc:
+        extra_fields["execution_claimed_at_utc"] = claimed_at_utc
+    if heartbeat_at_utc:
+        extra_fields["execution_heartbeat_at_utc"] = heartbeat_at_utc
+    if progress:
+        extra_fields["execution_progress"] = progress
+    if completed_at_utc:
+        extra_fields["execution_completed_at_utc"] = completed_at_utc
+    if failed_at_utc:
+        extra_fields["execution_failed_at_utc"] = failed_at_utc
+    if result:
+        extra_fields["execution_result"] = result
+    if failure_reason:
+        extra_fields["execution_failure_reason"] = failure_reason
+
+    clear_fields: list[str] = []
+    if task_state == "done":
+        clear_fields.append("execution_failure_reason")
+    if task_state in OPERATIONAL_TERMINAL_STATES:
+        clear_fields.append("execution_progress")
+
+    _update_packet_frontmatter(
+        packet_path,
+        "",
+        "",
+        loop_id=loop_id,
+        extra_fields=extra_fields,
+        clear_fields=clear_fields,
+    )
+
+
 # ── Public API ───────────────────────────────────────────────────
 
 
@@ -300,6 +455,7 @@ def delegate(
     target_role: str = "worker",
     delegator_terminal: str = "",
     wave_kind_intent: str = "",
+    execution_lane: str = "interactive",
 ) -> dict[str, Any]:
     """Create a delegation from control surface to worker execution.
 
@@ -353,6 +509,44 @@ def delegate(
 
     if not delegator_terminal:
         delegator_terminal = os.environ.get("OPS_TERMINAL_ID", "unknown")
+
+    if execution_lane == "operational":
+        if packet_kind != "controller_prompt":
+            raise DelegationError(
+                "operational admission currently supports controller-prompt packets only"
+            )
+        queue_data = _mailroom_enqueue(
+            state_root,
+            loop_id=loop_id,
+            packet_id=packet_id,
+            packet_path=packet_path,
+            objective=objective,
+            target_role=target_role,
+        )
+        task_id = str(queue_data.get("task_id", "")).strip()
+        task_file = str(queue_data.get("file", "")).strip()
+        if not task_id or not task_file:
+            raise DelegationError("operational admission returned incomplete task metadata")
+        sync_operational_packet(
+            packet_path,
+            loop_id=loop_id,
+            task_id=task_id,
+            task_state=str(queue_data.get("state", "queued")).strip() or "queued",
+            task_file=task_file,
+        )
+        return {
+            "status": "admitted",
+            "task_id": task_id,
+            "task_file": task_file,
+            "loop_id": loop_id,
+            "packet_id": packet_id,
+            "packet_kind": packet_kind,
+            "packet_path": packet_path,
+            "objective": objective,
+            "target_role": target_role,
+            "execution_lane": "operational_mailroom_task",
+            "route_target": str(queue_data.get("route_target", "")).strip(),
+        }
 
     # ── Write delegation envelope ────────────────────────────────
     delegation_id = f"DEL-{_now_id()}"

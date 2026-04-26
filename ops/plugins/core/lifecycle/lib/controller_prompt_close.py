@@ -40,6 +40,7 @@ LOOP_DISPOSITION_BY_PACKET_DISPOSITION = {
 ACTIVE_HANDOFF_STATES = frozenset({"active", "parked"})
 TERMINAL_DELEGATION_STATES = frozenset({"landed", "needs_review", "cancelled"})
 TERMINAL_WAVE_STATUSES = frozenset({"closed", "superseded"})
+TERMINAL_OPERATIONAL_TASK_STATES = frozenset({"done", "failed", "cancelled"})
 
 
 class ControllerPromptCloseError(Exception):
@@ -240,6 +241,26 @@ def _active_delegation_ids_for_loop(state_root: str, loop_id: str) -> list[str]:
     return active_ids
 
 
+def _active_operational_task_ids_for_loop(state_root: str, loop_id: str) -> list[str]:
+    prompts_dir = Path(state_root) / "controller-prompts"
+    if not prompts_dir.is_dir():
+        return []
+
+    active_ids: list[str] = []
+    for path in sorted(prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+        fm = _packet_frontmatter(path)
+        if str(fm.get("loop_id", "")).strip() != loop_id:
+            continue
+        if str(fm.get("execution_mode", "")).strip().lower() != "operational":
+            continue
+        task_state = str(fm.get("execution_request_state", "")).strip().lower()
+        if not task_state or task_state in TERMINAL_OPERATIONAL_TASK_STATES:
+            continue
+        task_id = str(fm.get("execution_request_id", "")).strip() or path.name
+        active_ids.append(task_id)
+    return active_ids
+
+
 def _active_handoff_ids_for_loop(state_root: str, loop_id: str) -> list[str]:
     handoffs_dir = Path(state_root) / "handoffs"
     if not handoffs_dir.is_dir():
@@ -406,6 +427,12 @@ def _evaluate_loop_auto_close(
     if active_delegations:
         blockers.append(
             "active delegations remain: " + ", ".join(active_delegations[:5])
+        )
+
+    active_operational_tasks = _active_operational_task_ids_for_loop(state_root, loop_id)
+    if active_operational_tasks:
+        blockers.append(
+            "active operational tasks remain: " + ", ".join(active_operational_tasks[:5])
         )
 
     active_waves = _active_wave_ids_for_loop(state_root, loop_id)
@@ -706,6 +733,18 @@ def close_packet(
             },
             "message": "packet already closed; no action taken",
         }
+
+    execution_mode = str(fm.get("execution_mode", "")).strip().lower()
+    execution_request_state = str(fm.get("execution_request_state", "")).strip().lower()
+    if (
+        execution_mode == "operational"
+        and execution_request_state
+        and execution_request_state not in TERMINAL_OPERATIONAL_TASK_STATES
+    ):
+        raise ControllerPromptCloseError(
+            "packet has active operational execution_request_state="
+            f"'{execution_request_state}' and cannot close until the linked task reaches a terminal state"
+        )
 
     # ── Resolve git truth ─────────────────────────────────────────
     if not ending_head:

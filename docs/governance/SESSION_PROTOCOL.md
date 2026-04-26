@@ -144,7 +144,10 @@ operator or system intent
 ```
 
 This lane is operational for autonomous work, but it does not yet carry the
-full loop/packet/wave semantics of controller-prompt execution.
+full controller-prompt closeout lifecycle. Controller-prompt work can now enter
+this lane truthfully, and packet runtime state is synchronized from
+`mailroom.task.claim|heartbeat|complete|fail`, but terminal packet close
+remains explicit.
 
 ### Compatibility: Manual Custody Path
 

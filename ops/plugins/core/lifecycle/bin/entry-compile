@@ -502,6 +502,47 @@ def main() -> None:
         assignment["active_delegations"] = []
         assignment["delegation_preferred"] = False
 
+    prompts_dir = os.path.join(state_root, "controller-prompts")
+    current_loop_id = str(assignment.get("loop_id") or "").strip()
+    active_operational = []
+    if current_loop_id and os.path.isdir(prompts_dir):
+        try:
+            import yaml
+            for fname in sorted(os.listdir(prompts_dir)):
+                if not fname.endswith(".md"):
+                    continue
+                fpath = os.path.join(prompts_dir, fname)
+                try:
+                    with open(fpath, encoding="utf-8") as f:
+                        text = f.read()
+                    if not text.startswith("---"):
+                        continue
+                    parts = text.split("---", 2)
+                    if len(parts) < 3:
+                        continue
+                    doc = yaml.safe_load(parts[1])
+                except Exception:
+                    continue
+                if not isinstance(doc, dict):
+                    continue
+                if str(doc.get("loop_id", "")).strip() != current_loop_id:
+                    continue
+                if str(doc.get("execution_mode", "")).strip().lower() != "operational":
+                    continue
+                task_state = str(doc.get("execution_request_state", "")).strip().lower()
+                if not task_state or task_state in {"done", "failed", "cancelled"}:
+                    continue
+                active_operational.append({
+                    "packet_id": doc.get("packet_id"),
+                    "task_id": doc.get("execution_request_id"),
+                    "state": task_state,
+                    "execution_lane_id": doc.get("execution_lane_id"),
+                })
+        except ImportError:
+            pass
+    assignment["active_operational_tasks"] = active_operational
+    assignment["operational_lane_preferred"] = bool(active_operational)
+
     if args.format == "summary":
         cs = assignment.get("compilation_state", "unknown")
         print(f"compilation: {cs}")
@@ -520,6 +561,13 @@ def main() -> None:
                 print(f"  {d.get('delegation_id', '?')} [{d.get('delegation_state', '?')}] {d.get('objective', '')[:60]}")
         else:
             print(f"delegations: none")
+        active_operational = assignment.get("active_operational_tasks") or []
+        if active_operational:
+            print(f"operational: {len(active_operational)} active")
+            for task in active_operational:
+                print(f"  {task.get('task_id', '?')} [{task.get('state', '?')}] {task.get('packet_id', '')}")
+        else:
+            print("operational: none")
     else:
         print(json.dumps(assignment, indent=2))
 

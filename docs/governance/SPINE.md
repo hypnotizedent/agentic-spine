@@ -61,7 +61,7 @@ truthful core would be:
 | broker read APIs | `shelf` | Convenience/read-model shell, not kernel substrate. |
 | plans, handoffs, narrative receipts | `shelf` | Legitimate surfaces, but not day-one spine core. |
 | public teaching of raw loops/waves/scope surgery as operator-default grammar | `delete` | Keep as drilldown/surgery only, not public front-door grammar. |
-| mailroom task lane as the default controller-prompt execution substrate | `must_prove_again` | Real autonomous lane exists, but it does not yet carry loop/packet/wave semantics for controller-prompt work. |
+| mailroom task lane as the default controller-prompt execution substrate | `must_prove_again` | Real autonomous lane now admits controller-prompt work truthfully and synchronizes packet runtime state, but packet closeout is still explicit and the path is not yet proven as the permanent default. |
 | translator/control-node storytelling as irreducible core substrate | `must_prove_again` | Explanatory shell must not outrank the smaller engine. |
 
 This matrix is deliberately smaller than the current shell. A surface may be
