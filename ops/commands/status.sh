@@ -1288,13 +1288,14 @@ try:
                 except Exception:
                     pass
 
-        def _node_role_posture(_role_name, _inventory, *, _posture, _delivered, _note, _target="", _target_access="", _promoted=True):
+        def _node_role_posture(_role_name, _inventory, *, _posture, _delivered, _note, _target="", _target_access="", _promoted=True, _counter_semantics="delivered_runtime"):
             return {
                 "role": _role_name,
                 "defined_in_binding": _role_name in _node_types,
                 "promoted": bool(_promoted),
                 "posture": _posture,
                 "delivered": bool(_delivered),
+                "workload_counter_semantics": _counter_semantics,
                 "target": _target,
                 "target_access": _target_access,
                 "note": _note,
@@ -1311,6 +1312,7 @@ try:
             ),
             _target=exec_host_target,
             _target_access=exec_host_target_access,
+            _counter_semantics="delivered_runtime",
         )
         verification_role = _node_role_posture(
             "verification_node",
@@ -1318,8 +1320,9 @@ try:
             _posture="defined_not_delivered",
             _delivered=False,
             _note=(
-                "Defined in node.role.contract.yaml but no scheduler labels or delivery attestation exist yet."
+                "Defined in node.role.contract.yaml; mapped inventory may exist, but no delivered verification_node target is attested yet."
             ),
+            _counter_semantics="mapped_inventory",
         )
         storage_role = _node_role_posture(
             "storage_evidence_node",
@@ -1327,8 +1330,9 @@ try:
             _posture="defined_not_delivered",
             _delivered=False,
             _note=(
-                "Inventory is mapped in the scheduler registry, but no separate delivered storage_evidence_node target is attested yet."
+                "Mapped inventory is shown for planned storage_evidence_node placement, but no separate delivered storage_evidence_node target is attested yet."
             ),
+            _counter_semantics="mapped_inventory",
         )
         control_role = {
             "role": "control_node",
@@ -1846,6 +1850,8 @@ if _node_roles:
     _ver = _node_roles.get("verification_node", {}) if isinstance(_node_roles.get("verification_node"), dict) else {}
     _store = _node_roles.get("storage_evidence_node", {}) if isinstance(_node_roles.get("storage_evidence_node"), dict) else {}
     _control = _node_roles.get("control_node", {}) if isinstance(_node_roles.get("control_node"), dict) else {}
+    _ver_prefix = "mapped_" if _ver.get("workload_counter_semantics") == "mapped_inventory" else ""
+    _store_prefix = "mapped_" if _store.get("workload_counter_semantics") == "mapped_inventory" else ""
     print(
         "  execution_host:    "
         f"{_exec.get('posture', 'unknown')} · "
@@ -1858,13 +1864,13 @@ if _node_roles:
     print(
         "  verification_node: "
         f"{_ver.get('posture', 'unknown')} · "
-        f"intended={int(_ver.get('intended_workload_count', 0) or 0)}"
+        f"{_ver_prefix}intended={int(_ver.get('intended_workload_count', 0) or 0)}"
     )
     print(
         "  storage_evidence:  "
         f"{_store.get('posture', 'unknown')} · "
-        f"active={int(_store.get('active_workload_count', 0) or 0)} "
-        f"intended={int(_store.get('intended_workload_count', 0) or 0)}"
+        f"{_store_prefix}active={int(_store.get('active_workload_count', 0) or 0)} "
+        f"{_store_prefix}intended={int(_store.get('intended_workload_count', 0) or 0)}"
     )
     print(
         "  control_node:      "

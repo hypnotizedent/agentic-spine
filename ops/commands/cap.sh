@@ -55,15 +55,23 @@ usage() {
 ops cap - Execute runtime capabilities
 
 Usage:
-  ops cap list                    List available capabilities
+  ops cap list [options]          List available capabilities
   ops cap run <name> [args...]    Execute a capability
   ops cap show <name>             Show capability details
 
 Examples:
   ops cap list
+  ops cap list --all
+  ops cap list --execution-class worker
   ops cap run spine.verify
   ops cap run monolith.search "TODO" agentic-spine
   ops cap show infra.docker_ps
+
+List options:
+  --all                           Show all live capabilities, not just those legal for the current execution class
+  --include-retired               Include retired historical registry rows
+  --execution-class <id>          Resolve visibility as if running under a different execution class
+  --json                          Machine-readable capability list
 EOF
 }
 
@@ -340,15 +348,180 @@ ensure_runtime_dirs() {
 }
 
 list_caps() {
-    echo "=== AVAILABLE CAPABILITIES ==="
-    echo ""
-    yq e -r '.capabilities | to_entries[] | [.key, (.value.safety // ""), (.value.description // "")] | @tsv' "$CAP_FILE" \
-      | LC_ALL=C sort -t $'\t' -k1,1 \
-      | while IFS=$'\t' read -r cap safety desc; do
-          printf "  %-25s [%s] %s\n" "$cap" "$safety" "$desc"
-        done
-    echo ""
-    echo "Run: ops cap run <name> [args...]"
+    local show_all=0
+    local include_retired=0
+    local json_mode=0
+    local requested_execution_class=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all)
+                show_all=1
+                shift
+                ;;
+            --include-retired)
+                include_retired=1
+                shift
+                ;;
+            --execution-class)
+                requested_execution_class="${2:?--execution-class requires a value}"
+                shift 2
+                ;;
+            --json)
+                json_mode=1
+                shift
+                ;;
+            -h|--help)
+                usage
+                return 0
+                ;;
+            *)
+                echo "ops cap list: unknown argument '$1'" >&2
+                return 2
+                ;;
+        esac
+    done
+
+    local execution_class="${requested_execution_class:-$(current_execution_class)}"
+
+    python3 - "$CAP_FILE" "$ROLE_POLICY_CONTRACT" "$execution_class" "$show_all" "$include_retired" "$json_mode" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+cap_file = Path(sys.argv[1])
+policy_file = Path(sys.argv[2])
+execution_class = sys.argv[3] or "researcher"
+show_all = sys.argv[4] == "1"
+include_retired = sys.argv[5] == "1"
+json_mode = sys.argv[6] == "1"
+
+reg = yaml.safe_load(cap_file.read_text(encoding="utf-8")) or {}
+caps = reg.get("capabilities") or {}
+policy = {}
+if policy_file.is_file():
+    policy = yaml.safe_load(policy_file.read_text(encoding="utf-8")) or {}
+runtime_roles = policy.get("runtime_roles") or {}
+read_only_roles = set(runtime_roles.get("read_only_roles") or [])
+allowlist_by_role = runtime_roles.get("mutating_capability_allowlist_by_role") or {}
+allowlist = set(allowlist_by_role.get(execution_class) or [])
+
+rows = []
+hidden_blocked = 0
+hidden_retired = 0
+live_total = 0
+retired_total = 0
+
+for name in sorted(caps):
+    payload = caps.get(name) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    lifecycle = str(payload.get("lifecycle") or "ready").strip() or "ready"
+    safety = str(payload.get("safety") or "").strip()
+    desc = str(payload.get("description") or "").strip()
+    retired = lifecycle.lower() == "retired"
+    if retired:
+        retired_total += 1
+    else:
+        live_total += 1
+
+    legal = True
+    visibility_reason = "readable"
+    allowlisted_mutation = False
+    if safety in {"mutating", "destructive"} and execution_class in read_only_roles:
+        if name in allowlist:
+            allowlisted_mutation = True
+            visibility_reason = "allowlisted_mutation"
+        else:
+            legal = False
+            visibility_reason = "blocked_by_execution_class"
+
+    if retired and not include_retired:
+        hidden_retired += 1
+        continue
+    if not show_all and not legal:
+        hidden_blocked += 1
+        continue
+
+    rows.append(
+        {
+            "name": name,
+            "safety": safety,
+            "description": desc,
+            "lifecycle": lifecycle,
+            "retired": retired,
+            "legal_for_execution_class": legal,
+            "allowlisted_mutation": allowlisted_mutation,
+            "visibility_reason": visibility_reason,
+        }
+    )
+
+if json_mode:
+    print(
+        json.dumps(
+            {
+                "execution_class": execution_class,
+                "view": (
+                    "all_with_retired"
+                    if show_all and include_retired
+                    else "all_live"
+                    if show_all
+                    else "legal_live_only"
+                ),
+                "counts": {
+                    "shown": len(rows),
+                    "live_total": live_total,
+                    "retired_total": retired_total,
+                    "hidden_blocked": hidden_blocked,
+                    "hidden_retired": hidden_retired,
+                },
+                "capabilities": rows,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    raise SystemExit(0)
+
+view = (
+    "all live + retired"
+    if show_all and include_retired
+    else "all live"
+    if show_all
+    else "live + legal for current execution class"
+)
+
+print("=== AVAILABLE CAPABILITIES ===")
+print("")
+print(f"Execution Class: {execution_class}")
+print(f"View:            {view}")
+print(f"Shown:           {len(rows)}")
+print(f"Live Registry:   {live_total}")
+if hidden_blocked or hidden_retired or retired_total:
+    print(
+        "Hidden:          "
+        f"{hidden_blocked} blocked by execution class, "
+        f"{hidden_retired} retired"
+    )
+print("")
+
+for row in rows:
+    label = row["safety"] or "unknown"
+    if row["retired"]:
+        label += " retired"
+    elif row["allowlisted_mutation"]:
+        label += " allowlisted"
+    elif show_all and not row["legal_for_execution_class"]:
+        label += f" blocked:{execution_class}"
+    print(f"  {row['name']:<25} [{label}] {row['description']}")
+
+print("")
+print("Run: ops cap run <name> [args...]")
+if not show_all or not include_retired:
+    print("Full registry: ops cap list --all --include-retired")
+PY
 }
 
 expand_runtime_value() {

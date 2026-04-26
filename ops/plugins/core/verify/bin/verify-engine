@@ -265,13 +265,15 @@ PY
 '
 
 # E8: every MANIFEST script entry must resolve on disk. Capability parity is
-# now enforced for every plugin-scoped registration:
+# enforced for the live registry:
 #   - every capability advertised by a MANIFEST plugin must exist in
 #     ops/capabilities.yaml
+#   - every non-retired capability in ops/capabilities.yaml must be advertised
+#     by at least one MANIFEST plugin
 #   - every capability whose command/script_path lives under a plugin path
-#     must be advertised by that plugin
-# Capabilities that intentionally resolve outside ops/plugins/ (root commands,
-# workbench-owned implementations) are excluded from the second rule.
+#     must be advertised by that exact plugin
+# Retired historical registry rows are excluded from the live projection
+# requirement.
 check E8 "MANIFEST script parity + plugin capability parity" bash -c '
     python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
 from pathlib import Path
@@ -304,8 +306,12 @@ if cap_registry_path.is_file():
 
 missing_scripts = []
 missing_caps = []
-missing_advertisements = []
+missing_registry_advertisements = []
+missing_plugin_advertisements = []
+duplicate_advertisements = []
 plugins = []
+advertised_caps = set()
+cap_to_plugins = {}
 for plugin in data.get("plugins") or []:
     if not isinstance(plugin, dict):
         continue
@@ -324,6 +330,8 @@ for plugin in data.get("plugins") or []:
         cn = str(cap_name or "").strip()
         if not cn:
             continue
+        advertised_caps.add(cn)
+        cap_to_plugins.setdefault(cn, set()).add(plugin_name)
         if cn not in known_caps:
             missing_caps.append(f"{plugin_name}::{cn}")
 
@@ -369,15 +377,31 @@ for plugin_name, _plugin_path, plugin in plugins:
     }
     real = plugin_scoped_caps.get(plugin_name, set())
     for cap_name in sorted(real - advertised):
-        missing_advertisements.append(f"{plugin_name}::{cap_name}")
+        missing_plugin_advertisements.append(f"{plugin_name}::{cap_name}")
+
+live_caps = {
+    cap_name
+    for cap_name, payload in cap_entries.items()
+    if str((payload or {}).get("lifecycle") or "ready").strip().lower() != "retired"
+}
+for cap_name in sorted(live_caps - advertised_caps):
+    missing_registry_advertisements.append(cap_name)
+
+for cap_name, owners in sorted(cap_to_plugins.items()):
+    if len(owners) > 1:
+        duplicate_advertisements.append(cap_name + "::" + ",".join(sorted(owners)))
 
 errs = []
 if missing_scripts:
     errs.append("MISSING SCRIPTS:\n" + "\n".join(missing_scripts))
 if missing_caps:
     errs.append("UNRESOLVED CAPABILITIES:\n" + "\n".join(missing_caps))
-if missing_advertisements:
-    errs.append("MISSING MANIFEST ADVERTISEMENTS:\n" + "\n".join(missing_advertisements))
+if missing_registry_advertisements:
+    errs.append("LIVE CAPABILITIES MISSING FROM MANIFEST:\n" + "\n".join(missing_registry_advertisements))
+if missing_plugin_advertisements:
+    errs.append("PLUGIN-SCOPED CAPABILITIES MISSING FROM THEIR OWN MANIFEST ROW:\n" + "\n".join(missing_plugin_advertisements))
+if duplicate_advertisements:
+    errs.append("DUPLICATE MANIFEST CAPABILITY ADVERTISEMENTS:\n" + "\n".join(duplicate_advertisements))
 
 if errs:
     print("\n\n".join(errs))
