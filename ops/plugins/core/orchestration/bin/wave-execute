@@ -773,19 +773,54 @@ cmd_start() {
   local ready
   ready="$(_auth_field "$auth_json" "ready_for_dispatch")"
   if [[ "$ready" != "True" ]]; then
-    echo "Authority: BLOCKED"
-    echo ""
-    local blockers
-    blockers="$(echo "$auth_json" | python3 -c "
+    # Proof-wave clean-surface routing: when --wave-kind proof is requested and
+    # the only authority blocker is dirty residue, bypass the hard fail. The wave
+    # worktree provides the clean execution surface. Normal mutation paths still
+    # fail on dirty residue as before.
+    local _proof_dirty_bypass=0
+    if _has_passthrough_flag "--wave-kind" "${passthrough_args[@]+"${passthrough_args[@]}"}"; then
+      local _wk_val=""
+      local _pi=0
+      for _pi in "${!passthrough_args[@]}"; do
+        if [[ "${passthrough_args[$_pi]}" == "--wave-kind" ]]; then
+          _wk_val="${passthrough_args[$((_pi+1))]:-}"
+          break
+        elif [[ "${passthrough_args[$_pi]}" == "--wave-kind="* ]]; then
+          _wk_val="${passthrough_args[$_pi]#--wave-kind=}"
+          break
+        fi
+      done
+      if [[ "$_wk_val" == "proof" ]]; then
+        local _dirty_only
+        _dirty_only="$(echo "$auth_json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+blockers=d.get('blockers',[])
+print('yes' if blockers and all('dirty residue' in b for b in blockers) else 'no')
+" 2>/dev/null || echo "no")"
+        if [[ "$_dirty_only" == "yes" ]]; then
+          _proof_dirty_bypass=1
+        fi
+      fi
+    fi
+
+    if [[ "$_proof_dirty_bypass" -eq 1 ]]; then
+      echo "Authority: dirty residue detected — proof wave routing to clean worktree surface"
+    else
+      echo "Authority: BLOCKED"
+      echo ""
+      local blockers
+      blockers="$(echo "$auth_json" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 for b in d.get('blockers',[]):
     print('  - ' + b)
 " 2>/dev/null || true)"
-    echo "Blockers:"
-    echo "$blockers"
-    echo ""
-    _fail "authority check blocked dispatch"
+      echo "Blockers:"
+      echo "$blockers"
+      echo ""
+      _fail "authority check blocked dispatch"
+    fi
   fi
 
   # Step 2: Generate wave ID if not provided
