@@ -91,17 +91,27 @@ stay on `main` and clean. All wave/feature work happens in managed worktrees.
 - Hygiene: `python3 ./ops/plugins/core/lifecycle/bin/git-worktree-hygiene --apply --brief`
 - Authority: `docs/governance/GIT_WORKTREE_HYGIENE.md`, `ops/bindings/worktree.lifecycle.contract.yaml`
 
-## Default Lifecycle
+## Execution Lifecycles
 
-The **delegation path** is the default operator path. The operator stays on
-the control surface and delegates execution to worker custody via the broker.
+No single autonomous execution handoff is taught as the default today.
+The truthful kernel progression is:
+
+`request -> claim -> execute -> outcome/receipt`
+
+Current governed realizations split by transport mode.
+
+### Interactive Control-Surface Handoff
+
+`delegate.to.execution` remains available for interactive control-surface
+handoff to worker custody, but it is an explicit handoff, not autonomous queue
+admission.
 
 ```
 operator intent
   → loop opened or attached                  [governed: loops.create]
     → packet scoped inside loop              [governed: controller_prompt.create]
-      → delegated to worker execution        [governed: delegate.to.execution]  ← DEFAULT
-        → worker picks up delegation         [governed: delegation.pickup]
+      → explicit worker handoff              [governed: delegate.to.execution]
+        → worker explicitly picks up         [governed: delegation.pickup]
           → worktree opened for mutation     [governed: kickoff allocates, or agent bootstraps]
             → wave dispatched                [governed: wave.execute]
             → wave finished with receipt     [governed: wave.finish]
@@ -112,11 +122,30 @@ operator intent
   → handoff emitted at session boundary      [manual: session.handoff.create]
 ```
 
+If no worker will explicitly claim the delegation, do not assume execution will
+occur. `delegated` is not autonomous lane admission.
+
+### Operational Mailroom Task Lane
+
+Autonomous/headless execution lives on the mailroom task lane:
+
+```
+operator or system intent
+  → task admitted to mailroom queue          [governed: mailroom.task.enqueue]
+    → autonomous worker claims task          [governed: mailroom.task.claim]
+      → worker proves liveness               [governed: mailroom.task.heartbeat]
+      → worker executes route target         [governed: autonomous worker lane]
+      → task reaches terminal result         [governed: mailroom.task.complete|mailroom.task.fail]
+```
+
+This lane is operational for autonomous work, but it does not yet carry the
+full loop/packet/wave semantics of controller-prompt execution.
+
 ### Compatibility: Manual Custody Path
 
 The manual path (direct terminal switch + worker attach without delegation)
-remains available as a **compatibility/expert fallback**. Use delegation as the
-default unless you have a specific reason not to.
+remains available as a **compatibility/expert fallback**. Use it only when you
+have a specific expert reason.
 
 ```
 # Compatibility path — manual custody choreography
@@ -235,7 +264,7 @@ active deferred intent belongs in the governed plans authority above.
 
 These seams were previously absent and have been addressed.
 
-- **Control-surface delegation** — `delegate.to.execution` bridges control surface intent to worker execution custody without manual terminal switching (landed 2026-04-25)
+- **Control-surface delegation** — `delegate.to.execution` bridges control surface intent to worker execution custody without manual terminal switching as an explicit interactive handoff (landed 2026-04-25). It is not autonomous queue admission.
 
 ## Desktop
 
