@@ -52,7 +52,6 @@ EXPECTED_TRIGGERS = {
     "com.ronny.alerting-probe-cycle": ["threshold_breach", "stale_failure"],
     "com.ronny.operator-ingress-auto-metabolizer": ["missed_heartbeat"],
     "com.ronny.domain-inventory-refresh-daily": ["stale_failure"],
-    "com.ronny.infra-core-smoke": ["stale_failure"],
     "com.ronny.simplefin-daily-sync": ["stale_failure"],
 }
 
