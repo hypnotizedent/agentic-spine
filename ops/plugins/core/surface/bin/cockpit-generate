@@ -392,21 +392,53 @@ def freshness_card(payload: dict) -> str:
     </div>"""
 
 
+def _node_posture_badge(posture: str) -> str:
+    palette = {
+        "live": ("var(--grn)", "LIVE"),
+        "defined_not_delivered": ("var(--ylw)", "DEFINED"),
+        "defined_not_local": ("var(--cyn)", "DEFINED"),
+        "taxonomy_only": ("var(--tb)", "TAXONOMY"),
+    }
+    color, label = palette.get(posture or "", ("var(--tb)", (posture or "UNKNOWN").replace("_", " ").upper()))
+    return (
+        f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;'
+        f'border-radius:3px;background:rgba(42,52,68,.75);color:{color}">{_h(label)}</span>'
+    )
+
+
 def node_role_card(roles: dict) -> str:
     local_role = roles.get("local_role") or "unknown"
     exec_target = roles.get("execution_host_target") or ""
-    exec_count = roles.get("execution_host_workload_count", 0)
     local_label = local_role.replace("_", " ")
+    exec_posture = roles.get("execution_host_posture") or "unknown"
+    exec_active = int(roles.get("execution_host_active_workload_count", roles.get("execution_host_workload_count", 0)) or 0)
+    exec_intended = int(roles.get("execution_host_intended_workload_count", exec_active) or 0)
+    exec_parked = int(roles.get("execution_host_parked_workload_count", 0) or 0)
+    verification = roles.get("verification_node", {}) if isinstance(roles.get("verification_node"), dict) else {}
+    storage = roles.get("storage_evidence_node", {}) if isinstance(roles.get("storage_evidence_node"), dict) else {}
+    control = roles.get("control_node", {}) if isinstance(roles.get("control_node"), dict) else {}
 
-    exec_html = ""
-    if exec_target:
-        exec_html = (
+    def _node_row(label: str, value: str, sub: str, posture: str) -> str:
+        return (
             f'<div class="nr-row">'
-            f'<div class="nr-label">execution host</div>'
-            f'<div class="nr-value">{_h(exec_target)}'
-            f'<span class="nr-sub">{exec_count} workload{"s" if exec_count != 1 else ""}</span>'
+            f'<div class="nr-label">{_h(label)}</div>'
+            f'<div class="nr-value">{_h(value)}'
+            f'<span class="nr-sub">{_h(sub)}</span>'
+            f'<span style="margin-left:.45rem">{_node_posture_badge(posture)}</span>'
             f'</div></div>'
         )
+
+    exec_value = exec_target or "defined role"
+    exec_sub = f"{exec_active} active / {exec_intended} intended"
+    if exec_parked:
+        exec_sub += f" / {exec_parked} parked"
+
+    verification_sub = f"{int(verification.get('intended_workload_count', 0) or 0)} mapped workload(s)"
+    storage_sub = (
+        f"{int(storage.get('active_workload_count', 0) or 0)} active / "
+        f"{int(storage.get('intended_workload_count', 0) or 0)} intended"
+    )
+    control_sub = "future taxonomy · not promoted"
 
     return f"""
     <div class="nr">
@@ -414,7 +446,10 @@ def node_role_card(roles: dict) -> str:
         <div class="nr-label">this machine</div>
         <div class="nr-value">{_h(local_label)}</div>
       </div>
-      {exec_html}
+      {_node_row("execution host", exec_value, exec_sub, exec_posture)}
+      {_node_row("verification node", "defined role", verification_sub, str(verification.get("posture", "defined_not_delivered") or "defined_not_delivered"))}
+      {_node_row("storage evidence", "defined role", storage_sub, str(storage.get("posture", "defined_not_delivered") or "defined_not_delivered"))}
+      {_node_row("control node", "taxonomy only", control_sub, str(control.get("posture", "taxonomy_only") or "taxonomy_only"))}
     </div>"""
 
 
@@ -503,15 +538,14 @@ def execution_host_section(roles: dict) -> str:
     if not exec_target:
         return ""
 
-    exec_count = roles.get("execution_host_workload_count", 0)
-    exec_labels = roles.get("execution_host_workload_labels", [])
+    exec_count = int(roles.get("execution_host_active_workload_count", roles.get("execution_host_workload_count", 0)) or 0)
+    exec_intended = int(roles.get("execution_host_intended_workload_count", exec_count) or 0)
+    exec_parked = int(roles.get("execution_host_parked_workload_count", 0) or 0)
+    exec_labels = roles.get("execution_host_active_workload_labels", roles.get("execution_host_workload_labels", []))
     exec_access = roles.get("execution_host_access") or ""
-    exec_purposes = roles.get("execution_host_workload_purposes", {})
-    non_local = roles.get("non_local_deferred", [])
-    breakdown = roles.get("non_local_breakdown", {}) or {}
-    parked = breakdown.get("parked_required", []) if isinstance(breakdown, dict) else []
-    locality_exempt = breakdown.get("locality_exempt", []) if isinstance(breakdown, dict) else []
-    active_elsewhere = breakdown.get("active_elsewhere", []) if isinstance(breakdown, dict) else non_local
+    exec_purposes = roles.get("execution_host_active_workload_purposes", roles.get("execution_host_workload_purposes", {}))
+    parked_labels = roles.get("execution_host_parked_workload_labels", [])
+    parked_purposes = roles.get("execution_host_parked_workload_purposes", {})
 
     workload_rows = ""
     for lbl in sorted(exec_labels):
@@ -519,46 +553,33 @@ def execution_host_section(roles: dict) -> str:
         purpose = exec_purposes.get(lbl, "")
         purpose_html = f'<div class="eh-purpose">{_h(purpose)}</div>' if purpose else ""
         workload_rows += f'<div class="eh-lbl">{_h(short)}{purpose_html}</div>'
+    if workload_rows:
+        workload_rows = (
+            f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5">'
+            f'active delivered ({exec_count})</div>'
+            + workload_rows
+        )
+    else:
+        workload_rows = '<div class="eh-lbl eh-other">no active delivered workloads</div>'
 
     other_rows = ""
-    if active_elsewhere:
-        for lbl in sorted(active_elsewhere):
-            short = lbl.replace("com.ronny.", "")
-            other_rows += f'<div class="eh-lbl eh-other">{_h(short)}</div>'
-        other_rows = (
-            f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;'
-            f'border-top:1px solid var(--b);margin-top:.25rem">active elsewhere ({len(active_elsewhere)})</div>'
-            + other_rows
-        )
-    if parked:
+    if parked_labels:
         parked_rows = ""
-        for lbl in sorted(parked):
+        for lbl in sorted(parked_labels):
             short = lbl.replace("com.ronny.", "")
-            parked_rows += f'<div class="eh-lbl eh-other">{_h(short)}</div>'
+            purpose = parked_purposes.get(lbl, "")
+            purpose_html = f'<div class="eh-purpose">{_h(purpose)}</div>' if purpose else ""
+            parked_rows += f'<div class="eh-lbl eh-other">{_h(short)}{purpose_html}</div>'
         other_rows += (
             f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;'
-            f'border-top:1px solid var(--b);margin-top:.25rem">parked required ({len(parked)})</div>'
+            f'border-top:1px solid var(--b);margin-top:.25rem">parked inventory ({len(parked_labels)})</div>'
             + parked_rows
-        )
-    if locality_exempt:
-        exempt_rows = ""
-        for lbl in sorted(locality_exempt):
-            short = lbl.replace("com.ronny.", "")
-            exempt_rows += f'<div class="eh-lbl eh-other">{_h(short)}</div>'
-        other_rows += (
-            f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;color:var(--t);opacity:.5;'
-            f'border-top:1px solid var(--b);margin-top:.25rem">locality exempt ({len(locality_exempt)})</div>'
-            + exempt_rows
         )
 
     access_line = f'<div class="eh-access">{_h(exec_access)}</div>' if exec_access else ""
-    detail_bits = [f"{exec_count} workloads"]
-    if active_elsewhere:
-        detail_bits.append(f"{len(active_elsewhere)} elsewhere")
-    if parked:
-        detail_bits.append(f"{len(parked)} parked")
-    if locality_exempt:
-        detail_bits.append(f"{len(locality_exempt)} locality-exempt")
+    detail_bits = [f"{exec_count} active", f"{exec_intended} intended"]
+    if exec_parked:
+        detail_bits.append(f"{exec_parked} parked")
     detail_summary = " · ".join(detail_bits)
 
     return f"""

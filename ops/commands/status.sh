@@ -262,6 +262,7 @@ exec python3 - "$SPINE_REPO" "$MODE" "$STRICT" "$SPINE_STATE" "$SPINE_INBOX" "$S
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -1142,6 +1143,7 @@ daemons_summary = {
         "other": [],
     },
     "local_role": "",
+    "node_roles": {},
 }
 
 try:
@@ -1212,15 +1214,64 @@ try:
         except Exception:
             pass
         missing = [lbl for lbl in local_required if lbl not in loaded_labels]
-        # Derive execution_host target and workload labels from full scheduler registry
-        # Include purpose text for cockpit rendering
+        # Derive node-role inventory from the scheduler registry, then separate
+        # active delivered runtime from intended/parked inventory for operator
+        # readback honesty.
         purpose_by_label = {}
+        labels_by_role = {}
+        active_labels_by_role = {}
+        parked_labels_by_role = {}
+        observed_hosts_by_role = {}
         for _entry in (_reg.get("labels") or []):
             _lbl = str((_entry or {}).get("label", "")).strip()
             _purpose = str((_entry or {}).get("purpose", "")).strip()
+            _role = str((_entry or {}).get("intended_node_role", "")).strip()
+            _state = str((_entry or {}).get("state", "")).strip().lower()
+            _proof = (_entry or {}).get("proof_channel") if isinstance((_entry or {}).get("proof_channel"), dict) else {}
+            _host = str((_entry or {}).get("active_runtime_host") or _proof.get("host") or "").strip()
             if _lbl and _purpose:
                 purpose_by_label[_lbl] = _purpose
-        exec_host_labels = [lbl for lbl, role in role_by_label.items() if role == "execution_host"]
+            if _lbl and _role:
+                labels_by_role.setdefault(_role, []).append(_lbl)
+                if _state == "active":
+                    active_labels_by_role.setdefault(_role, []).append(_lbl)
+                    if _host:
+                        observed_hosts_by_role.setdefault(_role, []).append(_host)
+                elif _state == "parked":
+                    parked_labels_by_role.setdefault(_role, []).append(_lbl)
+
+        _node_contract = spine / "ops" / "bindings" / "node.role.contract.yaml"
+        _node_types = {}
+        if _node_contract.is_file():
+            try:
+                _node_data = _yaml_daemons.safe_load(_node_contract.read_text(encoding="utf-8")) or {}
+                _node_types = _node_data.get("node_types") or {}
+                if not isinstance(_node_types, dict):
+                    _node_types = {}
+            except Exception:
+                _node_types = {}
+
+        def _role_inventory(_role_name):
+            _intended = sorted(labels_by_role.get(_role_name, []))
+            _active = sorted(active_labels_by_role.get(_role_name, []))
+            _parked = sorted(parked_labels_by_role.get(_role_name, []))
+            _hosts = sorted(set(observed_hosts_by_role.get(_role_name, [])))
+            return {
+                "intended_workload_count": len(_intended),
+                "intended_workload_labels": _intended,
+                "intended_workload_purposes": {lbl: purpose_by_label.get(lbl, "") for lbl in _intended},
+                "active_workload_count": len(_active),
+                "active_workload_labels": _active,
+                "active_workload_purposes": {lbl: purpose_by_label.get(lbl, "") for lbl in _active},
+                "parked_workload_count": len(_parked),
+                "parked_workload_labels": _parked,
+                "parked_workload_purposes": {lbl: purpose_by_label.get(lbl, "") for lbl in _parked},
+                "observed_active_hosts": _hosts,
+            }
+
+        exec_host_inventory = _role_inventory("execution_host")
+        verification_inventory = _role_inventory("verification_node")
+        storage_inventory = _role_inventory("storage_evidence_node")
         exec_host_target = ""
         exec_host_target_access = ""
         # Read activation receipt for canonical execution_host target
@@ -1236,6 +1287,71 @@ try:
                         break
                 except Exception:
                     pass
+
+        def _node_role_posture(_role_name, _inventory, *, _posture, _delivered, _note, _target="", _target_access="", _promoted=True):
+            return {
+                "role": _role_name,
+                "defined_in_binding": _role_name in _node_types,
+                "promoted": bool(_promoted),
+                "posture": _posture,
+                "delivered": bool(_delivered),
+                "target": _target,
+                "target_access": _target_access,
+                "note": _note,
+                **_inventory,
+            }
+
+        exec_host_role = _node_role_posture(
+            "execution_host",
+            exec_host_inventory,
+            _posture="live" if exec_host_target else "defined_not_delivered",
+            _delivered=bool(exec_host_target),
+            _note=(
+                "Active delivered runtime is counted separately from intended inventory; parked labels remain inventory, not live delivery."
+            ),
+            _target=exec_host_target,
+            _target_access=exec_host_target_access,
+        )
+        verification_role = _node_role_posture(
+            "verification_node",
+            verification_inventory,
+            _posture="defined_not_delivered",
+            _delivered=False,
+            _note=(
+                "Defined in node.role.contract.yaml but no scheduler labels or delivery attestation exist yet."
+            ),
+        )
+        storage_role = _node_role_posture(
+            "storage_evidence_node",
+            storage_inventory,
+            _posture="defined_not_delivered",
+            _delivered=False,
+            _note=(
+                "Inventory is mapped in the scheduler registry, but no separate delivered storage_evidence_node target is attested yet."
+            ),
+        )
+        control_role = {
+            "role": "control_node",
+            "defined_in_binding": False,
+            "promoted": False,
+            "posture": "taxonomy_only",
+            "delivered": False,
+            "target": "",
+            "target_access": "",
+            "note": (
+                "Named in doctrine as future taxonomy only; absent from node.role.contract.yaml and not promoted."
+            ),
+            "intended_workload_count": 0,
+            "intended_workload_labels": [],
+            "intended_workload_purposes": {},
+            "active_workload_count": 0,
+            "active_workload_labels": [],
+            "active_workload_purposes": {},
+            "parked_workload_count": 0,
+            "parked_workload_labels": [],
+            "parked_workload_purposes": {},
+            "observed_active_hosts": [],
+        }
 
         daemons_summary = {
             "required_total": len(local_required),
@@ -1253,9 +1369,37 @@ try:
             "execution_host": {
                 "target": exec_host_target,
                 "target_access": exec_host_target_access,
-                "workload_count": len(exec_host_labels),
-                "workload_labels": exec_host_labels,
-                "workload_purposes": {lbl: purpose_by_label.get(lbl, "") for lbl in exec_host_labels},
+                "delivery_posture": exec_host_role.get("posture", "defined_not_delivered"),
+                "workload_count": exec_host_inventory["active_workload_count"],
+                "workload_labels": exec_host_inventory["active_workload_labels"],
+                "workload_purposes": exec_host_inventory["active_workload_purposes"],
+                "active_workload_count": exec_host_inventory["active_workload_count"],
+                "active_workload_labels": exec_host_inventory["active_workload_labels"],
+                "active_workload_purposes": exec_host_inventory["active_workload_purposes"],
+                "intended_workload_count": exec_host_inventory["intended_workload_count"],
+                "intended_workload_labels": exec_host_inventory["intended_workload_labels"],
+                "intended_workload_purposes": exec_host_inventory["intended_workload_purposes"],
+                "parked_workload_count": exec_host_inventory["parked_workload_count"],
+                "parked_workload_labels": exec_host_inventory["parked_workload_labels"],
+                "parked_workload_purposes": exec_host_inventory["parked_workload_purposes"],
+                "observed_active_hosts": exec_host_inventory["observed_active_hosts"],
+                "note": exec_host_role.get("note", ""),
+            },
+            "node_roles": {
+                "operator_console": {
+                    "role": "operator_console",
+                    "defined_in_binding": "operator_console" in _node_types,
+                    "promoted": True,
+                    "posture": "live" if local_role == "operator_console" else "defined_not_local",
+                    "delivered": local_role == "operator_console",
+                    "target": str(socket.gethostname() or "").strip(),
+                    "target_access": "",
+                    "note": "Interactive admitting client surface for this current checkout.",
+                },
+                "execution_host": exec_host_role,
+                "verification_node": verification_role,
+                "storage_evidence_node": storage_role,
+                "control_node": control_role,
             },
         }
         # Missing launchd labels are rendered in the DAEMON LOAD section,
@@ -1692,6 +1836,41 @@ if daemons_summary.get("missing") or daemons_summary.get("non_local_deferred"):
     )
     if _daemon_temporal.get("operator_treatment"):
         print(f"  read:              {_daemon_temporal.get('operator_treatment', '')}")
+    print()
+
+_node_roles = daemons_summary.get("node_roles", {}) if isinstance(daemons_summary.get("node_roles"), dict) else {}
+if _node_roles:
+    print("NODE DELIVERY")
+    print("-" * 72)
+    _exec = _node_roles.get("execution_host", {}) if isinstance(_node_roles.get("execution_host"), dict) else {}
+    _ver = _node_roles.get("verification_node", {}) if isinstance(_node_roles.get("verification_node"), dict) else {}
+    _store = _node_roles.get("storage_evidence_node", {}) if isinstance(_node_roles.get("storage_evidence_node"), dict) else {}
+    _control = _node_roles.get("control_node", {}) if isinstance(_node_roles.get("control_node"), dict) else {}
+    print(
+        "  execution_host:    "
+        f"{_exec.get('posture', 'unknown')} · "
+        f"active={int(_exec.get('active_workload_count', 0) or 0)} "
+        f"intended={int(_exec.get('intended_workload_count', 0) or 0)} "
+        f"parked={int(_exec.get('parked_workload_count', 0) or 0)}"
+    )
+    if _exec.get("target"):
+        print(f"    target:           {_exec.get('target', '')}")
+    print(
+        "  verification_node: "
+        f"{_ver.get('posture', 'unknown')} · "
+        f"intended={int(_ver.get('intended_workload_count', 0) or 0)}"
+    )
+    print(
+        "  storage_evidence:  "
+        f"{_store.get('posture', 'unknown')} · "
+        f"active={int(_store.get('active_workload_count', 0) or 0)} "
+        f"intended={int(_store.get('intended_workload_count', 0) or 0)}"
+    )
+    print(
+        "  control_node:      "
+        f"{_control.get('posture', 'unknown')} · "
+        f"{'promoted' if _control.get('promoted') else 'not promoted'}"
+    )
     print()
 
 # ── Communications Queue ──
