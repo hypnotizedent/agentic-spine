@@ -43,7 +43,7 @@ OPENCODE_MANAGED_MODEL_DEFAULTS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate managed provider-aware tool configs in the workbench repo.")
-    parser.add_argument("--tool", choices=["all", "codex", "opencode"], default="all")
+    parser.add_argument("--tool", choices=["all", "claude", "codex", "opencode"], default="all")
     parser.add_argument("--provider", help="Explicit provider override for single-tool sync")
     parser.add_argument(
         "--workbench-root",
@@ -115,7 +115,7 @@ def build_codex_config(contract: dict) -> str:
         '# Codex CLI Configuration',
         f'model = "{provider_model(contract, "codex_native", "codex")}"',
         'sandbox = "danger-full-access"',
-        'model_reasoning_effort = "xhigh"',
+        'model_reasoning_effort = "medium"',
         'personality = "pragmatic"',
         '',
         '[shell_environment_policy]',
@@ -127,8 +127,12 @@ def build_codex_config(contract: dict) -> str:
         '[notice.model_migrations]',
         '"gpt-5.1-codex-mini" = "gpt-5.2-codex"',
         '"gpt-5.2" = "gpt-5.2-codex"',
+        '"gpt-5.3-codex" = "gpt-5.4"',
         '',
         '[projects."/Users/ronnyworks"]',
+        'trust_level = "trusted"',
+        '',
+        '[projects."/Users/ronnyworks/code/agentic-spine"]',
         'trust_level = "trusted"',
         '',
         '# Native Codex account auth is the default path.',
@@ -138,6 +142,71 @@ def build_codex_config(contract: dict) -> str:
         '',
     ]
     return "\n".join(lines)
+
+
+def build_claude_configs(workbench_root: Path) -> tuple[str, str]:
+    spine_root = Path(__file__).resolve().parents[4]
+    desktop = {
+        "mcpServers": {
+            "spine": {
+                "command": str(spine_root / "bin/ops"),
+                "args": ["mcp", "serve"],
+            }
+        },
+        "preferences": {
+            "coworkScheduledTasksEnabled": True,
+            "ccdScheduledTasksEnabled": True,
+            "sidebarMode": "task",
+            "coworkWebSearchEnabled": False,
+            "coworkOnboardingResumeStep": None,
+            "chicagoEnabled": True,
+            "keepAwakeEnabled": True,
+            "localAgentModeTrustedFolders": [
+                str(spine_root),
+            ],
+        },
+    }
+    settings_local = {
+        "permissions": {
+            "allow": [
+                "Bash(ls:*)",
+                "Bash(cat:*)",
+                "Bash(rg:*)",
+                "Bash(find:*)",
+                "Bash(jq:*)",
+                "Bash(yq:*)",
+                "Bash(launchctl:*)",
+                "Bash(git status:*)",
+                "Bash(git add:*)",
+                "Bash(git commit:*)",
+                "Bash(git push:*)",
+                "Bash(brew list:*)",
+                "Bash(chmod:*)",
+                f"Bash({spine_root}/docs/brain/generate-context.sh)",
+                "Bash(./bin/ops verify:*)",
+                "Bash(./surfaces/verify/drift-gate.sh:*)",
+                f"Bash({spine_root}/surfaces/verify/d44-cli-tools-discovery-lock.sh)",
+                "Bash(./bin/ops cap list:*)",
+                "Bash(./bin/ops cap run:*)",
+                "Bash(mount:*)",
+                "Bash(rclone config:*)",
+                "Bash(rclone rc:*)",
+                "Bash(opencode --version:*)",
+                "Bash(opencode:*)",
+                "Bash(hs:*)",
+                "Bash(env:*)",
+                "Bash(log stream:*)",
+                "Bash(/tmp/test_hotkey.lua:*)",
+            ]
+        },
+        "enabledMcpjsonServers": [
+            "spine",
+        ],
+    }
+    return (
+        json.dumps(desktop, indent=2) + "\n",
+        json.dumps(settings_local, indent=2) + "\n",
+    )
 
 
 def opencode_catalog_models(contract: dict, provider_id: str) -> list[str]:
@@ -283,6 +352,15 @@ def main() -> int:
     contract = load_contract()
 
     changed: list[str] = []
+    if args.tool in {"all", "claude"}:
+        claude_desktop_text, claude_settings_local_text = build_claude_configs(workbench_root)
+        claude_desktop_path = workbench_root / "dotfiles/claude/claude_desktop_config.json"
+        claude_settings_local_path = workbench_root / "dotfiles/claude/settings.local.json"
+        if write_if_changed(claude_desktop_path, claude_desktop_text):
+            changed.append(str(claude_desktop_path))
+        if write_if_changed(claude_settings_local_path, claude_settings_local_text):
+            changed.append(str(claude_settings_local_path))
+
     if args.tool in {"all", "codex"}:
         codex_text = build_codex_config(contract)
         codex_path = workbench_root / "dotfiles/codex/config.toml"

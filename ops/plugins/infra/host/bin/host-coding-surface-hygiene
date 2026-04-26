@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+CLAUDE_STATE="$HOME/.claude.json"
+CODEX_LOG_DB="$HOME/.codex/logs_2.sqlite"
+CODEX_LOG="$HOME/.codex/log/codex-tui.log"
+CODEX_PLUGIN_ROOT="$HOME/.codex/.tmp/plugins/plugins"
+ARCHIVE_ROOT="$HOME/.archive/tool-history"
+HYGIENE_RECONCILE="$ROOT/ops/plugins/core/lifecycle/bin/operator-hygiene-reconcile"
+
+is_open_file() {
+  local path="${1:-}"
+  [[ -n "$path" && -e "$path" ]] || return 1
+  command -v lsof >/dev/null 2>&1 || return 1
+  lsof "$path" >/dev/null 2>&1
+}
+
+normalize_claude_runtime_state() {
+  if [[ ! -f "$CLAUDE_STATE" ]]; then
+    echo "SKIP claude runtime state missing: $CLAUDE_STATE"
+    return 0
+  fi
+
+  python3 - "$CLAUDE_STATE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+changed = False
+
+servers = data.get("mcpServers")
+if isinstance(servers, dict) and "MCP_DOCKER" in servers:
+    servers.pop("MCP_DOCKER", None)
+    changed = True
+
+projects = data.get("projects")
+if isinstance(projects, dict):
+    for key in (
+        "/Users/ronnyworks/code/agentic-spine",
+        "/Users/ronnyworks/Code/agentic-spine",
+    ):
+        project = projects.get(key)
+        if not isinstance(project, dict):
+            continue
+        if project.get("enabledMcpjsonServers") != ["spine"]:
+            project["enabledMcpjsonServers"] = ["spine"]
+            changed = True
+        if project.get("disabledMcpjsonServers") != []:
+            project["disabledMcpjsonServers"] = []
+            changed = True
+        if project.get("mcpServers") != {}:
+            project["mcpServers"] = {}
+            changed = True
+
+if changed:
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print(f"UPDATED {path}")
+else:
+    print(f"UNCHANGED {path}")
+PY
+}
+
+run_operator_hygiene() {
+  if [[ ! -x "$HYGIENE_RECONCILE" ]]; then
+    echo "SKIP operator hygiene reconcile missing: $HYGIENE_RECONCILE"
+    return 0
+  fi
+
+  python3 "$HYGIENE_RECONCILE" \
+    --execute \
+    --brief \
+    --id claude.projects.retention \
+    --id codex.sessions.retention \
+    --id codex.log.retention
+}
+
+rotate_malformed_codex_log_db() {
+  if [[ ! -f "$CODEX_LOG_DB" ]]; then
+    echo "SKIP codex log db missing: $CODEX_LOG_DB"
+    return 0
+  fi
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    echo "SKIP sqlite3 unavailable; cannot verify $CODEX_LOG_DB"
+    return 0
+  fi
+
+  local integrity=""
+  integrity="$(sqlite3 "$CODEX_LOG_DB" 'pragma integrity_check;' 2>&1 || true)"
+  if [[ "$integrity" == "ok" ]]; then
+    echo "OK codex log db integrity: $CODEX_LOG_DB"
+    return 0
+  fi
+
+  if is_open_file "$CODEX_LOG_DB"; then
+    echo "SKIP malformed codex log db still open: $CODEX_LOG_DB"
+    return 0
+  fi
+
+  local backup="${CODEX_LOG_DB}.corrupt.${TS}"
+  mv "$CODEX_LOG_DB" "$backup"
+  echo "ROTATED malformed codex log db -> $backup"
+}
+
+normalize_codex_plugin_manifests() {
+  if [[ ! -d "$CODEX_PLUGIN_ROOT" ]]; then
+    echo "SKIP codex plugin cache missing: $CODEX_PLUGIN_ROOT"
+    return 0
+  fi
+
+  python3 - "$CODEX_PLUGIN_ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+changed: list[str] = []
+
+for path in sorted(root.glob("*/.codex-plugin/plugin.json")):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    interface = data.get("interface")
+    if not isinstance(interface, dict):
+        continue
+    default_prompt = interface.get("defaultPrompt")
+    touched = False
+    if isinstance(default_prompt, str) and len(default_prompt) > 128:
+        interface["defaultPrompt"] = default_prompt[:125].rstrip() + "..."
+        touched = True
+    elif isinstance(default_prompt, list) and len(default_prompt) > 3:
+        interface["defaultPrompt"] = default_prompt[:3]
+        touched = True
+    if touched:
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        changed.append(str(path))
+
+if changed:
+    print("NORMALIZED codex plugin manifests:")
+    for item in changed:
+        print(f"  - {item}")
+else:
+    print("UNCHANGED codex plugin manifests")
+PY
+}
+
+rotate_codex_log_if_safe() {
+  if [[ ! -f "$CODEX_LOG" ]]; then
+    echo "SKIP codex log missing: $CODEX_LOG"
+    return 0
+  fi
+
+  local size_bytes=0
+  size_bytes="$(stat -f '%z' "$CODEX_LOG" 2>/dev/null || echo 0)"
+  if [[ "$size_bytes" -lt 33554432 ]]; then
+    echo "OK codex log below rotation threshold: ${size_bytes} bytes"
+    return 0
+  fi
+
+  if is_open_file "$CODEX_LOG"; then
+    echo "SKIP codex log rotation while file is open: $CODEX_LOG"
+    return 0
+  fi
+
+  local archive_dir="$ARCHIVE_ROOT/codex-log"
+  mkdir -p "$archive_dir"
+  local archive_path="$archive_dir/codex-tui-${TS}.log"
+  mv "$CODEX_LOG" "$archive_path"
+  echo "ROTATED codex log -> $archive_path"
+}
+
+echo "=== host.coding_surface.hygiene ==="
+normalize_claude_runtime_state
+run_operator_hygiene
+rotate_malformed_codex_log_db
+normalize_codex_plugin_manifests
+rotate_codex_log_if_safe
+echo "DONE: host coding surface hygiene"
