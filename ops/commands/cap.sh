@@ -97,6 +97,32 @@ cap_safety_requires_mutation_policy() {
     esac
 }
 
+# Detect a pending delegation with wave_kind_intent=proof.
+# Returns 0 and sets CAP_PROOF_DELEGATION_ID if one exists.
+pending_proof_delegation() {
+    local spine_state="${SPINE_STATE:-}"
+    [[ -n "$spine_state" ]] || return 1
+    local del_dir="${spine_state}/delegations"
+    [[ -d "$del_dir" ]] || return 1
+
+    local del_file del_state wk_intent del_id
+    for del_file in "$del_dir"/DEL-*.yaml; do
+        [[ -f "$del_file" ]] || continue
+        del_state="$(python3 -c "
+import yaml,sys
+d=yaml.safe_load(open(sys.argv[1]))
+print(d.get('delegation_state',''), d.get('wave_kind_intent',''), d.get('delegation_id',''))
+" "$del_file" 2>/dev/null || true)"
+        IFS=' ' read -r ds wki did <<< "$del_state"
+        [[ "$wki" == "proof" ]] || continue
+        [[ "$ds" == "delegated" || "$ds" == "executing" ]] || continue
+        [[ -n "$did" ]] || continue
+        CAP_PROOF_DELEGATION_ID="$did"
+        return 0
+    done
+    return 1
+}
+
 # Detect an active proof wave in the runtime state directory.
 # Returns 0 and sets CAP_PROOF_WAVE_ID if a proof wave is active.
 active_proof_wave_id() {
@@ -229,13 +255,20 @@ evaluate_role_policy() {
         return 0
     fi
 
-    # Proof-wave auto-override: when a proof wave is active, worker-custody
-    # capabilities are allowed from read-only roles without manual override envs.
-    # This is bounded to wave_kind=proof and logged in the capability receipt.
+    # Proof auto-override: when a proof wave is active OR a pending delegation
+    # declares proof intent, worker-custody capabilities are allowed from
+    # read-only roles without manual override envs. Bounded to proof lifecycle
+    # and logged in the capability receipt.
     if active_proof_wave_id; then
         CAP_ROLE_POLICY_OVERRIDE_USED="true"
         CAP_ROLE_POLICY_OVERRIDE_REF="proof-wave:${CAP_PROOF_WAVE_ID}"
         CAP_ROLE_POLICY_OVERRIDE_REASON="auto-override: active proof wave permits worker-custody capabilities"
+        return 0
+    fi
+    if pending_proof_delegation; then
+        CAP_ROLE_POLICY_OVERRIDE_USED="true"
+        CAP_ROLE_POLICY_OVERRIDE_REF="proof-delegation:${CAP_PROOF_DELEGATION_ID}"
+        CAP_ROLE_POLICY_OVERRIDE_REASON="auto-override: pending proof-intended delegation permits pre-wave worker-custody capabilities"
         return 0
     fi
 
@@ -406,6 +439,38 @@ resolve_lane_type_for_telemetry() {
     printf 'managed_worktree_or_branch\n'
 }
 
+loop_id_is_live_for_custody() {
+    local loop_id="${1:-}"
+    [[ -n "$loop_id" ]] || return 1
+
+    python3 - "$SPINE_STATE" "$loop_id" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+state_root = Path(sys.argv[1])
+loop_id = sys.argv[2]
+db_path = state_root / "shared_authority.db"
+if not db_path.is_file():
+    raise SystemExit(1)
+
+conn = sqlite3.connect(str(db_path))
+try:
+    row = conn.execute(
+        "SELECT status FROM loops WHERE loop_id = ?",
+        (loop_id,),
+    ).fetchone()
+finally:
+    conn.close()
+
+if not row:
+    raise SystemExit(1)
+
+status = str(row[0] or "").strip().lower()
+raise SystemExit(0 if status in {"active", "draft", "open"} else 1)
+PY
+}
+
 write_terminal_custody_heartbeat() {
     local terminal_id="${1:-}"
     [[ -n "$terminal_id" ]] || return 0
@@ -432,6 +497,9 @@ write_terminal_custody_heartbeat() {
     [[ -n "$terminal_type" && "$terminal_type" != "null" ]] || terminal_type="unknown"
     if [[ -z "$loop_id" && "${OPS_WORKTREE_IDENTITY:-}" == LOOP-* ]]; then
         loop_id="${OPS_WORKTREE_IDENTITY:-}"
+    fi
+    if [[ -n "$loop_id" ]] && ! loop_id_is_live_for_custody "$loop_id"; then
+        loop_id=""
     fi
 
     if [[ -f "$heartbeat_file" ]]; then

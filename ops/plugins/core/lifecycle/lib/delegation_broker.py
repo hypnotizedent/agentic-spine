@@ -289,6 +289,7 @@ def delegate(
     objective: str = "",
     target_role: str = "worker",
     delegator_terminal: str = "",
+    wave_kind_intent: str = "",
 ) -> dict[str, Any]:
     """Create a delegation from control surface to worker execution.
 
@@ -364,6 +365,8 @@ def delegate(
         "disposition": None,
         "completed_at_utc": None,
     }
+    if wave_kind_intent:
+        delegation_data["wave_kind_intent"] = wave_kind_intent
 
     del_path = str(del_dir / f"{delegation_id}.yaml")
     _atomic_write(del_path, delegation_data)
