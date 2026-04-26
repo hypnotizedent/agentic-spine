@@ -60,7 +60,22 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def resolve_targets() -> tuple[str, str, str, str, str]:
+def resolve_machine_identity(proxy: dict[str, Any], defaults: dict[str, Any]) -> Path | None:
+    origin = str(proxy.get("machine_auth_origin") or defaults.get("machine_auth_origin") or "explicit").strip()
+    if origin == "ambient":
+        return None
+
+    identity_raw = str(proxy.get("machine_identity_file") or defaults.get("machine_identity_file") or "").strip()
+    if not identity_raw:
+        fail("STOP (2): explicit machine identity required but machine_identity_file is missing in ssh.targets.yaml", 2)
+
+    identity_path = expand(identity_raw)
+    if not identity_path.is_file():
+        fail(f"STOP (2): governed machine identity missing: {identity_path}", 2)
+    return identity_path
+
+
+def resolve_targets() -> tuple[str, str, str, str, str, str, Path | None]:
     payload = load_yaml(SSH_BINDING)
     ssh_cfg = payload.get("ssh", {}) if isinstance(payload, dict) else {}
     targets = ssh_cfg.get("targets", []) if isinstance(ssh_cfg, dict) else []
@@ -75,12 +90,13 @@ def resolve_targets() -> tuple[str, str, str, str, str]:
     strict = str(defaults.get("strict_host_key_checking", "no") or "no").strip()
     known_hosts = str(defaults.get("user_known_hosts_file", "/dev/null") or "/dev/null").strip()
     timeout = str(defaults.get("connect_timeout_sec", 5) or 5).strip()
+    identity_path = resolve_machine_identity(proxy, defaults)
 
     if not udr_host:
         fail("STOP (2): udr-home not found in ssh.targets.yaml", 2)
     if not proxy_host:
         fail("STOP (2): proxmox-home not found in ssh.targets.yaml", 2)
-    return udr_host, proxy_host, proxy_user, strict, known_hosts, timeout
+    return udr_host, proxy_host, proxy_user, strict, known_hosts, timeout, identity_path
 
 
 def resolve_api_key() -> str:
@@ -106,7 +122,7 @@ def resolve_api_key() -> str:
 
 
 def query_clients(site: str) -> dict[str, Any]:
-    udr_host, proxy_host, proxy_user, strict, known_hosts, timeout = resolve_targets()
+    udr_host, proxy_host, proxy_user, strict, known_hosts, timeout, identity_path = resolve_targets()
     api_key = resolve_api_key()
     ssh_args = [
         "ssh",
@@ -123,6 +139,8 @@ def query_clients(site: str) -> dict[str, Any]:
         f"{proxy_user}@{proxy_host}",
         "bash -s",
     ]
+    if identity_path is not None:
+        ssh_args[1:1] = ["-i", str(identity_path), "-o", "IdentitiesOnly=yes"]
     script = (
         f"curl -sk \"https://{udr_host}/proxy/network/api/s/{site}/stat/sta\" "
         f"-H \"X-API-KEY: {api_key}\" "
