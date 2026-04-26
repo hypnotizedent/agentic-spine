@@ -187,6 +187,123 @@ except Exception:
     unset _STATE_ROOT
 fi
 
+resolve_loop_workspace_for_repo() {
+    local loop_id="${1:-}"
+    local repo_root="${2:-}"
+    local runtime_root="${SPINE_RUNTIME_ROOT:-}"
+    [[ -n "$loop_id" && -n "$repo_root" && -n "$runtime_root" ]] || return 0
+
+    python3 - "$runtime_root" "$loop_id" "$repo_root" <<'PY'
+import json, os, pathlib, subprocess, sys
+
+runtime_root = pathlib.Path(sys.argv[1])
+loop_id = sys.argv[2]
+repo_root = os.path.realpath(sys.argv[3])
+waves_dir = runtime_root / "waves"
+if not waves_dir.is_dir():
+    sys.exit(0)
+
+def git_common_dir(repo_path: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo_path, "rev-parse", "--git-common-dir"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return ""
+    value = proc.stdout.strip()
+    if not value:
+        return ""
+    if not os.path.isabs(value):
+        value = os.path.join(repo_path, value)
+    return os.path.realpath(value)
+
+repo_identity = git_common_dir(repo_root)
+if not repo_identity:
+    sys.exit(0)
+
+candidates = []
+for state_path in sorted(waves_dir.glob("WAVE-*/state.json")):
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    if not isinstance(state, dict):
+        continue
+    status = str(state.get("status") or "").strip().lower()
+    if status in {"", "closed", "superseded"}:
+        continue
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+    workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
+    wave_loop_id = str(state.get("loop_id") or packet.get("loop_id") or "").strip()
+    if wave_loop_id != loop_id:
+        continue
+    workspace_path = str(workspace.get("worktree") or "").strip()
+    workspace_repo = str(workspace.get("repo") or "").strip()
+    workspace_branch = str(workspace.get("branch") or "").strip()
+    lifecycle_state = str(workspace.get("lifecycle_state") or "").strip().lower()
+    if not workspace_path or lifecycle_state == "cleaned":
+        continue
+    if not workspace_repo:
+        continue
+    workspace_identity = git_common_dir(workspace_repo)
+    if not workspace_identity or workspace_identity != repo_identity:
+        continue
+    if not os.path.isdir(workspace_path):
+        continue
+    candidates.append(
+        {
+            "wave_id": str(state.get("wave_id") or state_path.parent.name).strip(),
+            "worktree": workspace_path,
+            "branch": workspace_branch,
+        }
+    )
+
+unique = {}
+for candidate in candidates:
+    unique[(candidate["wave_id"], candidate["worktree"], candidate["branch"])] = candidate
+candidates = list(unique.values())
+
+if len(candidates) == 1:
+    candidate = candidates[0]
+    print("ok")
+    print(candidate["worktree"])
+    print(candidate["wave_id"])
+    print(candidate["branch"])
+elif len(candidates) > 1:
+    print("ambiguous")
+    for candidate in candidates:
+        print(f'{candidate["wave_id"]}|{candidate["worktree"]}|{candidate["branch"]}')
+else:
+    print("missing")
+PY
+}
+
+LAUNCH_CWD="$SPINE_ROOT"
+LAUNCH_WAVE_ID=""
+LAUNCH_BRANCH=""
+if [[ "$TOOL" != "verify" && -n "$LOOP_ID" ]]; then
+    mapfile -t _WORKTREE_RESOLUTION < <(resolve_loop_workspace_for_repo "$LOOP_ID" "$SPINE_ROOT" || true)
+    _resolution_status="${_WORKTREE_RESOLUTION[0]:-}"
+    case "$_resolution_status" in
+        ok)
+            LAUNCH_CWD="${_WORKTREE_RESOLUTION[1]:-$SPINE_ROOT}"
+            LAUNCH_WAVE_ID="${_WORKTREE_RESOLUTION[2]:-}"
+            LAUNCH_BRANCH="${_WORKTREE_RESOLUTION[3]:-}"
+            ;;
+        ambiguous)
+            fail "loop '$LOOP_ID' has multiple active governed worktrees for this repo; launch from the intended wave worktree explicitly"
+            ;;
+        missing)
+            fail "loop '$LOOP_ID' has no active governed worktree for this repo; start or rehydrate a wave worktree before launching a mutating terminal"
+            ;;
+        *)
+            ;;
+    esac
+fi
+
 # ── Build the in-terminal command ────────────────────────────────────────
 build_entry_cmd() {
     local tool="$1"
@@ -194,10 +311,12 @@ build_entry_cmd() {
     local runtime_role="${3:-researcher}"
     local loop_id="${4:-}"
     local posture_exports="${5:-}"
-    local spine="$SPINE_ROOT"
+    local launch_cwd="${6:-$SPINE_ROOT}"
+    local launch_wave_id="${7:-}"
+    local launch_branch="${8:-}"
     local parts=()
 
-    parts+=("cd $(printf '%q' "$spine")")
+    parts+=("cd $(printf '%q' "$launch_cwd")")
 
     # Unset stale old-model env and inherited loop identity so birth state is explicit.
     parts+=("unset SPINE_ENTRY_PACKET_PATH SPINE_ENTRY_PACKET_HASH SPINE_POLICY_PRESET SPINE_TERMINAL_NAME SPINE_LOOP_ID OPS_WORKTREE_IDENTITY 2>/dev/null; true")
@@ -230,6 +349,15 @@ POSTURE_EOF
         parts+=("export OPS_WORKTREE_IDENTITY=$(printf '%q' "$loop_id")")
         parts+=("export SPINE_LOOP_HEARTBEAT_FILE=$(printf '%q' "$SPINE_STATE/loop-heartbeats/${loop_id}.yaml")")
     fi
+    if [[ -n "$launch_wave_id" ]]; then
+        parts+=("export SPINE_ACTIVE_WAVE_ID=$(printf '%q' "$launch_wave_id")")
+    fi
+    if [[ -n "$launch_branch" ]]; then
+        parts+=("export SPINE_TARGET_BRANCH=$(printf '%q' "$launch_branch")")
+    fi
+    if [[ "$launch_cwd" != "$SPINE_ROOT" ]]; then
+        parts+=("export SPINE_WORKTREE=$(printf '%q' "$launch_cwd")")
+    fi
 
     # Session attach at terminal birth (best-effort, never blocks)
     parts+=("{ ./bin/ops cap run session.v3.attach || true; }")
@@ -255,7 +383,7 @@ if command -v session_posture_emit_env >/dev/null 2>&1; then
     POSTURE_EXPORTS="$(session_posture_emit_env)"
 fi
 
-ENTRY_CMD="$(build_entry_cmd "$TOOL" "$TERMINAL_NAME" "$RUNTIME_ROLE" "$LOOP_ID" "$POSTURE_EXPORTS")"
+ENTRY_CMD="$(build_entry_cmd "$TOOL" "$TERMINAL_NAME" "$RUNTIME_ROLE" "$LOOP_ID" "$POSTURE_EXPORTS" "$LAUNCH_CWD" "$LAUNCH_WAVE_ID" "$LAUNCH_BRANCH")"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "# Terminal: ${TERMINAL_NAME:-ad-hoc}"
@@ -263,6 +391,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "# Node type: ${__SP_NODE_TYPE:-unknown}"
     echo "# Session posture: ${__SP_POSTURE:-unknown} (source: ${__SP_SOURCE:-unknown})"
     [[ -z "$LOOP_ID" ]] || echo "# Loop: $LOOP_ID"
+    echo "# Launch cwd: $LAUNCH_CWD"
+    [[ -z "$LAUNCH_WAVE_ID" ]] || echo "# Launch wave: $LAUNCH_WAVE_ID"
+    [[ -z "$LAUNCH_BRANCH" ]] || echo "# Launch branch: $LAUNCH_BRANCH"
     echo "$ENTRY_CMD"
     exit 0
 fi
