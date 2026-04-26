@@ -544,10 +544,18 @@ terminal_telemetry = collect_terminal_telemetry()
 fresh_terminals = [row for row in terminal_telemetry if row.get("liveness_fresh")]
 fresh_custody_terminals = [row for row in terminal_telemetry if row.get("custody_fresh")]
 fresh_custody_by_loop = {}
+live_open_loop_ids = {
+    str(loop.get("loop_id") or "").strip()
+    for loop in open_loops
+    if str(loop.get("loop_id") or "").strip()
+}
+fresh_custody_live_claims = 0
 for row in fresh_custody_terminals:
     loop_id = str(row.get("loop_id") or "").strip()
     if not loop_id:
         continue
+    if loop_id in live_open_loop_ids:
+        fresh_custody_live_claims += 1
     existing = fresh_custody_by_loop.get(loop_id)
     existing_ts = str(existing.get("custody_heartbeat_at") or "") if existing else ""
     current_ts = str(row.get("custody_heartbeat_at") or "")
@@ -594,7 +602,9 @@ for loop in open_loops:
 mapped_open_loops = sum(1 for loop in open_loops if loop.get("loop_custody_fresh"))
 unmapped_open_loops = sum(1 for loop in open_loops if not loop.get("loop_custody_fresh"))
 terminal_telemetry_status = "ok"
-if open_loops and fresh_terminals and mapped_open_loops == 0:
+if open_loops and mapped_open_loops == 0 and fresh_custody_live_claims == 0:
+    terminal_telemetry_status = "unattended"
+elif open_loops and fresh_terminals and mapped_open_loops == 0:
     terminal_telemetry_status = "degraded"
 elif open_loops and fresh_custody_terminals and mapped_open_loops == 0:
     terminal_telemetry_status = "stale"
@@ -607,6 +617,7 @@ terminal_telemetry_summary = {
     "fresh_terminals": len(fresh_terminals),
     "fresh_custody_terminals": len(fresh_custody_terminals),
     "observed_terminals": len(terminal_telemetry),
+    "fresh_custody_live_claims": fresh_custody_live_claims,
     "mapped_open_loops": mapped_open_loops,
     "unmapped_open_loops": unmapped_open_loops,
     "terminals": terminal_telemetry,
@@ -1043,6 +1054,13 @@ if terminal_telemetry_status == "degraded":
         f" {len(fresh_terminals)} fresh terminal heartbeat(s),"
         f" {len(fresh_custody_terminals)} fresh custody record(s),"
         f" 0/{len(open_loops)} open loops mapped"
+    )
+elif terminal_telemetry_status == "unattended":
+    anomalies.append(
+        "LOOP CUSTODY UNATTENDED:"
+        f" {len(open_loops)} open loop(s),"
+        f" {len(fresh_terminals)} fresh terminal heartbeat(s),"
+        " no fresh custody claim for a live open loop"
     )
 
 # Check background loop heartbeat freshness
