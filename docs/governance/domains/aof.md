@@ -1,21 +1,20 @@
 # aof
 
-Canonical domain policy for `aof`.
+Canonical fabric grouping for `aof`.
 
 - Authority: `docs/governance/SPINE.md`
 - Runtime contracts: `ops/bindings/domains/aof.bundle.yaml`
-- Verify entrypoint: `./bin/ops cap run verify.run -- domain aof`
+- Verification posture: `./bin/ops cap run spine.verify`
 
 ## Governed Capability Membership
 
-- Total governed capabilities with `domain: aof`: `25`
-- All `25` are `plane: fabric` capabilities
-- `0` are `plane: domain_external` capabilities
-- The catalog view shows only `domain_external` capabilities; all `25` fabric capabilities are engine-internal
+- `aof` is not a live runtime verify domain
+- Current fabric surfaces in this grouping are carried by `tenant.*`, `policy.*`, `version.*`, `surface.*`, `evidence.*`, and `receipts.*`
+- `0` domain-external capabilities currently map to `aof`
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog
 Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 
-_No domain-external capabilities currently map to `aof`._
+_No domain-external capabilities map to `aof`; use the grouped fabric surfaces above._
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->

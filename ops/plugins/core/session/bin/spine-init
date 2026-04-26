@@ -63,32 +63,108 @@ need_file() {
   }
 }
 
-resolve_capability_script_path() {
-  local capability_id="$1"
-  local fallback_rel="$2"
-  local script_rel=""
-  if [[ -f "$ROOT/ops/capabilities.yaml" ]]; then
-    script_rel="$(
-      awk -v cap="$capability_id" '
-        $0 == "  " cap ":" { in_cap=1; next }
-        in_cap && $0 ~ /^  [^[:space:]][^:]*:/ { exit }
-        in_cap && $1 == "script_path:" { print $2; exit }
-      ' "$ROOT/ops/capabilities.yaml"
-    )"
+file_mtime() {
+  local path="$1"
+  stat -f %m "$path" 2>/dev/null || stat -c %Y "$path" 2>/dev/null || echo 0
+}
+
+validate_environment_identity() {
+  local env_file="$1"
+  local identity_file="$2"
+
+  yq e '.' "$env_file" >/dev/null 2>&1 || return 1
+  local version
+  version="$(yq -r '.version // ""' "$env_file")"
+  [[ "$version" == "1.0" ]] || return 1
+
+  local name
+  name="$(yq -r '.environment.name // ""' "$env_file")"
+  [[ "$name" =~ ^[a-z0-9-]+$ ]] || return 1
+
+  local tier
+  tier="$(yq -r '.environment.tier // ""' "$env_file")"
+  case "$tier" in
+    production|product|lab|minimal|ephemeral) ;;
+    *) return 1 ;;
+  esac
+
+  if [[ -f "$identity_file" ]]; then
+    yq e '.' "$identity_file" >/dev/null 2>&1 || return 1
+    local node_id
+    node_id="$(yq -r '.identity.node_id // ""' "$identity_file")"
+    [[ "$node_id" =~ ^[a-z0-9-]+$ ]] || return 1
   fi
-  [[ -n "$script_rel" && "$script_rel" != "null" ]] || script_rel="$fallback_rel"
-  script_rel="${script_rel#./}"
-  printf '%s\n' "$ROOT/$script_rel"
+}
+
+bootstrap_environment_identity() {
+  local env_name="$1"
+  local profile="$2"
+  local target_dir="$3"
+  local env_file="$target_dir/.environment.yaml"
+  local identity_file="$target_dir/.identity.yaml"
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local node_id
+  node_id="$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' || true)"
+  [[ -n "$node_id" ]] || node_id="node-unknown"
+  local spine_version
+  spine_version="${SPINE_VERSION:-v1.0.0}"
+
+  mkdir -p "$target_dir"
+
+  cat > "$env_file" <<EOF
+version: "1.0"
+environment:
+  name: "$env_name"
+  tier: $profile
+  deployed_at: "$now"
+identity:
+  org: ""
+  role: $profile
+  contact: ""
+contracts:
+  preflight:
+    - read_environment_contract
+    - verify_identity
+    - check_drift_gates
+  restricted:
+    - delete_receipts
+    - modify_authority_index
+    - change_environment_tier
+    - register_new_host
+  allowed:
+    - container_deploy
+    - runner_task
+    - receipt_write
+    - log_append
+    - code_change
+    - test_run
+declared_services: []
+drift_gates:
+  scope: environment
+  categories:
+    - identity
+    - receipts
+    - spine_core
+  fail_action: block
+EOF
+
+  cat > "$identity_file" <<EOF
+version: "1.0"
+identity:
+  node_id: $node_id
+  deployed_at: "$now"
+  spine_version: $spine_version
+  org: ""
+  role: standalone
+  environment: $env_name
+EOF
 }
 
 need_tool jq
 need_tool yq
 need_file "$BOOTSTRAP_CONTRACT"
 need_file "$TENANT_PROFILE"
-
-BOOTSTRAP_SCRIPT="$(resolve_capability_script_path "aof.bootstrap" "./ops/plugins/core/kernel/aof/bin/bootstrap-spine.sh")"
-VALIDATE_SCRIPT="$(resolve_capability_script_path "aof.validate" "./ops/plugins/core/kernel/aof/bin/validate-environment.sh")"
-CONTRACT_SCRIPT="$(resolve_capability_script_path "aof.contract.status" "./ops/plugins/core/kernel/aof/bin/contract-read-check.sh")"
 
 cd "$ROOT"
 
@@ -121,24 +197,12 @@ else
 fi
 
 if [[ "$DRY_RUN" -eq 0 && "$bootstrap_action" != "reuse_existing" ]]; then
-  cmd=(
-    "$BOOTSTRAP_SCRIPT"
-    --environment-name "$ENV_NAME"
-    --profile "$PROFILE"
-    --target "$ROOT"
-  )
-  if [[ "$FORCE" -eq 1 ]]; then
-    cmd+=(--force)
-  fi
-  "${cmd[@]}"
+  bootstrap_environment_identity "$ENV_NAME" "$PROFILE" "$ROOT"
 fi
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
-  "$ROOT/ops/plugins/core/tenant/bin/tenant-profile-validate" --profile "$TENANT_PROFILE" >/dev/null
-  "$VALIDATE_SCRIPT" \
-    --environment-file "$ENV_FILE" \
-    --identity-file "$IDENTITY_FILE" \
-    >/dev/null
+  "$ROOT/ops/plugins/core/authority/bin/tenant-profile-validate" --profile "$TENANT_PROFILE" >/dev/null
+  validate_environment_identity "$ENV_FILE" "$IDENTITY_FILE" >/dev/null
 fi
 
 ack_state="skipped"
@@ -154,7 +218,8 @@ elif [[ "$DRY_RUN" -eq 1 ]]; then
 elif [[ -f "$today_marker" ]]; then
   ack_state="current"
 else
-  "$CONTRACT_SCRIPT" --ack >/dev/null
+  mkdir -p "$(dirname "$today_marker")"
+  touch "$today_marker"
   ack_state="acknowledged"
 fi
 

@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 BOOTSTRAP_CONTRACT="$ROOT/ops/bindings/runtime.bootstrap.contract.yaml"
 PATH_BASELINE="$ROOT/ops/bindings/runtime.path.inventory.baseline.yaml"
 TENANT_PROFILE="$ROOT/ops/bindings/tenant.profile.yaml"
@@ -23,7 +25,7 @@ Checks:
   - required tools and canonical bootstrap contracts
   - tenant profile validation
   - environment/identity validation when present
-  - AOF contract acknowledgement state
+  - bootstrap contract acknowledgement state
   - optional fast verify execution
 EOF
 }
@@ -67,22 +69,37 @@ check_file() {
   fi
 }
 
-resolve_capability_script_path() {
-  local capability_id="$1"
-  local fallback_rel="$2"
-  local script_rel=""
-  if [[ -f "$ROOT/ops/capabilities.yaml" ]]; then
-    script_rel="$(
-      awk -v cap="$capability_id" '
-        $0 == "  " cap ":" { in_cap=1; next }
-        in_cap && $0 ~ /^  [^[:space:]][^:]*:/ { exit }
-        in_cap && $1 == "script_path:" { print $2; exit }
-      ' "$ROOT/ops/capabilities.yaml"
-    )"
+file_mtime() {
+  local path="$1"
+  stat -f %m "$path" 2>/dev/null || stat -c %Y "$path" 2>/dev/null || echo 0
+}
+
+validate_environment_identity() {
+  local env_file="$1"
+  local identity_file="$2"
+
+  yq e '.' "$env_file" >/dev/null 2>&1 || return 1
+  local version
+  version="$(yq -r '.version // ""' "$env_file")"
+  [[ "$version" == "1.0" ]] || return 1
+
+  local name
+  name="$(yq -r '.environment.name // ""' "$env_file")"
+  [[ "$name" =~ ^[a-z0-9-]+$ ]] || return 1
+
+  local tier
+  tier="$(yq -r '.environment.tier // ""' "$env_file")"
+  case "$tier" in
+    production|product|lab|minimal|ephemeral) ;;
+    *) return 1 ;;
+  esac
+
+  if [[ -f "$identity_file" ]]; then
+    yq e '.' "$identity_file" >/dev/null 2>&1 || return 1
+    local node_id
+    node_id="$(yq -r '.identity.node_id // ""' "$identity_file")"
+    [[ "$node_id" =~ ^[a-z0-9-]+$ ]] || return 1
   fi
-  [[ -n "$script_rel" && "$script_rel" != "null" ]] || script_rel="$fallback_rel"
-  script_rel="${script_rel#./}"
-  printf '%s\n' "$ROOT/$script_rel"
 }
 
 if [[ "$JSON_MODE" -eq 0 ]]; then
@@ -102,9 +119,6 @@ check_file "$BOOTSTRAP_CONTRACT"
 check_file "$PATH_BASELINE"
 check_file "$TENANT_PROFILE"
 check_file "$TENANT_SCHEMA"
-
-VALIDATE_SCRIPT="$(resolve_capability_script_path "aof.validate" "./ops/plugins/core/kernel/aof/bin/validate-environment.sh")"
-CONTRACT_SCRIPT="$(resolve_capability_script_path "aof.contract.status" "./ops/plugins/core/kernel/aof/bin/contract-read-check.sh")"
 
 tenant_status="fail"
 if [[ -f "$TENANT_PROFILE" && -f "$TENANT_SCHEMA" ]]; then
@@ -126,9 +140,7 @@ fi
 
 env_status="missing"
 if [[ -f "$ENV_FILE" && -f "$IDENTITY_FILE" ]]; then
-  if "$VALIDATE_SCRIPT" \
-      --environment-file "$ENV_FILE" \
-      --identity-file "$IDENTITY_FILE" >/dev/null 2>&1; then
+  if validate_environment_identity "$ENV_FILE" "$IDENTITY_FILE" >/dev/null 2>&1; then
     env_status="ok"
     ok "environment + identity validation passed"
   else
@@ -145,12 +157,22 @@ fi
 
 ack_state="unknown"
 if [[ -f "$ENV_FILE" ]]; then
-  ack_output="$("$CONTRACT_SCRIPT" --status --contract-file "$ENV_FILE" 2>/dev/null || true)"
-  ack_state="$(printf '%s\n' "$ack_output" | awk -F': *' '/marker_state/ {print $2}' | tail -1)"
-  ack_state="${ack_state:-unknown}"
+  ack_marker="$(spine_contract_ack_file)"
+  contract_mtime="$(file_mtime "$ENV_FILE")"
+  marker_mtime=0
+  if [[ -f "$ack_marker" ]]; then
+    marker_mtime="$(file_mtime "$ack_marker")"
+    if [[ "$marker_mtime" -ge "$contract_mtime" ]]; then
+      ack_state="current"
+    else
+      ack_state="stale"
+    fi
+  else
+    ack_state="missing"
+  fi
   case "$ack_state" in
     current) ok "contract acknowledgment: current" ;;
-    stale|missing) warn "contract acknowledgment: $ack_state (run aof.contract.acknowledge)" ;;
+    stale|missing) warn "contract acknowledgment: $ack_state (run spine.init without --skip-ack)" ;;
     *) warn "contract acknowledgment status unavailable" ;;
   esac
 fi
