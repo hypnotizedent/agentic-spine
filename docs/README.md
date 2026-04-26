@@ -23,7 +23,8 @@ Minimal landing page for live docs after the lean reset.
 
 ## Domain Docs
 
-Domain authority is one file per domain under [`docs/governance/domains/`](governance/domains/).
+Domain docs under [`docs/governance/domains/`](governance/domains/) are
+supporting, domain-specific reference. They are not L1 entry doctrine.
 Keep additions there instead of creating new governance roots.
 
 ## Supporting Surfaces
@@ -36,7 +37,7 @@ Keep additions there instead of creating new governance roots.
 - `docs/core/` - core contracts and state summaries
 - `docs/contracts/` - stable human-read contracts referenced by bindings/plugins
 - `docs/governance/` - live governance and SSOTs
-- `docs/governance/domains/` - one canonical doc per domain
+- `docs/governance/domains/` - supporting domain-specific reference, not L1 entry doctrine
 - `docs/reference/` - non-authoritative support material
 - `docs/reference/generated/` - generated projections and legacy-generated notes that remain machine-useful but non-authoritative
 - `docs/reference/brain/` - agent context helpers

@@ -23,11 +23,17 @@ cd ~/code/agentic-spine
 ```bash
 cd ~/code/agentic-spine
 ./bin/ops status --json
-./bin/ops verify
+./bin/ops cap run verify.engine.run
+./bin/ops cap run spine.verify
 ./bin/ops cap list
 ```
 
 5. Work through `./bin/ops cap run <capability> -- ...`
+
+Compatibility note:
+
+- `ops context` is replaced by `ops status --context`
+- `ops ready` is deprecated and not part of normal session entry
 
 ## Workflow Objects
 

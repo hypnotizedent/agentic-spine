@@ -18,7 +18,8 @@ current aperture and operator entry rules.
 cd ~/code/agentic-spine
 ./bin/ops cap run session.v3.attach
 ./bin/ops status --json
-./bin/ops verify
+./bin/ops cap run verify.engine.run
+./bin/ops cap run spine.verify
 ./bin/ops cap list
 ```
 
@@ -29,7 +30,10 @@ cd ~/code/agentic-spine
 - Read [SESSION_PROTOCOL.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SESSION_PROTOCOL.md) for environment behavior.
 - Read [NODE_PROMOTION_LADDER.md](/Users/ronnyworks/code/agentic-spine/docs/governance/NODE_PROMOTION_LADDER.md) when the question is how node roles become real.
 - Use `./bin/ops cap run <capability> -- ...` when a capability exists.
-- Keep changes bounded and re-run `./bin/ops verify` after meaningful mutations.
+- Use foundational verification for entry and truth checks:
+  `./bin/ops cap run verify.engine.run` and `./bin/ops cap run spine.verify`.
+- `ops context` and `ops ready` are deprecated compatibility shims, not normal
+  entry grammar.
 
 ## Principle
 
