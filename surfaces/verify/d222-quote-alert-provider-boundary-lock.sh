@@ -5,7 +5,15 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-PROVIDERS="${COMMUNICATIONS_PROVIDERS_CONTRACT:-$ROOT/ops/bindings/domains/communications/communications.providers.contract.yaml}"
+export SPINE_ROOT="$ROOT"
+export SPINE_TARGET_REPO="$ROOT"
+export SPINE_REPO="$ROOT"
+export SPINE_CODE="$ROOT"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init >/dev/null 2>&1 || true
+WORKBENCH_ROOT="$(spine_resolve_peer_repo workbench "$SPINE_TARGET_REPO")"
+COMMUNICATIONS_BINDINGS_ROOT="${COMMUNICATIONS_BINDINGS_ROOT:-$WORKBENCH_ROOT/agents/communications/bindings}"
+PROVIDERS="${COMMUNICATIONS_PROVIDERS_CONTRACT:-$COMMUNICATIONS_BINDINGS_ROOT/communications.providers.contract.yaml}"
 MINT_MODULES_ROOT="${MINT_MODULES_ROOT:-$HOME/code/mint-modules}"
 QUOTE_CONFIG="$MINT_MODULES_ROOT/quote-page/src/config.ts"
 

@@ -17,7 +17,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[5]
-PROVIDERS_CONTRACT = ROOT / "ops/bindings/domains/communications/communications.providers.contract.yaml"
 PROFILE_PREFS = Path(
     "~/Library/Group Containers/UBF8T346G9.Office/Outlook/Outlook 15 Profiles/Main Profile/ProfilePreferences.plist"
 ).expanduser()
@@ -30,6 +29,31 @@ ACCOUNT_SUFFIX = "_ActiveSyncExchange_HxS"
 
 class ToolError(RuntimeError):
     pass
+
+
+def resolve_workbench_root() -> Path:
+    candidates: list[Path] = []
+
+    workbench_root_env = os.environ.get("WORKBENCH_ROOT", "").strip()
+    if workbench_root_env:
+        candidates.append(Path(workbench_root_env).expanduser())
+
+    workspace_root_env = os.environ.get("SPINE_WORKSPACE_ROOT", "").strip()
+    if workspace_root_env:
+        candidates.append(Path(workspace_root_env).expanduser() / "workbench")
+
+    candidates.append(ROOT.parent / "workbench")
+    candidates.append(Path("~/code/workbench").expanduser())
+
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+
+    return candidates[0].resolve()
+
+
+WORKBENCH_ROOT = resolve_workbench_root()
+PROVIDERS_CONTRACT = WORKBENCH_ROOT / "agents/communications/bindings/communications.providers.contract.yaml"
 
 
 def run_text(*args: str) -> str:
