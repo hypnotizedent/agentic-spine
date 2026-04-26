@@ -761,17 +761,17 @@ cmd_start() {
   # Step 1: Authority check
   echo "Resolving authority for $loop_id..."
   local auth_json
-  auth_json="$("$AUTHORITY_RESOLVE" --loop-id "$loop_id" --json 2>&1)" || {
-    local rc=$?
+  local auth_rc=0
+  auth_json="$("$AUTHORITY_RESOLVE" --loop-id "$loop_id" --json 2>&1)" || auth_rc=$?
+
+  if [[ "$auth_rc" -eq 2 ]]; then
     echo "$auth_json"
-    if [[ $rc -eq 2 ]]; then
-      _fail "loop not found or invalid: $loop_id" 2
-    fi
-    _fail "authority check blocked dispatch"
-  }
+    _fail "loop not found or invalid: $loop_id" 2
+  fi
 
   local ready
   ready="$(_auth_field "$auth_json" "ready_for_dispatch")"
+
   if [[ "$ready" != "True" ]]; then
     # Proof-wave clean-surface routing: when --wave-kind proof is requested and
     # the only authority blocker is dirty residue, bypass the hard fail. The wave
@@ -807,7 +807,7 @@ print('yes' if blockers and all('dirty residue' in b for b in blockers) else 'no
     if [[ "$_proof_dirty_bypass" -eq 1 ]]; then
       echo "Authority: dirty residue detected — proof wave routing to clean worktree surface"
     else
-      echo "Authority: BLOCKED"
+      echo "$auth_json"
       echo ""
       local blockers
       blockers="$(echo "$auth_json" | python3 -c "
