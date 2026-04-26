@@ -71,77 +71,117 @@ schemas.
 
 ### 2. CLAIM
 
-**Realization status:** Partially realized — delegation.pickup is the primary
-claim surface, but claim is not first-class as a governed primitive.
+**Realization status:** First-class — claim is the governed proof of custody,
+canonically realized as the `delegated → picked_up` transition.
 
 | Aspect | Current State |
 |--------|---------------|
-| **Canonical authority** | `delegation_broker.py` state machine: `delegated → picked_up` transition |
-| **Canonical form** | State transition on DEL-*.yaml (`delegation_state: picked_up`, `picked_up_by`, `picked_up_at_utc`) |
+| **Canonical authority** | `delegation_broker.py` state machine (canonical home for the CLAIM primitive) |
+| **Canonical form** | State transition on DEL-*.yaml: `delegation_state: picked_up`, `picked_up_by`, `picked_up_at_utc` |
 | **Birth paths** | (a) `delegation.pickup` — worker picks up delegation (FIFO or explicit); (b) `mailroom.task.claim` — headless worker claims operational task |
 | **Read/query paths** | `delegation.status --state picked_up`, terminal telemetry (custody field) |
-| **Verify gates** | No gate validates claim state; delegation pickup is validated at transition time only |
-| **Classification** | **Partially realized** — the delegation broker implements claim semantics but "claim" is not named as a primitive in any contract |
+| **Verify gates** | D433 validates delegation state integrity (includes claim transitions) |
+| **Classification** | **First-class** — claim is explicitly named as a kernel primitive with canonical semantics |
 
-**Canon decision:** CLAIM is canonically realized as the `delegated → picked_up`
-transition in the delegation broker. The delegation envelope is the canonical
-claim artifact. Mailroom task.claim is a second claim surface for the
-operational transport mode.
+**Canon decision (LOOP-CLAIM-HEARTBEAT-FIRST-CLASS-20260426):** CLAIM is the
+governed proof that an agent/terminal has taken custody of a work item and has
+the right to execute it. The delegation envelope is the canonical claim artifact.
+
+**Claim protocol semantics:**
+
+A valid claim requires these fields on the custody artifact:
+- `claimed_by` / `picked_up_by` — identity of the claiming agent/terminal
+- `claimed_at` / `picked_up_at_utc` — timestamp of the claim
+- prior state was `delegated` or `queued` (right-to-claim proven by state
+  machine transition, not by ambient access)
+
+**Claim class mappings:**
+
+| Claim Surface | Transport Mode | Custody Artifact | claimed_by field | claimed_at field |
+|---|---|---|---|---|
+| `delegation.pickup` | interactive / proof | DEL-*.yaml | `picked_up_by` | `picked_up_at_utc` |
+| `mailroom.task.claim` | operational | running/*.yaml | `claimed_by` | `claimed_at` |
+| worktree lease creation | execution isolation | `.spine-lane-lease.yaml` | `owner` | `created_at` |
 
 **What is canonical:** `delegation.pickup` (interactive), `mailroom.task.claim`
-(operational), DEL-*.yaml `picked_up` state.
+(operational), the claim protocol semantics above.
 
 **What is derived:** terminal telemetry custody classification (derived from
-delegation + wave state).
+delegation + wave state), worktree lease `owner` (derived from terminal role).
 
 **What is compatibility residue:** Manual worker attach without delegation
 pickup (compatibility path in SESSION_PROTOCOL.md).
 
-**What is undefined:** No contract names "claim" as a kernel primitive or
-defines what it means for a node to claim work independent of the delegation
-broker implementation. The NORTH_STAR protocol expects any model/node to speak
-"claim" but only the delegation broker knows the word.
+**What is resolved:** The question "should claim exist independent of the
+delegation broker" is answered: claim is a protocol with canonical semantics
+(who, when, prior-state-valid). The delegation broker is the canonical
+realization for interactive work. Mailroom task claim is the canonical
+realization for operational work. Both express the same protocol.
 
 ### 3. HEARTBEAT
 
-**Realization status:** Undefined as a kernel primitive — multiple independent
-health/liveness surfaces exist but none implements "heartbeat" as a protocol
-primitive.
+**Realization status:** First-class — heartbeat is the governed proof of
+continued liveness, canonically realized as a timestamp + staleness threshold
+emitted to a declared proof channel.
 
 | Aspect | Current State |
 |--------|---------------|
-| **Canonical authority** | No single authority. Closest: `launchd.scheduler.registry.yaml` `proof_channel` fields; terminal telemetry in `shared_authority.db` |
-| **Canonical form** | No canonical heartbeat artifact. Multiple forms: (a) cycle_state JSON from standing programs; (b) terminal attach timestamps; (c) watcher probe results |
-| **Birth paths** | (a) standing program execution cycle → cycle_state.json; (b) `session.v3.attach` / `ops terminal launch` → terminal telemetry row; (c) watcher alerting-probe-cycle → probe results |
-| **Read/query paths** | `ops status` (standing program health section, terminal telemetry section), `watcher.health` |
-| **Verify gates** | Standing program stale_threshold_seconds (age-based staleness detection in status), no explicit heartbeat gate |
-| **Classification** | **Undefined** — there is no governed "heartbeat" primitive; health/liveness is inferred from multiple independent age-check surfaces |
+| **Canonical authority** | `launchd.scheduler.registry.yaml` `proof_channel` fields (canonical home for the HEARTBEAT primitive's per-program declarations); heartbeat protocol definition in this document |
+| **Canonical form** | Three required elements: (1) a timestamp proving liveness, (2) a declared proof channel where the timestamp can be read, (3) a staleness threshold after which absence of heartbeat means trouble |
+| **Birth paths** | (a) standing program execution cycle → proof_channel artifact; (b) `worktree.lease.heartbeat` → `.spine-lane-lease.yaml` heartbeat_at; (c) `mailroom.task.heartbeat` → running task heartbeat_at; (d) terminal attach → shared_authority.db telemetry row |
+| **Read/query paths** | `ops status` (standing program health, terminal telemetry), `watcher.health`, direct proof_channel read |
+| **Verify gates** | Standing program staleness via `stale_threshold_seconds` in scheduler registry; worktree lease staleness via `ttl_hours` in worktree lifecycle contract |
+| **Classification** | **First-class** — heartbeat is explicitly named as a kernel primitive with canonical semantics |
 
-**Canon decision:** HEARTBEAT is not yet realized as a kernel primitive. The
-existing surfaces that approximate heartbeat semantics are:
+**Canon decision (LOOP-CLAIM-HEARTBEAT-FIRST-CLASS-20260426):** HEARTBEAT is
+the governed proof that an agent/process is still alive and operating. It is NOT
+a single artifact — it is a protocol with three required semantics.
 
-- **Standing program proof channels** — cycle_state.json with
-  stale_threshold_seconds (closest to heartbeat: periodic evidence of liveness)
-- **Terminal telemetry** — attach timestamps and custody state in
-  shared_authority.db
-- **Watcher probes** — alerting-probe-cycle results
+**Heartbeat protocol semantics:**
 
-These are independent implementations, not a unified heartbeat protocol. The
-canon pass names this gap but does not fix it. The claim/heartbeat
-first-classing child loop owns the fix.
+A valid heartbeat requires:
+1. **Liveness timestamp** — a field recording when the process last proved it
+   was alive (e.g., `heartbeat_at`, cycle_state mtime, journal entry timestamp)
+2. **Proof channel** — a declared location where the liveness timestamp can be
+   read by an observer (e.g., file path, systemd unit, runtime telemetry path)
+3. **Staleness threshold** — a duration after which absence of a fresh
+   heartbeat means the process is considered stale/failed (e.g.,
+   `stale_threshold_seconds`, `ttl_hours`)
 
-**What is canonical:** standing program proof_channel pattern (closest to
-heartbeat intent).
+Staleness classification:
+- `fresh` — last heartbeat is within staleness threshold
+- `stale` — last heartbeat is beyond staleness threshold but proof channel exists
+- `missing` — no proof channel artifact exists at all
 
-**What is derived:** terminal freshness classification in `ops status` (derived
-from attach timestamps).
+**Heartbeat class mappings:**
 
-**What is compatibility residue:** None — there is no legacy heartbeat to
-classify.
+| Heartbeat Surface | Liveness Field | Proof Channel Type | Staleness Threshold |
+|---|---|---|---|
+| Standing program proof_channel | cycle_state mtime / journal timestamp | `cycle_state` / `systemd_journal` / `runtime_telemetry` / `heartbeat` | `stale_threshold_seconds` in scheduler registry |
+| Worktree lease | `heartbeat_at` | `.spine-lane-lease.yaml` | `ttl_hours` in worktree lifecycle contract |
+| Mailroom task | `heartbeat_at` | running/*.yaml | implicit (no declared threshold — subsystem gap) |
+| Terminal telemetry | attach timestamp | `shared_authority.db` terminal row | implicit (no declared threshold — subsystem gap) |
 
-**What is undefined:** The kernel protocol primitive itself. No contract defines
-what a heartbeat is, what it must contain, how often it must arrive, or what
-staleness means at the protocol level.
+**What is canonical:** The heartbeat protocol (three required semantics above).
+The `proof_channel` pattern in `launchd.scheduler.registry.yaml` is the
+canonical realization for standing programs. The worktree lease is the canonical
+realization for execution isolation.
+
+**What is derived:** `ops status` freshness classification (derived from
+proof_channel age checks), terminal "last seen" display.
+
+**What is compatibility residue:** None significant.
+
+**What has subsystem gaps:** Mailroom task heartbeat has no declared staleness
+threshold (implicit only). Terminal telemetry has no declared staleness
+threshold. These are known subsystem-local gaps, not kernel-level omissions —
+the protocol is defined, these implementations are incomplete.
+
+**What is resolved:** The question "what is a heartbeat at the protocol level"
+is answered: a liveness timestamp + proof channel + staleness threshold. The
+standing program proof_channel pattern is already the right shape. Other
+subsystem heartbeats must declare their staleness threshold to be fully
+protocol-compliant.
 
 ### 4. RESULT
 
@@ -270,18 +310,17 @@ complexity without collapsing truth.
 | Primitive | Realization | First-Class? | Authority Home |
 |-----------|-------------|-------------|----------------|
 | request | Fragmented (two classes: work-request via loops, execution-request via delegation) | No | `dispatch.envelope.contract.yaml` + loop scope |
-| claim | Partially realized (delegation pickup) | No | `delegation_broker.py` state machine |
-| heartbeat | Undefined (multiple independent liveness surfaces) | No | None — gap |
+| claim | **First-class** (custody proof via delegation pickup + mailroom claim) | Yes — via claim protocol | `delegation_broker.py` + `mailroom.task.worker.contract.yaml` |
+| heartbeat | **First-class** (liveness proof via proof channel + staleness threshold) | Yes — via heartbeat protocol | `launchd.scheduler.registry.yaml` proof_channel + this document |
 | result | **Collapsed** (outcome: success on governed receipts) | Yes — via outcome vocabulary | `closeout.disposition.contract.yaml` outcome_vocabulary |
 | failure | **Collapsed** (outcome: failure/blocked on governed receipts) | Yes — via outcome vocabulary | `closeout.disposition.contract.yaml` outcome_vocabulary |
 | receipt | **Collapsed** (four governed classes + shared outcome vocabulary) | Yes — partial (four classes, shared outcome) | `SESSION_PROTOCOL.md` receipt taxonomy + `closeout.disposition.contract.yaml` outcome_vocabulary |
 
-**Key finding:** Three of the six primitives are now first-class after the
-receipt/result/failure collapse. Result and failure are realized as the
-`success`/`failure`/`blocked` outcome vocabulary shared across all governed
-receipt classes. Receipt itself is four governed classes (narrative demoted to
-residue) with explicit outcome semantics. Heartbeat remains furthest (no
-canonical form). Request and claim remain partially realized.
+**Key finding:** Five of the six primitives are now first-class after the
+receipt/result/failure collapse and the claim/heartbeat first-classing. Only
+REQUEST remains unfirst-classed (two classes without a unifying protocol).
+Claim and heartbeat are defined as protocols with canonical semantics, not as
+single artifacts — this is the right shape for custody and liveness primitives.
 
 ## What This Canon Pass Enables
 
@@ -290,8 +329,9 @@ Later child loops can now act on classified truth:
 1. ~~**Receipt/result/failure collapse**~~ — **DONE**
    (LOOP-RECEIPT-RESULT-FAILURE-COLLAPSE-20260426). Outcome vocabulary
    declared, class mappings landed, narrative demoted to residue.
-2. **Claim/heartbeat first-classing** — knows claim lives in delegation broker
-   and heartbeat has no canonical form; can build the minimum primitive
+2. ~~**Claim/heartbeat first-classing**~~ — **DONE**
+   (LOOP-CLAIM-HEARTBEAT-FIRST-CLASS-20260426). Claim and heartbeat are
+   first-class primitives with canonical protocol semantics and class mappings.
 3. **Split-brain authority removal** — knows where competing truths exist
    (request has two classes, receipt has four governed + one residue)
 4. **Surface subtraction** — knows what is canonical vs derived vs compatibility
@@ -302,9 +342,6 @@ Later child loops can now act on classified truth:
 These questions are explicitly deferred to later child loops:
 
 - Should request be unified into a single object or remain two classes?
-- What should a heartbeat contain, how often should it arrive, and what does
-  staleness mean at the protocol level?
-- Should "claim" exist independent of the delegation broker?
 
 These questions are **resolved** by the receipt/result/failure collapse:
 
@@ -313,3 +350,9 @@ These questions are **resolved** by the receipt/result/failure collapse:
   failure|blocked` on governed receipts. Disposition subsumes both.
 - ~~Should the five receipt classes share a common envelope schema?~~ → **No.**
   The classes serve different scopes. They share outcome vocabulary, not schema.
+- ~~What should a heartbeat contain, how often should it arrive, and what does
+  staleness mean at the protocol level?~~ → **Answered.** Heartbeat = liveness
+  timestamp + proof channel + staleness threshold. See §3 HEARTBEAT.
+- ~~Should "claim" exist independent of the delegation broker?~~ → **Answered.**
+  Claim is a protocol (who, when, prior-state-valid), not an artifact.
+  Delegation broker and mailroom task claim are canonical realizations.

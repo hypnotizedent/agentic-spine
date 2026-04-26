@@ -5,8 +5,14 @@ Implements the V1 delegation state model:
   delegated → cancelled
 
 Kernel primitive role: This module is the canonical authority home for the
-CLAIM primitive (delegated → picked_up transition = claim). See
-docs/governance/KERNEL_PRIMITIVE_CANON.md for the full primitive matrix.
+CLAIM primitive. Claim = governed proof of custody (who claimed, when, from
+a valid prior state). The delegated → picked_up transition is the canonical
+claim realization for interactive work. See KERNEL_PRIMITIVE_CANON.md §2.
+
+Claim protocol semantics (must be present on every claim transition):
+  - claimed_by / picked_up_by: identity of the claiming agent/terminal
+  - claimed_at / picked_up_at_utc: timestamp of the claim
+  - prior state: delegated (right-to-claim proven by state machine)
 
 Design authority: CONTROL-SURFACE-DELEGATION-V1-DESIGN-20260425.md
 """
