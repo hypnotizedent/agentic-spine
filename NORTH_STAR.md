@@ -58,21 +58,39 @@ The spine owns boring, generic, estate-critical truth:
 - recovery
 - maintenance sequencing
 - minimal verification
-- abstract role truth for node-portable execution
+- explicit terminal identity, execution class, and node-role truth for portable execution
 - machine coordination kernel
 
-Abstract roles are platform truth.
+Execution classes and node roles are platform truth.
 
 Specific hosts are deployment variables outside L1.
 
-The spine must know what work belongs to which role.
+The spine must know what work belongs to which execution class and node role.
 
-It must not hardcode which machine fills that role.
+It must not hardcode which machine fills that node role.
 
-A new node joins by attaching to the spine, declaring its local role, and
-materializing only the work legal for that role.
+A new node joins by attaching to the spine, declaring its local node role, and
+materializing only the work legal for that node role.
 
 The plumbing must work out of the box for the next new computer or node.
+
+## The Control Plane Is Node Architecture
+
+The target is not Ronny's MacBook carrying control, execution, and memory by
+force of habit.
+
+The target is a node architecture with explicit responsibility boundaries:
+
+- `operator_console` admits and observes work
+- `execution_host` carries unattended execution
+- `watcher_node` proves liveness and escalation from outside the watched node
+- `storage_evidence_node` owns durable runtime truth and receipts
+- `verification_node` attests read-heavy truth
+
+The operator workstation is a client of that system.
+
+It may open terminals into the control plane, but it must not be the glue that
+keeps the control plane alive.
 
 ## Distribution Authority
 
