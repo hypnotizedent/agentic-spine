@@ -266,13 +266,15 @@ if missing:
 PY
 '
 
-# E8: every MANIFEST script entry must resolve on disk. Narrow per-plugin
-# capability parity: for the allowlisted plugins below, every advertised
-# capability name must resolve in ops/capabilities.yaml. The allowlist is
-# intentionally small because the broader MANIFEST currently carries
-# hundreds of unresolved capability names (pre-existing drift); this check
-# guards against regressions for plugins that have been cleaned up.
-check E8 "MANIFEST script parity + narrow capability parity" bash -c '
+# E8: every MANIFEST script entry must resolve on disk. Capability parity is
+# now enforced for every plugin-scoped registration:
+#   - every capability advertised by a MANIFEST plugin must exist in
+#     ops/capabilities.yaml
+#   - every capability whose command/script_path lives under a plugin path
+#     must be advertised by that plugin
+# Capabilities that intentionally resolve outside ops/plugins/ (root commands,
+# workbench-owned implementations) are excluded from the second rule.
+check E8 "MANIFEST script parity + plugin capability parity" bash -c '
     python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
 from pathlib import Path
 import sys
@@ -282,30 +284,37 @@ root = Path(sys.argv[1])
 manifest_path = root / "ops/plugins/MANIFEST.yaml"
 data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
 
-# Plugins whose capability advertising MUST stay truthful.
-CAP_PARITY_ALLOWLIST = {"alerting", "orchestration", "host"}
-
 cap_registry_path = root / "ops/capabilities.yaml"
 known_caps = set()
+cap_entries = {}
 if cap_registry_path.is_file():
     reg = yaml.safe_load(cap_registry_path.read_text(encoding="utf-8")) or {}
     caps = reg.get("capabilities") or {}
     if isinstance(caps, dict):
-        known_caps.update(str(name).strip() for name in caps.keys() if str(name).strip())
+        for name, payload in caps.items():
+            cn = str(name).strip()
+            if cn:
+                known_caps.add(cn)
+                cap_entries[cn] = payload if isinstance(payload, dict) else {}
     else:
         for cap in caps:
             if isinstance(cap, dict):
                 name = str(cap.get("id") or cap.get("name") or "").strip()
                 if name:
                     known_caps.add(name)
+                    cap_entries[name] = cap
 
 missing_scripts = []
 missing_caps = []
+missing_advertisements = []
+plugins = []
 for plugin in data.get("plugins") or []:
     if not isinstance(plugin, dict):
         continue
     plugin_name = str(plugin.get("name") or plugin.get("id") or "").strip()
-    base = root / str(plugin.get("path") or "").strip()
+    plugin_path = str(plugin.get("path") or "").strip()
+    base = root / plugin_path
+    plugins.append((plugin_name, Path(plugin_path), plugin))
     for rel in plugin.get("scripts") or []:
         script_rel = str(rel or "").strip()
         if not script_rel:
@@ -313,19 +322,64 @@ for plugin in data.get("plugins") or []:
         candidate = base / script_rel
         if not candidate.exists():
             missing_scripts.append(str(candidate.relative_to(root)))
-    if plugin_name in CAP_PARITY_ALLOWLIST:
-        for cap_name in plugin.get("capabilities") or []:
-            cn = str(cap_name or "").strip()
-            if not cn:
+    for cap_name in plugin.get("capabilities") or []:
+        cn = str(cap_name or "").strip()
+        if not cn:
+            continue
+        if cn not in known_caps:
+            missing_caps.append(f"{plugin_name}::{cn}")
+
+
+def plugin_for_cap(cap_payload):
+    best = None
+    best_len = -1
+    for field in ("script_path", "command"):
+        raw = cap_payload.get(field)
+        if not isinstance(raw, str):
+            continue
+        candidate = raw.strip()
+        if candidate.startswith("./"):
+            candidate = candidate[2:]
+        if not candidate.startswith("ops/plugins/"):
+            continue
+        candidate_path = Path(candidate)
+        for plugin_name, plugin_path, _plugin in plugins:
+            try:
+                candidate_path.relative_to(plugin_path)
+            except Exception:
                 continue
-            if cn not in known_caps:
-                missing_caps.append(f"{plugin_name}::{cn}")
+            if len(plugin_path.parts) > best_len:
+                best = plugin_name
+                best_len = len(plugin_path.parts)
+    return best
+
+
+plugin_scoped_caps = {}
+for cap_name, payload in cap_entries.items():
+    if not isinstance(payload, dict):
+        continue
+    plugin_name = plugin_for_cap(payload)
+    if not plugin_name:
+        continue
+    plugin_scoped_caps.setdefault(plugin_name, set()).add(cap_name)
+
+for plugin_name, _plugin_path, plugin in plugins:
+    advertised = {
+        str(cap_name).strip()
+        for cap_name in (plugin.get("capabilities") or [])
+        if str(cap_name).strip()
+    }
+    real = plugin_scoped_caps.get(plugin_name, set())
+    for cap_name in sorted(real - advertised):
+        missing_advertisements.append(f"{plugin_name}::{cap_name}")
 
 errs = []
 if missing_scripts:
     errs.append("MISSING SCRIPTS:\n" + "\n".join(missing_scripts))
 if missing_caps:
-    errs.append("UNRESOLVED CAPABILITIES (allowlisted plugins):\n" + "\n".join(missing_caps))
+    errs.append("UNRESOLVED CAPABILITIES:\n" + "\n".join(missing_caps))
+if missing_advertisements:
+    errs.append("MISSING MANIFEST ADVERTISEMENTS:\n" + "\n".join(missing_advertisements))
 
 if errs:
     print("\n\n".join(errs))

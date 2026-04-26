@@ -24,6 +24,7 @@ LIFECYCLE="ready"
 OUTPUTS_CSV="stdout"
 TAGS_CSV=""
 ARG_PROTOCOL=""
+LAYER=""
 NOTE=""
 DRY_RUN=0
 LANE_SAFE=0
@@ -43,6 +44,8 @@ Options:
   --outputs <csv>                   Default: stdout
   --tags <csv>                      Optional
   --arg-protocol <passthrough|argparse|positional|none>
+  --layer <L1_engine|L2_shared_infrastructure|L3_product_runtime>
+                                   Optional for domain-bound capabilities; required with domain=none
   --dry-run
   --lane-safe                       Queue shared-authority mutation instead of mutating files
   --loop-id <LOOP-ID>               Required with --lane-safe when SPINE_LOOP_ID is not set
@@ -80,6 +83,7 @@ while [[ $# -gt 0 ]]; do
     --outputs) OUTPUTS_CSV="${2:?--outputs requires a value}"; shift 2 ;;
     --tags) TAGS_CSV="${2:?--tags requires a value}"; shift 2 ;;
     --arg-protocol) ARG_PROTOCOL="${2:?--arg-protocol requires a value}"; shift 2 ;;
+    --layer) LAYER="${2:?--layer requires a value}"; shift 2 ;;
     --note) NOTE="${2:?--note requires a value}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --lane-safe) LANE_SAFE=1; shift ;;
@@ -113,6 +117,12 @@ case "$PLANE" in
   fabric|domain_external) ;;
   *) fail "invalid --plane '$PLANE'" ;;
 esac
+if [[ -n "$LAYER" ]]; then
+  case "$LAYER" in
+    L1_engine|L2_shared_infrastructure|L3_product_runtime) ;;
+    *) fail "invalid --layer '$LAYER'" ;;
+  esac
+fi
 if [[ -n "$ARG_PROTOCOL" ]]; then
   case "$ARG_PROTOCOL" in
     passthrough|argparse|positional|none) ;;
@@ -122,6 +132,7 @@ fi
 
 # --- domain catalog validation ---
 DOMAIN_CATALOG="$ROOT/ops/bindings/capability.domain.catalog.yaml"
+DOMAIN_TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 if [[ "$DOMAIN" != "none" ]]; then
   [[ -f "$DOMAIN_CATALOG" ]] || fail "missing domain catalog: $DOMAIN_CATALOG"
   valid_domains="$(yq e '.domains[].domain_id' "$DOMAIN_CATALOG" 2>/dev/null)" || fail "unable to parse domain catalog"
@@ -130,6 +141,30 @@ if [[ "$DOMAIN" != "none" ]]; then
     echo "Valid domains:" >&2
     echo "$valid_domains" | sed 's/^/  - /' >&2
     exit 1
+  fi
+fi
+
+resolve_layer_for_domain() {
+  local domain="$1"
+  if [[ "$domain" == "network" ]]; then
+    printf '%s\n' "L2_shared_infrastructure"
+    return 0
+  fi
+  [[ -f "$DOMAIN_TOPOLOGY" ]] || fail "missing domain topology: $DOMAIN_TOPOLOGY"
+  local resolved
+  resolved="$(yq e -r ".domain_metadata[] | select(.domain_id == \"$domain\") | .layer // \"\"" "$DOMAIN_TOPOLOGY" 2>/dev/null || true)"
+  [[ -n "$resolved" && "$resolved" != "null" ]] || fail "unable to resolve layer for domain '$domain'"
+  printf '%s\n' "$resolved"
+}
+
+RESOLVED_LAYER=""
+if [[ "$DOMAIN" == "none" ]]; then
+  [[ -n "$LAYER" ]] || fail "--layer is required when --domain none"
+  RESOLVED_LAYER="$LAYER"
+else
+  RESOLVED_LAYER="$(resolve_layer_for_domain "$DOMAIN")"
+  if [[ -n "$LAYER" && "$LAYER" != "$RESOLVED_LAYER" ]]; then
+    fail "--layer '$LAYER' does not match resolved layer '$RESOLVED_LAYER' for domain '$DOMAIN'"
   fi
 fi
 
@@ -157,6 +192,7 @@ mutation:
   plugin: "$PLUGIN"
   script: "$SCRIPT"
   domain: "$DOMAIN"
+  layer: "$RESOLVED_LAYER"
   plane: "$PLANE"
   cwd: "$CWD"
   lifecycle: "$LIFECYCLE"
@@ -201,6 +237,7 @@ trap cleanup EXIT INT TERM
     [[ -n "$o" ]] && echo "  - \"${o//\"/\\\"}\""
   done
   echo "domain: $DOMAIN"
+  echo "layer: $RESOLVED_LAYER"
   echo "plane: $PLANE"
   if [[ -n "$ARG_PROTOCOL" ]]; then
     echo "arg_protocol: $ARG_PROTOCOL"

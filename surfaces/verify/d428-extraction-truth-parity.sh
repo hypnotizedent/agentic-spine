@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # D428: extraction-truth-parity-domain-capability
-# Enforces the machine-queryable layer split between domain topology and any
-# future domain=none capability residue classification.
+# Enforces machine-queryable layer parity between domain topology and
+# capabilities.yaml.
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -31,6 +31,7 @@ topology_path = Path(sys.argv[1])
 capabilities_path = Path(sys.argv[2])
 
 ALLOWED_LAYERS = {"L1_engine", "L2_shared_infrastructure", "L3_product_runtime"}
+DOMAIN_LAYER_ALIASES = {"network": "L2_shared_infrastructure"}
 EXPECTED_DOMAIN_COUNT = 19
 
 
@@ -73,45 +74,51 @@ for entry in domain_metadata:
         fail(f"domain '{domain_id}' has invalid layer '{layer}'")
     layer_dist[layer] += 1
 
+effective_domain_layers = {**{k: v for k, v in [(row.get("domain_id"), row.get("layer")) for row in domain_metadata if isinstance(row, dict)]}, **DOMAIN_LAYER_ALIASES}
+
 caps = capabilities_doc.get("capabilities") or {}
 if not isinstance(caps, dict):
     fail("capabilities.yaml capabilities must be a mapping")
 
-none_caps = {}
-leakage = []
 missing_domain = []
+missing_layer = []
+unknown_domain_layer = []
+mismatch = []
 for cap_id, payload in caps.items():
     if not isinstance(payload, dict):
         continue
     if "domain" not in payload:
         missing_domain.append(str(cap_id))
         continue
-    domain = payload.get("domain")
+    domain = str(payload.get("domain") or "").strip()
+    layer = payload.get("layer")
+    if layer is None:
+        missing_layer.append(str(cap_id))
+        continue
+    if layer not in ALLOWED_LAYERS:
+        fail(f"capability '{cap_id}' has invalid layer '{layer}'")
     if domain == "none":
-        none_caps[cap_id] = payload
-    elif "layer" in payload:
-        leakage.append(str(cap_id))
+        continue
+    expected = effective_domain_layers.get(domain)
+    if expected is None:
+        unknown_domain_layer.append(str(cap_id))
+        continue
+    if layer != expected:
+        mismatch.append(f"{cap_id}:{layer}!={expected}")
 
 if missing_domain:
     fail(f"{len(missing_domain)} capabilities missing domain field: {sorted(missing_domain)[:5]}")
-if leakage:
-    fail(f"{len(leakage)} non-domain-none capabilities carry layer: {sorted(leakage)[:5]}")
-
-missing_none_layer = [cap_id for cap_id, payload in none_caps.items() if "layer" not in payload]
-if missing_none_layer:
-    fail(f"{len(missing_none_layer)} domain=none capabilities missing layer: {sorted(missing_none_layer)[:5]}")
-
-invalid_none_layer = [
-    cap_id for cap_id, payload in none_caps.items()
-    if payload.get("layer") not in ALLOWED_LAYERS
-]
-if invalid_none_layer:
-    fail(f"{len(invalid_none_layer)} domain=none capabilities with invalid layer: {sorted(invalid_none_layer)[:5]}")
+if missing_layer:
+    fail(f"{len(missing_layer)} capabilities missing layer field: {sorted(missing_layer)[:5]}")
+if unknown_domain_layer:
+    fail(f"{len(unknown_domain_layer)} capabilities use domains missing topology layer mapping: {sorted(unknown_domain_layer)[:5]}")
+if mismatch:
+    fail(f"{len(mismatch)} capabilities disagree with domain topology layer: {sorted(mismatch)[:5]}")
 
 print(
     "D428 PASS: extraction truth parity valid "
     f"(domains={len(domain_ids)}, L1={layer_dist['L1_engine']}, "
     f"L2={layer_dist['L2_shared_infrastructure']}, L3={layer_dist['L3_product_runtime']}, "
-    f"domain_none_capabilities={len(none_caps)})"
+    f"capabilities={len(caps)})"
 )
 PY
