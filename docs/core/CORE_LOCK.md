@@ -89,7 +89,6 @@ All must PASS for core to be healthy.
 | D35 | Infra relocation parity lock (cross-SSOT consistency for service moves during cutover/cleanup) |
 | D36 | Legacy exception hygiene lock (stale/near-expiry exception enforcement) |
 | D38 | Extraction hygiene lock (EXTRACTION_PROTOCOL enforcement) |
-| D40 | Maker tools drift lock (binding validity, script hygiene, no debug/secret/tmp leaks) |
 | D41 | Hidden-root governance lock (home-root inventory + forbidden pattern enforcement) |
 | D42 | Code path case lock (runtime scripts must use `$HOME/code` not `$HOME/Code`) |
 | D43 | Secrets namespace policy lock (freeze legacy root-path debt + enforce /spine namespace wiring) |
