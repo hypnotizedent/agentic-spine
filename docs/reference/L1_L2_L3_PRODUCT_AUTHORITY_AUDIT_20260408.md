@@ -76,7 +76,7 @@ Files that are hand-maintained, authoritative, and drive spine behavior:
 | L2 backup | 1 | backup.status |
 | L2 microsoft adapter | 6 | microsoft.mail.{send,draft.create,draft.update}, microsoft.calendar.{create,update,rsvp} |
 | **L3 product** | **8** | calendar.external.secrets.status, calendar.ha.snapshot.build, finance.stack.status, immich.ingest.watch, immich.status, media.api.resolve, media.content.snapshot.refresh, n8n.infra.health.quick |
-| Compat aliases | 6 | nodes.status, verify.core.run, verify.fast, infra.proxmox.maintenance.{precheck,shutdown,startup} |
+| Compat aliases | 2 | verify.core.run, verify.fast (nodes.status + infra.proxmox.maintenance.{precheck,shutdown,startup} subtracted 2026-04-26) |
 | **Mint entries** | **0** | All mint routes in routing.dispatch.yaml came from the now-deleted agents.registry.yaml |
 
 **Key finding:** capabilities.yaml is 87% L1/L2 infrastructure. Only 8 of 63 entries are product-domain. Mint has zero entries. The "~120 product capabilities" claim from the v1 audit was wrong — it counted generated dispatch routes, not governed registry entries.
