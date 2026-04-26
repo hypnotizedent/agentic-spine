@@ -41,6 +41,7 @@ Usage:
   ops terminal launch [options]    Open an iTerm window with a tool
 
 Options:
+  --role <solo|control|lane-worker>  Launch mode (solo disables implicit loop attach)
   --tool <tool>         Tool to run (claude|codex|opencode|verify)
   --terminal <name>     Terminal character name (sets OPS_TERMINAL_ROLE)
   --loop <loop_id>      Explicitly attach a loop (otherwise one live loop auto-attaches)
@@ -76,6 +77,7 @@ TOOL=""
 TERMINAL_NAME=""
 LOOP_ID=""
 SESSION_POSTURE=""
+LAUNCH_MODE=""
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -84,7 +86,7 @@ while [[ $# -gt 0 ]]; do
         --terminal) TERMINAL_NAME="${2:-}"; shift 2 ;;
         --loop) LOOP_ID="${2:-}"; shift 2 ;;
         --session-posture) SESSION_POSTURE="${2:-}"; shift 2 ;;
-        --role) shift 2 ;;  # Accepted for compat, ignored (role comes from contract)
+        --role) LAUNCH_MODE="${2:-}"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --) shift; break ;;
         *) shift ;;  # Accept and ignore unknown flags for forward compat
@@ -92,6 +94,21 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$TOOL" ]] || fail "missing required --tool (claude|codex|opencode|verify)"
+
+resolve_launch_mode() {
+    local raw="${1:-}"
+    case "$raw" in
+        ""|auto) echo "auto" ;;
+        solo) echo "solo" ;;
+        control|orchestrator) echo "control" ;;
+        lane-worker|worker) echo "lane-worker" ;;
+        *)
+            fail "unknown --role '$raw' (expected: solo|control|lane-worker; compat: orchestrator|worker)"
+            ;;
+    esac
+}
+
+LAUNCH_MODE="$(resolve_launch_mode "$LAUNCH_MODE")"
 
 # ── Resolve runtime role from contract ───────────────────────────────────
 # Reads terminal.role.contract.yaml to map terminal name → type → runtime role.
@@ -163,7 +180,7 @@ fi
 #   - Zero active loops → keep empty (clean start)
 #   - Multiple active loops → keep empty (ambiguous, do not guess)
 #   - entry-compile failure → keep empty (degraded truth, no silent attach)
-if [[ -z "$LOOP_ID" ]]; then
+if [[ -z "$LOOP_ID" && "$LAUNCH_MODE" != "solo" ]]; then
     ENTRY_COMPILE_BIN="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/entry-compile"
     _STATE_ROOT="$SPINE_STATE"
     if [[ -f "$ENTRY_COMPILE_BIN" && -d "$_STATE_ROOT/loop-scopes" ]]; then
@@ -388,6 +405,7 @@ ENTRY_CMD="$(build_entry_cmd "$TOOL" "$TERMINAL_NAME" "$RUNTIME_ROLE" "$LOOP_ID"
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "# Terminal: ${TERMINAL_NAME:-ad-hoc}"
     echo "# Runtime role: $RUNTIME_ROLE"
+    echo "# Launch mode: $LAUNCH_MODE"
     echo "# Node type: ${__SP_NODE_TYPE:-unknown}"
     echo "# Session posture: ${__SP_POSTURE:-unknown} (source: ${__SP_SOURCE:-unknown})"
     [[ -z "$LOOP_ID" ]] || echo "# Loop: $LOOP_ID"
