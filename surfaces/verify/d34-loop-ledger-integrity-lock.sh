@@ -8,7 +8,8 @@
 #   P3: Scope files in loop-scopes/ have no status that contradicts SQLite
 #   P4: ops status open_loops count == SQLite open count
 #   P5: No scope-only orphans (open scope files with no SQLite row)
-#   P6: All closure-set files declare SQLite authority (regression guard)
+#   P6: Loop closeout receipts must agree with SQLite + scope projection
+#   P7: All closure-set files declare SQLite authority (regression guard)
 #
 # Authority: SQLite (shared_authority.db) is the sole active-state source.
 # Scope files are projections, not policy.
@@ -199,7 +200,70 @@ $ORPHAN_LINES"
     fi
 fi
 
-# ── P6: Closure set files all declare SQLite authority ────────────────
+# ── P6: Closeout receipts agree with SQLite + projection ──────────────
+
+RECEIPT_DRIFT=0
+CLOSEOUT_DIR="${SPINE_EVIDENCE_ROOT}/loop-closeouts"
+if [[ -d "$CLOSEOUT_DIR" ]]; then
+    RECEIPT_DETAIL=$(python3 -c "
+import sys, os, re
+from pathlib import Path
+sys.path.insert(0, '$ROOT/ops/plugins/core/lifecycle/lib')
+os.environ.setdefault('SPINE_STATE', '$SPINE_STATE')
+import loops_sql_authority as lsa
+
+db_path, scopes_dir = lsa.resolve_paths(Path('$ROOT'))
+archive_dir = lsa.resolve_scope_archive_dir(scopes_dir)
+conn = lsa.connect(db_path)
+lsa.ensure_schema(conn)
+sqlite_status = {row['loop_id']: row['status'] for row in lsa.list_loops(conn, status='all')}
+conn.close()
+
+live_statuses = {'active', 'open', 'draft', 'planned', 'blocked'}
+closeout_dir = Path('$CLOSEOUT_DIR')
+drift_count = 0
+loop_id_re = re.compile(r'^- loop_id:\\s*(\\S+)\\s*$')
+
+for path in sorted(closeout_dir.glob('LOOP-*.closeout.md')):
+    loop_id = path.name.removesuffix('.closeout.md')
+    try:
+        text = path.read_text(encoding='utf-8')
+    except OSError:
+        continue
+    match = loop_id_re.search(text)
+    if match:
+        loop_id = match.group(1).strip()
+    if not loop_id:
+        continue
+
+    db_status = str(sqlite_status.get(loop_id, '')).strip().lower()
+    live_scope = scopes_dir / f'{loop_id}.scope.md'
+    archived_scope = archive_dir / f'{loop_id}.scope.md'
+
+    if db_status in live_statuses:
+        drift_count += 1
+        print(f'  {loop_id}: closeout receipt exists but SQLite says {db_status}')
+        continue
+    if db_status and not archived_scope.exists():
+        drift_count += 1
+        print(f'  {loop_id}: closeout receipt exists but archived projection is missing')
+        continue
+    if live_scope.exists():
+        drift_count += 1
+        print(f'  {loop_id}: closeout receipt exists but live scope projection still exists')
+
+print(f'RECEIPT_DRIFT={drift_count}')
+" 2>/dev/null) || fail "P6: closeout receipt parity scan failed"
+
+    RECEIPT_DRIFT="$(echo "$RECEIPT_DETAIL" | grep '^RECEIPT_DRIFT=' | cut -d= -f2)"
+    if [[ "${RECEIPT_DRIFT:-0}" -gt 0 ]]; then
+        RECEIPT_LINES="$(echo "$RECEIPT_DETAIL" | grep -v '^RECEIPT_DRIFT=')"
+        fail "P6: $RECEIPT_DRIFT closeout receipt(s) disagree with SQLite/projection truth:
+$RECEIPT_LINES"
+    fi
+fi
+
+# ── P7: Closure set files all declare SQLite authority ────────────────
 
 CLOSURE_SET=(
     "ops/plugins/core/orchestration/bin/authority-resolve"
@@ -219,7 +283,7 @@ for cs_file in "${CLOSURE_SET[@]}"; do
     fi
 done
 if [[ "$P6_MISSING" -gt 0 ]]; then
-    fail "P6: $P6_MISSING closure-set file(s) missing SQLite authority marker"
+    fail "P7: $P6_MISSING closure-set file(s) missing SQLite authority marker"
 fi
 
-echo "D34 PASS: loop ledger integrity (open=$SQLITE_OPEN wip=$SQLITE_WIP live=$SQLITE_LIVE scope_drift=$SCOPE_DRIFT orphans=${ORPHAN_COUNT:-0} closure_set=5/5 source=sqlite)"
+echo "D34 PASS: loop ledger integrity (open=$SQLITE_OPEN wip=$SQLITE_WIP live=$SQLITE_LIVE scope_drift=$SCOPE_DRIFT orphans=${ORPHAN_COUNT:-0} receipt_drift=${RECEIPT_DRIFT:-0} closure_set=5/5 source=sqlite)"
