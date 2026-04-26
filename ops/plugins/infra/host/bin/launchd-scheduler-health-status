@@ -33,6 +33,13 @@ WEEKDAY_NAMES = {
     7: "Sun",
 }
 
+REMOTE_EXECUTION_HOST_TARGET = "ai-consolidation"
+REMOTE_SYSTEMD_LABELS = {
+    "com.ronny.domain-inventory-refresh-daily",
+    "com.ronny.infra-core-smoke",
+    "com.ronny.simplefin-daily-sync",
+}
+
 
 @dataclass
 class JobEvidence:
@@ -179,6 +186,187 @@ def load_plist(path: Path) -> dict[str, Any]:
     with path.open("rb") as handle:
         payload = plistlib.load(handle)
     return payload if isinstance(payload, dict) else {}
+
+
+def shell_read(script: str) -> str:
+    result = subprocess.run(
+        ["bash", "-lc", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def label_to_systemd_unit(label: str) -> str:
+    name = label
+    for prefix in ("com.ronny.", "com.ronnyworks."):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return f"spine-{name.replace('.', '-')}"
+
+
+def _remote_execution_host_connection(root: Path) -> tuple[str, str, list[str]] | None:
+    resolver = root / "ops" / "lib" / "ssh-resolve.sh"
+    if not resolver.is_file():
+        return None
+
+    resolved = shell_read(
+        f'source "{resolver}" && ssh_resolve_ssh_host_with_fallback "{REMOTE_EXECUTION_HOST_TARGET}" 3 || true'
+    )
+    if not resolved:
+        return None
+
+    parts = resolved.split()
+    host = parts[0] if parts else ""
+    path_used = parts[1] if len(parts) > 1 else "unreachable"
+    if not host or path_used == "unreachable":
+        return None
+
+    user = shell_read(f'source "{resolver}" && ssh_resolve_user "{REMOTE_EXECUTION_HOST_TARGET}" "ubuntu"')
+    if not user:
+        user = "ubuntu"
+
+    identity_result = subprocess.run(
+        ["bash", "-lc", f'source "{resolver}" && ssh_resolve_machine_identity_opts "{REMOTE_EXECUTION_HOST_TARGET}"'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    identity_opts = identity_result.stdout.strip().split() if identity_result.returncode == 0 else []
+    return host, user, identity_opts
+
+
+def remote_systemd_probe(root: Path, label: str) -> dict[str, Any] | None:
+    if label not in REMOTE_SYSTEMD_LABELS:
+        return None
+
+    conn = _remote_execution_host_connection(root)
+    if conn is None:
+        return {"reachable": False, "error": "execution_host_unreachable"}
+
+    host, user, identity_opts = conn
+    timer_unit = f"{label_to_systemd_unit(label)}.timer"
+    service_unit = f"{label_to_systemd_unit(label)}.service"
+    remote_script = f"""python3 - <<'PY'
+import json
+import subprocess
+
+label = {json.dumps(label)}
+timer_unit = {json.dumps(timer_unit)}
+service_unit = {json.dumps(service_unit)}
+
+
+def read_props(unit, props):
+    proc = subprocess.run(
+        ["systemctl", "show", unit, f"--property={{','.join(props)}}", "--no-pager"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    payload = {{}}
+    for raw in proc.stdout.splitlines():
+        if "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        payload[key] = value
+    return payload
+
+
+def normalize_ts(value):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    proc = subprocess.run(
+        ["date", "-u", "-d", value, "+%Y-%m-%dT%H:%M:%SZ"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+timer = read_props(
+    timer_unit,
+    [
+        "Id",
+        "LoadState",
+        "UnitFileState",
+        "ActiveState",
+        "SubState",
+        "Result",
+        "FragmentPath",
+        "NextElapseUSecRealtime",
+        "LastTriggerUSec",
+    ],
+)
+service = read_props(
+    service_unit,
+    [
+        "Id",
+        "LoadState",
+        "UnitFileState",
+        "ActiveState",
+        "SubState",
+        "Result",
+        "FragmentPath",
+        "ExecMainStatus",
+        "ExecMainCode",
+        "ExecStart",
+        "ExecMainStartTimestamp",
+        "ExecMainExitTimestamp",
+        "StateChangeTimestamp",
+    ],
+)
+
+payload = {{
+    "label": label,
+    "reachable": True,
+    "timer_load_state": timer.get("LoadState", ""),
+    "timer_unit_file_state": timer.get("UnitFileState", ""),
+    "timer_active_state": timer.get("ActiveState", ""),
+    "timer_sub_state": timer.get("SubState", ""),
+    "timer_result": timer.get("Result", ""),
+    "timer_fragment_path": timer.get("FragmentPath", ""),
+    "next_run_at": normalize_ts(timer.get("NextElapseUSecRealtime", "")),
+    "last_trigger_at": normalize_ts(timer.get("LastTriggerUSec", "")),
+    "service_load_state": service.get("LoadState", ""),
+    "service_unit_file_state": service.get("UnitFileState", ""),
+    "service_active_state": service.get("ActiveState", ""),
+    "service_sub_state": service.get("SubState", ""),
+    "service_result": service.get("Result", ""),
+    "service_fragment_path": service.get("FragmentPath", ""),
+    "service_exec_main_status": service.get("ExecMainStatus", ""),
+    "service_exec_main_code": service.get("ExecMainCode", ""),
+    "service_exec_start": service.get("ExecStart", ""),
+    "service_exec_main_start_at": normalize_ts(service.get("ExecMainStartTimestamp", "")),
+    "service_exec_main_exit_at": normalize_ts(service.get("ExecMainExitTimestamp", "")),
+    "service_state_change_at": normalize_ts(service.get("StateChangeTimestamp", "")),
+}}
+print(json.dumps(payload))
+PY"""
+
+    ssh_cmd = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=8",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        *identity_opts,
+        f"{user}@{host}",
+        remote_script,
+    ]
+    result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        return {"reachable": False, "error": err or f"ssh exit {result.returncode}"}
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {"reachable": False, "error": "invalid_remote_json"}
 
 
 def mtime_evidence(paths: list[str]) -> JobEvidence:
@@ -374,26 +562,51 @@ def build_payload(root: Path) -> dict[str, Any]:
         cadence_seconds, schedule = cadence_from_plist(plist_payload)
         job_name = label.replace("com.ronny.", "", 1)
 
-        runtime_evidence = runtime_index.get(job_name) or JobEvidence(timestamp=None, exit_code=None, source="none")
-        # Only use runtime-jobs evidence if it's from a scheduled launchd execution
-        runtime_is_scheduled = "launchd" in runtime_evidence.execution_source
-        if not runtime_is_scheduled and runtime_evidence.source == "runtime-jobs":
-            runtime_evidence = JobEvidence(timestamp=None, exit_code=None, source="none")
-
-        log_paths = [
-            str(plist_payload.get("StandardOutPath", "") or ""),
-            str(plist_payload.get("StandardErrorPath", "") or ""),
-        ]
-        mtime = mtime_evidence(log_paths)
-        evidence = choose_evidence(runtime_evidence, mtime)
-        launchctl_exit = launchctl_last_exit_code(label)
-        if launchctl_exit is not None:
+        remote_probe = remote_systemd_probe(root, label)
+        if remote_probe and remote_probe.get("reachable"):
+            last_trigger = parse_iso8601(str(remote_probe.get("last_trigger_at", "")))
+            service_exec_start = parse_iso8601(str(remote_probe.get("service_exec_main_start_at", "")))
+            service_exec_exit = parse_iso8601(str(remote_probe.get("service_exec_main_exit_at", "")))
+            service_state_change = parse_iso8601(str(remote_probe.get("service_state_change_at", "")))
+            service_run_at = service_exec_exit or service_exec_start or service_state_change
+            if service_run_at and (last_trigger is None or service_run_at > last_trigger):
+                last_trigger = service_run_at
+            exit_code = None
+            exec_status = str(remote_probe.get("service_exec_main_status", "") or "").strip()
+            if exec_status:
+                try:
+                    exit_code = int(exec_status)
+                except ValueError:
+                    exit_code = None
+            if exit_code is None and str(remote_probe.get("service_result", "") or "").strip() == "success":
+                exit_code = 0
             evidence = JobEvidence(
-                timestamp=evidence.timestamp,
-                exit_code=launchctl_exit,
-                source=evidence.source if evidence.source != "none" else "launchctl",
-                execution_source=evidence.execution_source,
+                timestamp=last_trigger,
+                exit_code=exit_code,
+                source="remote-systemd",
+                execution_source="systemd_scheduler",
             )
+        else:
+            runtime_evidence = runtime_index.get(job_name) or JobEvidence(timestamp=None, exit_code=None, source="none")
+            # Only use runtime-jobs evidence if it's from a scheduled execution.
+            runtime_is_scheduled = runtime_evidence.execution_source.endswith("_scheduler")
+            if not runtime_is_scheduled and runtime_evidence.source == "runtime-jobs":
+                runtime_evidence = JobEvidence(timestamp=None, exit_code=None, source="none")
+
+            log_paths = [
+                str(plist_payload.get("StandardOutPath", "") or ""),
+                str(plist_payload.get("StandardErrorPath", "") or ""),
+            ]
+            mtime = mtime_evidence(log_paths)
+            evidence = choose_evidence(runtime_evidence, mtime)
+            launchctl_exit = launchctl_last_exit_code(label)
+            if launchctl_exit is not None:
+                evidence = JobEvidence(
+                    timestamp=evidence.timestamp,
+                    exit_code=launchctl_exit,
+                    source=evidence.source if evidence.source != "none" else "launchctl",
+                    execution_source=evidence.execution_source,
+                )
 
         status, age_seconds, stale_threshold = classify_status(now, evidence, cadence_seconds)
         expectation = scheduler_expectations.get(label, {}) if isinstance(scheduler_expectations, dict) else {}
@@ -422,7 +635,14 @@ def build_payload(root: Path) -> dict[str, Any]:
                 "stale_threshold_seconds": stale_threshold,
                 "status": status,
                 "evidence_source": evidence.source,
+                "execution_source": evidence.execution_source,
                 "template_path": template_path,
+                "scheduler_backend": "systemd" if remote_probe and remote_probe.get("reachable") else "launchd",
+                "next_run_at": str((remote_probe or {}).get("next_run_at", "") or ""),
+                "timer_load_state": str((remote_probe or {}).get("timer_load_state", "") or ""),
+                "timer_unit_file_state": str((remote_probe or {}).get("timer_unit_file_state", "") or ""),
+                "service_load_state": str((remote_probe or {}).get("service_load_state", "") or ""),
+                "service_unit_file_state": str((remote_probe or {}).get("service_unit_file_state", "") or ""),
             }
         )
 

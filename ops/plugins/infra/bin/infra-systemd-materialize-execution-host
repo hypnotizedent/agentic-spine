@@ -12,6 +12,9 @@ set -euo pipefail
 # Loop: LOOP-SPINE-EXECUTION-HOST-MATERIALIZATION-READINESS-20260413
 
 ROOT="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+EXECUTION_HOST_USER="${SPINE_EXECUTION_HOST_USER:-ubuntu}"
+EXECUTION_HOST_GROUP="${SPINE_EXECUTION_HOST_GROUP:-ubuntu}"
+EXECUTION_HOST_HOME="${SPINE_EXECUTION_HOST_HOME:-/home/${EXECUTION_HOST_USER}}"
 
 OUTPUT_DIR=""
 JSON_OUTPUT=false
@@ -319,7 +322,10 @@ for label in "${LABELS[@]}"; do
     echo ""
     echo "[Service]"
     echo "Type=$(if [[ "$schedule_type" == "daemon" ]]; then echo "simple"; else echo "oneshot"; fi)"
+    echo "User=${EXECUTION_HOST_USER}"
+    echo "Group=${EXECUTION_HOST_GROUP}"
     echo "EnvironmentFile=/etc/spine/execution-host.env"
+    echo "Environment=\"HOME=${EXECUTION_HOST_HOME}\""
     echo "ExecStart=${exec_start}"
 
     if [[ -n "$working_dir" ]]; then
@@ -341,9 +347,11 @@ for label in "${LABELS[@]}"; do
       if [[ "$env_line" == PATH=* ]]; then
         continue
       fi
-      # SPINE_ROOT is provided by EnvironmentFile as SPINE_REPO — translate
+      # Do not inject SPINE_ROOT via systemd Environment= using a second
+      # environment variable reference; systemd leaves it literal here.
+      # Repo-native scripts either resolve from their own path or can read
+      # SPINE_REPO from EnvironmentFile when they need the host checkout root.
       if [[ "$env_line" == SPINE_ROOT=* ]]; then
-        echo 'Environment="SPINE_ROOT=${SPINE_REPO}"'
         continue
       fi
       # Translate any remaining Mac-local values
