@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: session-v3-attach must check OPS_TERMINAL_ROLE and emit ADMITTED vs UNBOUND
+# TRIAGE: session-v3-attach must check canonical terminal identity and emit ADMITTED vs UNBOUND
 #         admission status. The header must describe it as orientation, NOT admission.
 set -euo pipefail
 
@@ -10,9 +10,13 @@ fail() { echo "D437 FAIL: $*" >&2; exit 1; }
 
 [[ -f "$ATTACH_SCRIPT" ]] || fail "session-v3-attach not found"
 
-# Must check admission status based on OPS_TERMINAL_ROLE
+# Must check admission status based on canonical terminal identity / aliases
 if ! grep -q 'ADMISSION_STATUS.*unbound' "$ATTACH_SCRIPT"; then
   fail "session-v3-attach does not check admission status (missing ADMISSION_STATUS)"
+fi
+
+if ! grep -Eq 'SPINE_TERMINAL_ID|OPS_TERMINAL_ID|OPS_TERMINAL_ROLE' "$ATTACH_SCRIPT"; then
+  fail "session-v3-attach does not resolve canonical terminal identity"
 fi
 
 # Header must say NOT admission
@@ -25,5 +29,5 @@ if ! grep -q 'UNBOUND' "$ATTACH_SCRIPT"; then
   fail "session-v3-attach does not emit UNBOUND status for standalone invocation"
 fi
 
-echo "D437 PASS: admission binding truth is explicit (ADMITTED vs UNBOUND, header says NOT admission)"
+echo "D437 PASS: admission binding truth is explicit (ADMITTED vs UNBOUND, canonical terminal identity resolved)"
 exit 0

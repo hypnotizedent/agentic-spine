@@ -5,8 +5,8 @@
 #
 # The ONE public admitting surface for governed human terminal sessions.
 # Opens an iTerm window with truthful runtime identity:
-#   - OPS_TERMINAL_ROLE     (terminal character name)
-#   - SPINE_RUNTIME_ROLE    (mutation policy role from contract)
+#   - SPINE_TERMINAL_ID     (canonical terminal identity)
+#   - SPINE_EXECUTION_CLASS (canonical mutation policy class from contract)
 #   - SPINE_LOOP_ID         (explicitly requested, or auto-attached when exactly
 #                            one live loop exists)
 #   - Claude launcher preserves legacy bypass-permissions behavior for
@@ -43,15 +43,16 @@ Usage:
 Options:
   --role <solo|control|lane-worker>  Launch mode (solo disables implicit loop attach)
   --tool <tool>         Tool to run (claude|codex|opencode|verify)
-  --terminal <name>     Terminal character name (sets OPS_TERMINAL_ROLE)
+  --terminal <name>     Terminal character name (sets SPINE_TERMINAL_ID)
   --loop <loop_id>      Explicitly attach a loop (otherwise one live loop auto-attaches)
   --session-posture <controller|membrane|worker|translator>  Explicit session posture (validated by node type)
   --dry-run             Print the command without opening iTerm
 
 Runtime identity:
-  OPS_TERMINAL_ROLE   = terminal character name (from --terminal)
-  SPINE_RUNTIME_ROLE  = mutation policy role (resolved from contract by terminal type)
+  SPINE_TERMINAL_ID   = canonical terminal identity (from --terminal)
+  SPINE_EXECUTION_CLASS = canonical execution class (resolved from contract by terminal type)
   SPINE_LOOP_ID       = explicit loop, or auto-attached when exactly one live loop exists
+  Legacy mirrors: OPS_TERMINAL_ID, OPS_TERMINAL_ROLE, SPINE_RUNTIME_ROLE
   SPINE_NODE_TYPE, SPINE_SESSION_POSTURE (resolved at birth from terminal type / explicit flag)
 
 Examples:
@@ -110,8 +111,8 @@ resolve_launch_mode() {
 
 LAUNCH_MODE="$(resolve_launch_mode "$LAUNCH_MODE")"
 
-# ── Resolve runtime role from contract ───────────────────────────────────
-# Reads terminal.role.contract.yaml to map terminal name → type → runtime role.
+# ── Resolve execution class from contract ─────────────────────────────────
+# Reads terminal.role.contract.yaml to map terminal name → type → execution class.
 # Falls back to "researcher" (read-only) if no terminal or contract missing.
 resolve_runtime_role() {
     local terminal_name="${1:-}"
@@ -164,7 +165,7 @@ TERMINAL_TYPE="$(resolve_terminal_type "$TERMINAL_NAME")"
 RUNTIME_ROLE="$(resolve_runtime_role "$TERMINAL_NAME")"
 
 # ── Resolve session posture (node type + posture + source) ─────────��─────
-# Pass RUNTIME_ROLE so posture derives from canonical execution identity.
+# Pass execution class so posture derives from canonical execution identity.
 # This prevents split-identity (e.g. worker role with controller posture).
 if command -v session_posture_resolve >/dev/null 2>&1; then
     if ! session_posture_resolve "$TERMINAL_NAME" "$SESSION_POSTURE" "$RUNTIME_ROLE"; then
@@ -325,7 +326,7 @@ fi
 build_entry_cmd() {
     local tool="$1"
     local terminal_name="${2:-}"
-    local runtime_role="${3:-researcher}"
+    local execution_class="${3:-researcher}"
     local loop_id="${4:-}"
     local posture_exports="${5:-}"
     local launch_cwd="${6:-$SPINE_ROOT}"
@@ -338,8 +339,10 @@ build_entry_cmd() {
     # Unset stale old-model env and inherited loop identity so birth state is explicit.
     parts+=("unset SPINE_ENTRY_PACKET_PATH SPINE_ENTRY_PACKET_HASH SPINE_POLICY_PRESET SPINE_TERMINAL_NAME SPINE_LOOP_ID OPS_WORKTREE_IDENTITY 2>/dev/null; true")
 
-    # Set terminal birth identity
+    # Set terminal birth identity and compatibility aliases.
     if [[ -n "$terminal_name" ]]; then
+        parts+=("export SPINE_TERMINAL_ID=$(printf '%q' "$terminal_name")")
+        parts+=("export OPS_TERMINAL_ID=$(printf '%q' "$terminal_name")")
         parts+=("export OPS_TERMINAL_ROLE=$(printf '%q' "$terminal_name")")
         parts+=("export SPINE_TERMINAL_NAME=$(printf '%q' "$terminal_name")")
         parts+=("export SPINE_HEARTBEAT_FILE=$(printf '%q' "$SPINE_STATE/terminal-heartbeats/${terminal_name}.yaml")")
@@ -347,7 +350,8 @@ build_entry_cmd() {
     if [[ -n "$TERMINAL_TYPE" ]]; then
         parts+=("export SPINE_TERMINAL_TYPE=$(printf '%q' "$TERMINAL_TYPE")")
     fi
-    parts+=("export SPINE_RUNTIME_ROLE=$(printf '%q' "$runtime_role")")
+    parts+=("export SPINE_EXECUTION_CLASS=$(printf '%q' "$execution_class")")
+    parts+=("export SPINE_RUNTIME_ROLE=$(printf '%q' "$execution_class")")
 
     # Session posture exports (one export line per part, verbatim)
     if [[ -n "$posture_exports" ]]; then
@@ -404,7 +408,7 @@ ENTRY_CMD="$(build_entry_cmd "$TOOL" "$TERMINAL_NAME" "$RUNTIME_ROLE" "$LOOP_ID"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "# Terminal: ${TERMINAL_NAME:-ad-hoc}"
-    echo "# Runtime role: $RUNTIME_ROLE"
+    echo "# Execution class: $RUNTIME_ROLE"
     echo "# Launch mode: $LAUNCH_MODE"
     echo "# Node type: ${__SP_NODE_TYPE:-unknown}"
     echo "# Session posture: ${__SP_POSTURE:-unknown} (source: ${__SP_SOURCE:-unknown})"

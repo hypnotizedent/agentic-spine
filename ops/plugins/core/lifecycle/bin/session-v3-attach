@@ -66,21 +66,24 @@ POSTURE_HELPER="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/session_posture.sh"
 # ── Admission status ──────────────────────────────────────────────────────
 # Detect whether we are inside a terminal-launch context (admitted) or
 # called standalone (orientation-only, not admitted).
+TERMINAL_ID="${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-}}}"
+EXECUTION_CLASS="${SPINE_EXECUTION_CLASS:-${SPINE_RUNTIME_ROLE:-}}"
+
 ADMISSION_STATUS="unbound"
-if [[ -n "${OPS_TERMINAL_ROLE:-}" && -n "${SPINE_RUNTIME_ROLE:-}" ]]; then
+if [[ -n "$TERMINAL_ID" && -n "$EXECUTION_CLASS" ]]; then
     ADMISSION_STATUS="admitted"
 fi
 
 echo "── admission ───────────────────────────────────────────────────"
 if [[ "$ADMISSION_STATUS" == "admitted" ]]; then
     echo "  status:          ADMITTED (via terminal launch)"
-    echo "  terminal:        ${OPS_TERMINAL_ROLE}"
-    echo "  runtime role:    ${SPINE_RUNTIME_ROLE}"
+    echo "  terminal id:     ${TERMINAL_ID}"
+    echo "  execution class: ${EXECUTION_CLASS}"
     echo "  loop:            ${SPINE_LOOP_ID:-<none>}"
 else
     echo "  status:          UNBOUND — orientation only, not governed admission"
-    echo "  terminal:        ${OPS_TERMINAL_ROLE:-<unset>}"
-    echo "  runtime role:    ${SPINE_RUNTIME_ROLE:-<unset>}"
+    echo "  terminal id:     ${TERMINAL_ID:-<unset>}"
+    echo "  execution class: ${EXECUTION_CLASS:-<unset>}"
     echo "  note:            use 'ops terminal launch' for governed session start"
 fi
 echo ""
@@ -157,7 +160,7 @@ if isinstance(stop, list):
     stop = '; '.join(stop)
 print(f'ENTRY_COMPILE_STOP={shlex.quote(str(stop or \"<none>\"))}')
 mg = d.get('mutation_ground') or {}
-mut_str = f'permitted={mg.get(\"mutation_permitted\", \"?\")} role={mg.get(\"runtime_role\", \"?\")}'
+mut_str = f'permitted={mg.get(\"mutation_permitted\", \"?\")} execution_class={mg.get(\"execution_class\", mg.get(\"runtime_role\", \"?\"))}'
 print(f'ENTRY_COMPILE_MUTATION={shlex.quote(mut_str)}')
 print(f'ENTRY_COMPILE_HANDOFF={shlex.quote(str(d.get(\"handoff_target\") or \"<none>\"))}')
 wk = d.get('wave_kind') or ''
@@ -224,13 +227,13 @@ echo ""
 # ── Session posture (best-effort, non-blocking) ────────────────────────────
 POSTURE_OK=0
 if command -v session_posture_resolve >/dev/null 2>&1; then
-    if session_posture_resolve "${OPS_TERMINAL_ROLE:-}" "" "${SPINE_RUNTIME_ROLE:-}" 2>/dev/null; then
+    if session_posture_resolve "${TERMINAL_ID:-}" "" "${EXECUTION_CLASS:-}" 2>/dev/null; then
         POSTURE_OK=1
         echo "── session posture ─────────────────────────────────────────────"
         echo "  node type:       ${__SP_NODE_TYPE:-unknown}"
         echo "  session posture: ${__SP_POSTURE:-unknown}"
         echo "  posture source:  ${__SP_SOURCE:-unknown}"
-        echo "  runtime role:    ${SPINE_RUNTIME_ROLE:-unset}"
+        echo "  execution class: ${EXECUTION_CLASS:-unset}"
         echo "  verify cmd:      ./bin/ops verify --spine-lite"
         echo "  control loop:    ./bin/ops status --control-loop"
         echo ""
@@ -320,7 +323,7 @@ if [[ -n "$ENTRY_COMPILE_STATE" ]]; then
         echo ""
         echo "  STATUS:          UNBOUND — no loop selected, no packet, no wave context"
         echo "  consequence:     work in this session has no governed orchestration trail"
-        echo "  next action:     ops terminal launch --tool <tool> --terminal ${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01} --loop <LOOP_ID>"
+        echo "  next action:     ops terminal launch --tool <tool> --terminal ${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}}} --loop <LOOP_ID>"
         echo ""
         echo "  active loop candidates (operator must select):"
         for i in $(seq 0 $(("${ENTRY_COMPILE_CAND_COUNT}" - 1))); do
@@ -483,8 +486,8 @@ fi
 if [[ "$EMIT_ASSIGNMENT" -eq 1 ]]; then
     echo "── compiled assignment ──────────────────────────────────────────"
     SPINE_ROOT_EXPORT="$SPINE_ROOT" ENTRY_COMPILE_JSON="${ENTRY_COMPILE_JSON:-}" python3 - \
-        "${OPS_TERMINAL_ROLE:-}" \
-        "${SPINE_RUNTIME_ROLE:-}" \
+        "${TERMINAL_ID:-}" \
+        "${EXECUTION_CLASS:-}" \
         "${WORKTREE_STATUS_BRIEF:-}" \
         "${__SP_SAFE_TO_MUTATE:-false}" \
         "${CONT_ACTIVE_HANDOFFS:-0}" \
@@ -511,7 +514,7 @@ import sqlite3
 
 args = sys.argv[1:]
 terminal_id       = args[0] or None
-runtime_role      = args[1] or None
+execution_class   = args[1] or None
 hygiene_brief     = args[2] or None
 safe_to_mutate    = args[3]
 active_handoffs   = int(args[4]) if args[4] else 0
@@ -662,7 +665,8 @@ assignment = {
     "terminal_id": terminal_id,
     "terminal_type": terminal_type,
     "tool": tool,
-    "runtime_role": runtime_role,
+    "execution_class": execution_class,
+    "runtime_role": execution_class,
     "loop_id": loop_id,
     "loop_objective": loop_objective,
     "loop_priority": loop_priority,

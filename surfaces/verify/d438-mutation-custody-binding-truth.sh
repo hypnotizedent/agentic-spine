@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: cap.sh must block mutating capabilities when OPS_TERMINAL_ROLE is unset
+# TRIAGE: cap.sh must block mutating capabilities when canonical terminal identity is unset
 #         (no bound terminal identity). The block reason is unbound_terminal_identity.
 set -euo pipefail
 
@@ -15,10 +15,10 @@ if ! grep -q 'unbound_terminal_identity' "$CAP_SH"; then
   fail "cap.sh does not enforce unbound_terminal_identity gate for mutation"
 fi
 
-# Must check OPS_TERMINAL_ROLE specifically
-if ! grep -q 'OPS_TERMINAL_ROLE' "$CAP_SH"; then
-  fail "cap.sh does not check OPS_TERMINAL_ROLE for mutation custody"
+# Must check canonical terminal identity or compatibility aliases
+if ! grep -Eq 'SPINE_TERMINAL_ID|OPS_TERMINAL_ID|OPS_TERMINAL_ROLE' "$CAP_SH"; then
+  fail "cap.sh does not check canonical terminal identity for mutation custody"
 fi
 
-echo "D438 PASS: mutation requires bound terminal identity (unbound_terminal_identity gate present)"
+echo "D438 PASS: mutation requires bound terminal identity (canonical identity gate present)"
 exit 0

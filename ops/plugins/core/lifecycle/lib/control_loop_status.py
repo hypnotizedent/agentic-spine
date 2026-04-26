@@ -38,15 +38,15 @@ TERMINAL_WAVE_STATUSES = frozenset(
 )
 
 _TERMINAL_ID_ENV_KEYS = (
-    "OPS_TERMINAL_ID",
     "SPINE_TERMINAL_ID",
+    "OPS_TERMINAL_ID",
     "SPINE_TERMINAL_NAME",
 )
 _TERMINAL_ROLE_ENV_KEYS = (
     "OPS_TERMINAL_ROLE",
     "SPINE_TERMINAL_ROLE",
 )
-_RUNTIME_ROLE_ENV_KEYS = ("SPINE_RUNTIME_ROLE",)
+_RUNTIME_ROLE_ENV_KEYS = ("SPINE_EXECUTION_CLASS", "SPINE_RUNTIME_ROLE")
 _LOOP_ID_ENV_KEYS = ("SPINE_LOOP_ID",)
 _WAVE_ID_ENV_KEYS = ("SPINE_WAVE_ID", "OPS_WAVE_ID")
 
@@ -69,6 +69,7 @@ def _resolve_terminal(env: dict) -> dict[str, Any]:
     return {
         "id": _first_env(env, _TERMINAL_ID_ENV_KEYS, "unknown"),
         "role": _first_env(env, _TERMINAL_ROLE_ENV_KEYS, "unknown"),
+        "execution_class": _first_env(env, _RUNTIME_ROLE_ENV_KEYS, "unknown"),
         "runtime_role": _first_env(env, _RUNTIME_ROLE_ENV_KEYS, "unknown"),
         "loop_id": _first_env(env, _LOOP_ID_ENV_KEYS, "unknown"),
         "wave_id": _first_env(env, _WAVE_ID_ENV_KEYS, None),

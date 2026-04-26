@@ -16,11 +16,18 @@ current aperture and operator entry rules.
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops cap run session.v3.attach
+./bin/ops terminal launch --tool <tool> --terminal <name>
 ./bin/ops status --json
 ./bin/ops cap run verify.engine.run
 ./bin/ops cap run spine.verify
 ./bin/ops cap list
+```
+
+If you are already inside a governed terminal-launch session and only need the
+orientation banner again, use:
+
+```bash
+./bin/ops cap run session.v3.attach
 ```
 
 ## Daily Use
@@ -38,6 +45,19 @@ If an agent cannot understand how to work here by reading the entry surface,
 the doctrine docs, and running the three commands above, the entry surface is
 too complex.
 
+## Layer Framing
+
+Persist this distinction or the shell will grow back:
+
+- **Spine Core**: request, claim, heartbeat, result/failure, receipt
+- **Spine Engine**: admission, capability execution, delegation, wave execution, verify, status
+- **Operational Packs**: secrets, recovery, control-cycle, service health, domain/runtime packs
+- **Shelf**: cockpit proliferation, broker read shells, narrative/explanatory comfort layers
+
+`operator_console` admits and observes work.
+
+Governed nodes carry unattended runtime.
+
 ## Rebuild-Grade Core
 
 If the spine were rebuilt from the durable kernel lessons only, the current
@@ -47,7 +67,7 @@ truthful core would be:
 |---|---|---|
 | canonical state root + shared authority | `keep` | Truth must live outside chat/session memory. |
 | `bin/ops` + governed capability registry | `keep` | Named capabilities are the boring execution/control surface. |
-| terminal identity + runtime role | `keep` | Custody and legal mutation boundaries must be explicit. |
+| terminal identity + execution class | `keep` | Custody and legal mutation boundaries must be explicit. |
 | `work_request` / loop birth | `keep` | Bounded work must have a governed birth object. |
 | `execution_request` / delegation birth | `keep` | Execution still needs a governed birth object, even if transport realizations change. |
 | claim | `keep` | Custody proof is core kernel truth. |

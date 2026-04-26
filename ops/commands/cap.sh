@@ -159,26 +159,34 @@ role_policy_override_env_name() {
     yq e -r "$field // \"$default_value\"" "$ROLE_POLICY_CONTRACT" 2>/dev/null || printf '%s\n' "$default_value"
 }
 
-runtime_role_is_read_only() {
-    local runtime_role="$1"
+current_terminal_id() {
+    printf '%s\n' "${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-}}}}}"
+}
+
+current_execution_class() {
+    printf '%s\n' "${SPINE_EXECUTION_CLASS:-${SPINE_RUNTIME_ROLE:-researcher}}"
+}
+
+execution_class_is_read_only() {
+    local execution_class="$1"
     local read_only_roles=""
     [[ -f "$ROLE_POLICY_CONTRACT" ]] || return 1
 
     read_only_roles="$(yq e -r '.runtime_roles.read_only_roles[]?' "$ROLE_POLICY_CONTRACT" 2>/dev/null || true)"
-    if printf '%s\n' "$read_only_roles" | grep -Fxq -- "$runtime_role"; then
+    if printf '%s\n' "$read_only_roles" | grep -Fxq -- "$execution_class"; then
         return 0
     fi
 
     return 1
 }
 
-capability_in_role_mutation_allowlist() {
-    local runtime_role="$1"
+capability_in_execution_class_mutation_allowlist() {
+    local execution_class="$1"
     local capability_name="$2"
     local allowlist=""
     [[ -f "$ROLE_POLICY_CONTRACT" ]] || return 1
 
-    allowlist="$(yq e -r ".runtime_roles.mutating_capability_allowlist_by_role.\"$runtime_role\"[]?" "$ROLE_POLICY_CONTRACT" 2>/dev/null || true)"
+    allowlist="$(yq e -r ".runtime_roles.mutating_capability_allowlist_by_role.\"$execution_class\"[]?" "$ROLE_POLICY_CONTRACT" 2>/dev/null || true)"
     if printf '%s\n' "$allowlist" | grep -Fxq -- "$capability_name"; then
         return 0
     fi
@@ -190,7 +198,7 @@ evaluate_role_policy() {
     local capability_name="$1"
     local safety="$2"
     local override_env override_reason_env override_ref override_reason
-    local session_posture runtime_role enforce_mutation_block
+    local session_posture execution_class enforce_mutation_block terminal_id
 
     reset_role_policy_state
 
@@ -231,9 +239,11 @@ evaluate_role_policy() {
 
     # ── Unbound identity check ────────────────────────────────────────────
     # Mutating capabilities require bound terminal identity (set by terminal
-    # launch). If OPS_TERMINAL_ROLE is unset, the caller did not go through
-    # governed admission. Block unless explicitly overridden.
-    if [[ -z "${OPS_TERMINAL_ROLE:-}" && "$CAP_ROLE_POLICY_OVERRIDE_USED" != "true" ]]; then
+    # launch). Canonical identity is SPINE_TERMINAL_ID with compatibility
+    # fallbacks. If identity is unset, the caller did not go through governed
+    # admission. Block unless explicitly overridden.
+    terminal_id="$(current_terminal_id)"
+    if [[ -z "$terminal_id" && "$CAP_ROLE_POLICY_OVERRIDE_USED" != "true" ]]; then
         CAP_BLOCKER_REASON="unbound_terminal_identity"
         CAP_ROLE_POLICY_BLOCK_REASON="$CAP_BLOCKER_REASON"
         CAP_ROLE_POLICY_BLOCK_MESSAGE="mutating capability '$capability_name' requires bound terminal identity — use 'ops terminal launch' for governed admission"
@@ -257,12 +267,12 @@ evaluate_role_policy() {
         return 0
     fi
 
-    runtime_role="${SPINE_RUNTIME_ROLE:-researcher}"
-    if ! runtime_role_is_read_only "$runtime_role"; then
+    execution_class="$(current_execution_class)"
+    if ! execution_class_is_read_only "$execution_class"; then
         return 0
     fi
 
-    if capability_in_role_mutation_allowlist "$runtime_role" "$capability_name"; then
+    if capability_in_execution_class_mutation_allowlist "$execution_class" "$capability_name"; then
         return 0
     fi
 
@@ -283,22 +293,22 @@ evaluate_role_policy() {
         return 0
     fi
 
-    CAP_BLOCKER_REASON="runtime_role_mutation_forbidden"
+    CAP_BLOCKER_REASON="execution_class_mutation_forbidden"
     CAP_ROLE_POLICY_BLOCK_REASON="$CAP_BLOCKER_REASON"
-    CAP_ROLE_POLICY_BLOCK_MESSAGE="runtime role '$runtime_role' is read-only and '$capability_name' is not allowlisted for mutation"
+    CAP_ROLE_POLICY_BLOCK_MESSAGE="execution class '$execution_class' is read-only and '$capability_name' is not allowlisted for mutation"
     return 1
 }
 
 emit_role_policy_stop() {
     local capability_name="$1"
     local safety="$2"
-    local override_env override_reason_env runtime_role session_posture terminal_role next_step
+    local override_env override_reason_env execution_class session_posture terminal_id next_step
 
     override_env="$(role_policy_override_env_name '.runtime_roles.execution_policy.override_env' 'SPINE_ROLE_POLICY_OVERRIDE_REF')"
     override_reason_env="$(role_policy_override_env_name '.runtime_roles.execution_policy.override_reason_env' 'SPINE_ROLE_POLICY_OVERRIDE_REASON')"
-    runtime_role="${SPINE_RUNTIME_ROLE:-researcher}"
+    execution_class="$(current_execution_class)"
     session_posture="${SPINE_SESSION_POSTURE:-unset}"
-    terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-unset}}}"
+    terminal_id="$(current_terminal_id)"
 
     next_step="rerun from a worker-bound execution surface or set $override_env and $override_reason_env with governed justification"
     if [[ "$session_posture" == "translator" ]]; then
@@ -306,13 +316,13 @@ emit_role_policy_stop() {
     fi
 
     cat <<EOF
-STOP: runtime role policy blocked capability execution
+STOP: execution class policy blocked capability execution
   capability: $capability_name
   safety:     $safety
-  runtime:    $runtime_role
+  execution:  $execution_class
   posture:    $session_posture
-  terminal:   $terminal_role
-  reason:     ${CAP_ROLE_POLICY_BLOCK_MESSAGE:-runtime role policy blocked capability execution}
+  terminal:   ${terminal_id:-unset}
+  reason:     ${CAP_ROLE_POLICY_BLOCK_MESSAGE:-execution class policy blocked capability execution}
   next:       $next_step
 EOF
 }
@@ -489,7 +499,8 @@ write_terminal_custody_heartbeat() {
     local heartbeat_dir="$SPINE_STATE/terminal-heartbeats"
     local heartbeat_file="${SPINE_HEARTBEAT_FILE:-$heartbeat_dir/${terminal_id}.yaml}"
     local now_utc expires_at
-    local runtime_role="${SPINE_RUNTIME_ROLE:-researcher}"
+    local execution_class
+    execution_class="$(current_execution_class)"
     local loop_id="${SPINE_LOOP_ID:-}"
     local terminal_type="${SPINE_TERMINAL_TYPE:-}"
     local terminal_scope="${SPINE_TERMINAL_SCOPE:-}"
@@ -558,7 +569,8 @@ PY
         printf 'version: 1\n'
         printf 'terminal_id: "%s"\n' "$terminal_id"
         printf 'role: "%s"\n' "$terminal_type"
-        printf 'runtime_role: "%s"\n' "$runtime_role"
+        printf 'execution_class: "%s"\n' "$execution_class"
+        printf 'runtime_role: "%s"\n' "$execution_class"
         printf 'scope: "%s"\n' "$terminal_scope"
         printf 'normalized_scope: "%s"\n' "$normalized_scope"
         printf 'protected_hotspot_scope: "%s"\n' "$protected_hotspot_scope"
@@ -585,10 +597,10 @@ append_telemetry() {
     local telemetry_dir="$SPINE_STATE/telemetry"
     local terminals_dir="$SPINE_STATE/terminals"
     local session_boundary="${SPINE_SESSION_ID:-}"
-    local terminal_id="${TERMINAL_ID:-${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-}}}}"
+    local terminal_id="${TERMINAL_ID:-$(current_terminal_id)}"
 
     if [[ -z "$session_boundary" && "$safety" == "mutating" ]]; then
-        session_boundary="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-}}}"
+        session_boundary="$(current_terminal_id)"
     fi
     [[ -n "$session_boundary" ]] || session_boundary="nosession"
 
@@ -715,8 +727,9 @@ write_cap_receipt() {
     local output_hash=""
     local receipt_hash=""
     local exec_receipt_hash=""
-    local runtime_role="${SPINE_RUNTIME_ROLE:-researcher}"
-    local terminal_id="${TERMINAL_ID:-${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-unknown-terminal}}}}"
+    local execution_class
+    execution_class="$(current_execution_class)"
+    local terminal_id="${TERMINAL_ID:-$(current_terminal_id)}"
     local lane_id="${SPINE_LANE:-execution}"
     local args_display="none"
     local source_refs_csv="none"
@@ -761,7 +774,7 @@ write_cap_receipt() {
 | Model | local (capability) |
 | Context | $safety |
 | Blocker Reason | $blocker_reason |
-| Runtime Role | ${runtime_role:-unknown} |
+| Execution Class | ${execution_class:-unknown} |
 | Role Policy Enforced | $role_policy_enforced |
 | Role Policy Override Used | $role_policy_override_used |
 | Role Policy Override Ref | $role_policy_override_ref |
@@ -827,7 +840,8 @@ EOF
     CAP_WAVE_ID="${SPINE_WAVE_ID:-}" \
     CAP_EXECUTION_HOST="$execution_host" \
     CAP_EXECUTION_MODE="$execution_mode" \
-    CAP_RUNTIME_ROLE="$runtime_role" \
+    CAP_EXECUTION_CLASS="$execution_class" \
+    CAP_RUNTIME_ROLE="$execution_class" \
     CAP_GOVERNANCE_VERSION="$governance_version" \
     CAP_ENTRY_PACKET_PATH="${SPINE_ENTRY_PACKET_PATH:-}" \
     CAP_ENTRY_PACKET_HASH="${SPINE_ENTRY_PACKET_HASH:-none}" \
@@ -926,6 +940,7 @@ attestation_payload = {
     "governance_version": os.environ.get("CAP_GOVERNANCE_VERSION", "SPINE.md@unknown"),
     "execution_host": os.environ.get("CAP_EXECUTION_HOST", "unknown-host"),
     "execution_mode": os.environ.get("CAP_EXECUTION_MODE", "capability"),
+    "execution_class": os.environ.get("CAP_EXECUTION_CLASS", os.environ.get("CAP_RUNTIME_ROLE", "worker")),
     "runtime_role": os.environ.get("CAP_RUNTIME_ROLE", "worker"),
     "completion_level": "",
     "checks_passed": checks_passed,

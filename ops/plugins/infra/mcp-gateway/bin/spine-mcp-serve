@@ -491,7 +491,7 @@ def _bounded_cap_output(stdout: str, stderr: str, *, full_output: bool, max_char
 
 
 def _load_role_prefixes() -> List[str]:
-    """Load allowed capability prefixes for the current runtime role."""
+    """Load allowed capability prefixes for the current execution class."""
     scope_file = os.path.join(
         SPINE_ROOT, "ops", "bindings", "mcp.role.scope.yaml"
     )
@@ -505,7 +505,7 @@ def _load_role_prefixes() -> List[str]:
             return []
         parsed = json.loads(out or "{}")
         roles = parsed.get("roles", {})
-        role = RUNTIME_ENV.get("SPINE_RUNTIME_ROLE", "researcher")
+        role = RUNTIME_ENV.get("SPINE_EXECUTION_CLASS") or RUNTIME_ENV.get("SPINE_RUNTIME_ROLE", "researcher")
         role_def = roles.get(role, roles.get("researcher", {}))
         return role_def.get("prefixes", [])
     except Exception:
@@ -935,12 +935,15 @@ def bootstrap_session() -> None:
 
 def main() -> int:
     terminal_role = (
-        RUNTIME_ENV.get("OPS_TERMINAL_ROLE")
+        RUNTIME_ENV.get("SPINE_TERMINAL_ID")
+        or RUNTIME_ENV.get("OPS_TERMINAL_ID")
+        or RUNTIME_ENV.get("OPS_TERMINAL_ROLE")
         or RUNTIME_ENV.get("SPINE_TERMINAL_ROLE")
         or RUNTIME_ENV.get("SPINE_TERMINAL_NAME")
         or "unset"
     )
-    runtime_role = RUNTIME_ENV.get("SPINE_RUNTIME_ROLE") or "researcher"
+    runtime_role = RUNTIME_ENV.get("SPINE_EXECUTION_CLASS") or RUNTIME_ENV.get("SPINE_RUNTIME_ROLE") or "researcher"
+    RUNTIME_ENV["SPINE_EXECUTION_CLASS"] = runtime_role
     RUNTIME_ENV["SPINE_RUNTIME_ROLE"] = runtime_role
     print(
         f"[spine-mcp-serve] terminal_role={terminal_role} runtime_role={runtime_role}",

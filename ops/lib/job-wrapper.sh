@@ -47,10 +47,11 @@ spine_export_autonomous_scheduler_context() {
 spine_export_autonomous_scheduler_context "${BASH_SOURCE[1]:-${0:-}}"
 
 # Scheduled jobs run without terminal role context, so cap.sh falls back to
-# the default "researcher" role which blocks mutating capabilities.
-# Set worker role explicitly — scheduled jobs are automated workers that
+# the default read-only execution class and blocks mutating capabilities.
+# Set worker execution class explicitly — scheduled jobs are automated workers that
 # need mutating access (snapshot builds, index refreshes, reconciliation).
-export SPINE_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-worker}"
+export SPINE_EXECUTION_CLASS="${SPINE_EXECUTION_CLASS:-${SPINE_RUNTIME_ROLE:-worker}}"
+export SPINE_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-$SPINE_EXECUTION_CLASS}"
 
 # Scheduled jobs run non-interactively — manual approval prompts would block
 # indefinitely. Auto-approve capabilities that require manual consent.

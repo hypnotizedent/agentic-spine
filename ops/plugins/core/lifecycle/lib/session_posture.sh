@@ -4,18 +4,19 @@
 # SPINE_NODE_TYPE at interactive attach time for the operator console path,
 # then emits posture-derived policy env as `export` lines on stdout.
 #
-# IDENTITY UNIFICATION (2026-04-25):
-# SPINE_RUNTIME_ROLE is the canonical execution identity. Session posture
-# is a DERIVED PROJECTION — it must not disagree with runtime role.
-# When a terminal has a by_terminal_id runtime role override, posture
-# derives from that role, not from terminal type alone.
+# IDENTITY UNIFICATION (2026-04-26):
+# SPINE_EXECUTION_CLASS is the canonical execution identity. Legacy
+# SPINE_RUNTIME_ROLE is a compatibility alias. Session posture is a DERIVED
+# PROJECTION — it must not disagree with execution class. When a terminal has a
+# by_terminal_id runtime role override, posture derives from that execution
+# class, not from terminal type alone.
 #
 # This library is sourced (not executed). It must not set -euo pipefail at
 # file top, must be idempotent, and must be macOS bash 3.2 compatible
 # (no associative arrays). It performs no disk writes and keeps no state.
 #
 # Public functions:
-#   session_posture_resolve TERMINAL_NAME REQUESTED_POSTURE [RUNTIME_ROLE]
+#   session_posture_resolve TERMINAL_NAME REQUESTED_POSTURE [EXECUTION_CLASS]
 #   session_posture_emit_env
 
 __SP_CONTRACT_PATH="/Users/ronnyworks/code/agentic-spine/ops/bindings/terminal.role.contract.yaml"
@@ -55,7 +56,7 @@ __sp_resolve_terminal_type() {
 session_posture_resolve() {
     local terminal_name="${1:-}"
     local requested_posture="${2:-}"
-    local runtime_role="${3:-}"
+    local execution_class="${3:-}"
 
     # 1. Node type
     if [ -n "${SPINE_LOCAL_ROLE:-}" ]; then
@@ -68,13 +69,13 @@ session_posture_resolve() {
     local terminal_type
     terminal_type="$(__sp_resolve_terminal_type "$terminal_name")"
 
-    # 3. Default posture — runtime role is canonical, terminal type is fallback.
-    #    When runtime_role is provided (from terminal.sh after contract resolution),
-    #    posture derives from role to prevent split identity.
+    # 3. Default posture — execution class is canonical, terminal type is fallback.
+    #    When execution_class is provided (from terminal.sh after contract
+    #    resolution), posture derives from it to prevent split identity.
     local default_posture default_source
-    if [ -n "$runtime_role" ]; then
-        # Runtime role is canonical — derive posture from it
-        case "$runtime_role" in
+    if [ -n "$execution_class" ]; then
+        # Execution class is canonical — derive posture from it
+        case "$execution_class" in
             worker)          default_posture="worker" ;;
             qc)              default_posture="membrane" ;;
             close|librarian) default_posture="controller" ;;
@@ -88,9 +89,9 @@ session_posture_resolve() {
                 ;;
             *)               default_posture="membrane" ;;
         esac
-        default_source="derived:runtime-role:${runtime_role}"
+        default_source="derived:execution-class:${execution_class}"
     else
-        # Legacy/fallback: terminal type only (no runtime role provided)
+        # Legacy/fallback: terminal type only (no execution class provided)
         case "$terminal_type" in
             control-plane)   default_posture="controller" ;;
             observation)     default_posture="membrane" ;;

@@ -159,7 +159,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "${OPS_TERMINAL_ROLE:-}" ]] || fail "not in a governed terminal (OPS_TERMINAL_ROLE is not set). Run: ops cap run session.v3.attach"
+TERMINAL_ID="${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-}}}"
+[[ -n "$TERMINAL_ID" ]] || fail "not in a governed terminal (terminal identity is not set). Run: ops terminal launch"
 [[ -n "$LOOP_ID" ]] || fail "missing --loop-id (or set SPINE_LOOP_ID)"
 [[ -n "$OBJECTIVE" ]] || fail "missing --objective"
 [[ ${#LANES[@]} -gt 0 ]] || fail "at least one --lane required"
@@ -402,7 +403,7 @@ if [[ "$PARALLEL" -eq 1 ]]; then
       export DISPATCH_ID="$dispatch_id"
       export TASK_ID="$dispatch_id"
       export LANE="$local_name"
-      export TERMINAL_ID="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-SPINE-CONTROL-01}}"
+      export TERMINAL_ID="${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}}}"
       lane_output="$(cd "$DISPATCH_LANE_CWD" && eval "$local_cmd" 2>&1)"
       lane_exit=$?
       set -e
@@ -476,7 +477,7 @@ else
       export DISPATCH_ID="$dispatch_id"
       export TASK_ID="$dispatch_id"
       export LANE="$local_name"
-      export TERMINAL_ID="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-SPINE-CONTROL-01}}"
+      export TERMINAL_ID="${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}}}"
       cd "$DISPATCH_LANE_CWD" && eval "$local_cmd" 2>&1
     )"
     lane_exit=$?

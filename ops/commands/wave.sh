@@ -81,11 +81,11 @@ _repo_abs_path() {
 }
 
 resolve_wave_owner_terminal() {
-  printf '%s\n' "${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-${USER:-unknown}}}}}"
+  printf '%s\n' "${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${USER:-unknown}}}}}}"
 }
 
 resolve_wave_terminal_identity() {
-  printf '%s\n' "${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-unknown}}}}"
+  printf '%s\n' "${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-unknown}}}}}"
 }
 
 resolve_wave_worktree_prefix() {
@@ -1171,8 +1171,8 @@ PYDEADLINE
 )"
   [[ -n "$claimed_paths_raw" ]] || claimed_paths_raw="$(resolve_wave_claimed_paths "$owner_terminal" "$wave_kind")"
   if [[ -z "$claimed_paths_raw" ]]; then
-    echo "FAIL: not in a governed terminal (OPS_TERMINAL_ROLE='$owner_terminal' has no claimed paths)." >&2
-    echo "  Run: ops cap run session.v3.attach" >&2
+    echo "FAIL: not in a governed terminal (terminal identity '$owner_terminal' has no claimed paths)." >&2
+    echo "  Run: ops terminal launch --tool <tool> --terminal <id>" >&2
     echo "  Or pass --claimed-paths explicitly." >&2
     exit 1
   fi

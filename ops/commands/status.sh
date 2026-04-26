@@ -99,8 +99,8 @@ fi
 if [[ "$MODE" == "--context" ]]; then
   JOINED_STATE_BIN="$SPINE_REPO/ops/plugins/core/lifecycle/bin/spine-engine-joined-state"
 
-  TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-<none>}"
-  RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-<none>}"
+  TERMINAL_ID="${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-<none>}}}"
+  EXECUTION_CLASS="${SPINE_EXECUTION_CLASS:-${SPINE_RUNTIME_ROLE:-<none>}}"
   LOOP_ID="${SPINE_LOOP_ID:-<none>}"
   SESSION_LOOP_DISPLAY="$LOOP_ID"
   SESSION_LOOP_RESIDUE=""
@@ -209,8 +209,8 @@ PY
   fi
 
   echo "─── spine context ───────────────────────────────────"
-  printf "  terminal:       %s\n" "$TERMINAL_ROLE"
-  printf "  runtime role:   %s\n" "$RUNTIME_ROLE"
+  printf "  terminal id:    %s\n" "$TERMINAL_ID"
+  printf "  execution class: %s\n" "$EXECUTION_CLASS"
   printf "  session loop:   %s\n" "$SESSION_LOOP_DISPLAY"
   if [[ -n "$SESSION_LOOP_RESIDUE" ]]; then
     printf "  loop residue:   %s\n" "$SESSION_LOOP_RESIDUE"
@@ -442,6 +442,7 @@ def collect_terminal_telemetry():
                 continue
             custody_by_terminal[terminal_id] = {
                 "role": str(hb.get("role") or "").strip(),
+                "execution_class": str(hb.get("execution_class") or hb.get("runtime_role") or "").strip(),
                 "runtime_role": str(hb.get("runtime_role") or "").strip(),
                 "scope": str(hb.get("scope") or "").strip(),
                 "normalized_scope": str(hb.get("normalized_scope") or "").strip(),
@@ -515,6 +516,7 @@ def collect_terminal_telemetry():
             "custody_fresh": bool(custody_fresh),
             "custody_age_minutes": round(custody_age, 1) if isinstance(custody_age, (int, float)) else None,
             "role": custody.get("role", ""),
+            "execution_class": custody.get("execution_class", custody.get("runtime_role", "")),
             "runtime_role": custody.get("runtime_role", ""),
             "scope": custody.get("scope", ""),
             "normalized_scope": custody.get("normalized_scope", ""),
