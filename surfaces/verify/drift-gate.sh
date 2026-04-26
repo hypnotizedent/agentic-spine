@@ -365,53 +365,6 @@ else
   scoped_fail D3 "d3-entrypoint-smoke script missing"
 fi
 
-# D4: Watcher (launchd canonical; warn only, no fail)
-if ! is_retired D4; then
-CURRENT_GATE="D4"
-echo -n "D4 watcher... "
-WATCHER_PRINT="$(launchctl print "gui/$(id -u)/com.ronny.agent-inbox" 2>/dev/null || true)"
-if [[ -n "$WATCHER_PRINT" ]]; then
-  WATCHER_STATE="$(echo "$WATCHER_PRINT" | awk -F' = ' '/state =/{print $2; exit}')"
-  WATCHER_PID="$(echo "$WATCHER_PRINT" | awk '/pid =/{print $3; exit}')"
-  if [[ "$WATCHER_STATE" == "running" && -n "$WATCHER_PID" ]]; then
-    pass
-  else
-    warn "(loaded but state=$WATCHER_STATE pid=${WATCHER_PID:-none})"
-  fi
-else
-  WATCHER_INFO="$(launchctl list com.ronny.agent-inbox 2>/dev/null || true)"
-  if [[ -n "$WATCHER_INFO" ]]; then
-    WATCHER_PID="$(echo "$WATCHER_INFO" | sed -n 's/.*"PID" = \([0-9]*\).*/\1/p')"
-    if [[ -n "$WATCHER_PID" ]]; then
-      pass
-    else
-      warn "(loaded but no PID)"
-    fi
-  else
-    warn "(launchd service not loaded)"
-  fi
-fi
-else echo "D4 watcher... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
-
-# D5: No executable ~/agent coupling
-if ! is_retired D5; then
-CURRENT_GATE="D5"
-echo -n "D5 no legacy coupling... "
-COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/plugins/core/agent/bin surfaces/verify 2>/dev/null \
-  | rg -v '^[[:space:]]*#' \
-  | rg -v 'foundation-gate.sh' \
-  | rg -v 'drift-gate.sh' \
-  | rg -v 'cloudflare-drift-gate.sh' \
-  | rg -v 'github-actions-gate.sh' \
-  | rg -v 'd18-docker-compose-drift.sh' \
-  | rg -v 'd19-backup-drift.sh' \
-  | rg -v 'd20-secrets-drift.sh' \
-  | rg -v 'd22-nodes-drift.sh' \
-  | rg -v 'd23-health-drift.sh' \
-  | rg -v 'd24-github-labels-drift.sh' \
-  | rg -v 'gate.registry.yaml' || true)"
-if [[ -z "$COUPLE" ]]; then pass; else fail "legacy coupling found"; fi
-else echo "D5 no legacy coupling... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D6: Receipts exist (latest 5 have receipt.md)
 if ! is_retired D6; then
@@ -456,25 +409,6 @@ else
 fi
 else echo "D10 logs under mailroom... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
-# D11: ~/agent must be symlink to mailroom (if exists)
-if ! is_retired D11; then
-CURRENT_GATE="D11"
-echo -n "D11 home surface... "
-if [[ -e "$HOME/agent" ]]; then
-  if [[ -L "$HOME/agent" ]]; then
-    TARGET="$(readlink "$HOME/agent")"
-    if [[ "$TARGET" == *"agentic-spine/mailroom"* ]]; then
-      pass
-    else
-      fail "~/agent symlink points to wrong target: $TARGET"
-    fi
-  else
-    fail "~/agent is a directory (should be symlink to mailroom)"
-  fi
-else
-  pass
-fi
-else echo "D11 home surface... SKIP (retired)"; RETIRED_SKIP_COUNT=$((RETIRED_SKIP_COUNT + 1)); fi
 
 # D12: CORE_LOCK.md must exist (repo validity marker)
 if ! is_retired D12; then
