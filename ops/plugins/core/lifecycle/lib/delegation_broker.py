@@ -1066,6 +1066,118 @@ def transition(
     }
 
 
+def reconcile_terminal_intervention_alignment(
+    state_root: str,
+    *,
+    delegation_id: str = "",
+) -> dict[str, Any]:
+    """Align terminal intervention-backed delegations with linked intervention truth.
+
+    This is a bounded repair path for historical residue where an intervention
+    packet was resolved/landed but its linked delegation row remained in a stale
+    terminal state such as needs_review. Active delegations are never widened or
+    mutated here; only terminal intervention-backed rows are eligible.
+    """
+    if not state_root or not os.path.isdir(state_root):
+        raise DelegationError(f"state_root not found: {state_root}")
+
+    del_dir = _delegations_dir(state_root)
+    targets: list[Path]
+    if delegation_id:
+        target = del_dir / f"{delegation_id}.yaml"
+        if not target.exists():
+            raise DelegationError(f"delegation '{delegation_id}' not found")
+        targets = [target]
+    else:
+        targets = sorted(del_dir.glob("DEL-*.yaml"))
+
+    reconciled: list[dict[str, Any]] = []
+    skipped = 0
+
+    for path in targets:
+        data = _read_delegation(path)
+        current_state = str(data.get("delegation_state", "")).strip().lower()
+        if current_state not in TERMINAL_STATES:
+            skipped += 1
+            continue
+
+        packet_id = str(data.get("packet_id", "")).strip()
+        packet_path = str(data.get("packet_path", "")).strip()
+        if not packet_id.startswith("INTERVENTION-") or not packet_path:
+            skipped += 1
+            continue
+
+        packet_doc: dict[str, Any] = {}
+        try:
+            packet_doc = yaml.safe_load(Path(packet_path).read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            skipped += 1
+            continue
+        if not isinstance(packet_doc, dict):
+            skipped += 1
+            continue
+        if str(packet_doc.get("intervention_id", "")).strip() != packet_id:
+            skipped += 1
+            continue
+
+        intervention_disposition = str(packet_doc.get("disposition", "")).strip().lower()
+        intervention_state = str(packet_doc.get("delegation_state", "")).strip().lower()
+        if (
+            intervention_disposition not in INTERVENTION_TERMINAL_DISPOSITIONS
+            or intervention_state not in TERMINAL_STATES
+        ):
+            skipped += 1
+            continue
+
+        updated = dict(data)
+        changed_fields: list[str] = []
+
+        if current_state != intervention_state:
+            updated["delegation_state"] = intervention_state
+            changed_fields.append("delegation_state")
+
+        expected_disposition = str(
+            packet_doc.get("resolution_note")
+            or packet_doc.get("disposition")
+            or ""
+        ).strip()
+        if expected_disposition and str(updated.get("disposition", "")).strip() != expected_disposition:
+            updated["disposition"] = expected_disposition
+            changed_fields.append("disposition")
+
+        resolved_at = str(
+            packet_doc.get("resolved_at")
+            or packet_doc.get("closed_at")
+            or packet_doc.get("last_observed_at")
+            or ""
+        ).strip()
+        if resolved_at and str(updated.get("completed_at_utc", "")).strip() != resolved_at:
+            updated["completed_at_utc"] = resolved_at
+            changed_fields.append("completed_at_utc")
+
+        if not changed_fields:
+            skipped += 1
+            continue
+
+        _atomic_write(str(path), updated)
+        reconciled.append(
+            {
+                "delegation_id": str(updated.get("delegation_id", "")).strip() or path.stem,
+                "packet_id": packet_id,
+                "previous_state": current_state,
+                "new_state": intervention_state,
+                "changed_fields": changed_fields,
+            }
+        )
+
+    return {
+        "status": "ok",
+        "count": len(reconciled),
+        "reconciled": reconciled,
+        "skipped": skipped,
+    }
+
+
 def status(
     state_root: str,
     *,
