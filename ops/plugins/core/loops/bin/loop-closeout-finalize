@@ -210,6 +210,51 @@ elif [[ "$RECEIPT_PATH" != /* ]]; then
 fi
 mkdir -p "$(dirname "$RECEIPT_PATH")"
 
+RETIRED_DELEGATIONS_PREVIEW_JSON="$(
+python3 - "$ROOT" "$SPINE_STATE" "$LOOP_ID" "$DISPOSITION" "$close_note" "$RECEIPT_PATH" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+root = Path(sys.argv[1])
+state_root = sys.argv[2]
+loop_id = sys.argv[3]
+close_disposition = sys.argv[4]
+close_reason = sys.argv[5]
+receipt_ref = sys.argv[6]
+
+sys.path.insert(0, str(root / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+import delegation_broker as db
+
+preview = db.preview_unclaimed_close_retirements(
+    state_root,
+    loop_id=loop_id,
+    close_disposition=close_disposition,
+    close_reason=close_reason,
+)
+print(json.dumps(preview))
+PY
+)" || {
+  echo "loop.closeout.finalize FAIL: unable to preview unclaimed delegation terminalization for $LOOP_ID" >&2
+  exit 1
+}
+
+cat > "$RECEIPT_PATH" <<EOF
+# Loop Closeout Receipt
+
+- loop_id: $LOOP_ID
+- disposition: $DISPOSITION
+- completion_level: ${COMPLETION_LEVEL:-n/a}
+- lightweight: $([[ "$LIGHTWEIGHT" -eq 1 ]] && echo true || echo false)
+- acceptance_matrix: ${ACCEPTANCE_MATRIX:-n/a}
+- linked_gaps_closed: $closed_gap_count
+- archived_scope_file: $ARCHIVED_SCOPE_FILE
+- reason: $close_note
+- capability: loop.closeout.finalize
+- run_key: ${SPINE_CAP_RUN_KEY:-manual}
+- generated_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
 RETIRED_DELEGATIONS_JSON="$(
 python3 - "$ROOT" "$SPINE_STATE" "$LOOP_ID" "$DISPOSITION" "$close_note" "$RECEIPT_PATH" <<'PY'
 from pathlib import Path
@@ -237,25 +282,24 @@ retired = db.retire_unclaimed_close_residue(
 print(json.dumps(retired))
 PY
 )" || {
-  echo "loop.closeout.finalize FAIL: unable to terminalize unclaimed delegations for $LOOP_ID" >&2
+  python3 - "$RETIRED_DELEGATIONS_PREVIEW_JSON" >> "$RECEIPT_PATH" <<'PY'
+import json
+import sys
+
+try:
+    preview = json.loads(sys.argv[1])
+except json.JSONDecodeError:
+    preview = []
+
+if preview:
+    print("\n## Unclaimed Delegation Terminalization\n")
+    print("- status: failed_after_receipt")
+    print("- note: receipt materialized before delegation retirement; retry required to align delegation ledger")
+    print(f"- preview_count: {len(preview)}")
+PY
+  echo "loop.closeout.finalize FAIL: unable to terminalize unclaimed delegations for $LOOP_ID after receipt write" >&2
   exit 1
 }
-
-cat > "$RECEIPT_PATH" <<EOF
-# Loop Closeout Receipt
-
-- loop_id: $LOOP_ID
-- disposition: $DISPOSITION
-- completion_level: ${COMPLETION_LEVEL:-n/a}
-- lightweight: $([[ "$LIGHTWEIGHT" -eq 1 ]] && echo true || echo false)
-- acceptance_matrix: ${ACCEPTANCE_MATRIX:-n/a}
-- linked_gaps_closed: $closed_gap_count
-- archived_scope_file: $ARCHIVED_SCOPE_FILE
-- reason: $close_note
-- capability: loop.closeout.finalize
-- run_key: ${SPINE_CAP_RUN_KEY:-manual}
-- generated_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-EOF
 
 python3 - "$RETIRED_DELEGATIONS_JSON" >> "$RECEIPT_PATH" <<'PY'
 import json
