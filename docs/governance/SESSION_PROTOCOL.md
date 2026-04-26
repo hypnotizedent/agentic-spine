@@ -100,6 +100,11 @@ The truthful kernel progression is:
 
 Current governed realizations split by transport mode.
 
+The canonical contract above both realizations lives in
+[`dispatch.envelope.contract.yaml`](../../ops/bindings/dispatch.envelope.contract.yaml)
+(`execution_lane_contract`). Interactive delegation and mailroom task execution
+are current realizations of one execution-lane model, not separate kernels.
+
 ### Interactive Control-Surface Handoff
 
 `delegate.to.execution` remains available for interactive control-surface

@@ -51,7 +51,8 @@ protocol with two distinct canonical classes that should not be collapsed:
 
 The `workflow.vocabulary.contract.yaml` kernel lifecycle protocol is the
 canonical protocol authority. The dispatch envelope contract owns
-execution-request lifecycle. The loop scope + SQLite loop row own work-request
+execution-request lifecycle, including the execution-lane contract above
+current realizations. The loop scope + SQLite loop row own work-request
 lifecycle. These are complementary classes of one first-class primitive, not
 competing truths.
 
@@ -70,23 +71,32 @@ A valid request must declare:
 | Request Class | Meaning | Birth Surface | Canonical Artifact | Canonical Read Surface |
 |---|---|---|---|---|
 | `work_request` | This bounded work should exist | `loops.create` | SQLite loop row + loop scope projection | `loops.status`, `ops status` |
-| `execution_request` | This bounded work should be executed by worker custody | `delegate.to.execution` | DEL-*.yaml delegation envelope + dispatch envelope lifecycle | `delegation.status` |
+| `execution_request` | This bounded work should be executed by a governed execution lane | `delegate.to.execution` (interactive), `mailroom.task.enqueue` (operational) | dispatch envelope lifecycle via realization-specific queue artifact | `delegation.status` (interactive); operational task readback remains subsystem-local today |
 
 **What is canonical:** work-request class via loop birth and loop authority;
-execution-request class via delegation birth and dispatch envelope contract;
-the two-class request protocol above.
+execution-request class via dispatch envelope contract and its execution-lane
+contract; the two-class request protocol above.
 
 **What is derived:** wave state.json (derived from execution request + wave
-start), operator overview payload request display.
+start), operator overview payload request display, realization-specific queue
+artifacts beyond the contract semantics.
 
 **What is compatibility residue:** `session.interactive.dispatch` ceremony
 (pre-delegation legacy), `wave.sh start` without delegation (manual custody
-path).
+path), teaching explicit interactive delegation as if it were autonomous queue
+admission.
 
 **What is resolved:** The question "should request be unified into a single
 object or remain two classes" is answered: request remains a first-class
 protocol with two canonical classes. A synthetic single object would hide real
 scope differences without reducing truth fracture.
+
+**Execution lane unification note (LOOP-EXECUTION-LANE-CONTRACT-UNIFICATION-20260426):**
+Interactive delegation and operational mailroom execution are realizations of
+one execution-request contract, not competing kernels. Interactive delegation
+remains manual/explicit today. Operational mailroom execution remains the
+autonomous realization, but it does not yet carry the full loop/packet/wave
+closeout semantics of controller-prompt work.
 
 ### 2. CLAIM
 

@@ -160,9 +160,10 @@ transport_modes:
 
   mailroom:
     description: >
-      Mailroom task queue. Envelope written to $SPINE_STATE/mailroom/tasks/,
-      target node claims it via mailroom.task.claim, executes, and writes receipt.
-    delivery_mechanism: "$SPINE_STATE/mailroom/tasks/<envelope_id>.yaml"
+      Mailroom task queue. Task envelope written to
+      $SPINE_STATE/agent-tasks/queued/, target node claims it via
+      mailroom.task.claim, executes, and writes receipt.
+    delivery_mechanism: "$SPINE_STATE/agent-tasks/queued/TASK-*.yaml"
     acknowledgment: "mailroom.task.claim creates claim record with claiming terminal ID"
     status: operational
     scope: "execution_mode: operational only (headless autonomous execution)"
@@ -180,6 +181,78 @@ transport_modes:
       Git-based dispatch requires worktree coordination and branch-as-transport
       semantics that are not yet fully governed. Deferred until worktree lifecycle
       and multi-node git coordination are machine-enforced.
+
+# ── Execution Lane Contract ─────────────────────────────────────────────────
+
+execution_lane_contract:
+  description: >
+    Canonical contract above execution-request realizations. An execution lane
+    is the governed path that accepts an execution request, acquires custody,
+    proves liveness while work is active, and emits terminal completion truth.
+    Transport and realization may vary, but these semantics must not.
+
+  required_truth:
+    - lane_id
+    - realization_mode
+    - admission_surface
+    - queue_state_surface
+    - claim_surface
+    - heartbeat_surface
+    - terminal_completion_surface
+    - escalation_surface
+
+  realization_modes:
+    interactive:
+      description: >
+        Explicit operator-visible handoff to worker custody. Honest when work
+        will be claimed deliberately by a worker terminal, not when autonomy is
+        expected.
+    operational:
+      description: >
+        Autonomous/headless execution lane. Honest when queue claim and
+        liveness are driven by a standing worker lane rather than explicit
+        terminal choreography.
+
+  current_realizations:
+    interactive_worker_handoff:
+      status: active
+      realization_mode: interactive
+      lane_id: interactive_worker_handoff
+      admission_surface: delegate.to.execution
+      queue_state_surface: DEL-*.yaml + delegation.status
+      claim_surface: delegation.pickup
+      heartbeat_surface: worktree.lease.heartbeat
+      terminal_completion_surface: wave.finish + controller_prompt.close
+      escalation_surface: delegation_state=needs_review or packet close blockers
+      truthful_operator_statement: >
+        Work has been explicitly handed to worker custody and must be
+        explicitly claimed before execution starts.
+      not_truthful_to_claim:
+        - autonomous queue admission
+        - guaranteed unattended pickup
+
+    operational_mailroom_task:
+      status: active
+      realization_mode: operational
+      lane_id: operational_mailroom_task
+      admission_surface: mailroom.task.enqueue
+      queue_state_surface: queued/running/done/failed task envelopes
+      claim_surface: mailroom.task.claim
+      heartbeat_surface: mailroom.task.heartbeat
+      terminal_completion_surface: mailroom.task.complete|mailroom.task.fail
+      escalation_surface: task failure + worker heartbeat drift
+      truthful_operator_statement: >
+        Work has entered an autonomous task lane and will be claimed/executed
+        by the standing mailroom worker according to that lane's policy.
+      current_limitations:
+        - does not yet carry loop/packet/wave closeout semantics for controller-prompt work
+        - task readback is still subsystem-local rather than unified with delegation.status
+
+  invariants:
+    - no execution request may claim autonomous behavior without a standing operational realization
+    - interactive handoff and operational autonomy are different realizations, not different kernels
+    - claim, heartbeat, and completion semantics must be readable per realization
+    - realization-specific transport must not redefine the kernel execution-request primitive
 
 # ── Routing Semantics ────────────────────────────────────────────────────────
 
