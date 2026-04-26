@@ -17,6 +17,15 @@ from provider_orchestration import (  # noqa: E402
     surface_status,
 )
 
+OPENCODE_REQUIRED_WATCHER_IGNORES = [
+    "node_modules/**",
+    "dist/**",
+    ".git/**",
+    "*.lock",
+    ".runtime/**",
+    ".evidence/**",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate managed provider-aware tool configs in the workbench repo.")
@@ -59,6 +68,21 @@ def write_if_changed(path: Path, content: str) -> bool:
         return False
     path.write_text(content, encoding="utf-8")
     return True
+
+
+def merge_unique_strings(*groups: object) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            value = str(item).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            merged.append(value)
+    return merged
 
 
 def selected_provider(contract: dict, surface: str, requested: str | None = None) -> str:
@@ -182,6 +206,13 @@ def build_opencode_config(workbench_root: Path, contract: dict, provider_id: str
         enabled_providers.append(alias)
     current["provider"] = provider_entries
     current["enabled_providers"] = enabled_providers
+    current["snapshot"] = False
+    watcher = current.get("watcher") if isinstance(current.get("watcher"), dict) else {}
+    watcher["ignore"] = merge_unique_strings(
+        OPENCODE_REQUIRED_WATCHER_IGNORES,
+        watcher.get("ignore"),
+    )
+    current["watcher"] = watcher
     agent = current.get("agent") if isinstance(current.get("agent"), dict) else {}
     default_agent = agent.get("default") if isinstance(agent.get("default"), dict) else {}
     default_agent["model"] = opencode_model

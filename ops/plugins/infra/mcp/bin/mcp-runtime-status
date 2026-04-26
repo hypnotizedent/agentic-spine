@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -82,6 +84,94 @@ def collect_opencode(path: Path) -> dict[str, bool]:
             enabled = bool(config.get("enabled", True))
         result[str(name)] = enabled
     return result
+
+
+def read_opencode_debug_config(pure: bool = False) -> tuple[dict | None, str | None]:
+    command = ["opencode"]
+    if pure:
+        command.append("--pure")
+    command.extend(["debug", "config"])
+    try:
+        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as handle:
+            proc = subprocess.run(
+                command,
+                cwd=ROOT,
+                stdout=handle,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            handle.seek(0)
+            stdout = handle.read()
+    except FileNotFoundError:
+        return None, "opencode binary not found"
+    except subprocess.TimeoutExpired:
+        mode = "pure" if pure else "resolved"
+        return None, f"opencode debug config ({mode}) timed out"
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        mode = "pure" if pure else "resolved"
+        return None, f"opencode debug config ({mode}) failed: {detail or f'exit {proc.returncode}'}"
+
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        mode = "pure" if pure else "resolved"
+        return None, f"opencode debug config ({mode}) returned invalid JSON: {exc}"
+
+    if not isinstance(data, dict):
+        mode = "pure" if pure else "resolved"
+        return None, f"opencode debug config ({mode}) did not return a JSON object"
+    return data, None
+
+
+def extract_opencode_runtime(config: dict | None) -> dict[str, bool]:
+    if not isinstance(config, dict):
+        return {}
+    mcp = config.get("mcp", {})
+    if not isinstance(mcp, dict):
+        return {}
+    result: dict[str, bool] = {}
+    for name, entry in mcp.items():
+        enabled = True
+        if isinstance(entry, dict):
+            enabled = bool(entry.get("enabled", True))
+        result[str(name)] = enabled
+    return result
+
+
+def config_count(config: dict | None, key: str) -> int | None:
+    if not isinstance(config, dict):
+        return None
+    value = config.get(key)
+    if not isinstance(value, dict):
+        return None
+    return len(value)
+
+
+def collect_effective_opencode_runtime() -> tuple[dict[str, bool], dict[str, bool], dict[str, int | None], list[str]]:
+    warnings: list[str] = []
+
+    resolved_cfg, resolved_warning = read_opencode_debug_config(pure=False)
+    if resolved_warning:
+        warnings.append(resolved_warning)
+    pure_cfg, pure_warning = read_opencode_debug_config(pure=True)
+    if pure_warning:
+        warnings.append(pure_warning)
+
+    return (
+        extract_opencode_runtime(resolved_cfg),
+        extract_opencode_runtime(pure_cfg),
+        {
+            "resolved_command_count": config_count(resolved_cfg, "command"),
+            "resolved_agent_count": config_count(resolved_cfg, "agent"),
+            "pure_command_count": config_count(pure_cfg, "command"),
+            "pure_agent_count": config_count(pure_cfg, "agent"),
+        },
+        warnings,
+    )
 
 
 def collect_claude_desktop(config_path: Path, runtime_path: Path, project_path: str) -> dict[str, bool]:
@@ -186,6 +276,44 @@ def main() -> int:
                 print(f"  PASS: required '{required}' registered+enabled")
             else:
                 print(f"  PASS: required '{required}' resolved via alias '{match_name}'")
+
+        if surface == "opencode":
+            resolved_runtime, pure_runtime, runtime_counts, runtime_warnings = collect_effective_opencode_runtime()
+            if runtime_warnings:
+                warnings += len(runtime_warnings)
+                for warning in runtime_warnings:
+                    print(f"  WARN: {warning}")
+            if resolved_runtime:
+                print("  resolved_runtime:")
+                for name, enabled in sorted(resolved_runtime.items()):
+                    print(f"    - {name} (enabled={str(enabled).lower()})")
+            if pure_runtime:
+                print("  pure_runtime:")
+                for name, enabled in sorted(pure_runtime.items()):
+                    print(f"    - {name} (enabled={str(enabled).lower()})")
+            extra_over_managed = sorted(name for name in resolved_runtime if name not in discovered)
+            extra_over_pure = sorted(name for name in resolved_runtime if name not in pure_runtime)
+            if extra_over_managed:
+                warnings += 1
+                print(f"  WARN: extra resolved servers beyond managed config: {', '.join(extra_over_managed)}")
+            if extra_over_pure:
+                print(f"  plugin/runtime-added servers: {', '.join(extra_over_pure)}")
+            resolved_command_count = runtime_counts.get("resolved_command_count")
+            resolved_agent_count = runtime_counts.get("resolved_agent_count")
+            pure_command_count = runtime_counts.get("pure_command_count")
+            pure_agent_count = runtime_counts.get("pure_agent_count")
+            if resolved_command_count is not None or resolved_agent_count is not None:
+                print(
+                    "  resolved_registry:"
+                    f" commands={resolved_command_count if resolved_command_count is not None else 'n/a'}"
+                    f" agents={resolved_agent_count if resolved_agent_count is not None else 'n/a'}"
+                )
+            if pure_command_count is not None or pure_agent_count is not None:
+                print(
+                    "  pure_registry:"
+                    f" commands={pure_command_count if pure_command_count is not None else 'n/a'}"
+                    f" agents={pure_agent_count if pure_agent_count is not None else 'n/a'}"
+                )
 
         print("")
 
