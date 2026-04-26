@@ -32,14 +32,13 @@ remains external to the repo and is not subject to extraction.
 
 ## Order Truth
 
-**Canonical business truth for order-facing modules**:
+**Canonical business truth for future order-facing modules**:
 - Read `ops/bindings/domains/mint/mint.order.truth.authority.yaml`
 - Use it for order vs quote vs revision vs artwork-binding semantics
 - Do not infer business order truth from seed IDs, artwork job IDs, legacy `visual_id`, or code presence
 
 **Current implementation rule**:
-- Module lifecycle truth lives in `mint-modules` canonical authority surfaces:
-  `docs/CANONICAL/ACTIVE_AUTHORITY.md` and `docs/CANONICAL/MINT_MODULE_LIFECYCLE_REGISTRY_V1.yaml`
+- `orders`, `quotes`, and `digital-proofs` remain blocked at the module level until they conform to the order-truth authority
 - Existing seed/artwork intake stays the normalized intake boundary; it is not the order entity
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
