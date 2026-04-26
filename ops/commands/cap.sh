@@ -115,7 +115,7 @@ print(d.get('delegation_state',''), d.get('wave_kind_intent',''), d.get('delegat
 " "$del_file" 2>/dev/null || true)"
         IFS=' ' read -r ds wki did <<< "$del_state"
         [[ "$wki" == "proof" ]] || continue
-        [[ "$ds" == "delegated" || "$ds" == "executing" ]] || continue
+        [[ "$ds" == "delegated" || "$ds" == "picked_up" || "$ds" == "executing" ]] || continue
         [[ -n "$did" ]] || continue
         CAP_PROOF_DELEGATION_ID="$did"
         return 0
