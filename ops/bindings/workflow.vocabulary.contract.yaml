@@ -1,10 +1,10 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-21
+last_verified: 2026-04-26
 scope: workflow-vocabulary
 version: 1
-updated_at: 2026-03-21
+updated_at: 2026-04-26
 lifecycle_state: active
 source_of_truth: ops/bindings/workflow.vocabulary.contract.yaml
 introduced_by: LOOP-SPINE-SELF-GOVERNANCE-LIFECYCLE-CANONICALIZATION-20260321
@@ -35,7 +35,6 @@ concepts:
     status_capability: loops.status
     supporting_capabilities:
       - loops.list
-      - loops.progress
       - loop.closeout.finalize
     authorities:
       - docs/governance/SESSION_PROTOCOL.md
@@ -164,28 +163,86 @@ concepts:
 kernel_primitives:
   authority: docs/governance/KERNEL_PRIMITIVE_CANON.md
   declared_in: NORTH_STAR.md
+  kernel_lifecycle_protocol:
+    ordered_primitives:
+      - request
+      - claim
+      - heartbeat
+      - result
+      - failure
+      - receipt
+    lifecycle_invariant: >
+      A governed work item is born as a request, acquires custody through a
+      claim, proves continued liveness through a heartbeat when active, and
+      closes through governed outcome/receipt truth. Result and failure are
+      outcome branches on governed receipts, not independent objects.
+    request:
+      realization: first_class_protocol
+      protocol_note: >
+        Request is first-class as a protocol with two canonical classes.
+        Work-request says the bounded work should exist. Execution-request says
+        the bounded work should be executed by worker custody.
+      classes:
+        work_request:
+          canonical_authority: loop scope + SQLite loop row
+          birth_capability: loops.create
+          read_capabilities:
+            - loops.status
+          residue:
+            - session.interactive.dispatch
+        execution_request:
+          canonical_authority: ops/bindings/dispatch.envelope.contract.yaml
+          birth_capability: delegate.to.execution
+          read_capabilities:
+            - delegation.status
+          residue:
+            - wave.start without delegation
+      invariants:
+        - execution_request must bind loop_id and packet_id
+        - execution_request cannot honestly bypass governed delegation birth
+        - manual custody start without delegation is compatibility residue
+    claim:
+      realization: first_class_protocol
+      canonical_capabilities:
+        - delegation.pickup
+        - mailroom.task.claim
+    heartbeat:
+      realization: first_class_protocol
+      canonical_capabilities:
+        - worktree.lease.heartbeat
+        - mailroom.task.heartbeat
+      protocol_requirements:
+        - liveness timestamp
+        - proof channel
+        - staleness threshold
+    outcome_receipt:
+      canonical_authority: ops/bindings/closeout.disposition.contract.yaml
+      outcome_values:
+        - success
+        - failure
+        - blocked
   primitives:
     request:
-      realization: fragmented
-      canonical_home: ops/bindings/dispatch.envelope.contract.yaml
-      note: Two classes — work-request (loop) and execution-request (delegation)
+      realization: first_class_protocol
+      canonical_home: ops/bindings/workflow.vocabulary.contract.yaml
+      note: Two canonical classes — work-request (loop birth) and execution-request (delegation birth)
     claim:
-      realization: partial
+      realization: first_class_protocol
       canonical_home: ops/plugins/core/lifecycle/lib/delegation_broker.py
-      note: Delegation pickup is the primary claim surface
+      note: Delegation pickup + mailroom task claim express the canonical claim protocol
     heartbeat:
-      realization: undefined
-      canonical_home: null
-      note: No canonical form — standing program proof_channels approximate
+      realization: first_class_protocol
+      canonical_home: ops/bindings/launchd.scheduler.registry.yaml
+      note: Heartbeat protocol = liveness timestamp + proof channel + staleness threshold
     result:
-      realization: aliased
+      realization: collapsed
       canonical_home: ops/bindings/closeout.disposition.contract.yaml
-      note: Encoded as disposition landed + EXEC_RECEIPT
+      note: "Expressed as outcome: success on governed receipts"
     failure:
-      realization: aliased
+      realization: collapsed
       canonical_home: ops/bindings/closeout.disposition.contract.yaml
-      note: Encoded as disposition non-landed + needs_review delegation state
+      note: "Expressed as outcome: failure|blocked on governed receipts"
     receipt:
-      realization: fragmented
+      realization: collapsed
       canonical_home: docs/governance/SESSION_PROTOCOL.md
-      note: Five receipt classes with independent schemas
+      note: Four governed classes with shared canonical outcome vocabulary; narrative is residue

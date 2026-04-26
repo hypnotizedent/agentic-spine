@@ -30,32 +30,51 @@ truth so those loops can act without guessing.
 
 ### 1. REQUEST
 
-**Realization status:** Fragmented — multiple competing birth surfaces, no
-unified "request" object.
+**Realization status:** First-class — request is a governed protocol with two
+canonical classes, not a single artifact.
 
 | Aspect | Current State |
 |--------|---------------|
-| **Canonical authority** | `dispatch.envelope.contract.yaml` (envelope lifecycle: created→in_transit→delivered→admitted→executing→complete/failed) |
-| **Canonical form** | No single canonical artifact. Closest: delegation envelope (DEL-*.yaml) and dispatch envelope schema |
+| **Canonical authority** | `workflow.vocabulary.contract.yaml` `kernel_lifecycle_protocol.request` (protocol authority), with class authorities in `dispatch.envelope.contract.yaml` (execution-request) and loop scope + SQLite loop row (work-request) |
+| **Canonical form** | Request protocol with two canonical classes: `work_request` and `execution_request` |
 | **Birth paths** | (a) `delegate.to.execution` — creates DEL-*.yaml delegation envelope; (b) `controller_prompt.create` — creates controller packet (pre-delegation); (c) `loops.create` — creates loop scope (work-level request); (d) `wave.sh start` — creates wave state (execution-level request); (e) mailroom task write (operational dispatch) |
 | **Read/query paths** | `delegation.status`, `orchestration.status`, `loops.status`, `session.v3.attach` (compiled entry) |
-| **Verify gates** | No gate validates "request exists" as a primitive; gates validate loop/wave/delegation state individually |
-| **Classification** | **Implied** — the concept is embedded across delegation, dispatch, loops, and waves but never named as a first-class object with a single canonical form |
+| **Verify gates** | D34 (work-request integrity), D433 (execution-request integrity via delegation state), D435 (kernel primitive lifecycle truth) |
+| **Classification** | **First-class** — request is explicitly named as a kernel primitive protocol with two canonical classes and governed birth/read paths |
 
-**Canon decision:** REQUEST is realized through two distinct scopes that should
-not be collapsed:
+**Canon decision (FINAL KERNEL CANON CLOSEOUT):** REQUEST is first-class as a
+protocol with two distinct canonical classes that should not be collapsed:
 
 - **Work request** = loop creation (`loops.create`) — "this work should exist"
 - **Execution request** = delegation (`delegate.to.execution`) — "this work
   should be executed by a worker"
 
-The dispatch envelope contract (`dispatch.envelope.contract.yaml`) is the
-canonical authority for execution-request lifecycle. The loop scope is the
-canonical authority for work-request lifecycle. These are complementary, not
-competing.
+The `workflow.vocabulary.contract.yaml` kernel lifecycle protocol is the
+canonical protocol authority. The dispatch envelope contract owns
+execution-request lifecycle. The loop scope + SQLite loop row own work-request
+lifecycle. These are complementary classes of one first-class primitive, not
+competing truths.
 
-**What is canonical:** delegation envelopes (DEL-*.yaml), loop scope files,
-dispatch envelope schema.
+**Request protocol semantics:**
+
+A valid request must declare:
+- `request_class` — `work_request` or `execution_request`
+- `request_id` — the class-appropriate identity (`loop_id` for work-request,
+  `delegation_id` / envelope identity for execution-request)
+- `objective` / `work_scope` — what should exist or be executed
+- `canonical_birth_surface` — governed birth path for the class
+- `canonical_read_surface` — governed read path for the class
+
+**Request class mappings:**
+
+| Request Class | Meaning | Birth Surface | Canonical Artifact | Canonical Read Surface |
+|---|---|---|---|---|
+| `work_request` | This bounded work should exist | `loops.create` | SQLite loop row + loop scope projection | `loops.status`, `ops status` |
+| `execution_request` | This bounded work should be executed by worker custody | `delegate.to.execution` | DEL-*.yaml delegation envelope + dispatch envelope lifecycle | `delegation.status` |
+
+**What is canonical:** work-request class via loop birth and loop authority;
+execution-request class via delegation birth and dispatch envelope contract;
+the two-class request protocol above.
 
 **What is derived:** wave state.json (derived from execution request + wave
 start), operator overview payload request display.
@@ -64,10 +83,10 @@ start), operator overview payload request display.
 (pre-delegation legacy), `wave.sh start` without delegation (manual custody
 path).
 
-**What is undefined:** There is no single "request" artifact that a node
-receives and can inspect without knowing which request class it is. The kernel
-protocol names "request" but the implementation has two classes with different
-schemas.
+**What is resolved:** The question "should request be unified into a single
+object or remain two classes" is answered: request remains a first-class
+protocol with two canonical classes. A synthetic single object would hide real
+scope differences without reducing truth fracture.
 
 ### 2. CLAIM
 
@@ -309,18 +328,19 @@ complexity without collapsing truth.
 
 | Primitive | Realization | First-Class? | Authority Home |
 |-----------|-------------|-------------|----------------|
-| request | Fragmented (two classes: work-request via loops, execution-request via delegation) | No | `dispatch.envelope.contract.yaml` + loop scope |
+| request | **First-class** (request protocol with work-request + execution-request classes) | Yes — via request protocol | `workflow.vocabulary.contract.yaml` request protocol + class authorities |
 | claim | **First-class** (custody proof via delegation pickup + mailroom claim) | Yes — via claim protocol | `delegation_broker.py` + `mailroom.task.worker.contract.yaml` |
 | heartbeat | **First-class** (liveness proof via proof channel + staleness threshold) | Yes — via heartbeat protocol | `launchd.scheduler.registry.yaml` proof_channel + this document |
 | result | **Collapsed** (outcome: success on governed receipts) | Yes — via outcome vocabulary | `closeout.disposition.contract.yaml` outcome_vocabulary |
 | failure | **Collapsed** (outcome: failure/blocked on governed receipts) | Yes — via outcome vocabulary | `closeout.disposition.contract.yaml` outcome_vocabulary |
 | receipt | **Collapsed** (four governed classes + shared outcome vocabulary) | Yes — partial (four classes, shared outcome) | `SESSION_PROTOCOL.md` receipt taxonomy + `closeout.disposition.contract.yaml` outcome_vocabulary |
 
-**Key finding:** Five of the six primitives are now first-class after the
-receipt/result/failure collapse and the claim/heartbeat first-classing. Only
-REQUEST remains unfirst-classed (two classes without a unifying protocol).
-Claim and heartbeat are defined as protocols with canonical semantics, not as
-single artifacts — this is the right shape for custody and liveness primitives.
+**Key finding:** All six primitives are now first-class, first-class protocols,
+or canonically collapsed after the request protocol resolution, the
+receipt/result/failure collapse, and the claim/heartbeat first-classing.
+Request, claim, and heartbeat are defined as protocols with canonical
+semantics, not as synthetic single artifacts — this is the right shape for
+request, custody, and liveness primitives.
 
 ## What This Canon Pass Enables
 
@@ -333,15 +353,11 @@ Later child loops can now act on classified truth:
    (LOOP-CLAIM-HEARTBEAT-FIRST-CLASS-20260426). Claim and heartbeat are
    first-class primitives with canonical protocol semantics and class mappings.
 3. **Split-brain authority removal** — knows where competing truths exist
-   (request has two classes, receipt has four governed + one residue)
+   (request classes are canonical, receipt has four governed + one residue)
 4. **Surface subtraction** — knows what is canonical vs derived vs compatibility
    residue for each primitive
 
 ## Deferred Ambiguity
-
-These questions are explicitly deferred to later child loops:
-
-- Should request be unified into a single object or remain two classes?
 
 These questions are **resolved** by the receipt/result/failure collapse:
 
@@ -356,3 +372,6 @@ These questions are **resolved** by the receipt/result/failure collapse:
 - ~~Should "claim" exist independent of the delegation broker?~~ → **Answered.**
   Claim is a protocol (who, when, prior-state-valid), not an artifact.
   Delegation broker and mailroom task claim are canonical realizations.
+- ~~Should request be unified into a single object or remain two classes?~~ →
+  **Answered.** Request is a first-class protocol with two canonical classes:
+  work-request and execution-request.
