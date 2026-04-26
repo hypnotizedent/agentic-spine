@@ -27,6 +27,21 @@ _REQUIRED_CORE_FIELDS = (
     "blockers",
 )
 
+# Canonical outcome vocabulary — maps disposition/status to outcome.
+# Authority: closeout.disposition.contract.yaml outcome_vocabulary section.
+_DISPOSITION_TO_OUTCOME = {
+    "landed": "success",
+    "delivered": "success",
+    "superseded": "success",
+    "abandoned": "failure",
+    "deferred": "blocked",
+}
+_STATUS_TO_OUTCOME = {
+    "done": "success",
+    "failed": "failure",
+    "blocked": "blocked",
+}
+
 
 def _git(spine_repo: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
@@ -86,6 +101,30 @@ def _validate_required_fields(fields: Dict[str, Any]) -> None:
                 raise PacketReceiptError(f"{key} must be a non-empty string")
 
 
+def _derive_outcome(fields: Dict[str, Any]) -> str:
+    """Derive canonical outcome from disposition or status fields."""
+    # Try disposition first (wave-close, controller-prompt, loop closeout)
+    disposition = str(fields.get("disposition", "") or fields.get("disposition_target", "")).strip().lower()
+    if disposition and disposition in _DISPOSITION_TO_OUTCOME:
+        return _DISPOSITION_TO_OUTCOME[disposition]
+    # Try status (cap-style receipts)
+    status = str(fields.get("status", "")).strip().lower()
+    if status and status in _STATUS_TO_OUTCOME:
+        return _STATUS_TO_OUTCOME[status]
+    # Try lanes — if all lanes done → success, any failed → failure
+    lanes = fields.get("lanes")
+    if isinstance(lanes, list) and lanes:
+        statuses = [str(lane.get("status", "")).strip().lower() for lane in lanes if isinstance(lane, dict)]
+        if statuses:
+            if all(s in ("done", "delivered", "landed") for s in statuses):
+                return "success"
+            if any(s in ("failed", "abandoned") for s in statuses):
+                return "failure"
+            if any(s in ("blocked", "deferred") for s in statuses):
+                return "blocked"
+    return ""
+
+
 def _canonical_dump(payload: Dict[str, Any]) -> str:
     return yaml.safe_dump(
         payload,
@@ -113,6 +152,12 @@ def write_packet_receipt(
         )
 
     payload: Dict[str, Any] = dict(fields)
+
+    # Derive canonical outcome if not already present.
+    if "outcome" not in payload:
+        _outcome = _derive_outcome(payload)
+        if _outcome:
+            payload["outcome"] = _outcome
 
     # fingerprint_sha256 is the sha256 of the canonical YAML serialization of
     # the payload BEFORE the fingerprint itself is injected.

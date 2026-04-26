@@ -871,6 +871,11 @@ exec_payload = {
     },
 }
 
+# Canonical outcome — maps status to outcome vocabulary
+# Authority: closeout.disposition.contract.yaml outcome_vocabulary
+_STATUS_OUTCOME = {"done": "success", "failed": "failure", "blocked": "blocked"}
+exec_payload["outcome"] = _STATUS_OUTCOME.get(status, "failure")
+
 loop_id = os.environ.get("CAP_LOOP_ID", "").strip()
 if loop_id:
     exec_payload["loop_id"] = loop_id
@@ -903,6 +908,7 @@ attestation_payload = {
     "evidence_refs": exec_payload["evidence_refs"],
     "prompt_lineage": exec_payload["prompt_lineage"],
     "verdict": status,
+    "outcome": exec_payload["outcome"],
 }
 attestation_path.write_text(json.dumps(attestation_payload, indent=2) + "\n", encoding="utf-8")
 PY

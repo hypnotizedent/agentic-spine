@@ -3,15 +3,15 @@
 # Last verified: 2026-04-12
 # Scope: terminal closeout outcomes for loops and waves
 
-version: "1.1"
-updated: "2026-04-12"
+version: "1.2"
+updated: "2026-04-26"
 owner: "@ronny"
 scope: closeout-disposition
 
 # Kernel primitive role: This contract is the canonical authority home for the
 # RESULT and FAILURE primitives in the kernel coordination protocol.
-# Result = disposition: landed + governed receipt evidence.
-# Failure = disposition: abandoned/deferred + non-zero exit or needs_review state.
+# The canonical outcome vocabulary (success/failure/blocked) unifies how
+# result and failure are expressed across all receipt classes.
 # See docs/governance/KERNEL_PRIMITIVE_CANON.md for the full primitive matrix.
 
 terminal_dispositions:
@@ -84,3 +84,84 @@ plan_transition_mapping:
   superseded: completed
   abandoned: blocked
   rule: "plan_transition status must reflect close disposition semantics instead of collapsing every non-landed close to blocked."
+
+# ── Canonical Outcome Vocabulary ──────────────────────────────────────────────
+# Introduced by LOOP-RECEIPT-RESULT-FAILURE-COLLAPSE-20260426.
+#
+# The kernel protocol names "result" and "failure" as primitives but the
+# implementation encodes them as branches of different vocabularies in different
+# receipt classes. This section declares one canonical outcome vocabulary and
+# maps each receipt class's existing encoding to it.
+#
+# This is the RESULT and FAILURE collapse: these primitives are not independent
+# objects — they are the outcome field of lifecycle events (receipts).
+
+outcome_vocabulary:
+  description: >
+    Canonical outcome for any governed lifecycle event. Every governed receipt
+    class must express its terminal state through this vocabulary, either
+    directly (outcome field) or via a documented mapping from its native
+    encoding.
+
+  values:
+    success:
+      meaning: "Work completed and its claimed proof passed."
+      result_primitive: true
+      failure_primitive: false
+    failure:
+      meaning: "Work did not complete or its proof did not pass."
+      result_primitive: false
+      failure_primitive: true
+    blocked:
+      meaning: "Work could not proceed due to a dependency, policy, or external condition. May be retried."
+      result_primitive: false
+      failure_primitive: true
+
+  class_mappings:
+    capability_receipt:
+      native_field: "status"
+      mapping:
+        done: success
+        failed: failure
+        blocked: blocked
+      notes: "cap.sh exec.json status field is already a direct expression of outcome."
+
+    wave_close_exec_receipt:
+      native_field: "lanes[].status + disposition"
+      mapping:
+        "all lanes done + disposition landed": success
+        "any lane failed or disposition abandoned": failure
+        "disposition deferred": blocked
+        "disposition superseded": success
+      notes: "Wave-close outcome is derived from lane outcomes and lifecycle disposition."
+
+    controller_prompt_exec_receipt:
+      native_field: "disposition"
+      mapping:
+        delivered: success
+        abandoned: failure
+        deferred: blocked
+        superseded: success
+      notes: "Controller-prompt close uses delivered/abandoned/deferred/superseded vocabulary."
+
+    loop_closeout_receipt:
+      native_field: "disposition"
+      mapping:
+        landed: success
+        abandoned: failure
+        deferred: blocked
+        superseded: success
+      notes: "Loop closeout uses the same terminal_dispositions vocabulary."
+
+    narrative_receipt:
+      native_field: "none"
+      mapping: {}
+      notes: "Narrative receipts are compatibility residue. They have no governed outcome field. If they claim an outcome that disagrees with a governed receipt, the governed receipt wins."
+
+  enforcement:
+    governed_receipts_must_express_outcome: true
+    narrative_receipts_excluded: true
+    rule: >
+      Any new governed receipt class must express outcome through this
+      vocabulary. Existing classes use the class_mappings above until
+      writers emit an explicit outcome field.

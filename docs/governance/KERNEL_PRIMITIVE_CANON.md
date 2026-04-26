@@ -145,27 +145,30 @@ staleness means at the protocol level.
 
 ### 4. RESULT
 
-**Realization status:** Aliased — result is encoded as delegation disposition,
-wave disposition, and cap exit code rather than existing as a first-class
-primitive.
+**Realization status:** Collapsed — result is canonically the `success` branch
+of the outcome vocabulary on governed receipts. No longer aliased.
 
 | Aspect | Current State |
 |--------|---------------|
-| **Canonical authority** | `closeout.disposition.contract.yaml` (disposition vocabulary: landed/deferred/superseded/abandoned) |
-| **Canonical form** | (a) delegation disposition on DEL-*.yaml; (b) wave disposition in wave state; (c) cap.sh exit code + receipt; (d) EXEC_RECEIPT-WAVE-CLOSE-*.yaml |
-| **Birth paths** | (a) `wave.finish` → writes EXEC_RECEIPT + updates wave disposition; (b) delegation broker `transition()` → sets disposition on DEL-*.yaml; (c) cap.sh → writes cap receipt with exit code |
-| **Read/query paths** | `delegation.status`, `orchestration.status`, `completion.state.reconcile`, `ops status` |
+| **Canonical authority** | `closeout.disposition.contract.yaml` (`outcome_vocabulary` section) |
+| **Canonical form** | `outcome: success` — expressed through class-specific native fields: `status: done` (cap), `disposition: landed` (wave/loop), `disposition: delivered` (packet) |
+| **Birth paths** | (a) `cap.sh write_cap_receipt()` → `status: done`; (b) `wave.finish` → EXEC_RECEIPT with disposition: landed; (c) `controller_prompt.close` → EXEC_RECEIPT with disposition: delivered; (d) `loop-closeout-finalize` → closeout receipt with disposition: landed |
+| **Read/query paths** | Read native field per class, map to outcome via `outcome_vocabulary.class_mappings` in disposition contract |
 | **Verify gates** | Wave closeout requires disposition; loop closeout requires disposition + completion_level |
-| **Classification** | **Aliased** — "result" is the successful outcome branch of multiple disposition vocabularies, not an independent primitive |
+| **Classification** | **Collapsed** — result is `outcome: success` on the canonical receipt for the relevant lifecycle scope |
 
-**Canon decision:** RESULT is canonically expressed through disposition. The
-disposition contract (`closeout.disposition.contract.yaml`) is the authority for
-what "result" means at the lifecycle level. At the execution level, cap.sh exit
-code 0 + receipt is the canonical result form.
+**Canon decision (LOOP-RECEIPT-RESULT-FAILURE-COLLAPSE-20260426):** RESULT does
+not need its own object. It is the successful outcome of a lifecycle event
+(receipt). The `outcome_vocabulary` in `closeout.disposition.contract.yaml`
+declares the canonical mapping from each receipt class's native encoding to
+`success`.
 
-**What is canonical:** EXEC_RECEIPT-WAVE-CLOSE-*.yaml (wave-level result),
-cap receipt with exit 0 (capability-level result), disposition: landed
-(lifecycle-level result).
+**What is canonical:** The outcome mapping in `closeout.disposition.contract.yaml`.
+Each governed receipt class expresses result through its native field:
+- Capability: `status: done` → `outcome: success`
+- Wave-close: `disposition: landed` → `outcome: success`
+- Controller-prompt: `disposition: delivered` → `outcome: success`
+- Loop closeout: `disposition: landed` → `outcome: success`
 
 **What is derived:** delegation disposition (derived from wave close hook),
 operator overview result display, completion state classification.
@@ -173,83 +176,94 @@ operator overview result display, completion state classification.
 **What is compatibility residue:** Narrative receipts claiming result status
 (convention only, not governed).
 
-**What is undefined:** "Result" as an independent kernel primitive with its own
-schema. The kernel protocol names "result" but the implementation encodes it
-as a branch of disposition. A later child loop must decide whether result needs
-its own object or whether disposition subsumes it.
+**What is resolved:** The question "should result be an independent object" is
+answered NO. Result is `outcome: success` on governed receipts. Disposition
+subsumes it with an explicit mapping.
 
 ### 5. FAILURE
 
-**Realization status:** Aliased — failure is encoded as non-zero exit codes,
-disposition values, and delegation states rather than existing as a first-class
-primitive.
+**Realization status:** Collapsed — failure is canonically the `failure` or
+`blocked` branch of the outcome vocabulary on governed receipts. No longer
+aliased.
 
 | Aspect | Current State |
 |--------|---------------|
-| **Canonical authority** | `closeout.disposition.contract.yaml` (abandoned/deferred), `dispatch.envelope.contract.yaml` (failed/blocked/rejected states) |
-| **Canonical form** | (a) cap.sh exit code != 0 + receipt; (b) delegation `needs_review` state; (c) dispatch envelope `failed`/`rejected`/`blocked` states; (d) wave disposition: abandoned |
-| **Birth paths** | (a) cap.sh non-zero exit → failed receipt; (b) wave.finish with non-landed disposition; (c) delegation broker `executing → needs_review`; (d) standing program failed state |
-| **Read/query paths** | `delegation.status --state needs_review`, `ops status` (standing program failed section), cap receipt inspection |
+| **Canonical authority** | `closeout.disposition.contract.yaml` (`outcome_vocabulary` section) |
+| **Canonical form** | `outcome: failure` or `outcome: blocked` — expressed through class-specific native fields: `status: failed|blocked` (cap), `disposition: abandoned` (failure) / `disposition: deferred` (blocked) for wave/loop/packet |
+| **Birth paths** | (a) `cap.sh write_cap_receipt()` → `status: failed|blocked`; (b) `wave.finish` with non-landed disposition; (c) `controller_prompt.close` with abandoned/deferred disposition; (d) delegation broker `executing → needs_review` |
+| **Read/query paths** | Read native field per class, map to outcome via `outcome_vocabulary.class_mappings` in disposition contract |
 | **Verify gates** | Standing program health classification (failed/stale), engine honesty gates |
-| **Classification** | **Aliased** — "failure" is encoded as the unsuccessful branch of multiple state machines, not an independent primitive |
+| **Classification** | **Collapsed** — failure is `outcome: failure` (terminal) or `outcome: blocked` (may retry) on governed receipts |
 
-**Canon decision:** FAILURE is canonically expressed as the complement of
-RESULT in the same surfaces. The dispatch envelope contract defines the failure
-states (failed, rejected, blocked). The delegation broker defines `needs_review`
-as the failure-adjacent terminal state. Cap.sh non-zero exit is the
-capability-level failure signal.
+**Canon decision (LOOP-RECEIPT-RESULT-FAILURE-COLLAPSE-20260426):** FAILURE does
+not need its own object. It is the unsuccessful outcome of a lifecycle event
+(receipt). The `outcome_vocabulary` in `closeout.disposition.contract.yaml`
+distinguishes `failure` (terminal — work stopped) from `blocked` (may be
+retried — work deferred).
 
-**What is canonical:** cap receipt with exit != 0 (capability-level failure),
-delegation `needs_review` state (execution-level failure signal),
-dispatch envelope `failed`/`rejected` states (coordination-level failure).
+**What is canonical:** The outcome mapping in `closeout.disposition.contract.yaml`.
+Each governed receipt class expresses failure through its native field:
+- Capability: `status: failed` → `outcome: failure`; `status: blocked` → `outcome: blocked`
+- Wave-close: `disposition: abandoned` → `outcome: failure`; `disposition: deferred` → `outcome: blocked`
+- Controller-prompt: `disposition: abandoned` → `outcome: failure`; `disposition: deferred` → `outcome: blocked`
+- Loop closeout: `disposition: abandoned` → `outcome: failure`; `disposition: deferred` → `outcome: blocked`
 
 **What is derived:** standing program "failed" classification (derived from
 scheduler exit + age check), `ops status` failure display.
 
-**What is compatibility residue:** None significant.
+**What is compatibility residue:** `dispatch.envelope.contract.yaml` failure
+states (`failed`/`rejected`/`blocked`) are coordination-level status, not
+receipt outcome. They describe envelope state, not lifecycle event outcome.
 
-**What is undefined:** "Failure" as an independent kernel primitive with its own
-schema, error taxonomy, or retry semantics. Like result, failure is a branch
-of existing disposition/state machines. A later child loop must decide whether
-failure needs its own object or whether the current encoding is sufficient.
+**What is resolved:** The question "should failure be an independent object" is
+answered NO. Failure is `outcome: failure|blocked` on governed receipts. The
+distinction between terminal failure and recoverable blocked is explicit.
 
 ### 6. RECEIPT
 
-**Realization status:** Fragmented — five distinct receipt classes documented in
-SESSION_PROTOCOL.md with different schemas, writers, governance levels, and
-authority roles.
+**Realization status:** Collapsed — four governed receipt classes with a shared
+outcome vocabulary. Narrative receipts demoted to compatibility residue.
 
 | Aspect | Current State |
 |--------|---------------|
-| **Canonical authority** | `SESSION_PROTOCOL.md` (receipt class taxonomy), `wave.closeout.contract.yaml`, `loop.closeout.contract.yaml` |
-| **Canonical form** | Five classes: (1) Capability receipt (RCAP-*/receipt.md), (2) Wave-close EXEC_RECEIPT (EXEC_RECEIPT-WAVE-CLOSE-*.yaml), (3) Controller-prompt EXEC_RECEIPT (EXEC_RECEIPT-CONTROLLER-PROMPT-*.yaml), (4) Loop closeout receipt (LOOP-*.closeout.md), (5) Narrative receipt (*-RECEIPT-*.md) |
-| **Birth paths** | (1) `cap.sh write_cap_receipt()`; (2) `packet_receipt_writer.py` via `wave.finish`; (3) `packet_receipt_writer.py` via `controller_prompt.close`; (4) `loop-closeout-finalize`; (5) Agent convention (manual) |
-| **Read/query paths** | Cap receipt: direct file read; EXEC_RECEIPT: `wave.finish` output, `completion.state.reconcile`; Loop closeout: direct file read; Narrative: direct file read |
+| **Canonical authority** | `SESSION_PROTOCOL.md` (receipt class taxonomy + outcome semantics), `closeout.disposition.contract.yaml` (`outcome_vocabulary` section), `wave.closeout.contract.yaml`, `loop.closeout.contract.yaml` |
+| **Canonical form** | Four governed classes: (1) Capability receipt (RCAP-*/receipt.md + exec.json), (2) Wave-close EXEC_RECEIPT (EXEC_RECEIPT-WAVE-CLOSE-*.yaml), (3) Controller-prompt EXEC_RECEIPT (EXEC_RECEIPT-CONTROLLER-PROMPT-*.yaml), (4) Loop closeout receipt (LOOP-*.closeout.md) |
+| **Birth paths** | (1) `cap.sh write_cap_receipt()`; (2) `packet_receipt_writer.py` via `wave.finish`; (3) `packet_receipt_writer.py` via `controller_prompt.close`; (4) `loop-closeout-finalize` |
+| **Read/query paths** | Cap receipt: direct file read; EXEC_RECEIPT: `wave.finish` output, `completion.state.reconcile`; Loop closeout: direct file read. Outcome: read native field per class, map via `outcome_vocabulary.class_mappings`. |
 | **Verify gates** | Wave closeout requires run_key evidence; loop closeout requires acceptance + run_keys; cap receipts auto-generated |
-| **Classification** | **Fragmented** — five classes are documented and governed individually but share no common schema or unified query surface |
+| **Classification** | **Collapsed** — four governed classes serve different lifecycle scopes but share a canonical outcome vocabulary. Narrative demoted to compatibility residue. |
 
-**Canon decision:** Receipt is the most developed primitive but is fragmented
-across five non-interchangeable classes. The five-class taxonomy in
-SESSION_PROTOCOL.md is the canonical authority for receipt classification.
+**Canon decision (LOOP-RECEIPT-RESULT-FAILURE-COLLAPSE-20260426):** The four
+governed receipt classes are legitimately different — they represent different
+lifecycle scopes (per-run, per-wave, per-packet, per-loop). They do NOT need a
+unified schema. What they need (and now have) is a shared outcome vocabulary
+that makes RESULT and FAILURE explicit across all classes.
 
-**What is canonical:** All five receipt classes as documented in
-SESSION_PROTOCOL.md. Each has a canonical writer path and governance level:
-- Capability receipt → `cap.sh` (automatic, per cap run)
-- Wave-close EXEC_RECEIPT → `packet_receipt_writer.py` (governed, per wave)
-- Controller-prompt EXEC_RECEIPT → `packet_receipt_writer.py` (governed, per packet)
-- Loop closeout receipt → `loop-closeout-finalize` (governed, per loop)
-- Narrative receipt → agent convention (ungoverned)
+The collapse is:
+- One outcome vocabulary (`success`/`failure`/`blocked`) in
+  `closeout.disposition.contract.yaml`
+- Class mappings from each class's native encoding to that vocabulary
+- Narrative receipts demoted from "fifth receipt class" to compatibility residue
+
+**What is canonical:**
+- Capability receipt → `cap.sh` (automatic, per cap run, outcome via `status`)
+- Wave-close EXEC_RECEIPT → `packet_receipt_writer.py` (governed, per wave, outcome via `disposition`)
+- Controller-prompt EXEC_RECEIPT → `packet_receipt_writer.py` (governed, per packet, outcome via `disposition`)
+- Loop closeout receipt → `loop-closeout-finalize` (governed, per loop, outcome via `disposition`)
+- Outcome vocabulary and class mappings → `closeout.disposition.contract.yaml`
 
 **What is derived:** `completion.state.reconcile` output (derives state from
-receipt existence/absence), `ops status` receipt summary.
+receipt existence/absence), `ops status` receipt summary, delegation disposition
+(derived from wave close hook).
 
-**What is compatibility residue:** Narrative receipts that duplicate information
-already captured in governed receipts.
+**What is compatibility residue:** Narrative receipts (`*-RECEIPT-*.md` in
+domain-state). Session memory only. If they disagree with a governed receipt,
+the governed receipt wins.
 
-**What is undefined:** A common receipt envelope schema that all five classes
-share. Each class has its own schema. A later child loop (receipt/result/failure
-collapse) must decide whether to unify schemas or keep them separate with a
-shared envelope wrapper.
+**What is resolved:** The question "should the five classes share a common
+envelope schema" is answered NO. The classes are different scopes. What they
+share is outcome vocabulary, not schema. A common envelope wrapper would add
+complexity without collapsing truth.
 
 ## Summary Classification
 
@@ -258,28 +272,28 @@ shared envelope wrapper.
 | request | Fragmented (two classes: work-request via loops, execution-request via delegation) | No | `dispatch.envelope.contract.yaml` + loop scope |
 | claim | Partially realized (delegation pickup) | No | `delegation_broker.py` state machine |
 | heartbeat | Undefined (multiple independent liveness surfaces) | No | None — gap |
-| result | Aliased (disposition branch) | No | `closeout.disposition.contract.yaml` |
-| failure | Aliased (complement of result) | No | `closeout.disposition.contract.yaml` + dispatch envelope failure states |
-| receipt | Fragmented (five classes) | Partial | `SESSION_PROTOCOL.md` receipt taxonomy |
+| result | **Collapsed** (outcome: success on governed receipts) | Yes — via outcome vocabulary | `closeout.disposition.contract.yaml` outcome_vocabulary |
+| failure | **Collapsed** (outcome: failure/blocked on governed receipts) | Yes — via outcome vocabulary | `closeout.disposition.contract.yaml` outcome_vocabulary |
+| receipt | **Collapsed** (four governed classes + shared outcome vocabulary) | Yes — partial (four classes, shared outcome) | `SESSION_PROTOCOL.md` receipt taxonomy + `closeout.disposition.contract.yaml` outcome_vocabulary |
 
-**Key finding:** None of the six kernel primitives named in NORTH_STAR.md is
-fully first-class today. Receipt is closest (five governed classes with
-documented taxonomy). Heartbeat is furthest (no canonical form at all). The
-remaining four are realized through other objects (delegation, disposition,
-dispatch envelopes) without being independently named or queryable as kernel
-protocol primitives.
+**Key finding:** Three of the six primitives are now first-class after the
+receipt/result/failure collapse. Result and failure are realized as the
+`success`/`failure`/`blocked` outcome vocabulary shared across all governed
+receipt classes. Receipt itself is four governed classes (narrative demoted to
+residue) with explicit outcome semantics. Heartbeat remains furthest (no
+canonical form). Request and claim remain partially realized.
 
 ## What This Canon Pass Enables
 
 Later child loops can now act on classified truth:
 
-1. **Receipt/result/failure collapse** — knows the five receipt classes and
-   where result/failure are aliased; can decide whether to unify or keep
-   separate
+1. ~~**Receipt/result/failure collapse**~~ — **DONE**
+   (LOOP-RECEIPT-RESULT-FAILURE-COLLAPSE-20260426). Outcome vocabulary
+   declared, class mappings landed, narrative demoted to residue.
 2. **Claim/heartbeat first-classing** — knows claim lives in delegation broker
    and heartbeat has no canonical form; can build the minimum primitive
 3. **Split-brain authority removal** — knows where competing truths exist
-   (request has two classes, receipt has five)
+   (request has two classes, receipt has four governed + one residue)
 4. **Surface subtraction** — knows what is canonical vs derived vs compatibility
    residue for each primitive
 
@@ -288,9 +302,14 @@ Later child loops can now act on classified truth:
 These questions are explicitly deferred to later child loops:
 
 - Should request be unified into a single object or remain two classes?
-- Should result/failure become independent objects or stay as disposition
-  branches?
 - What should a heartbeat contain, how often should it arrive, and what does
   staleness mean at the protocol level?
-- Should the five receipt classes share a common envelope schema?
 - Should "claim" exist independent of the delegation broker?
+
+These questions are **resolved** by the receipt/result/failure collapse:
+
+- ~~Should result/failure become independent objects or stay as disposition
+  branches?~~ → **No.** Result = `outcome: success`, failure = `outcome:
+  failure|blocked` on governed receipts. Disposition subsumes both.
+- ~~Should the five receipt classes share a common envelope schema?~~ → **No.**
+  The classes serve different scopes. They share outcome vocabulary, not schema.

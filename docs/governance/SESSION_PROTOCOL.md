@@ -159,7 +159,26 @@ They are not interchangeable.
 
 When you see "receipt" in the spine, determine which class is meant before
 acting on it. The governed classes (capability, wave-close, controller-prompt,
-loop closeout) are authoritative. Narrative receipts are session memory only.
+loop closeout) are authoritative. Narrative receipts are **compatibility
+residue** — session memory only, not canonical evidence.
+
+### Receipt Outcome Semantics
+
+Every governed receipt expresses an **outcome**: `success`, `failure`, or
+`blocked`. This is the canonical realization of the RESULT and FAILURE kernel
+primitives. Each class encodes outcome through its native field vocabulary:
+
+| Class | Native Outcome Field | success | failure | blocked |
+|---|---|---|---|---|
+| Capability receipt | `status` | `done` | `failed` | `blocked` |
+| Wave-close EXEC_RECEIPT | `disposition` | `landed` | `abandoned` | `deferred` |
+| Controller-prompt EXEC_RECEIPT | `disposition` | `delivered` | `abandoned` | `deferred` |
+| Loop closeout receipt | `disposition` | `landed` | `abandoned` | `deferred` |
+
+The canonical outcome mapping is defined in
+[`closeout.disposition.contract.yaml`](../../ops/bindings/closeout.disposition.contract.yaml)
+(`outcome_vocabulary` section). When reading outcome, use the class mapping —
+do not infer outcome from fields not listed above.
 
 ## Parked Classes
 
