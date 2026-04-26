@@ -974,12 +974,17 @@ except Exception as _exc:
 _pkt_closeout_result = None
 _pkt_closeout_error = ""
 _pkt_coordinator_cmd = ""
+_loop_closeout_reconcile = None
+_loop_closeout_reconcile_error = ""
 try:
     _pkt_loop_id = str(packet.get("loop_id", "")).strip()
     if _pkt_loop_id:
         _orch_lib = os.path.join(os.path.abspath(spine_repo), "ops", "plugins", "core", "orchestration", "lib") if spine_repo else ""
         if _orch_lib and os.path.isdir(_orch_lib):
             sys.path.insert(0, _orch_lib)
+        _lifecycle_lib = os.path.join(os.path.abspath(spine_repo), "ops", "plugins", "core", "lifecycle", "lib") if spine_repo else ""
+        if _lifecycle_lib and os.path.isdir(_lifecycle_lib):
+            sys.path.insert(0, _lifecycle_lib)
 
         _spine_state_dir = os.environ.get("SPINE_STATE", "") or os.path.join(
             os.environ.get("HOME", ""), "code", ".runtime", "spine", "state"
@@ -1097,6 +1102,19 @@ try:
                     f"--target-branch main"
                 )
 
+        try:
+            import controller_prompt_close as _cpc
+
+            _loop_closeout_reconcile = _cpc.reconcile_single_packet_loop_closeout(
+                state_root=_spine_state_dir,
+                loop_id=_pkt_loop_id,
+                spine_repo=spine_repo,
+                dry_run=False,
+                auto_close_loop=True,
+            )
+        except Exception as _reconcile_exc:
+            _loop_closeout_reconcile_error = f"{type(_reconcile_exc).__name__}: {_reconcile_exc}"
+
         # Auto-materialize integration markers for bridged lanes.
         # Independent of packet closeout — engineering waves may not have
         # a packet.yaml at all.  Only fires when the dispatch is synthetic
@@ -1135,6 +1153,33 @@ try:
 except Exception as _pkt_exc:
     _pkt_closeout_error = f"{type(_pkt_exc).__name__}: {_pkt_exc}"
 
+if _loop_closeout_reconcile is not None:
+    close_receipt["loop_closeout_reconcile"] = _loop_closeout_reconcile
+    _atomic_write_json(close_receipt_path, close_receipt)
+    with open(receipt_path, "a", encoding="utf-8") as rf:
+        rf.write("\n## Loop Closeout Reconcile\n\n")
+        rf.write(f"- status: {_loop_closeout_reconcile.get('status', 'unknown')}\n")
+        rf.write(f"- loop_id: {_loop_closeout_reconcile.get('loop_id', '')}\n")
+        rf.write(f"- packet_id: {_loop_closeout_reconcile.get('packet_id', '')}\n")
+        rf.write(f"- completion_level: {_loop_closeout_reconcile.get('completion_level', '') or 'n/a'}\n")
+        rf.write(
+            f"- backfilled_completion_level: "
+            f"{'true' if _loop_closeout_reconcile.get('backfilled_completion_level') else 'false'}\n"
+        )
+        _decision = _loop_closeout_reconcile.get("decision", {})
+        if isinstance(_decision, dict):
+            rf.write(f"- decision.status: {_decision.get('status', '')}\n")
+            _blockers = _decision.get("blockers", []) if isinstance(_decision.get("blockers"), list) else []
+            if _blockers:
+                for _blocker in _blockers:
+                    rf.write(f"- blocker: {_blocker}\n")
+elif _loop_closeout_reconcile_error:
+    close_receipt["loop_closeout_reconcile_error"] = _loop_closeout_reconcile_error
+    _atomic_write_json(close_receipt_path, close_receipt)
+    with open(receipt_path, "a", encoding="utf-8") as rf:
+        rf.write("\n## Loop Closeout Reconcile\n\n")
+        rf.write(f"- error: {_loop_closeout_reconcile_error}\n")
+
 print(f"Wave '{state['wave_id']}' closed.")
 print(f"  Disposition: {disposition}")
 print(f"  Dispatches: {len(dispatches)} ({sum(1 for d in dispatches if d['status'] == 'done')} done, {sum(1 for d in dispatches if d['status'] == 'blocked')} blocked)")
@@ -1169,6 +1214,19 @@ if _pkt_closeout_result:
     print(f"  packet: {_pkt_closeout_result.get('packet_path', '')}")
 elif _pkt_closeout_error:
     print(f"  Packet closeout: skipped ({_pkt_closeout_error})")
+if _loop_closeout_reconcile:
+    print()
+    print("── loop closeout reconcile ───────────────────────────────────")
+    print(f"  status: {_loop_closeout_reconcile.get('status', 'unknown')}")
+    print(f"  loop_id: {_loop_closeout_reconcile.get('loop_id', '')}")
+    print(f"  packet_id: {_loop_closeout_reconcile.get('packet_id', '')}")
+    _decision = _loop_closeout_reconcile.get('decision', {})
+    if isinstance(_decision, dict):
+        print(f"  decision: {_decision.get('status', '')}")
+        for _blocker in (_decision.get('blockers', []) if isinstance(_decision.get('blockers'), list) else []):
+            print(f"    blocker: {_blocker}")
+elif _loop_closeout_reconcile_error:
+    print(f"  Loop closeout reconcile: skipped ({_loop_closeout_reconcile_error})")
 if _pkt_coordinator_cmd:
     print()
     print("── coordinator handoff ────────────────────────────────────────")

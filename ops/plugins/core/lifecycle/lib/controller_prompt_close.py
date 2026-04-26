@@ -108,6 +108,28 @@ def _load_yaml_file(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _resolved_runtime_root(state_root: str | Path) -> Path:
+    root = Path(state_root)
+    if root.name == "state":
+        return root.parent
+    return root
+
+
+def _waves_dirs_for_state_root(state_root: str | Path) -> list[Path]:
+    state_path = Path(state_root)
+    runtime_root = _resolved_runtime_root(state_path)
+    candidates = [runtime_root / "waves", state_path / "waves"]
+    seen: set[str] = set()
+    dirs: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        dirs.append(candidate)
+    return dirs
+
+
 def _packet_frontmatter(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -166,6 +188,42 @@ def _packet_ids_for_loop(
     return packet_ids
 
 
+def _packet_paths_for_loop(state_root: str, loop_id: str) -> list[Path]:
+    prompts_dir = Path(state_root) / "controller-prompts"
+    if not prompts_dir.is_dir():
+        return []
+
+    paths: list[Path] = []
+    for path in sorted(prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+        fm = _packet_frontmatter(path)
+        if str(fm.get("loop_id", "")).strip() == loop_id:
+            paths.append(path)
+    return paths
+
+
+def _safe_packet_id(packet_id: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "-", packet_id)
+
+
+def _receipt_payloads_for_packet(state_root: str, packet_id: str) -> list[tuple[Path, dict[str, Any]]]:
+    receipt_dir = Path(state_root) / "domain-state"
+    safe_packet_id = _safe_packet_id(packet_id)
+    payloads: list[tuple[Path, dict[str, Any]]] = []
+    for path in sorted(receipt_dir.glob(f"EXEC_RECEIPT-CONTROLLER-PROMPT-{safe_packet_id}-*.yaml")):
+        doc = _load_yaml_file(path)
+        if str(doc.get("packet_id", "")).strip() == packet_id:
+            payloads.append((path, doc))
+    return payloads
+
+
+def _latest_receipt_for_packet(state_root: str, packet_id: str) -> tuple[Path | None, dict[str, Any]]:
+    payloads = _receipt_payloads_for_packet(state_root, packet_id)
+    if not payloads:
+        return None, {}
+    payloads.sort(key=lambda item: item[0].stat().st_mtime)
+    return payloads[-1]
+
+
 def _active_delegation_ids_for_loop(state_root: str, loop_id: str) -> list[str]:
     delegations_dir = Path(state_root) / "delegations"
     if not delegations_dir.is_dir():
@@ -206,25 +264,30 @@ def _active_handoff_ids_for_loop(state_root: str, loop_id: str) -> list[str]:
 
 
 def _active_wave_ids_for_loop(state_root: str, loop_id: str) -> list[str]:
-    waves_dir = Path(state_root) / "waves"
-    if not waves_dir.is_dir():
-        return []
-
     active_ids: list[str] = []
-    for path in sorted(waves_dir.glob("WAVE-*/state.json")):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+    seen: set[str] = set()
+    for waves_dir in _waves_dirs_for_state_root(state_root):
+        if not waves_dir.is_dir():
             continue
-        if not isinstance(payload, dict):
-            continue
-        packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else {}
-        parent_loop = str(packet.get("loop_id") or "").strip()
-        if parent_loop != loop_id:
-            continue
-        status = str(payload.get("status") or "").strip().lower()
-        if status not in TERMINAL_WAVE_STATUSES:
-            active_ids.append(str(payload.get("wave_id") or path.parent.name).strip() or path.parent.name)
+        for path in sorted(waves_dir.glob("WAVE-*/state.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else {}
+            parent_loop = str(packet.get("loop_id") or payload.get("loop_id") or "").strip()
+            if parent_loop != loop_id:
+                continue
+            status = str(payload.get("status") or "").strip().lower()
+            if status in TERMINAL_WAVE_STATUSES:
+                continue
+            wave_id = str(payload.get("wave_id") or path.parent.name).strip() or path.parent.name
+            if wave_id in seen:
+                continue
+            seen.add(wave_id)
+            active_ids.append(wave_id)
     return active_ids
 
 
@@ -461,6 +524,90 @@ def _auto_close_loop_if_eligible(
         "closeout_receipt_path": parsed.get("receipt", ""),
         "archived_scope_file": parsed.get("archived_scope_file", ""),
         "stdout": stdout,
+    }
+
+
+def reconcile_single_packet_loop_closeout(
+    *,
+    state_root: str,
+    loop_id: str,
+    spine_repo: str,
+    dry_run: bool = False,
+    auto_close_loop: bool = True,
+) -> dict[str, Any]:
+    packet_paths = _packet_paths_for_loop(state_root, loop_id)
+    if len(packet_paths) != 1:
+        return {
+            "status": "skipped",
+            "loop_id": loop_id,
+            "reason": f"expected exactly 1 controller packet, found {len(packet_paths)}",
+        }
+
+    packet_path = packet_paths[0]
+    fm = _packet_frontmatter(packet_path)
+    packet_id = str(fm.get("packet_id", "")).strip() or packet_path.name
+    packet_status = str(fm.get("status", "")).strip().lower()
+    disposition = str(fm.get("disposition", "")).strip().lower()
+    completion_level = str(fm.get("completion_level", "")).strip()
+    receipt_path, receipt_doc = _latest_receipt_for_packet(state_root, packet_id)
+    backfilled_completion_level = False
+
+    if packet_status != "closed":
+        return {
+            "status": "skipped",
+            "loop_id": loop_id,
+            "packet_id": packet_id,
+            "reason": f"packet status is {packet_status or 'unknown'}",
+        }
+
+    if not completion_level:
+        receipt_completion_level = str(receipt_doc.get("completion_level", "")).strip()
+        if receipt_completion_level:
+            completion_level = receipt_completion_level
+            backfilled_completion_level = True
+            if not dry_run:
+                text = packet_path.read_text(encoding="utf-8")
+                updated = _update_frontmatter(
+                    text,
+                    closed_at_utc=str(fm.get("closed_at_utc", "")).strip(),
+                    disposition=str(fm.get("disposition", "")).strip(),
+                    closed_by=str(fm.get("closed_by", "")).strip() or "controller_prompt.close",
+                    completion_level=completion_level,
+                )
+                packet_path.write_text(updated, encoding="utf-8")
+
+    if dry_run:
+        decision = _evaluate_loop_auto_close(
+            state_root=state_root,
+            loop_id=loop_id,
+            packet_id=packet_id,
+            disposition=disposition,
+            completion_level=completion_level,
+        )
+        if decision.get("status") == "eligible":
+            decision = {**decision, "status": "would_close"}
+    else:
+        decision = _auto_close_loop_if_eligible(
+            state_root=state_root,
+            loop_id=loop_id,
+            packet_id=packet_id,
+            disposition=disposition,
+            completion_level=completion_level,
+            receipt_path=str(receipt_path or ""),
+            spine_repo=spine_repo,
+            auto_close_loop=auto_close_loop,
+        )
+
+    return {
+        "status": decision.get("status", "unknown"),
+        "loop_id": loop_id,
+        "packet_id": packet_id,
+        "packet_path": str(packet_path),
+        "packet_disposition": disposition,
+        "completion_level": completion_level,
+        "receipt_path": str(receipt_path or ""),
+        "backfilled_completion_level": backfilled_completion_level,
+        "decision": decision,
     }
 
 
