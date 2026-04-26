@@ -14,9 +14,12 @@ evidence_refs: []
 exclusions: []
 supersedes: []
 ---
-<!-- Authority: loop scope files are the canonical authority for loop lifecycle state.
+<!-- Authority: loop scope files are runtime projections/materializations of governed
+     loop lifecycle state, not the primary authority.
      Runtime location: $SPINE_STATE/loop-scopes/ (externalized from repo).
-     Mutation paths: loops.create, loops.auto-close, loop-closeout-finalize. -->
+     Default close path: wave.finish -> loop-closeout-finalize.
+     Manual control-plane recovery close: orchestration.loop.close.
+     Do not use raw shared_authority.db mutation as the operator path. -->
 
 # Loop Scope: {{LOOP_ID}}
 

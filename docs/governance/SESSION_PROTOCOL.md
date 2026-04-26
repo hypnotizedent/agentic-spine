@@ -133,9 +133,11 @@ When work is done, follow this sequence:
 1. **Worktree** — commit, push, merge to main, then: `git-worktree-hygiene --apply --maintenance --brief`
 2. **Wave** — `./bin/ops cap run wave.finish`
 3. **Packet** — write receipt to `_intake-artifacts/` (orchestration packets auto-close at wave-close)
-4. **Loop** — if last packet: `loop-closeout-finalize`; if more packets remain: `loops.continuity.update`
+4. **Loop** — normal path: if last packet, `wave.finish` chains the governed loop closeout writer (`loop-closeout-finalize`); if more packets remain: `loops.continuity.update`
 5. **Handoff** — if session ending: `session.handoff.create --summary "..." --loops LOOP-ID`
 6. **Git hygiene** — `git-worktree-hygiene --apply --brief` and `wave.residue` for stale wave branches
+
+If the normal wave-finish close path cannot complete and a control-plane recovery close is required, use `./bin/ops cap run orchestration.loop.close`. That is the explicit manual recovery surface. Do not fall through to raw `shared_authority.db` mutation as an operator path.
 
 ## Receipt Classes
 
@@ -148,7 +150,7 @@ They are not interchangeable.
 | **Capability receipt** | `.evidence/spine/sessions/RCAP-*/receipt.md` | `cap.sh` (automatic) | yes — every cap run emits one | Execution evidence: proves a capability ran, its exit code, role policy, and prompt provenance. Canonical per run key. |
 | **Wave-close EXEC_RECEIPT** | `.runtime/spine/state/domain-state/EXEC_RECEIPT-WAVE-CLOSE-*.yaml` | `packet_receipt_writer.py` via `wave.finish` | yes — fingerprinted YAML, git-truth validated | Delivery evidence: proves a wave closed with head ancestry, lane outcomes, verify results, and disposition. Canonical per wave. |
 | **Controller-prompt EXEC_RECEIPT** | `.runtime/spine/state/domain-state/EXEC_RECEIPT-CONTROLLER-PROMPT-*.yaml` | `packet_receipt_writer.py` via `controller_prompt.close` | yes — same fingerprinted writer as wave-close | Packet-close evidence: proves a controller-prompt packet reached a terminal disposition with operator summary. Canonical per packet. |
-| **Loop closeout receipt** | `.evidence/spine/loop-closeouts/LOOP-*.closeout.md` | `loop-closeout-finalize` (manual trigger) | partial — governed script, markdown output | Lifecycle evidence: proves a loop closed with disposition, completion level, and scope archive ref. One per loop. |
+| **Loop closeout receipt** | `.evidence/spine/loop-closeouts/LOOP-*.closeout.md` | `loop-closeout-finalize` (typically chained by `wave.finish`; may also be reached via `orchestration.loop.close`) | partial — governed script, markdown output | Lifecycle evidence: proves a loop closed with disposition, completion level, and scope archive ref. One per loop. |
 | **Narrative receipt** | `.runtime/spine/state/domain-state/spine/*-RECEIPT-*.md` | Agent (convention) | no — convention only, no governed writer | Session evidence: human-readable summary of a slice (what changed, what was proved, what is next). Not canonical authority — if it disagrees with a governed receipt, the governed receipt wins. |
 
 When you see "receipt" in the spine, determine which class is meant before
