@@ -48,11 +48,12 @@ mapfile -t DOMAINS < <(yq -r '.zones[].name // ""' "$INVENTORY" | sed '/^$/d')
 
 extract_error_message() {
   local body="${1:-}"
-  printf '%s' "$body" | python3 - <<'PY'
+  REGISTRAR_ERROR_BODY="$body" python3 - <<'PY'
 import json
+import os
 import sys
 
-raw = sys.stdin.read().strip()
+raw = os.environ.get("REGISTRAR_ERROR_BODY", "").strip()
 if not raw:
     print("no_response_body")
     raise SystemExit(0)
@@ -90,12 +91,13 @@ trap 'rm -f "$TMP_ROWS" 2>/dev/null || true' EXIT
 for domain in "${DOMAINS[@]}"; do
   url="${CF_API}/accounts/${ACCOUNT_ID}/registrar/domains/${domain}"
   if response="$(cf_api_get "$url" 2>/dev/null)"; then
-    row_json="$(printf '%s\n' "$response" | python3 - "$domain" <<'PY'
+    row_json="$(REGISTRAR_RESPONSE="$response" python3 - "$domain" <<'PY'
 import json
+import os
 import sys
 
 domain = sys.argv[1]
-raw = sys.stdin.read()
+raw = os.environ.get("REGISTRAR_RESPONSE", "")
 try:
     data = json.loads(raw)
 except Exception:
