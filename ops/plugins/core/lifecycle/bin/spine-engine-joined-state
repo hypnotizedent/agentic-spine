@@ -231,10 +231,11 @@ def resolve_paths(root: Path) -> dict[str, Path]:
     }
 
 
-def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
+def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
     rows_by_id: dict[str, dict[str, Any]] = {}
     status_index: dict[str, str] = {}
     scope_only_orphans: list[dict[str, Any]] = []
+    projection_residue: list[dict[str, Any]] = []
     scopes_dir = paths["scopes_dir"]
     if loops_authority is not None:
         previous_spine_state = os.environ.get("SPINE_STATE")
@@ -312,14 +313,24 @@ def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dic
                 rows_by_id[loop_id] = merged
                 # status_index keeps the SQLite value (already set above)
             elif sqlite_status is not None:
-                # SQLite already has this loop — keep SQLite status in the index,
-                # but allow scope file to enrich metadata when both agree it's open.
-                if status in OPEN_LOOP_STATUSES:
+                # SQLite already has this loop. Only enrich when SQLite and the
+                # scope projection both agree the loop is still open. A stale
+                # scope file must not resurrect a loop that SQLite has already
+                # closed or parked.
+                if sqlite_is_open and status in OPEN_LOOP_STATUSES:
                     existing = rows_by_id.get(loop_id, {})
                     merged = dict(existing)
                     merged.update({k: v for k, v in row.items() if v and k != "status"})
                     rows_by_id[loop_id] = merged
-                # If SQLite says closed and scope also says closed — no row needed.
+                elif (not sqlite_is_open) and status in OPEN_LOOP_STATUSES:
+                    projection_residue.append({
+                        "loop_id": loop_id,
+                        "sqlite_status": sqlite_status,
+                        "scope_status": status,
+                        "path": str(path),
+                    })
+                # If SQLite says closed/parked, no open row is emitted even if
+                # the scope projection is stale.
             else:
                 # Loop NOT in SQLite — do NOT adopt as an open loop.
                 # SQLite is canonical authority; scope-only files are orphans
@@ -334,7 +345,8 @@ def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dic
                 # Closed scope-only files are historical residue, not anomalies.
 
     rows = sorted(rows_by_id.values(), key=lambda row: (row.get("created_at_utc", ""), row.get("loop_id", "")), reverse=True)
-    return rows, status_index, scope_only_orphans
+    projection_residue.sort(key=lambda row: (row.get("loop_id", ""), row.get("path", "")))
+    return rows, status_index, scope_only_orphans, projection_residue
 
 
 def normalize_gap_row(item: dict[str, Any]) -> dict[str, Any]:
@@ -966,7 +978,7 @@ def _gap_projection_match(gap_state: dict[str, Any]) -> bool | None:
 
 def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str, Any]:
     paths = resolve_paths(root)
-    open_loops, loop_status_index, scope_only_orphans = collect_loop_rows(paths)
+    open_loops, loop_status_index, scope_only_orphans, projection_residue = collect_loop_rows(paths)
     gap_state = collect_gap_state(paths, loop_status_index)
     open_gaps = gap_state.get("open", []) if gap_state.get("status") == "ok" else []
     orphaned_gaps = gap_state.get("orphaned", []) if gap_state.get("status") == "ok" else []
@@ -1044,6 +1056,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
         "summary": {
             "open_loops": len(open_loops),
             "scope_only_orphans": len(scope_only_orphans),
+            "projection_residue": len(projection_residue),
             "open_gaps": len(open_gaps) if gap_state.get("status") == "ok" else None,
             "orphaned_gaps": len(orphaned_gaps) if gap_state.get("status") == "ok" else None,
             "active_handoffs": len(handoffs),
@@ -1068,7 +1081,11 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "gap_projection_match": _gap_projection_match(gap_state),
             "completion_state": completion_summary,
         },
-        "loops": {"open": open_loops, "scope_only_orphans": scope_only_orphans},
+        "loops": {
+            "open": open_loops,
+            "scope_only_orphans": scope_only_orphans,
+            "projection_residue": projection_residue,
+        },
         "gaps": {
             "status": gap_state.get("status", "degraded"),
             "source": gap_state.get("source", "gaps_sql_authority"),
@@ -1149,6 +1166,9 @@ def main() -> int:
     _soo = summary.get('scope_only_orphans', 0)
     if _soo:
         print(f"scope_only_orphans: {_soo}")
+    _pr = summary.get('projection_residue', 0)
+    if _pr:
+        print(f"projection_residue: {_pr}")
     print(f"open_gaps: {open_gaps}")
     print(f"orphaned_gaps: {orphaned_gaps}")
     print(f"blocked_worktrees: {summary.get('blocked_worktrees', 0)}")

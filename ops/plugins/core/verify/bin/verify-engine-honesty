@@ -464,9 +464,9 @@ check H6 "surface coherence (status + context agree on loop counts)" bash -c "
     ctx_rc=\$?
     [[ \"\$ctx_rc\" -eq 0 ]] || { echo \"status --context exited \$ctx_rc (expected 0)\"; exit 1; }
 
-    # Both surfaces report open loop counts. The honest relation here is that
-    # the status surface is the broader joined-state read, so it may be equal to
-    # or one step ahead of the context surface for the known registration class.
+    # Both surfaces must now agree on open loop count. Status derives its loop
+    # set from direct SQLite-backed authority and joined-state may only enrich
+    # matching rows, not widen the set.
     ctx_loops=\"\$(echo \"\$context_output\" | grep -o 'open loops:.*[0-9]' | grep -o '[0-9]*$')\"
     ctx_loops=\"\${ctx_loops:-0}\"
 
@@ -479,9 +479,8 @@ check H6 "surface coherence (status + context agree on loop counts)" bash -c "
     fi
 
     if [[ \"\$status_loops\" -ne \"\$ctx_loops\" ]]; then
-        delta=\$((status_loops - ctx_loops))
-        [[ \"\$delta\" -le 1 ]] || { echo \"loop count gap too large: status=\$status_loops context=\$ctx_loops\"; exit 1; }
-        echo \"context trails status by \$delta loop(s) on the known agent-registration class\"
+        echo \"loop count mismatch: status=\$status_loops context=\$ctx_loops\"
+        exit 1
     fi
 
     # Context should report spine verify status (front-door authority)

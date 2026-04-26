@@ -134,6 +134,7 @@ if [[ "$MODE" == "--context" ]]; then
   STATE_ROOT_VAL="$(jq_val '.paths.state_root' 'unknown')"
   EVIDENCE_ROOT="$(jq_val '.paths.receipts_root' 'unknown')"
   OPEN_LOOPS="$(jq_val '.summary.open_loops' '?')"
+  PROJECTION_RESIDUE="$(jq_val '.summary.projection_residue' '0')"
   OPEN_GAPS="$(jq_val '.summary.open_gaps' '?')"
   ACTIVE_WAVES="$(jq_val '.summary.active_waves' '?')"
   ORPHANED_WAVES="$(jq_val '.summary.orphaned_waves' '?')"
@@ -219,6 +220,9 @@ PY
   printf "  evidence root:  %s\n" "$EVIDENCE_ROOT"
   echo "─── open work ──────────────────────────────────────"
   printf "  open loops:     %s\n" "$OPEN_LOOPS"
+  if [[ "$PROJECTION_RESIDUE" != "0" ]]; then
+    printf "  projection residue: %s stale scope file(s)\n" "$PROJECTION_RESIDUE"
+  fi
   printf "  open gaps:      %s\n" "$OPEN_GAPS"
   printf "  active waves:   %s\n" "$ACTIVE_WAVES"
   printf "  orphaned waves: %s\n" "$ORPHANED_WAVES"
@@ -903,6 +907,7 @@ elif comms_slo_status == "ok":
 joined_state_summary = {
     "source": "local_fallback",
     "open_loops": len(open_loops),
+    "projection_residue": 0,
     "open_gaps": open_gap_count,
     "active_waves": 0,
     "orphaned_waves": 0,
@@ -914,6 +919,7 @@ joined_state_summary = {
 }
 joined_state_verify_temporal = {}
 joined_state_verify_payload = {}
+joined_state_projection_residue = []
 
 joined_state_bin = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-engine-joined-state"
 if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
@@ -928,10 +934,13 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
             _summary = _jdata.get("summary", {})
             _verify_payload = ((_jdata.get("verify") or {}).get("latest_fast")) or {}
             _verify_temporal = ((_jdata.get("temporal_truth") or {}).get("verify")) or {}
+            _projection_residue = ((_jdata.get("loops") or {}).get("projection_residue")) or []
             if isinstance(_verify_payload, dict):
                 joined_state_verify_payload = _verify_payload
             if isinstance(_verify_temporal, dict):
                 joined_state_verify_temporal = _verify_temporal
+            if isinstance(_projection_residue, list):
+                joined_state_projection_residue = [row for row in _projection_residue if isinstance(row, dict)]
             if isinstance(_summary, dict):
                 _aw = _summary.get("active_waves")
                 _ow = _summary.get("orphaned_waves")
@@ -939,6 +948,7 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                 joined_state_summary = {
                     "source": "joined_state",
                     "open_loops": _summary.get("open_loops", len(open_loops)),
+                    "projection_residue": _summary.get("projection_residue", 0),
                     "open_gaps": _summary.get("open_gaps", open_gap_count),
                     "active_waves": int(_aw) if isinstance(_aw, (int, float)) else 0,
                     "orphaned_waves": int(_ow) if isinstance(_ow, (int, float)) else 0,
@@ -967,43 +977,29 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                     if not _loop_id:
                         continue
                     _merged = dict(_current_loops_by_id.get(_loop_id) or {})
-                    _priority = str(_row.get("priority") or _row.get("severity") or "").strip()
                     if not _merged:
-                        _merged = {
-                            "loop_id": _loop_id,
-                            "status": str(_row.get("status") or "active").strip().lower(),
-                            "severity": _priority or "-",
-                            "owner": str(_row.get("owner") or "unassigned").strip() or "unassigned",
-                            "execution_mode": str(_row.get("execution_mode") or "").strip(),
-                            "active_terminal": "",
-                            "blocked_by": str(_row.get("blocked_by") or "").strip(),
-                            "operator_note": "",
-                            "last_heartbeat_utc": "",
-                            "heartbeat_ttl_minutes": "",
-                            "heartbeat_source": "",
-                            "horizon": str(_row.get("horizon") or "now").strip() or "now",
-                            "execution_readiness": str(_row.get("execution_readiness") or "runnable").strip() or "runnable",
-                            "title": str(_row.get("objective") or _row.get("title") or _loop_id).strip(),
-                            "file": str(_row.get("path") or "joined_state").strip() or "joined_state",
-                        }
-                    else:
-                        if _priority:
-                            _merged["severity"] = _priority
-                        _owner = str(_row.get("owner") or "").strip()
-                        if _owner:
-                            _merged["owner"] = _owner
-                        _horizon = str(_row.get("horizon") or "").strip()
-                        if _horizon:
-                            _merged["horizon"] = _horizon
-                        _readiness = str(_row.get("execution_readiness") or "").strip()
-                        if _readiness:
-                            _merged["execution_readiness"] = _readiness
-                        _objective = str(_row.get("objective") or _row.get("title") or "").strip()
-                        if _objective:
-                            _merged["title"] = _objective
-                        _path = str(_row.get("path") or "").strip()
-                        if _path:
-                            _merged["file"] = _path
+                        # SQLite-backed open loops are authoritative. Joined-state
+                        # may enrich those rows, but it must not introduce extra
+                        # open loops on its own.
+                        continue
+                    _priority = str(_row.get("priority") or _row.get("severity") or "").strip()
+                    if _priority:
+                        _merged["severity"] = _priority
+                    _owner = str(_row.get("owner") or "").strip()
+                    if _owner:
+                        _merged["owner"] = _owner
+                    _horizon = str(_row.get("horizon") or "").strip()
+                    if _horizon:
+                        _merged["horizon"] = _horizon
+                    _readiness = str(_row.get("execution_readiness") or "").strip()
+                    if _readiness:
+                        _merged["execution_readiness"] = _readiness
+                    _objective = str(_row.get("objective") or _row.get("title") or "").strip()
+                    if _objective:
+                        _merged["title"] = _objective
+                    _path = str(_row.get("path") or "").strip()
+                    if _path:
+                        _merged["file"] = _path
                     _merged_open_loops.append(_merged)
                 if _merged_open_loops:
                     open_loops = _merged_open_loops
@@ -1315,15 +1311,20 @@ if mode == "--json":
             "sent_total": comms_sent_total,
             "oneliner": comms_oneliner,
         },
+        "projection_residue": {
+            "stale_scope_files": int(joined_state_summary.get("projection_residue", 0) or 0),
+            "loops": joined_state_projection_residue,
+        },
         "coherence_summary": joined_state_summary,
         "daemons": daemons_summary,
         "temporal_truth": temporal_truth_payload,
         "standing_program_health": standing_program_health,
         "delegations": delegation_summary,
         "counts": {
-            # Use joined-state as authoritative source so status --json and
-            # status --context agree on the same open-loop count (H6 coherence).
-            "open_loops": int(joined_state_summary.get("open_loops", len(open_loops))),
+            # Direct SQLite-backed open loops are authoritative for loop count.
+            # Joined-state may enrich the rows, but it must not widen the set.
+            "open_loops": len(open_loops),
+            "projection_residue": int(joined_state_summary.get("projection_residue", 0) or 0),
             "mapped_open_loops": mapped_open_loops,
             "standing_programs_total": int((standing_program_health.get("summary") or {}).get("total", 0) or 0),
             "standing_programs_healthy": int((standing_program_health.get("summary") or {}).get("healthy", 0) or 0),
@@ -1381,6 +1382,9 @@ if mode == "--brief":
     parts = [loop_part]
     if planned_loops:
         parts[0] += f" + {len(planned_loops)} planned"
+    projection_residue = int(joined_state_summary.get("projection_residue", 0) or 0)
+    if projection_residue:
+        parts.append(f"Residue: {projection_residue} stale scope file(s)")
     if gaps_available:
         parts.append(f"Gaps: {open_gap_count} open ({unlinked_gap_count} unlinked)")
     else:

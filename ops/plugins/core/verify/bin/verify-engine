@@ -21,6 +21,7 @@
 #   E12 execution identity parity: by_terminal_id role overrides must produce matching posture
 #   E13 cap.sh no silent widen-by-fallback to worker on missing SPINE_RUNTIME_ROLE
 #   E14 researcher→worker bridge continuity (warn): active loops have delegation, packet, or handoff
+#   E15 status open-loop count anchored to SQLite authority
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -775,6 +776,60 @@ if uncovered:
     print("%d active loop(s) without delegation, packet, or handoff continuity:" % len(uncovered))
     for lid in sorted(uncovered):
         print("  %s" % lid)
+    raise SystemExit(1)
+PY
+'
+
+check E15 "status open-loop count matches SQLite authority" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+spine_state = os.environ.get("SPINE_STATE", "")
+if not spine_state:
+    home = os.environ.get("HOME", "")
+    spine_state = os.path.join(home, "code/.runtime/spine/state")
+
+db_path = Path(spine_state) / "shared_authority.db"
+if not db_path.is_file():
+    print(f"shared_authority.db not found at {db_path}")
+    raise SystemExit(1)
+
+conn = sqlite3.connect(str(db_path))
+try:
+    sqlite_open = conn.execute(
+        "SELECT COUNT(*) FROM loops WHERE status IN (?, ?, ?)",
+        ["active", "draft", "open"],
+    ).fetchone()[0]
+finally:
+    conn.close()
+
+proc = subprocess.run(
+    [str(root / "bin" / "ops"), "status", "--json"],
+    capture_output=True,
+    text=True,
+    cwd=str(root),
+)
+if proc.returncode != 0:
+    print(f"ops status --json exited {proc.returncode}")
+    if proc.stderr.strip():
+        print(proc.stderr.strip())
+    raise SystemExit(1)
+
+try:
+    payload = json.loads(proc.stdout)
+except json.JSONDecodeError as exc:
+    print(f"status json parse failed: {exc}")
+    raise SystemExit(1)
+
+status_open = int(((payload.get("counts") or {}).get("open_loops", 0)) or 0)
+if status_open != sqlite_open:
+    print(f"open loop count mismatch: sqlite={sqlite_open} status={status_open}")
     raise SystemExit(1)
 PY
 '
