@@ -237,15 +237,12 @@ run_and_wrap_json() {
 }
 
 run_scope() {
-  local mode="$1"
-  shift
-  local result="" rc=0
+  local mode="$1"; shift
+  local rc=0
 
   if [[ "$json_mode" -eq 1 ]]; then
-    set +e
-    result="$(run_and_wrap_json "$mode" "$@" --json)"
-    rc=$?
-    set -e
+    local result
+    set +e; result="$(run_and_wrap_json "$mode" "$@" --json)"; rc=$?; set -e
     [[ "$rc" -eq 0 ]] || surface_recovery "$mode" "$result"
     printf '%s\n' "$result"
     return "$rc"
@@ -253,17 +250,27 @@ run_scope() {
 
   emit_alias_deprecation_note "$alias_source"
   emit_scope_note "$mode"
-  set +e
-  "$@"
-  rc=$?
-  set -e
-  if [[ "$rc" -ne 0 ]]; then
-    set +e
-    result="$(run_and_wrap_json "$mode" "$@" --json)"
-    set -e
-    surface_recovery "$mode" "$result"
-  fi
-  return "$rc"
+
+  # Subshell scopes EXIT trap — no leak into caller.
+  # Shell functions (surface_recovery etc.) inherited by (...) subshell.
+  (
+    _tmpout="$(mktemp)"
+    trap 'rm -f "$_tmpout"' EXIT
+
+    set +e; "$@" 2>&1 | tee "$_tmpout"; rc=${PIPESTATUS[0]}; set -e
+
+    if [[ "$rc" -ne 0 ]]; then
+      local fail_ids json_arr
+      # Extract D### gate IDs only (recovery dispatch only handles D-series)
+      fail_ids="$(grep -oE 'D[0-9]+' "$_tmpout" | sort -u || true)"
+      if [[ -n "$fail_ids" ]]; then
+        json_arr="$(printf '%s\n' $fail_ids | jq -R . | jq -sc .)"
+        surface_recovery "$mode" "$(jq -n --argjson ids "$json_arr" '{blocking_fail_ids: $ids}')"
+      fi
+    fi
+    exit "$rc"
+  )
+  return $?
 }
 
 load_spine_helper_json() {

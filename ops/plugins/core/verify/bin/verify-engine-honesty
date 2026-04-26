@@ -237,10 +237,14 @@ fi
 [[ "$json_mode" -eq 1 ]] || echo ""
 
 # Capture pre-test orphan count so H5 only fails on new orphans
-_pre_orphan_count=0
-_pre_ctx="$("$ROOT/bin/ops" context 2>&1 || true)"
-_pre_orphan_count="$(echo "$_pre_ctx" | grep -o 'orphaned waves:.*[0-9]' | grep -o '[0-9]*$' || echo 0)"
-_pre_orphan_count="${_pre_orphan_count:-0}"
+set +e
+_pre_status_json="$("$ROOT/bin/ops" status --json 2>&1)"
+_pre_status_json_rc=$?
+set -e
+if [[ "$_pre_status_json_rc" -ne 0 ]] \
+  || ! _pre_orphan_count="$(jq -e '.counts.orphaned_waves // 0' <<<"$_pre_status_json" 2>/dev/null)"; then
+  _pre_orphan_count="UNAVAILABLE"
+fi
 
 # ── H1: Capability resolution ────────────────────────────────────────────
 # Calls verify-engine directly to avoid nested-cap-run context issues.
@@ -413,25 +417,40 @@ if [[ -f "$_wave_sf" ]]; then
     fi
 fi
 
+# ── Cache post-cleanup state for H5/H6 ──────────────────────────────────
+set +e
+_post_status_json="$("$ROOT/bin/ops" status --json 2>&1)"
+_post_status_json_rc=$?
+_post_status_context="$("$ROOT/bin/ops" status --context 2>&1)"
+_post_status_context_rc=$?
+set -e
+
+if [[ "$_post_status_json_rc" -ne 0 ]] \
+  || ! _post_orphan_count="$(jq -e '.counts.orphaned_waves // 0' <<<"$_post_status_json" 2>/dev/null)"; then
+  _post_orphan_count="UNAVAILABLE"
+fi
+
 # ── H5: Continuity invariants ────────────────────────────────────────────
 # Checks that after the synthetic run + cleanup, orphan count hasn't grown.
-check H5 "continuity invariants (no new orphaned waves from synthetic run)" bash -c "
-    context_output=\"\$('$ROOT/bin/ops' context 2>&1)\"
-    orphaned=\"\$(echo \"\$context_output\" | grep -o 'orphaned waves:.*[0-9]' | grep -o '[0-9]*$')\"
-    orphaned=\"\${orphaned:-0}\"
-    pre=$_pre_orphan_count
-    if [[ \"\$orphaned\" -gt \"\$pre\" ]]; then
-        echo \"orphaned waves grew: \$pre → \$orphaned (synthetic run left orphans)\"
-        exit 1
-    fi
+if [[ "$_pre_orphan_count" == "UNAVAILABLE" || "$_post_orphan_count" == "UNAVAILABLE" ]]; then
+    record_fail H5 "continuity invariants (no new orphaned waves from synthetic run)" \
+        "status --json unavailable for orphan accounting (pre_rc=$_pre_status_json_rc post_rc=$_post_status_json_rc or parse failure)"
+else
+    check H5 "continuity invariants (no new orphaned waves from synthetic run)" bash -c "
+        pre=$_pre_orphan_count
+        post=$_post_orphan_count
+        if [[ \"\$post\" -gt \"\$pre\" ]]; then
+            echo \"orphaned waves grew: \$pre → \$post (synthetic run left orphans)\"
+            exit 1
+        fi
 
-    synthetic_branch=\"codex/$SYNTHETIC_WAVE_ID\"
-    if git -C '$ROOT' show-ref --verify --quiet \"refs/heads/\$synthetic_branch\"; then
-        echo \"synthetic branch leaked after cleanup: \$synthetic_branch\"
-        exit 1
-    fi
+        synthetic_branch=\"codex/$SYNTHETIC_WAVE_ID\"
+        if git -C '$ROOT' show-ref --verify --quiet \"refs/heads/\$synthetic_branch\"; then
+            echo \"synthetic branch leaked after cleanup: \$synthetic_branch\"
+            exit 1
+        fi
 
-    leaked_worktree=\"\$(git -C '$ROOT' worktree list --porcelain 2>/dev/null | awk '/^worktree /{print \$2}' | python3 - '$SYNTHETIC_WAVE_ID' <<'PY'
+        leaked_worktree=\"\$(git -C '$ROOT' worktree list --porcelain 2>/dev/null | awk '/^worktree /{print \$2}' | python3 - '$SYNTHETIC_WAVE_ID' <<'PY'
 import os
 import sys
 
@@ -445,47 +464,47 @@ for raw in sys.stdin:
         raise SystemExit(0)
 raise SystemExit(1)
 PY
-    )\" || true
-    if [[ -n \"\$leaked_worktree\" ]]; then
-        echo \"synthetic worktree leaked after cleanup: \$leaked_worktree\"
-        exit 1
-    fi
-"
+        )\" || true
+        if [[ -n \"\$leaked_worktree\" ]]; then
+            echo \"synthetic worktree leaked after cleanup: \$leaked_worktree\"
+            exit 1
+        fi
+    "
+fi
 
 # ── H6: Surface coherence ────────────────────────────────────────────────
-# Checks that status --json and context agree on shared data (loop counts),
-# while tolerating the known agent-owned registration class where the joined
-# context can trail the status surface by one.
-check H6 "surface coherence (status + context agree on loop counts)" bash -c "
-    status_json=\"\$('$ROOT/bin/ops' status --json 2>&1)\"
+# Checks that status --json and status --context agree on shared data (loop
+# counts). Uses cached post-cleanup captures to avoid redundant subprocess
+# spawns. Fails explicitly if either front-door surface is broken.
+if [[ "$_post_status_json_rc" -ne 0 ]]; then
+    record_fail H6 "surface coherence (status + context agree on loop counts)" \
+        "status --json exited non-zero (rc=$_post_status_json_rc)"
+elif ! jq -e . >/dev/null 2>&1 <<<"$_post_status_json"; then
+    record_fail H6 "surface coherence (status + context agree on loop counts)" \
+        "status --json emitted non-JSON"
+elif [[ "$_post_status_context_rc" -ne 0 ]]; then
+    record_fail H6 "surface coherence (status + context agree on loop counts)" \
+        "status --context exited non-zero (rc=$_post_status_context_rc)"
+else
+    export _H6_STATUS_JSON="$_post_status_json"
+    export _H6_STATUS_CONTEXT="$_post_status_context"
+    check H6 "surface coherence (status + context agree on loop counts)" bash -c '
+        status_loops="$(jq ".counts.open_loops // 0" <<<"$_H6_STATUS_JSON" 2>/dev/null)"
+        status_loops="${status_loops:-0}"
 
-    # status --context must exit 0 (not just print valid output)
-    context_output=\"\$('$ROOT/bin/ops' status --context 2>&1)\"
-    ctx_rc=\$?
-    [[ \"\$ctx_rc\" -eq 0 ]] || { echo \"status --context exited \$ctx_rc (expected 0)\"; exit 1; }
+        ctx_loops="$(echo "$_H6_STATUS_CONTEXT" | grep -o "open loops:.*[0-9]" | grep -o "[0-9]*$")"
+        ctx_loops="${ctx_loops:-0}"
 
-    # Both surfaces must now agree on open loop count. Status derives its loop
-    # set from direct SQLite-backed authority and joined-state may only enrich
-    # matching rows, not widen the set.
-    ctx_loops=\"\$(echo \"\$context_output\" | grep -o 'open loops:.*[0-9]' | grep -o '[0-9]*$')\"
-    ctx_loops=\"\${ctx_loops:-0}\"
+        if [[ "$status_loops" -ne "$ctx_loops" ]]; then
+            echo "loop count mismatch: status=$status_loops context=$ctx_loops"
+            exit 1
+        fi
 
-    status_loops=\"\$(echo \"\$status_json\" | jq '.counts.open_loops // 0' 2>/dev/null)\"
-    status_loops=\"\${status_loops:-0}\"
-
-    if [[ \"\$status_loops\" -lt \"\$ctx_loops\" ]]; then
-        echo \"loop count mismatch: status=\$status_loops context=\$ctx_loops\"
-        exit 1
-    fi
-
-    if [[ \"\$status_loops\" -ne \"\$ctx_loops\" ]]; then
-        echo \"loop count mismatch: status=\$status_loops context=\$ctx_loops\"
-        exit 1
-    fi
-
-    # Context should report spine verify status (front-door authority)
-    echo \"\$context_output\" | grep -q 'spine verify:' || { echo 'context does not show spine verify status'; exit 1; }
-"
+        # Context should report spine verify status (front-door authority)
+        echo "$_H6_STATUS_CONTEXT" | grep -q "spine verify:" || { echo "context does not show spine verify status"; exit 1; }
+    '
+    unset _H6_STATUS_JSON _H6_STATUS_CONTEXT
+fi
 
 # ── H8: Kickoff-path honesty ────────────────────────────────────────────
 # Proves the real kickoff binary enforces worktree-only execution:
