@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# session.v3.attach - Canonical session entry point
+# session.v3.attach - Read-only orientation surface (NOT admission)
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Single entry capability for a new terminal session.
-# Composes the birth banner (context) and work summary (status --brief)
-# into one screen so the operator lands oriented.
+# Renders session context and work summary for orientation.
+# This is a READ-ONLY surface. It does NOT constitute governed admission.
 #
-# Called by: ops terminal launch (internally, after env setup)
-# Also callable directly: ops cap run session.v3.attach
+# Admission surface: ops terminal launch
+#   - terminal launch sets identity, resolves custody, auto-attaches loops
+#   - terminal launch calls this script internally after env setup
 #
-# Does NOT:
+# Direct invocation (ops cap run session.v3.attach) produces orientation
+# output but does NOT:
+#   - Create or bind terminal identity
 #   - Mutate state
 #   - Attach loops (use --loop on terminal launch for that)
+#   - Constitute governed session start
 #   - Run verify (ops verify is a separate health surface)
 #   - Dispatch work (ops dispatch local is a separate work surface)
 #
@@ -59,6 +62,28 @@ done
 POSTURE_HELPER="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/session_posture.sh"
 # shellcheck source=/dev/null
 [[ -f "$POSTURE_HELPER" ]] && . "$POSTURE_HELPER" 2>/dev/null || true
+
+# ── Admission status ──────────────────────────────────────────────────────
+# Detect whether we are inside a terminal-launch context (admitted) or
+# called standalone (orientation-only, not admitted).
+ADMISSION_STATUS="unbound"
+if [[ -n "${OPS_TERMINAL_ROLE:-}" && -n "${SPINE_RUNTIME_ROLE:-}" ]]; then
+    ADMISSION_STATUS="admitted"
+fi
+
+echo "── admission ───────────────────────────────────────────────────"
+if [[ "$ADMISSION_STATUS" == "admitted" ]]; then
+    echo "  status:          ADMITTED (via terminal launch)"
+    echo "  terminal:        ${OPS_TERMINAL_ROLE}"
+    echo "  runtime role:    ${SPINE_RUNTIME_ROLE}"
+    echo "  loop:            ${SPINE_LOOP_ID:-<none>}"
+else
+    echo "  status:          UNBOUND — orientation only, not governed admission"
+    echo "  terminal:        ${OPS_TERMINAL_ROLE:-<unset>}"
+    echo "  runtime role:    ${SPINE_RUNTIME_ROLE:-<unset>}"
+    echo "  note:            use 'ops terminal launch' for governed session start"
+fi
+echo ""
 
 # ── Context banner ─────────────────────────────────────────────────────────
 # Best-effort: never block terminal birth
@@ -476,6 +501,7 @@ if [[ "$EMIT_ASSIGNMENT" -eq 1 ]]; then
         "${PROV_CHECKPOINT_ID:-}" \
         "${PROV_CHECKPOINT_PACKET:-}" \
         "${PROV_CHECKPOINT_RECORDED:-}" \
+        "${ADMISSION_STATUS:-unbound}" \
         <<'PYASSIGN' 2>/dev/null || true
 import json
 import os
@@ -502,6 +528,7 @@ routing_json_raw  = args[14] or ""
 prov_checkpoint_id = args[15] or None
 prov_checkpoint_packet = args[16] or None
 prov_checkpoint_recorded = args[17] or None
+admission_status  = args[18] if len(args) > 18 else "unbound"
 
 # Resolve terminal type and tool from contract (best-effort)
 terminal_type = None
@@ -629,8 +656,9 @@ if loop_id and state_root:
 
 # Compose the assignment object
 assignment = {
-    "version": "0.1",
+    "version": "0.2",
     "type": "entry.assignment.partial",
+    "admission_status": admission_status,
     "terminal_id": terminal_id,
     "terminal_type": terminal_type,
     "tool": tool,

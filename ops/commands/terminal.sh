@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# ops terminal - Terminal birth with runtime identity
+# ops terminal - Canonical governed admission surface
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Canonical launcher for the Hammerspoon Ctrl+Shift+P picker.
+# The ONE public admitting surface for governed human terminal sessions.
 # Opens an iTerm window with truthful runtime identity:
 #   - OPS_TERMINAL_ROLE     (terminal character name)
 #   - SPINE_RUNTIME_ROLE    (mutation policy role from contract)

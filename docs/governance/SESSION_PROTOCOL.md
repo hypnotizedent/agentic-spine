@@ -11,12 +11,18 @@ Agent entry is simple:
 
 1. Open the repo.
 2. Read [AGENTS.md](/Users/ronnyworks/code/agentic-spine/AGENTS.md) first, then [NORTH_STAR.md](/Users/ronnyworks/code/agentic-spine/NORTH_STAR.md), [SPINE.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE.md), and this file.
-3. If terminal birth did not already do it, run:
+3. Governed session start is `ops terminal launch` — it sets identity, resolves
+   custody, and auto-attaches loops. If you are already inside a terminal-launch
+   session, orientation context was rendered at birth. If you need to re-read
+   orientation without restarting, use:
 
 ```bash
-cd ~/code/agentic-spine
 ./bin/ops cap run session.v3.attach
 ```
+
+   Note: `session.v3.attach` is a read-only orientation surface. It does not
+   create admission, bind identity, or attach loops. It is not a substitute for
+   `ops terminal launch`.
 
 4. Run:
 
@@ -206,7 +212,7 @@ query the relevant surface directly.
 These seams are missing or manual today. They are named here so agents know,
 not as a fix list.
 
-- **Loop auto-attach at session start** — terminal birth (`ops terminal launch`) auto-attaches the active loop when exactly one exists; standalone `session.v3.attach` remains read-only and does not bind loop context into the caller's environment
+- **Loop auto-attach at session start** — terminal birth (`ops terminal launch`) auto-attaches the active loop when exactly one exists; standalone `session.v3.attach` is orientation-only and does not create admission, bind identity, or attach loops
 - **Membrane-to-controller handoff** — no governed artifact between what the membrane understood and what the controller executes
 - **Controller-prompt packet amend/checkpoint** — no governed mid-packet surface between birth (`controller_prompt.create`) and death (`controller_prompt.close`); the execution phase is ungoverned by design
 

@@ -229,6 +229,17 @@ evaluate_role_policy() {
         return 0
     fi
 
+    # ── Unbound identity check ────────────────────────────────────────────
+    # Mutating capabilities require bound terminal identity (set by terminal
+    # launch). If OPS_TERMINAL_ROLE is unset, the caller did not go through
+    # governed admission. Block unless explicitly overridden.
+    if [[ -z "${OPS_TERMINAL_ROLE:-}" && "$CAP_ROLE_POLICY_OVERRIDE_USED" != "true" ]]; then
+        CAP_BLOCKER_REASON="unbound_terminal_identity"
+        CAP_ROLE_POLICY_BLOCK_REASON="$CAP_BLOCKER_REASON"
+        CAP_ROLE_POLICY_BLOCK_MESSAGE="mutating capability '$capability_name' requires bound terminal identity — use 'ops terminal launch' for governed admission"
+        return 1
+    fi
+
     if [[ ! -f "$ROLE_POLICY_CONTRACT" ]]; then
         CAP_BLOCKER_REASON="role_policy_contract_missing"
         CAP_ROLE_POLICY_BLOCK_REASON="$CAP_BLOCKER_REASON"
@@ -582,11 +593,25 @@ append_telemetry() {
     [[ -n "$session_boundary" ]] || session_boundary="nosession"
 
     if [[ -z "$terminal_id" ]]; then
-        local host_part pid_part
+        local host_part pid_part identity_class
         host_part="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)"
         host_part="$(printf '%s' "$host_part" | tr '[:space:]/' '__')"
         pid_part="$$"
-        terminal_id="attach-${OPS_TERMINAL_ROLE:-unset}-${host_part}-${pid_part}"
+        # Classify the caller: service/automation (launchd/systemd/cron parent)
+        # vs ad-hoc shell invocation. This prevents service execution from
+        # polluting terminal telemetry with pseudo-terminal identity.
+        if [[ -n "${SPINE_SERVICE_ID:-}" ]]; then
+            identity_class="service-${SPINE_SERVICE_ID}"
+        elif [[ -n "${SPINE_SCHEDULER_LABEL:-}" ]]; then
+            # Governed launchd/systemd scheduled job
+            identity_class="scheduled-${SPINE_SCHEDULER_LABEL}"
+        elif [[ -n "${INVOCATION_ID:-}" || -n "${SPINE_AUTONOMOUS_EXECUTION_CONTEXT:-}" ]]; then
+            # INVOCATION_ID = systemd, SPINE_AUTONOMOUS_EXECUTION_CONTEXT = governed job wrapper
+            identity_class="automation-${host_part}"
+        else
+            identity_class="adhoc-${host_part}"
+        fi
+        terminal_id="${identity_class}-${pid_part}"
     fi
 
     terminal_id="$(printf '%s' "$terminal_id" | tr '[:space:]/' '__')"

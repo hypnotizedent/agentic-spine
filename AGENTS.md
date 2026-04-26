@@ -96,7 +96,8 @@ Non-promoted work, synthesis artifacts, and parked material belong in
 promotion and Ronny co-sign.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
-Session attach: `./bin/ops cap run session.v3.attach`
+Governed session start: `ops terminal launch --tool <tool> --terminal <name>`
+Orientation (read-only, not admission): `./bin/ops cap run session.v3.attach`
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
 Verify hierarchy for all agent sessions:
