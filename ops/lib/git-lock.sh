@@ -37,27 +37,48 @@ _git_lock_emit_retry_hint() {
 _git_lock_proc_start_ticks() {
   local pid="${1:-}"
   [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 1
-  [[ -r "/proc/$pid/stat" ]] || return 1
 
-  awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || return 1
+  # Linux: read start time in clock ticks from /proc
+  if [[ -r "/proc/$pid/stat" ]]; then
+    awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || return 1
+    return 0
+  fi
+
+  # macOS: use ps lstart as a stable per-process birth token
+  # Returns a string like "Sat Apr 26 01:15:00 2026" — used as opaque token for comparison
+  local lstart=""
+  lstart="$(ps -p "$pid" -o lstart= 2>/dev/null || true)"
+  [[ -n "$lstart" ]] || return 1
+  echo "$lstart"
 }
 
 _git_lock_proc_start_epoch() {
   local pid="${1:-}"
-  local start_ticks=""
-  local boot_epoch=""
-  local hz=""
 
-  start_ticks="$(_git_lock_proc_start_ticks "$pid" 2>/dev/null || true)"
-  [[ -n "$start_ticks" && "$start_ticks" =~ ^[0-9]+$ ]] || return 1
+  # Linux: compute epoch from /proc boot time + process start ticks
+  if [[ -r "/proc/$pid/stat" ]] && [[ -r "/proc/stat" ]]; then
+    local start_ticks=""
+    local boot_epoch=""
+    local hz=""
 
-  boot_epoch="$(awk '/^btime / {print $2; exit}' /proc/stat 2>/dev/null || true)"
-  [[ -n "$boot_epoch" && "$boot_epoch" =~ ^[0-9]+$ ]] || return 1
+    start_ticks="$(_git_lock_proc_start_ticks "$pid" 2>/dev/null || true)"
+    [[ -n "$start_ticks" && "$start_ticks" =~ ^[0-9]+$ ]] || return 1
 
-  hz="$(getconf CLK_TCK 2>/dev/null || true)"
-  [[ -n "$hz" && "$hz" =~ ^[0-9]+$ ]] || hz=100
+    boot_epoch="$(awk '/^btime / {print $2; exit}' /proc/stat 2>/dev/null || true)"
+    [[ -n "$boot_epoch" && "$boot_epoch" =~ ^[0-9]+$ ]] || return 1
 
-  awk -v boot="$boot_epoch" -v ticks="$start_ticks" -v hz="$hz" 'BEGIN { printf "%d\n", boot + int(ticks / hz) }' 2>/dev/null || return 1
+    hz="$(getconf CLK_TCK 2>/dev/null || true)"
+    [[ -n "$hz" && "$hz" =~ ^[0-9]+$ ]] || hz=100
+
+    awk -v boot="$boot_epoch" -v ticks="$start_ticks" -v hz="$hz" 'BEGIN { printf "%d\n", boot + int(ticks / hz) }' 2>/dev/null || return 1
+    return 0
+  fi
+
+  # macOS: parse ps lstart into epoch
+  local lstart=""
+  lstart="$(ps -p "$pid" -o lstart= 2>/dev/null || true)"
+  [[ -n "$lstart" ]] || return 1
+  date -jf "%c" "$lstart" +%s 2>/dev/null || return 1
 }
 
 acquire_git_lock() {
