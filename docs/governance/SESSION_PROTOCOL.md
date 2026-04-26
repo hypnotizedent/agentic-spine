@@ -215,6 +215,21 @@ not as a fix list.
 - **Membrane-to-controller handoff** — no governed artifact between what the membrane understood and what the controller executes
 - **Controller-prompt packet amend/checkpoint** — no governed mid-packet surface between birth (`controller_prompt.create`) and death (`controller_prompt.close`); the execution phase is ungoverned by design
 
+## Deferred Plans
+
+Deferred intent is governed by the first-class plans authority, not by repo
+reference docs.
+
+- Create via `./bin/ops cap run planning.plans.create -- ...`
+- Read health via `./bin/ops cap run planning.plans.status -- --json`
+- Authority: `shared_authority.db` (`plans` table) via
+  [`plans.lifecycle.yaml`](../../ops/bindings/plans.lifecycle.yaml)
+- Projection: `.runtime/spine/state/plans/index.yaml` and
+  `.runtime/spine/state/plans/PLAN-*.md`
+
+Repo docs may describe a program or preserve historical planning context, but
+active deferred intent belongs in the governed plans authority above.
+
 ## Resolved Seams
 
 These seams were previously absent and have been addressed.

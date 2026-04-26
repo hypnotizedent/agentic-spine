@@ -32,6 +32,15 @@ Keep additions there instead of creating new governance roots.
 - [reference/brain/memory.md](reference/brain/memory.md) - context-loading and memory rules
 - [contracts/](contracts/) - stable contract/policy docs that are still human-read
 
+Deferred-intent plans are not authored in `docs/reference/`.
+Use the governed plans authority:
+
+- `./bin/ops cap run planning.plans.create -- ...`
+- `./bin/ops cap run planning.plans.status -- --json`
+
+Plan authority lives in runtime shared authority and projects to
+`.runtime/spine/state/plans/PLAN-*.md`.
+
 ## Directory Map
 
 - `docs/core/` - core contracts and state summaries
