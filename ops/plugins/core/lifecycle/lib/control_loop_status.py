@@ -9,8 +9,7 @@ Contract (Packet 4, Lane A):
   - Pure stdlib. No subprocess. No network. No mailroom reads.
   - Reads only:
       * env (pass-through of os.environ)
-      * {state_root}/shared_authority.db  (sqlite, read-only)
-      * {state_root}/loop-scopes/         (fallback only)
+      * {state_root}/shared_authority.db  (sqlite, read-only — sole loop authority)
       * {runtime_root}/waves/*/state.json (top-level only)
   - Never raises on missing state; degrades to zeros/nulls and appends a
     warning string to the output's sorted `warnings` list.
@@ -161,29 +160,12 @@ def _count_open_loops_sqlite(db_path: str) -> int | None:
 
 
 def _count_open_loops_scope_fallback(state_root: str) -> int | None:
-    """Count *.scope.md files without a sibling closed marker."""
-    scopes_dir = os.path.join(state_root, "loop-scopes")
-    if not os.path.isdir(scopes_dir):
-        return None
-    try:
-        entries = os.listdir(scopes_dir)
-    except OSError:
-        return None
-    count = 0
-    for name in entries:
-        if not name.endswith(".scope.md"):
-            continue
-        base = name[: -len(".scope.md")]
-        closed_markers = (
-            os.path.join(scopes_dir, f"{base}.closed"),
-            os.path.join(scopes_dir, f"{base}.closed.md"),
-            os.path.join(scopes_dir, f"{base}.scope.closed"),
-            os.path.join(scopes_dir, f"{base}.scope.closed.md"),
-        )
-        if any(os.path.exists(marker) for marker in closed_markers):
-            continue
-        count += 1
-    return count
+    """Scope-file fallback REMOVED — SQLite is sole loop authority.
+
+    Always returns None so callers degrade to 0 with a warning rather than
+    resurrecting loop truth from stale projection files.
+    """
+    return None
 
 
 def _is_live_loop_sqlite(db_path: str, loop_id: str) -> bool | None:
@@ -220,38 +202,12 @@ def _is_live_loop_sqlite(db_path: str, loop_id: str) -> bool | None:
 
 
 def _is_live_loop_scope_fallback(state_root: str, loop_id: str) -> bool | None:
-    """Return whether loop_id is live via scope files, or None when unavailable."""
-    if not state_root or not loop_id:
-        return None
+    """Scope-file fallback REMOVED — SQLite is sole loop authority.
 
-    scopes_dir = os.path.join(state_root, "loop-scopes")
-    if not os.path.isdir(scopes_dir):
-        return None
-
-    scope_path = os.path.join(scopes_dir, f"{loop_id}.scope.md")
-    if not os.path.isfile(scope_path):
-        return False
-
-    closed_markers = (
-        os.path.join(scopes_dir, f"{loop_id}.closed"),
-        os.path.join(scopes_dir, f"{loop_id}.closed.md"),
-        os.path.join(scopes_dir, f"{loop_id}.scope.closed"),
-        os.path.join(scopes_dir, f"{loop_id}.scope.closed.md"),
-    )
-    if any(os.path.exists(marker) for marker in closed_markers):
-        return False
-
-    try:
-        with open(scope_path, "r", encoding="utf-8") as handle:
-            for raw in handle:
-                line = raw.strip()
-                if line.startswith("status:"):
-                    status = line.split(":", 1)[1].strip().lower()
-                    return status in {"open", "active", "draft"}
-    except OSError:
-        return None
-
-    return True
+    Always returns None so callers treat the loop as unvalidated rather than
+    resurrecting liveness from stale projection files.
+    """
+    return None
 
 
 # ── Wave scanning ────────────────────────────────────────────────────

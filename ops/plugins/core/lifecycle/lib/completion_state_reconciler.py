@@ -13,7 +13,7 @@ Public API:
 Contract:
   - Pure read-side. No mutations.
   - Uses subprocess for git commands only.
-  - Uses filesystem reads for loop scopes, handoffs, and controller-prompts.
+  - Uses SQLite for loop state (sole authority), filesystem reads for handoffs and controller-prompts.
   - Never raises on missing state; degrades to empty classifications.
 """
 
@@ -245,27 +245,42 @@ def _runtime_reference_paths(state_root: str, tokens: list[str]) -> list[str]:
 
 
 def build_loop_state_index(state_root: str) -> dict[str, dict[str, str]]:
-    """Build a loop-id -> status/location index from active + archived scope files."""
-    state_path = Path(state_root)
+    """Build a loop-id -> status/location index from SQLite authority.
+
+    SQLite is the sole loop authority. Scope files are projections only.
+    Falls back to empty index on SQLite failure (read-side, never raises).
+    """
+    import sqlite3
+
     items: dict[str, dict[str, str]] = {}
-    scan_roots = (
-        ("active", state_path / "loop-scopes"),
-        ("archive", state_path / "archive" / "closed-loop-scopes"),
-    )
-    for location, root in scan_roots:
-        if not root.is_dir():
+    db_path = Path(state_root) / "shared_authority.db"
+    if not db_path.is_file():
+        return items
+
+    live_statuses = {"active", "open", "draft", "planned", "blocked"}
+    try:
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro", uri=True, timeout=0.5
+        )
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT loop_id, status FROM loops ORDER BY loop_id"
+        ).fetchall()
+        conn.close()
+    except (sqlite3.Error, OSError):
+        return items
+
+    for row in rows:
+        loop_id = str(row["loop_id"] or "").strip()
+        status = str(row["status"] or "unknown").strip().lower()
+        if not loop_id.startswith("LOOP-"):
             continue
-        for path in sorted(root.glob("*.scope.md")):
-            front = _parse_frontmatter(path)
-            loop_id = str(front.get("loop_id") or path.stem.replace(".scope", "")).strip()
-            if not loop_id.startswith("LOOP-"):
-                continue
-            status = str(front.get("status") or "unknown").strip().lower()
-            items[loop_id] = {
-                "status": status,
-                "location": location,
-                "path": str(path),
-            }
+        location = "active" if status in live_statuses else "archive"
+        items[loop_id] = {
+            "status": status,
+            "location": location,
+            "path": "",
+        }
     return items
 
 
@@ -394,46 +409,59 @@ def classify_handoff_continuity(
 # ── Collectors ───────────────────────────────────────────────────────
 
 def _collect_loops(state_root: str) -> list[dict[str, Any]]:
-    """Collect loop specimens from active scope files.
+    """Collect loop specimens from SQLite authority.
 
-    Only active (live) loops are classified individually. Closed/archived
-    loops are counted but not enumerated — the reconciler's job is to
-    classify live work items, not to inventory the entire loop history.
+    SQLite is the sole loop authority. Only active (live) loops are classified
+    individually. Closed loops are counted but not enumerated.
     """
+    import sqlite3
+
     items: list[dict[str, Any]] = []
-    state_path = Path(state_root)
-    active_dir = state_path / "loop-scopes"
-    archive_dir = state_path / "archive" / "closed-loop-scopes"
+    db_path = Path(state_root) / "shared_authority.db"
+    if not db_path.is_file():
+        _collect_loops._archived_count = 0  # type: ignore[attr-defined]
+        return items
 
-    # Active loops — classify each one
-    if active_dir.is_dir():
-        for path in sorted(active_dir.glob("*.scope.md")):
-            front = _parse_frontmatter(path)
-            loop_id = str(front.get("loop_id") or path.stem.replace(".scope", "")).strip()
-            if not loop_id.startswith("LOOP-"):
-                continue
-            status = str(front.get("status") or "unknown").strip().lower()
-            owner = str(front.get("owner") or "").strip()
-            disposition = str(front.get("disposition") or "").strip().lower()
+    live_statuses = ("active", "open", "draft", "planned", "blocked")
+    try:
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro", uri=True, timeout=0.5
+        )
+        conn.row_factory = sqlite3.Row
+        live_rows = conn.execute(
+            "SELECT loop_id, status, owner, disposition FROM loops "
+            "WHERE LOWER(status) IN ({}) ORDER BY loop_id".format(
+                ",".join("?" for _ in live_statuses)
+            ),
+            live_statuses,
+        ).fetchall()
+        archived_count = conn.execute(
+            "SELECT COUNT(*) FROM loops "
+            "WHERE LOWER(status) NOT IN ({})".format(
+                ",".join("?" for _ in live_statuses)
+            ),
+            live_statuses,
+        ).fetchone()[0]
+        conn.close()
+    except (sqlite3.Error, OSError):
+        _collect_loops._archived_count = 0  # type: ignore[attr-defined]
+        return items
 
-            items.append({
-                "object_class": "loop",
-                "identity": loop_id,
-                "location": "active",
-                "status": status,
-                "owner": owner,
-                "disposition": disposition,
-                "path": str(path),
-            })
+    for row in live_rows:
+        loop_id = str(row["loop_id"] or "").strip()
+        if not loop_id.startswith("LOOP-"):
+            continue
+        items.append({
+            "object_class": "loop",
+            "identity": loop_id,
+            "location": "active",
+            "status": str(row["status"] or "unknown").strip().lower(),
+            "owner": str(row["owner"] or "").strip(),
+            "disposition": str(row["disposition"] or "").strip().lower(),
+            "path": "",
+        })
 
-    # Archive — count only; individual classification adds no value
-    archived_count = 0
-    if archive_dir.is_dir():
-        archived_count = len(list(archive_dir.glob("*.scope.md")))
-
-    # Store archive count as metadata on the collector (accessed via result)
     _collect_loops._archived_count = archived_count  # type: ignore[attr-defined]
-
     return items
 
 # Module-level accessor for archived count

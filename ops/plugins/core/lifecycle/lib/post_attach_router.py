@@ -8,7 +8,7 @@ data, never makes network calls.
 Contract:
   - Pure stdlib. No subprocess. No network.
   - Reuses collect_control_loop_status() for wave/loop counts.
-  - Reads {state_root}/loop-scopes/*.scope.md for candidate details.
+  - Reads SQLite authority for loop candidates (scope files are projection only).
   - Degrades gracefully to routing_state="ambiguous" when truth is
     unreliable, or "clean_start" when genuinely empty.
   - Target latency well under one second.
@@ -63,51 +63,12 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
 
 
 def _collect_loop_candidates(state_root: str) -> tuple[list[dict[str, Any]], list[str]]:
-    """Read loop-scope files and return (candidates, warnings).
+    """Scope-file candidate collection REMOVED — SQLite is sole loop authority.
 
-    Each candidate dict has: loop_id, objective, priority, horizon.
-    Returns up to _MAX_CANDIDATES sorted by priority.
+    Returns empty list. All candidate data now comes from
+    _read_live_loop_candidates() which reads SQLite directly.
     """
-    warnings: list[str] = []
-    scopes_dir = os.path.join(state_root, "loop-scopes")
-    if not os.path.isdir(scopes_dir):
-        return [], warnings
-
-    try:
-        entries = os.listdir(scopes_dir)
-    except OSError:
-        warnings.append("loop-scopes dir unreadable")
-        return [], warnings
-
-    raw: list[dict[str, Any]] = []
-    for name in sorted(entries):
-        if not name.endswith(".scope.md"):
-            continue
-        path = os.path.join(scopes_dir, name)
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                text = fh.read(8192)  # frontmatter is small
-        except OSError:
-            continue
-
-        fm = _parse_frontmatter(text)
-        status = fm.get("status", "").strip().lower()
-        if status not in _OPEN_LOOP_STATUSES:
-            continue
-
-        loop_id = fm.get("loop_id", "").strip()
-        if not loop_id:
-            # Derive from filename as fallback.
-            loop_id = name[: -len(".scope.md")]
-
-        raw.append({
-            "loop_id": loop_id,
-            "objective": fm.get("objective", "").strip() or None,
-            "priority": fm.get("priority", "").strip().lower() or None,
-            "horizon": fm.get("horizon", "").strip() or None,
-        })
-
-    return _sort_candidates(raw), warnings
+    return [], []
 
 
 def _sort_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -181,25 +142,11 @@ def _merge_live_candidates(
     live_candidates: list[dict[str, Any]],
     scope_candidates: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    scope_by_id = {
-        str(candidate.get("loop_id") or "").strip(): candidate
-        for candidate in scope_candidates
-        if str(candidate.get("loop_id") or "").strip()
-    }
-    live_ids = {str(candidate.get("loop_id") or "").strip() for candidate in live_candidates}
+    """Merge is now a passthrough — scope candidates are always empty.
 
-    merged: list[dict[str, Any]] = []
-    for live_candidate in live_candidates:
-        loop_id = str(live_candidate.get("loop_id") or "").strip()
-        overlay = scope_by_id.get(loop_id, {})
-        candidate = dict(live_candidate)
-        for key in ("objective", "priority", "horizon"):
-            if overlay.get(key):
-                candidate[key] = overlay[key]
-        merged.append(candidate)
-
-    stale_scope_ids = sorted(loop_id for loop_id in scope_by_id if loop_id not in live_ids)
-    return _sort_candidates(merged), stale_scope_ids
+    SQLite is the sole loop authority. Scope-file enrichment removed.
+    """
+    return _sort_candidates(live_candidates), []
 
 
 # ── Public API ───────────────────────────────────────────────────────

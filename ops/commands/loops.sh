@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# ops loops - Expert loop surgery (SQLite-backed, scope-file fallback)
+# ops loops - Expert loop surgery (SQLite sole authority, scope-file projection)
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # Usage:
@@ -13,8 +13,8 @@
 # Canonical operator-facing current-work surface is `ops status`. This command
 # remains expert drilldown for raw loop inspection, closeout surgery, and
 # archival inspection.
-# SQLite (loops_sql_authority) is the SSOT for loop state; scope files are
-# the fallback when the SQLite library is unavailable.
+# SQLite (loops_sql_authority) is the sole authority for loop state; scope files
+# are projections for display only, never read as authority input.
 # See: LOOP-MAILROOM-CONSOLIDATION-20260210 for the migration rationale.
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -34,13 +34,13 @@ DISPOSITION_CONTRACT="$SPINE_REPO/ops/bindings/closeout.disposition.contract.yam
 
 usage() {
     cat <<'EOF'
-ops loops - Expert loop surgery (SQLite-backed, scope-file fallback)
+ops loops - Expert loop surgery (SQLite sole authority)
 
 Usage:
   ops loops list [--open|--closed|--all]   List loops from SQLite authority (default: open only)
   ops loops close <loop_id> --disposition <state> [--completion-level <level>] [--close-summary "<text>"]
                                            Mark loop as closed
-  ops loops show <loop_id>                  Show loop scope file
+  ops loops show <loop_id>                  Show loop scope file (projection)
   ops loops summary                         Show loop counts by status/severity
 
 Deprecated:
@@ -51,12 +51,12 @@ Normal operator path:
 
 Expert scope of this command:
   - raw SQLite loop inspection
-  - scope-file drilldown
+  - scope-file drilldown (display only)
   - manual closeout surgery
 
 Truth sources:
-  - authority: SQLite via loops_sql_authority
-  - fallback: .runtime/spine/state/loop-scopes/*.scope.md
+  - authority: SQLite via loops_sql_authority (sole source)
+  - projection: .runtime/spine/state/loop-scopes/*.scope.md (display only, never authority input)
 EOF
 }
 
@@ -419,11 +419,11 @@ def _entries_from_scope_files():
     return entries
 
 
-# Try SQLite first, fall back to scope files
+# SQLite is sole loop authority — no scope-file fallback
 entries = _entries_from_sqlite()
 if entries is None:
-    print("(SQLite unavailable — falling back to scope files)", file=sys.stderr)
-    entries = _entries_from_scope_files()
+    print("ERROR: SQLite loop authority unavailable — cannot list loops", file=sys.stderr)
+    entries = []
 
 if not entries:
     print("(no loops)")
@@ -748,11 +748,11 @@ def _loops_from_scope_files():
     return loops
 
 
-# Try SQLite first
+# SQLite is sole loop authority — no scope-file fallback
 all_loops = _loops_from_sqlite()
 if all_loops is None:
-    print("(SQLite unavailable — falling back to scope files)", file=sys.stderr)
-    all_loops = _loops_from_scope_files()
+    print("ERROR: SQLite loop authority unavailable — cannot show summary", file=sys.stderr)
+    all_loops = []
 
 open_count = 0
 planned_count = 0

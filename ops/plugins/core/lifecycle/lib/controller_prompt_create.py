@@ -102,61 +102,48 @@ def _check_packet_id_uniqueness(
 
 
 def _validate_loop_scope(loop_id: str, state_root: str) -> None:
-    """Validate that loop_id references an active loop scope.
+    """Validate that loop_id references an active loop in SQLite authority.
 
-    Checks that a scope file exists in loop-scopes/ with matching loop_id
-    and status in {active, open, draft}.
+    SQLite is the sole loop authority. Scope files are projections only.
     """
     if not loop_id or not isinstance(loop_id, str):
         raise ControllerPromptCreateError("loop_id is required")
 
-    loop_scopes_dir = Path(state_root) / "loop-scopes"
-    if not loop_scopes_dir.is_dir():
-        raise ControllerPromptCreateError(
-            f"loop-scopes directory not found: {loop_scopes_dir}"
-        )
+    import sqlite3
 
     ACTIVE_STATUSES = frozenset({"active", "open", "draft"})
 
-    for path in loop_scopes_dir.glob("*.scope.md"):
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if not text.startswith("---"):
-            continue
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            continue
-        raw_frontmatter = parts[1]
-        try:
-            fm = yaml.safe_load(raw_frontmatter)
-        except yaml.YAMLError as exc:
-            raw_loop_id = ""
-            raw_loop_id_match = re.search(
-                r"(?m)^loop_id:\s*(.+?)\s*$", raw_frontmatter
-            )
-            if raw_loop_id_match:
-                raw_loop_id = raw_loop_id_match.group(1).strip().strip("'\"")
-            if raw_loop_id == loop_id or path.name == f"{loop_id}.scope.md":
-                raise ControllerPromptCreateError(
-                    f"malformed YAML frontmatter in scope file '{path.name}': {exc}"
-                )
-            continue
-        if not isinstance(fm, dict):
-            continue
-        scope_loop_id = str(fm.get("loop_id") or "").strip()
-        scope_status = str(fm.get("status") or "").strip().lower()
-        if scope_loop_id == loop_id:
-            if scope_status in ACTIVE_STATUSES:
-                return  # valid
-            raise ControllerPromptCreateError(
-                f"loop '{loop_id}' exists but status is '{scope_status}' "
-                f"(must be one of: {', '.join(sorted(ACTIVE_STATUSES))})"
-            )
+    db_path = Path(state_root) / "shared_authority.db"
+    if not db_path.is_file():
+        raise ControllerPromptCreateError(
+            f"loop authority database not found: {db_path}"
+        )
 
-    raise ControllerPromptCreateError(
-        f"no scope file found for loop_id '{loop_id}' in {loop_scopes_dir}"
+    try:
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro", uri=True, timeout=0.5
+        )
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT status FROM loops WHERE loop_id = ? LIMIT 1",
+            (loop_id,),
+        ).fetchone()
+        conn.close()
+    except (sqlite3.Error, OSError) as exc:
+        raise ControllerPromptCreateError(
+            f"loop authority query failed for '{loop_id}': {exc}"
+        )
+
+    if row is None:
+        raise ControllerPromptCreateError(
+            f"no loop found for loop_id '{loop_id}' in SQLite authority"
+        )
+
+    status = str(row["status"] or "").strip().lower()
+    if status not in ACTIVE_STATUSES:
+        raise ControllerPromptCreateError(
+            f"loop '{loop_id}' exists but status is '{status}' "
+            f"(must be one of: {', '.join(sorted(ACTIVE_STATUSES))})"
     )
 
 
