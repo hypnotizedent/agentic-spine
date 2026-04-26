@@ -97,6 +97,30 @@ cap_safety_requires_mutation_policy() {
     esac
 }
 
+# Detect an active proof wave in the runtime state directory.
+# Returns 0 and sets CAP_PROOF_WAVE_ID if a proof wave is active.
+active_proof_wave_id() {
+    local spine_state="${SPINE_STATE:-}"
+    [[ -n "$spine_state" ]] || return 1
+    local waves_dir
+    waves_dir="$(dirname "$spine_state")/waves"
+    [[ -d "$waves_dir" ]] || return 1
+
+    local state_file wave_kind lifecycle_state wave_id
+    for state_file in "$waves_dir"/WAVE-*/state.json; do
+        [[ -f "$state_file" ]] || continue
+        wave_kind="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('wave_kind',''))" "$state_file" 2>/dev/null || true)"
+        [[ "$wave_kind" == "proof" ]] || continue
+        lifecycle_state="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('lifecycle_state',''))" "$state_file" 2>/dev/null || true)"
+        [[ "$lifecycle_state" == "active" ]] || continue
+        wave_id="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('wave_id',''))" "$state_file" 2>/dev/null || true)"
+        [[ -n "$wave_id" ]] || continue
+        CAP_PROOF_WAVE_ID="$wave_id"
+        return 0
+    done
+    return 1
+}
+
 role_policy_override_env_name() {
     local field="$1"
     local default_value="$2"
@@ -202,6 +226,16 @@ evaluate_role_policy() {
     fi
 
     if capability_in_role_mutation_allowlist "$runtime_role" "$capability_name"; then
+        return 0
+    fi
+
+    # Proof-wave auto-override: when a proof wave is active, worker-custody
+    # capabilities are allowed from read-only roles without manual override envs.
+    # This is bounded to wave_kind=proof and logged in the capability receipt.
+    if active_proof_wave_id; then
+        CAP_ROLE_POLICY_OVERRIDE_USED="true"
+        CAP_ROLE_POLICY_OVERRIDE_REF="proof-wave:${CAP_PROOF_WAVE_ID}"
+        CAP_ROLE_POLICY_OVERRIDE_REASON="auto-override: active proof wave permits worker-custody capabilities"
         return 0
     fi
 
