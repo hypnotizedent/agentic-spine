@@ -20,14 +20,37 @@ _spine_expand_home_token() {
 _spine_guess_workspace_root() {
   local code_root="${1:-}"
   code_root="$(_spine_expand_home_token "$code_root")"
+  local prefix=""
 
   case "$code_root" in
     */code/.wt/*)
       printf '%s\n' "${code_root%%/.wt/*}"
       return 0
       ;;
+    */.wt/*)
+      prefix="${code_root%%/.wt/*}"
+      if [[ "$(basename "$prefix")" == "code" ]]; then
+        printf '%s\n' "$prefix"
+      elif [[ "$prefix" == */code/* ]]; then
+        printf '%s\n' "${prefix%%/code/*}/code"
+      else
+        printf '%s\n' "$(dirname "$prefix")"
+      fi
+      return 0
+      ;;
     */code/.runtime/spine/tmp/worktrees/*)
       printf '%s\n' "${code_root%%/.runtime/*}"
+      return 0
+      ;;
+    */.runtime/spine/tmp/worktrees/*)
+      prefix="${code_root%%/.runtime/*}"
+      if [[ "$(basename "$prefix")" == "code" ]]; then
+        printf '%s\n' "$prefix"
+      elif [[ "$prefix" == */code/* ]]; then
+        printf '%s\n' "${prefix%%/code/*}/code"
+      else
+        printf '%s\n' "$(dirname "$prefix")"
+      fi
       return 0
       ;;
   esac

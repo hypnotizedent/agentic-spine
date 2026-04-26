@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
 PACKET_CONTRACT="$ROOT/ops/bindings/orchestration.packet.contract.yaml"
 ORCH_DIR="$SPINE_STATE/orchestration"
 CAPS="$ROOT/ops/capabilities.yaml"
@@ -13,6 +15,8 @@ CLOSEOUT_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-close
 CLOSEOUT_CAP="coordinator.lane.closeout"
 WAVE_CMD="$ROOT/ops/commands/wave.sh"
 REGRESSION_SCRIPT="$ROOT/surfaces/verify/lib/wave_hardening_regression.py"
+WAVE_RESIDUE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/wave-residue"
+CANONICAL_WT_PREFIX="$(spine_canonical_worktree_prefix "$ROOT")"
 
 fail() {
   echo "D331 FAIL: $*" >&2
@@ -25,6 +29,7 @@ fail() {
 [[ -x "$CLOSEOUT_SCRIPT" ]] || fail "missing closeout script: $CLOSEOUT_SCRIPT"
 [[ -f "$WAVE_CMD" ]] || fail "missing wave command: $WAVE_CMD"
 [[ -f "$REGRESSION_SCRIPT" ]] || fail "missing wave regression harness: $REGRESSION_SCRIPT"
+[[ -x "$WAVE_RESIDUE_BIN" ]] || fail "missing wave residue surface: $WAVE_RESIDUE_BIN"
 command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 command -v rg >/dev/null 2>&1 || fail "missing dependency: rg"
 command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
@@ -210,3 +215,70 @@ print(
 PY
 
 python3 "$REGRESSION_SCRIPT" "$ROOT" || fail "wave.sh regression harness failed"
+
+python3 - "$ROOT" "$CANONICAL_WT_PREFIX" "$WAVE_RESIDUE_BIN" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+root = os.path.normpath(sys.argv[1])
+canonical_prefix = os.path.normpath(sys.argv[2]) + os.sep
+wave_residue_bin = sys.argv[3]
+
+def fail(msg: str) -> None:
+    print(f"D331 FAIL: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+proc = subprocess.run(
+    ["git", "-C", root, "worktree", "list", "--porcelain"],
+    text=True,
+    capture_output=True,
+    check=True,
+)
+worktrees: list[str] = []
+for raw in proc.stdout.splitlines():
+    if raw.startswith("worktree "):
+        worktrees.append(os.path.normpath(raw.split(" ", 1)[1].strip()))
+
+primary = worktrees[0] if worktrees else ""
+noncanonical = [
+    wt for wt in worktrees[1:]
+    if not ((wt + os.sep).startswith(canonical_prefix))
+]
+if noncanonical:
+    lines = "\n".join(f"  - {path}" for path in noncanonical)
+    fail(
+        "noncanonical registered worktree(s) present outside governed prefix "
+        f"'{canonical_prefix}':\n{lines}"
+    )
+
+residue_proc = subprocess.run(
+    [wave_residue_bin, "--json"],
+    text=True,
+    capture_output=True,
+    cwd=root,
+    check=True,
+)
+payload = json.loads(residue_proc.stdout)
+report = payload.get("report", {}) if isinstance(payload, dict) else {}
+items = report.get("items", []) if isinstance(report, dict) else []
+
+blocking: list[str] = []
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    cls = str(item.get("class") or "")
+    wave_status = str(item.get("wave_status") or "")
+    identity = str(item.get("identity") or "")
+    reason = str(item.get("ambiguous_reason") or "")
+    safe = bool(item.get("safe_to_sweep"))
+    if safe or wave_status == "unknown" or cls == "inconsistent_cleaned_workspace":
+        detail = reason or f"wave_status={wave_status or 'unknown'}"
+        blocking.append(f"  - [{cls}] {identity} :: {detail}")
+
+if blocking:
+    fail(
+        "repo-local wave/worktree residue detected:\n" + "\n".join(blocking)
+    )
+PY

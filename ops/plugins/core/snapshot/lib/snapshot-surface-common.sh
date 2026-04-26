@@ -3,6 +3,31 @@
 _SNAPSHOT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _SNAPSHOT_REPO_ROOT="$(cd "$_SNAPSHOT_LIB_DIR/../../../../.." && pwd)"
 
+snapshot_surface_runtime_output_path() {
+  local root="$1"
+  local tracked_rel="$2"
+  local basename
+  basename="$(basename "$tracked_rel")"
+  if declare -f spine_resolve_domain_state >/dev/null 2>&1; then
+    spine_resolve_domain_state "snapshots/$basename"
+    return 0
+  fi
+  local state_root="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+  printf '%s/domain-state/snapshots/%s\n' "$state_root" "$basename"
+}
+
+snapshot_surface_resolve_source_path() {
+  local root="$1"
+  local tracked_rel="$2"
+  local runtime_path
+  runtime_path="$(snapshot_surface_runtime_output_path "$root" "$tracked_rel")"
+  if [[ -f "$runtime_path" ]]; then
+    printf '%s\n' "$runtime_path"
+    return 0
+  fi
+  printf '%s/%s\n' "$root" "$tracked_rel"
+}
+
 snapshot_surface_init() {
   local tracked_rel="$1"
   shift
@@ -34,14 +59,7 @@ snapshot_surface_init() {
   if [[ "$SNAPSHOT_SURFACE_MODE" == "apply" ]]; then
     SNAPSHOT_SURFACE_OUTPUT="$SNAPSHOT_SURFACE_TRACKED_OUTPUT"
   elif [[ -z "$SNAPSHOT_SURFACE_OUTPUT" ]]; then
-    local basename
-    basename="$(basename "$tracked_rel")"
-    if declare -f spine_resolve_domain_state >/dev/null 2>&1; then
-      SNAPSHOT_SURFACE_OUTPUT="$(spine_resolve_domain_state "snapshots/$basename")"
-    else
-      local state_root="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
-      SNAPSHOT_SURFACE_OUTPUT="$state_root/domain-state/snapshots/$basename"
-    fi
+    SNAPSHOT_SURFACE_OUTPUT="$(snapshot_surface_runtime_output_path "$SNAPSHOT_SURFACE_ROOT" "$tracked_rel")"
   fi
 
   mkdir -p "$(dirname "$SNAPSHOT_SURFACE_OUTPUT")" 2>/dev/null || true

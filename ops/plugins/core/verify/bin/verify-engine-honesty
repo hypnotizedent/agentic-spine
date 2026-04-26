@@ -424,6 +424,32 @@ check H5 "continuity invariants (no new orphaned waves from synthetic run)" bash
         echo \"orphaned waves grew: \$pre → \$orphaned (synthetic run left orphans)\"
         exit 1
     fi
+
+    synthetic_branch=\"codex/$SYNTHETIC_WAVE_ID\"
+    if git -C '$ROOT' show-ref --verify --quiet \"refs/heads/\$synthetic_branch\"; then
+        echo \"synthetic branch leaked after cleanup: \$synthetic_branch\"
+        exit 1
+    fi
+
+    leaked_worktree=\"\$(git -C '$ROOT' worktree list --porcelain 2>/dev/null | awk '/^worktree /{print \$2}' | python3 - '$SYNTHETIC_WAVE_ID' <<'PY'
+import os
+import sys
+
+target = sys.argv[1]
+for raw in sys.stdin:
+    path = raw.strip()
+    if not path:
+        continue
+    if os.path.basename(os.path.normpath(path)) == target:
+        print(path)
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+    )\" || true
+    if [[ -n \"\$leaked_worktree\" ]]; then
+        echo \"synthetic worktree leaked after cleanup: \$leaked_worktree\"
+        exit 1
+    fi
 "
 
 # ── H6: Surface coherence ────────────────────────────────────────────────

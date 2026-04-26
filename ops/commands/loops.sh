@@ -552,6 +552,10 @@ close_loop() {
     scope_file="$SCOPES_DIR/${loop_id}.scope.md"
     local archived_scope_file="$SCOPES_ARCHIVE_DIR/${loop_id}.scope.md"
 
+    if [[ ! -f "$scope_file" && -f "$archived_scope_file" ]]; then
+        scope_file="$archived_scope_file"
+    fi
+
     if [[ ! -f "$scope_file" ]]; then
         echo "ERROR: Scope file not found: $scope_file" >&2
         exit 1
