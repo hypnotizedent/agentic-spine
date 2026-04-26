@@ -536,29 +536,63 @@ def reconcile_single_packet_loop_closeout(
     auto_close_loop: bool = True,
 ) -> dict[str, Any]:
     packet_paths = _packet_paths_for_loop(state_root, loop_id)
-    if len(packet_paths) != 1:
+    if not packet_paths:
         return {
             "status": "skipped",
             "loop_id": loop_id,
-            "reason": f"expected exactly 1 controller packet, found {len(packet_paths)}",
+            "reason": "no controller packets found for loop",
         }
 
-    packet_path = packet_paths[0]
-    fm = _packet_frontmatter(packet_path)
-    packet_id = str(fm.get("packet_id", "")).strip() or packet_path.name
-    packet_status = str(fm.get("status", "")).strip().lower()
+    # Collect state of all packets. Any open packet blocks reconciliation.
+    open_packets: list[str] = []
+    closed_packets: list[tuple[Path, dict[str, Any], str]] = []
+
+    for pp in packet_paths:
+        fm = _packet_frontmatter(pp)
+        pid = str(fm.get("packet_id", "")).strip() or pp.name
+        status = str(fm.get("status", "")).strip().lower()
+        if status != "closed":
+            open_packets.append(pid)
+        else:
+            closed_packets.append((pp, fm, pid))
+
+    if open_packets:
+        return {
+            "status": "skipped",
+            "loop_id": loop_id,
+            "reason": f"{len(open_packets)} packet(s) still open: {', '.join(open_packets[:5])}",
+        }
+
+    if not closed_packets:
+        return {
+            "status": "skipped",
+            "loop_id": loop_id,
+            "reason": "no closed packets found",
+        }
+
+    # All packets closed. Select one authoritative packet — no cross-packet
+    # synthesis.  Disposition precedence: delivered/landed > deferred >
+    # superseded > abandoned.  Ties broken by closed_at_utc (latest wins),
+    # then by packet_id as stable fallback.
+    _DISPOSITION_RANK: dict[str, int] = {
+        "delivered": 4, "landed": 4,
+        "deferred": 3,
+        "superseded": 2,
+        "abandoned": 1,
+    }
+
+    def _packet_sort_key(entry: tuple[Path, dict[str, Any], str]) -> tuple[int, str, str]:
+        _, fm, pid = entry
+        d = str(fm.get("disposition", "")).strip().lower()
+        closed_at = str(fm.get("closed_at_utc", "")).strip()
+        return (_DISPOSITION_RANK.get(d, 0), closed_at, pid)
+
+    closed_packets.sort(key=_packet_sort_key, reverse=True)
+    packet_path, fm, packet_id = closed_packets[0]
     disposition = str(fm.get("disposition", "")).strip().lower()
     completion_level = str(fm.get("completion_level", "")).strip()
     receipt_path, receipt_doc = _latest_receipt_for_packet(state_root, packet_id)
     backfilled_completion_level = False
-
-    if packet_status != "closed":
-        return {
-            "status": "skipped",
-            "loop_id": loop_id,
-            "packet_id": packet_id,
-            "reason": f"packet status is {packet_status or 'unknown'}",
-        }
 
     if not completion_level:
         receipt_completion_level = str(receipt_doc.get("completion_level", "")).strip()
@@ -602,6 +636,7 @@ def reconcile_single_packet_loop_closeout(
         "status": decision.get("status", "unknown"),
         "loop_id": loop_id,
         "packet_id": packet_id,
+        "packet_count": len(packet_paths),
         "packet_path": str(packet_path),
         "packet_disposition": disposition,
         "completion_level": completion_level,

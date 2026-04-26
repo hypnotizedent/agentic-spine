@@ -1395,7 +1395,9 @@ for p in pending:
     if [[ "$controller_only" -eq 1 || "$wave_kind" == "engineering" ]]; then
       echo "Closing orchestration manifest through controller-direct compatibility path..."
       _maybe_force_close_orchestration_manifest "$loop_id" "$disposition" "$completion_level" "$wave_id" || {
-        _fail "orchestration manifest close failed"
+        # Wave is already closed; transition delegation before failing.
+        _delegation_transition_complete "$loop_id" "$wave_id" "deferred" || true
+        _fail "orchestration manifest close failed (delegation transitioned to needs_review)"
       }
       echo ""
     fi
@@ -1453,30 +1455,38 @@ for p in pending:
       echo "Running wave.finish..."
       local finish_repo_root=""
       finish_repo_root="$finish_repo_root_seed"
-      [[ -n "$finish_repo_root" ]] || _fail "unable to resolve canonical repo root for wave.finish"
+      [[ -n "$finish_repo_root" ]] || {
+        _delegation_transition_complete "$loop_id" "$wave_id" "deferred" || true
+        _fail "unable to resolve canonical repo root for wave.finish (delegation transitioned to needs_review)"
+      }
       local finish_runner=""
       finish_runner="$(_provision_finish_runner_worktree "$finish_repo_root" "$wave_id" "${close_head:-HEAD}")"
       local finish_bin="$finish_runner/ops/plugins/core/orchestration/bin/wave-finish"
       [[ -x "$finish_bin" ]] || {
         _remove_temp_worktree "$finish_repo_root" "$finish_runner"
-        _fail "wave.finish missing from detached finish runner: $finish_bin"
+        _delegation_transition_complete "$loop_id" "$wave_id" "deferred" || true
+        _fail "wave.finish missing from detached finish runner: $finish_bin (delegation transitioned to needs_review)"
       }
       local -a finish_env=("OPS_CAP_AUTO_APPROVE=yes")
       if [[ -n "$finish_main_override" ]]; then
         finish_env+=("OPS_GOVERNED_MAIN_OVERRIDE=1")
       fi
+      local finish_rc=0
       (
         cd "$finish_runner"
         env -u SPINE_ROOT -u SPINE_REPO -u SPINE_TARGET_REPO -u OPS_WORKTREE_IDENTITY \
           "${finish_env[@]}" \
           bash "$finish_bin" "${finish_args[@]}"
-      ) || {
-        _remove_temp_worktree "$finish_repo_root" "$finish_runner"
-        _fail "wave.finish failed"
-      }
+      ) || finish_rc=$?
       _remove_temp_worktree "$finish_repo_root" "$finish_runner"
 
-      # ── Delegation hook: transition to landed/needs_review ──
+      # ── Delegation hook: transition regardless of wave.finish outcome ──
+      # Wave is already closed; delegation must not stay in "executing".
+      # On finish failure, delegation goes to needs_review (not landed).
+      if [[ "$finish_rc" -ne 0 ]]; then
+        _delegation_transition_complete "$loop_id" "$wave_id" "deferred" || true
+        _fail "wave.finish failed (delegation transitioned to needs_review)"
+      fi
       _delegation_transition_complete "$loop_id" "$wave_id" "$disposition" || true
     fi
   fi
