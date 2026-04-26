@@ -885,8 +885,13 @@ if wave_id:
 
 exec_receipt_path.write_text(json.dumps(exec_payload, indent=2) + "\n", encoding="utf-8")
 
+# Attestation is a derived governance envelope around exec.json.
+# Authority hierarchy: exec.json is canonical for execution truth
+# (status, outcome, evidence_refs, prompt_lineage). Attestation adds
+# governance context (host, role, checks, packet provenance) and
+# references exec.json by hash. It does NOT duplicate exec fields.
 attestation_payload = {
-    "schema_version": "1.0",
+    "schema_version": "1.1",
     "request_id": os.environ["CAP_RUN_KEY"],
     "capability": os.environ["CAP_TASK_ID"],
     "generated_at_utc": os.environ["CAP_TIMESTAMP_UTC"],
@@ -905,10 +910,6 @@ attestation_payload = {
         "exec": {"path": str(exec_receipt_path), "sha256": sha256(exec_receipt_path)},
         "output": {"path": str(output_path), "sha256": sha256(output_path)},
     },
-    "evidence_refs": exec_payload["evidence_refs"],
-    "prompt_lineage": exec_payload["prompt_lineage"],
-    "verdict": status,
-    "outcome": exec_payload["outcome"],
 }
 attestation_path.write_text(json.dumps(attestation_payload, indent=2) + "\n", encoding="utf-8")
 PY
