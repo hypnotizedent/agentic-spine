@@ -322,7 +322,9 @@ def _mailroom_enqueue(
     packet_path: str,
     objective: str,
     target_role: str,
-    route_target: str = "agent_tool",
+    route_target: str = "capability",
+    route_capability: str = "",
+    route_args: list[str] | None = None,
 ) -> dict[str, Any]:
     """Admit a controller packet into the operational mailroom lane."""
     enqueue_bin = (
@@ -335,6 +337,7 @@ def _mailroom_enqueue(
     if not enqueue_bin.exists():
         raise DelegationError(f"mailroom enqueue surface missing: {enqueue_bin}")
 
+    route_args = route_args or []
     payload = json.dumps(
         {
             "kind": "controller_prompt_execution_request",
@@ -344,6 +347,9 @@ def _mailroom_enqueue(
             "objective": objective,
             "target_role": target_role,
             "execution_lane_id": "operational_mailroom_task",
+            "route_target": route_target,
+            "route_capability": route_capability,
+            "route_args": route_args,
         },
         sort_keys=True,
     )
@@ -351,6 +357,7 @@ def _mailroom_enqueue(
         str(enqueue_bin),
         "--summary", objective,
         "--route-target", route_target,
+        "--route-capability", route_capability,
         "--payload", payload,
         "--loop-id", loop_id,
         "--packet-id", packet_id,
@@ -358,6 +365,8 @@ def _mailroom_enqueue(
         "--execution-lane-id", "operational_mailroom_task",
         "--json",
     ]
+    for arg in route_args:
+        cmd.extend(["--route-arg", arg])
     proc = subprocess.run(
         cmd,
         capture_output=True,
@@ -389,6 +398,8 @@ def sync_operational_packet(
     task_id: str = "",
     task_state: str = "",
     task_file: str = "",
+    route_target: str = "",
+    route_capability: str = "",
     claimed_by: str = "",
     claimed_at_utc: str = "",
     heartbeat_at_utc: str = "",
@@ -410,6 +421,10 @@ def sync_operational_packet(
         extra_fields["execution_request_state"] = task_state
     if task_file:
         extra_fields["execution_request_artifact"] = task_file
+    if route_target:
+        extra_fields["execution_route_target"] = route_target
+    if route_capability:
+        extra_fields["execution_route_capability"] = route_capability
     if claimed_by:
         extra_fields["execution_claimed_by"] = claimed_by
     if claimed_at_utc:
@@ -456,6 +471,9 @@ def delegate(
     delegator_terminal: str = "",
     wave_kind_intent: str = "",
     execution_lane: str = "interactive",
+    route_target: str = "",
+    route_capability: str = "",
+    route_args: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a delegation from control surface to worker execution.
 
@@ -515,6 +533,20 @@ def delegate(
             raise DelegationError(
                 "operational admission currently supports controller-prompt packets only"
             )
+        route_args = list(route_args or [])
+        normalized_route_target = route_target.strip().lower()
+        normalized_route_capability = route_capability.strip()
+        if not normalized_route_target and normalized_route_capability:
+            normalized_route_target = "capability"
+        if normalized_route_target != "capability":
+            raise DelegationError(
+                "operational controller-prompt admission currently supports capability-backed execution only; "
+                "supply --route-target capability --route-capability <capability> or use interactive handoff"
+            )
+        if not normalized_route_capability:
+            raise DelegationError(
+                "operational capability-backed admission requires --route-capability"
+            )
         queue_data = _mailroom_enqueue(
             state_root,
             loop_id=loop_id,
@@ -522,6 +554,9 @@ def delegate(
             packet_path=packet_path,
             objective=objective,
             target_role=target_role,
+            route_target=normalized_route_target,
+            route_capability=normalized_route_capability,
+            route_args=route_args,
         )
         task_id = str(queue_data.get("task_id", "")).strip()
         task_file = str(queue_data.get("file", "")).strip()
@@ -533,6 +568,8 @@ def delegate(
             task_id=task_id,
             task_state=str(queue_data.get("state", "queued")).strip() or "queued",
             task_file=task_file,
+            route_target=normalized_route_target,
+            route_capability=normalized_route_capability,
         )
         return {
             "status": "admitted",
@@ -546,6 +583,8 @@ def delegate(
             "target_role": target_role,
             "execution_lane": "operational_mailroom_task",
             "route_target": str(queue_data.get("route_target", "")).strip(),
+            "route_capability": normalized_route_capability,
+            "route_args": route_args,
         }
 
     # ── Write delegation envelope ────────────────────────────────

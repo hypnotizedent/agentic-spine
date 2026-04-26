@@ -31,8 +31,10 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   [[ -f "$running_file" ]] || { echo "FAIL: running task not found: $TASK_ID" >&2; exit 1; }
   mv "$running_file" "$failed_file"
   now="$(mailroom_task_now)"
-  yq e -i ".status = \"failed\" | .failure_reason = \"$REASON\" | .failed_at = \"$now\" | .updated_at = \"$now\"" "$failed_file"
+  NOW_ENV="$now" REASON_ENV="$REASON" \
+  yq e -i '.status = "failed" | .failure_reason = strenv(REASON_ENV) | .failed_at = strenv(NOW_ENV) | .updated_at = strenv(NOW_ENV)' "$failed_file"
   mailroom_task_sync_linked_packet "$failed_file" "failed"
+  mailroom_task_close_linked_packet "$failed_file" "failed"
 fi
 
 data="$(jq -n --arg task_id "$TASK_ID" --arg state "failed" --arg file "$failed_file" --arg reason "$REASON" --arg dry_run "$( [[ "$DRY_RUN" -eq 1 ]] && echo true || echo false )" '{task_id:$task_id,state:$state,file:$file,reason:$reason,dry_run:($dry_run=="true")}')"

@@ -121,3 +121,72 @@ db.sync_operational_packet(
 )
 PY
 }
+
+mailroom_task_close_linked_packet() {
+  local task_file="$1"
+  local task_state="$2"
+  [[ -f "$task_file" ]] || return 0
+  python3 - "$MAILROOM_TASK_ROOT" "$task_file" "$task_state" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+root = Path(sys.argv[1])
+task_file = Path(sys.argv[2])
+task_state = sys.argv[3].strip().lower()
+
+if task_state not in {"done", "failed", "cancelled"}:
+    raise SystemExit(0)
+
+sys.path.insert(0, str(root / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+import controller_prompt_close as cpc  # noqa: E402
+
+doc = yaml.safe_load(task_file.read_text(encoding="utf-8"))
+if not isinstance(doc, dict):
+    raise SystemExit(0)
+
+packet_path = str(doc.get("packet_path") or "").strip()
+if not packet_path:
+    raise SystemExit(0)
+
+task_id = str(doc.get("task_id") or task_file.stem).strip()
+result = str(doc.get("result") or "").strip()
+failure_reason = str(doc.get("failure_reason") or "").strip()
+route_target = str(doc.get("route_target") or "").strip()
+route_capability = str(doc.get("route_capability") or "").strip()
+
+disposition_map = {
+    "done": "delivered",
+    "failed": "abandoned",
+    "cancelled": "deferred",
+}
+disposition = disposition_map[task_state]
+
+if task_state == "done":
+    summary = result or f"mailroom task {task_id} completed"
+    blockers: list[str] = []
+else:
+    summary = failure_reason or f"mailroom task {task_id} {task_state}"
+    blockers = [failure_reason] if failure_reason else []
+
+if route_capability:
+    summary = f"{summary} (capability={route_capability})"
+elif route_target:
+    summary = f"{summary} (route_target={route_target})"
+
+result_doc = cpc.close_packet(
+    packet_path=packet_path,
+    disposition=disposition,
+    operator_summary=summary,
+    spine_repo=str(root),
+    evidence_refs=[str(task_file)],
+    verify_result="skip",
+    blockers=blockers,
+    auto_close_loop=True,
+)
+status = str(result_doc.get("status") or "").strip()
+if status not in {"closed", "already_closed"}:
+    raise SystemExit(f"linked packet close returned status={status}")
+PY
+}

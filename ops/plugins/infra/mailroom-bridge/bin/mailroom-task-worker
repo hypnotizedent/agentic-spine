@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""mailroom-task-worker — bounded operational mailroom worker."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[5]
+CONTRACT = ROOT / "ops" / "bindings" / "mailroom.task.worker.contract.yaml"
+STATE_ROOT = os.environ.get("SPINE_STATE", "")
+TASK_ROOT = Path(STATE_ROOT) / "agent-tasks" if STATE_ROOT else Path()
+QUEUED_DIR = TASK_ROOT / "queued"
+STATUS_PATH = TASK_ROOT / "mailroom-task-worker.status.json"
+RUN_KEY_RE = re.compile(r"Run Key:\s+(\S+)")
+
+
+class WorkerError(RuntimeError):
+    """Raised when worker setup or execution fails."""
+
+
+def _load_contract() -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(CONTRACT.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise WorkerError(f"cannot load worker contract: {exc}") from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def _task_execution_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    task_execution = contract.get("task_execution")
+    return task_execution if isinstance(task_execution, dict) else {}
+
+
+def _runtime_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    runtime = contract.get("runtime")
+    return runtime if isinstance(runtime, dict) else {}
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _write_status(payload: dict[str, Any]) -> None:
+    STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATUS_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, STATUS_PATH)
+
+
+def _task_doc(path: Path) -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _task_supported(doc: dict[str, Any], *, allowlist: set[str], supported_routes: set[str]) -> tuple[bool, str]:
+    route_target = str(doc.get("route_target") or "").strip().lower()
+    if route_target not in supported_routes:
+        return False, f"unsupported route_target={route_target or 'unset'}"
+    if route_target == "capability":
+        capability = str(doc.get("route_capability") or "").strip()
+        if not capability:
+            payload = doc.get("payload")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = {}
+            if isinstance(payload, dict):
+                capability = str(payload.get("route_capability") or "").strip()
+        if not capability:
+            return False, "capability route missing route_capability"
+        if capability not in allowlist:
+            return False, f"capability {capability} not allowlisted"
+    return True, ""
+
+
+def _claim_task(task_id: str, worker_id: str) -> dict[str, Any]:
+    proc = subprocess.run(
+        [
+            str(ROOT / "ops" / "plugins" / "infra" / "mailroom-bridge" / "bin" / "mailroom-task-claim"),
+            "--task-id",
+            task_id,
+            "--worker",
+            worker_id,
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=os.environ.copy(),
+    )
+    if proc.returncode != 0:
+        raise WorkerError(proc.stderr.strip() or proc.stdout.strip() or f"mailroom.task.claim failed for {task_id}")
+    payload = json.loads(proc.stdout)
+    return payload.get("data") if isinstance(payload.get("data"), dict) else {}
+
+
+def _heartbeat_task(task_id: str, progress: str) -> None:
+    proc = subprocess.run(
+        [
+            str(ROOT / "ops" / "plugins" / "infra" / "mailroom-bridge" / "bin" / "mailroom-task-heartbeat"),
+            "--task-id",
+            task_id,
+            "--progress",
+            progress,
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=os.environ.copy(),
+    )
+    if proc.returncode != 0:
+        raise WorkerError(proc.stderr.strip() or proc.stdout.strip() or f"mailroom.task.heartbeat failed for {task_id}")
+
+
+def _complete_task(task_id: str, result: str) -> None:
+    proc = subprocess.run(
+        [
+            str(ROOT / "ops" / "plugins" / "infra" / "mailroom-bridge" / "bin" / "mailroom-task-complete"),
+            "--task-id",
+            task_id,
+            "--result",
+            result,
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=os.environ.copy(),
+    )
+    if proc.returncode != 0:
+        raise WorkerError(proc.stderr.strip() or proc.stdout.strip() or f"mailroom.task.complete failed for {task_id}")
+
+
+def _fail_task(task_id: str, reason: str) -> None:
+    proc = subprocess.run(
+        [
+            str(ROOT / "ops" / "plugins" / "infra" / "mailroom-bridge" / "bin" / "mailroom-task-fail"),
+            "--task-id",
+            task_id,
+            "--reason",
+            reason,
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=os.environ.copy(),
+    )
+    if proc.returncode != 0:
+        raise WorkerError(proc.stderr.strip() or proc.stdout.strip() or f"mailroom.task.fail failed for {task_id}")
+
+
+def _normalize_payload(doc: dict[str, Any]) -> dict[str, Any]:
+    payload = doc.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str) and payload.strip():
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _execute_capability(task_id: str, doc: dict[str, Any], worker_id: str) -> dict[str, Any]:
+    payload = _normalize_payload(doc)
+    capability = str(doc.get("route_capability") or payload.get("route_capability") or "").strip()
+    route_args = doc.get("route_args")
+    if not isinstance(route_args, list):
+        route_args = payload.get("route_args")
+    route_args = [str(item) for item in route_args] if isinstance(route_args, list) else []
+    summary = str(doc.get("summary") or task_id).strip()
+
+    _heartbeat_task(task_id, f"executing capability {capability}")
+    env = os.environ.copy()
+    env["SPINE_TERMINAL_ID"] = worker_id
+    env["OPS_TERMINAL_ID"] = worker_id
+    env["OPS_TERMINAL_ROLE"] = worker_id
+    env["SPINE_EXECUTION_CLASS"] = "worker"
+    env["SPINE_RUNTIME_ROLE"] = "worker"
+    env["SPINE_SESSION_POSTURE"] = "worker"
+
+    cmd = [str(ROOT / "bin" / "ops"), "cap", "run", capability]
+    if route_args:
+        cmd.extend(["--", *route_args])
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    merged = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
+    run_key = ""
+    match = RUN_KEY_RE.search(merged)
+    if match:
+        run_key = match.group(1)
+
+    if proc.returncode == 0:
+        result = f"{summary} -> capability={capability}"
+        if run_key:
+            result += f" run_key={run_key}"
+        _complete_task(task_id, result)
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "capability": capability,
+            "run_key": run_key,
+            "result": result,
+        }
+
+    failure_reason = f"capability={capability} rc={proc.returncode}"
+    if merged:
+        failure_reason = f"{failure_reason} :: {merged.splitlines()[-1][:240]}"
+    _fail_task(task_id, failure_reason)
+    return {
+        "task_id": task_id,
+        "status": "failed",
+        "capability": capability,
+        "run_key": run_key,
+        "error": failure_reason,
+    }
+
+
+def _process_once(*, worker_id: str, claim_limit: int, allowlist: set[str], supported_routes: set[str]) -> dict[str, Any]:
+    QUEUED_DIR.mkdir(parents=True, exist_ok=True)
+    queued = sorted(QUEUED_DIR.glob("TASK-*.yaml"))
+    claimed: list[dict[str, Any]] = []
+    completed: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for path in queued:
+        if len(claimed) >= claim_limit:
+            break
+        doc = _task_doc(path)
+        if not doc:
+            skipped.append({"task_id": path.stem, "reason": "unreadable task envelope"})
+            continue
+        supported, reason = _task_supported(doc, allowlist=allowlist, supported_routes=supported_routes)
+        task_id = str(doc.get("task_id") or path.stem).strip()
+        if not supported:
+            skipped.append({"task_id": task_id, "reason": reason})
+            continue
+        claim_data = _claim_task(task_id, worker_id)
+        claimed.append({"task_id": task_id, "state": "running", "worker": worker_id})
+        running_file = Path(str(claim_data.get("file") or TASK_ROOT / "running" / f"{task_id}.yaml"))
+        running_doc = _task_doc(running_file)
+        result = _execute_capability(task_id, running_doc, worker_id)
+        if result.get("status") == "completed":
+            completed.append(result)
+        else:
+            failed.append(result)
+
+    payload = {
+        "generated_at": _now(),
+        "worker_id": worker_id,
+        "mode": "once",
+        "queued_seen": len(queued),
+        "claimed": claimed,
+        "completed": completed,
+        "failed": failed,
+        "skipped": skipped,
+    }
+    _write_status(payload)
+    return payload
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="mailroom-task-worker",
+        description="Run the operational mailroom worker once or in foreground mode.",
+    )
+    parser.add_argument("--once", action="store_true", help="Run one bounded worker pass and exit.")
+    parser.add_argument("--foreground", action="store_true", help="Run as a long-lived polling worker.")
+    parser.add_argument("--worker-id", default="", help="Canonical worker terminal identity.")
+    parser.add_argument("--poll-seconds", type=int, default=0, help="Foreground poll interval override.")
+    parser.add_argument("--claim-limit", type=int, default=0, help="Maximum claims per pass override.")
+    parser.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON output.")
+    parser.add_argument("--self-check", action="store_true", help="Verify dependencies and exit.")
+
+    if "--self-check" in sys.argv:
+        try:
+            import yaml  # noqa: F401
+            print("mailroom.task.worker.once self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"mailroom.task.worker.once self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    args = parser.parse_args()
+    if not STATE_ROOT:
+        msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": msg}, indent=2))
+        else:
+            print(f"mailroom.task.worker FAIL: {msg}", file=sys.stderr)
+        return 1
+
+    contract = _load_contract()
+    runtime_contract = _runtime_contract(contract)
+    task_execution = _task_execution_contract(contract)
+    worker_id = args.worker_id or str(task_execution.get("claim_policy", {}).get("worker_id") or "SPINE-EXECUTION-01")
+    claim_limit = args.claim_limit or int(task_execution.get("max_claims_per_tick") or 1)
+    poll_seconds = args.poll_seconds or int(runtime_contract.get("poll_seconds") or 90)
+    supported_routes = {str(item).strip() for item in (task_execution.get("execute_route_targets") or []) if str(item).strip()}
+    allowlist = {str(item).strip() for item in (task_execution.get("capability_allowlist") or []) if str(item).strip()}
+
+    if "capability" not in supported_routes:
+        raise WorkerError("mailroom worker contract must allow capability route_target for active operational execution")
+
+    run_once = bool(args.once or not args.foreground)
+    try:
+        if args.foreground:
+            while True:
+                _process_once(worker_id=worker_id, claim_limit=claim_limit, allowlist=allowlist, supported_routes=supported_routes)
+                time.sleep(max(poll_seconds, 1))
+        if run_once:
+            result = _process_once(worker_id=worker_id, claim_limit=claim_limit, allowlist=allowlist, supported_routes=supported_routes)
+    except KeyboardInterrupt:
+        return 130
+    except WorkerError as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"mailroom.task.worker FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"queued_seen: {result['queued_seen']}")
+        print(f"claimed: {len(result['claimed'])}")
+        print(f"completed: {len(result['completed'])}")
+        print(f"failed: {len(result['failed'])}")
+        print(f"skipped: {len(result['skipped'])}")
+        for item in result["completed"]:
+            print(f"- completed {item['task_id']} capability={item['capability']} run_key={item.get('run_key', '')}")
+        for item in result["failed"]:
+            print(f"- failed {item['task_id']} capability={item['capability']} error={item['error']}")
+        for item in result["skipped"]:
+            print(f"- skipped {item['task_id']} reason={item['reason']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

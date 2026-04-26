@@ -24,6 +24,10 @@ Agent entry is simple:
    create admission, bind identity, or attach loops. It is not a substitute for
    `ops terminal launch`.
 
+   The operator workstation is an admitting client, not the unattended runtime
+   substrate. Autonomous execution belongs on governed nodes and worker lanes,
+   not on Ronny manually carrying context between terminals.
+
 4. Run:
 
 ```bash
@@ -72,8 +76,9 @@ projections, residue).
 ### Handoff
 
 A continuity object that preserves context across a session boundary —
-terminal close, role change, or membrane-to-controller transition. Carries:
-summary, active loops, from/to roles, input/output references.
+terminal close, execution-class/posture change, or membrane-to-controller
+transition. Carries:
+summary, active loops, from/to execution classes, input/output references.
 
 - State: `.runtime/spine/state/handoffs/HO-{DATE}-{TIME}.yaml`
 - Create: `session.handoff.create`
@@ -143,11 +148,18 @@ operator or system intent
       → task reaches terminal result         [governed: mailroom.task.complete|mailroom.task.fail]
 ```
 
-This lane is operational for autonomous work, but it does not yet carry the
-full controller-prompt closeout lifecycle. Controller-prompt work can now enter
-this lane truthfully, and packet runtime state is synchronized from
-`mailroom.task.claim|heartbeat|complete|fail`, but terminal packet close
-remains explicit.
+This lane is operational for autonomous work, but the active truthful
+controller-prompt class is currently capability-backed rather than open-ended
+`agent_tool` execution. The worker claims the task, proves liveness, executes
+the allowlisted capability, then drives canonical packet/loop closeout through
+`mailroom.task.complete|mailroom.task.fail` plus `controller_prompt.close`.
+
+This is the node-architecture path for unattended work:
+
+- `operator_console` admits intent
+- governed worker lanes claim custody
+- `execution_host` carries runtime execution
+- receipts and status survive terminal loss
 
 ### Compatibility: Manual Custody Path
 

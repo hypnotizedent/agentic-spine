@@ -11,6 +11,8 @@ TASK_ID=""
 SUMMARY=""
 REQUIRED_AGENTS=""
 ROUTE_TARGET=""
+ROUTE_CAPABILITY=""
+declare -a ROUTE_ARGS=()
 PAYLOAD=""
 LOOP_ID=""
 PACKET_ID=""
@@ -23,6 +25,8 @@ while [[ $# -gt 0 ]]; do
     --summary) SUMMARY="${2:?--summary requires value}"; shift 2 ;;
     --required-agents) REQUIRED_AGENTS="${2:?--required-agents requires value}"; shift 2 ;;
     --route-target) ROUTE_TARGET="${2:?--route-target requires value}"; shift 2 ;;
+    --route-capability) ROUTE_CAPABILITY="${2:?--route-capability requires value}"; shift 2 ;;
+    --route-arg) ROUTE_ARGS+=("${2:?--route-arg requires value}"); shift 2 ;;
     --payload) PAYLOAD="${2:?--payload requires value}"; shift 2 ;;
     --loop-id) LOOP_ID="${2:?--loop-id requires value}"; shift 2 ;;
     --packet-id) PACKET_ID="${2:?--packet-id requires value}"; shift 2 ;;
@@ -41,6 +45,7 @@ mailroom_task_require yq
 [[ -n "$TASK_ID" ]] || TASK_ID="$(mailroom_task_generate_id)"
 
 agents_json="$(mailroom_task_csv_to_json_array "$REQUIRED_AGENTS")"
+route_args_json="$(printf '%s\n' "${ROUTE_ARGS[@]:-}" | sed '/^$/d' | jq -Rsc 'split("\n") | map(select(length > 0))')"
 file="$MAILROOM_TASK_QUEUED/$TASK_ID.yaml"
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
@@ -50,12 +55,14 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     exit 1
   fi
   now="$(mailroom_task_now)"
-  TASK_ID_ENV="$TASK_ID" SUMMARY_ENV="$SUMMARY" ROUTE_TARGET_ENV="${ROUTE_TARGET:-}" PAYLOAD_ENV="${PAYLOAD:-}" NOW_ENV="$now" AGENTS_JSON_ENV="$agents_json" LOOP_ID_ENV="${LOOP_ID:-}" PACKET_ID_ENV="${PACKET_ID:-}" PACKET_PATH_ENV="${PACKET_PATH:-}" EXECUTION_LANE_ID_ENV="${EXECUTION_LANE_ID:-}" \
+  TASK_ID_ENV="$TASK_ID" SUMMARY_ENV="$SUMMARY" ROUTE_TARGET_ENV="${ROUTE_TARGET:-}" ROUTE_CAPABILITY_ENV="${ROUTE_CAPABILITY:-}" PAYLOAD_ENV="${PAYLOAD:-}" NOW_ENV="$now" AGENTS_JSON_ENV="$agents_json" ROUTE_ARGS_JSON_ENV="$route_args_json" LOOP_ID_ENV="${LOOP_ID:-}" PACKET_ID_ENV="${PACKET_ID:-}" PACKET_PATH_ENV="${PACKET_PATH:-}" EXECUTION_LANE_ID_ENV="${EXECUTION_LANE_ID:-}" \
   yq e -n '
     .task_id = strenv(TASK_ID_ENV) |
     .status = "queued" |
     .summary = strenv(SUMMARY_ENV) |
     .route_target = strenv(ROUTE_TARGET_ENV) |
+    .route_capability = strenv(ROUTE_CAPABILITY_ENV) |
+    .route_args = (strenv(ROUTE_ARGS_JSON_ENV) | fromjson) |
     .payload = strenv(PAYLOAD_ENV) |
     .created_at = strenv(NOW_ENV) |
     .updated_at = strenv(NOW_ENV) |
@@ -67,7 +74,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   ' >"$file"
 fi
 
-data="$(jq -n --arg task_id "$TASK_ID" --arg state "queued" --arg file "$file" --arg route_target "${ROUTE_TARGET:-}" --arg summary "$SUMMARY" --arg loop_id "${LOOP_ID:-}" --arg packet_id "${PACKET_ID:-}" --arg packet_path "${PACKET_PATH:-}" --arg execution_lane_id "${EXECUTION_LANE_ID:-}" --argjson required_agents "$agents_json" --arg dry_run "$( [[ "$DRY_RUN" -eq 1 ]] && echo true || echo false )" '{task_id:$task_id,state:$state,file:$file,summary:$summary,route_target:$route_target,required_agents:$required_agents,loop_id:$loop_id,packet_id:$packet_id,packet_path:$packet_path,execution_lane_id:$execution_lane_id,dry_run:($dry_run=="true")}')"
+data="$(jq -n --arg task_id "$TASK_ID" --arg state "queued" --arg file "$file" --arg route_target "${ROUTE_TARGET:-}" --arg route_capability "${ROUTE_CAPABILITY:-}" --arg summary "$SUMMARY" --arg loop_id "${LOOP_ID:-}" --arg packet_id "${PACKET_ID:-}" --arg packet_path "${PACKET_PATH:-}" --arg execution_lane_id "${EXECUTION_LANE_ID:-}" --argjson required_agents "$agents_json" --argjson route_args "$route_args_json" --arg dry_run "$( [[ "$DRY_RUN" -eq 1 ]] && echo true || echo false )" '{task_id:$task_id,state:$state,file:$file,summary:$summary,route_target:$route_target,route_capability:$route_capability,route_args:$route_args,required_agents:$required_agents,loop_id:$loop_id,packet_id:$packet_id,packet_path:$packet_path,execution_lane_id:$execution_lane_id,dry_run:($dry_run=="true")}')"
 if [[ "$JSON" -eq 1 ]]; then
   status="queued"; [[ "$DRY_RUN" -eq 1 ]] && status="dry-run"
   mailroom_task_emit_json "$CAPABILITY" "$status" "$data"
