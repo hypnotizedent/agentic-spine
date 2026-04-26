@@ -105,7 +105,5 @@ Verify hierarchy for all agent sessions:
 - these two are the only foundational verify surfaces
 - `verify.infra.run`, `verify.run domain <id>`, and `verify.run release` answer
   estate/workload health — they are scoped secondary surfaces, not peers
-- `verify.fast` and `verify.core.run` are deprecated compatibility aliases for
-  `verify.infra.run`; do not use them in new work
 - estate/workload verify surfaces must not be treated as spine closeout truth or
   as packet/loop/governance blockers unless a contract explicitly says so

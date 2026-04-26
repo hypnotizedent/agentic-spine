@@ -30,11 +30,6 @@ cd ~/code/agentic-spine
 
 5. Work through `./bin/ops cap run <capability> -- ...`
 
-Compatibility note:
-
-- `ops context` is replaced by `ops status --context`
-- `ops ready` is deprecated and not part of normal session entry
-
 ## Workflow Objects
 
 Everything an agent does lives inside these five objects. If you do not know
