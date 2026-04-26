@@ -8,16 +8,16 @@
 # Ensures all domains in the admitted portfolio have SPF and DMARC records configured.
 # Prevents email spoofing and domain reputation damage from missing anti-spoofing controls.
 #
-# This gate parses domains.portfolio.status capability output and fails if any
+# This gate parses cloudflare.domains.portfolio.status capability output and fails if any
 # domain shows MISSING for SPF or DMARC.
 
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
-# Run domains.portfolio.status and capture output
-output=$("$ROOT/bin/ops" cap run domains.portfolio.status 2>&1) || {
-  echo "D392 FAIL: domains.portfolio.status capability failed" >&2
+# Run cloudflare.domains.portfolio.status and capture output
+output=$("$ROOT/bin/ops" cap run cloudflare.domains.portfolio.status 2>&1) || {
+  echo "D392 FAIL: cloudflare.domains.portfolio.status capability failed" >&2
   exit 1
 }
 

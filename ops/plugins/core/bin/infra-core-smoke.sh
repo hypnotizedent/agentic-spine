@@ -27,15 +27,15 @@ smoke_cloudflare() {
     fail "cloudflare.inventory.sync"
   fi
 
-  log "cloudflare: domains.portfolio.status"
+  log "cloudflare: cloudflare.domains.portfolio.status"
   set +e
-  "$CAP" cap run domains.portfolio.status -- --json >/dev/null 2>&1
+  "$CAP" cap run cloudflare.domains.portfolio.status -- --json >/dev/null 2>&1
   local rc=$?
   set -e
   if [[ "$rc" -eq 7 ]]; then
     log "cloudflare: portfolio status rate-limited (non-fatal, bounded retry exhausted)"
   elif [[ "$rc" -ne 0 ]]; then
-    fail "domains.portfolio.status (rc=$rc)"
+    fail "cloudflare.domains.portfolio.status (rc=$rc)"
   fi
 
   log "cloudflare: registrar.status"
