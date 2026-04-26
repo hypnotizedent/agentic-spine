@@ -34,16 +34,15 @@ EXPECTED_LABELS = [
     "com.ronny.alerting-probe-cycle",
     "com.ronny.operator-ingress-auto-metabolizer",
     "com.ronny.domain-inventory-refresh-daily",
-    "com.ronny.infra-core-smoke",
     "com.ronny.simplefin-daily-sync",
 ]
 ROLLOUT_LABELS = [
     "com.ronny.domain-inventory-refresh-daily",
-    "com.ronny.infra-core-smoke",
     "com.ronny.simplefin-daily-sync",
 ]
 BLOCKED_LABELS = [
     "com.ronny.communications-alerts-dispatcher",
+    "com.ronny.infra-core-smoke",
     "com.ronny.log-rotation-daily",
     "com.ronny.operator-storage-surface-sync",
     "com.ronny.finance-backup-weekly",

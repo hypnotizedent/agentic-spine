@@ -27,7 +27,6 @@ SCHEDULER_HEALTH_BIN = (
 
 STALE_FAILURE_ROLLOUT_LABELS = (
     "com.ronny.domain-inventory-refresh-daily",
-    "com.ronny.infra-core-smoke",
     "com.ronny.simplefin-daily-sync",
 )
 
