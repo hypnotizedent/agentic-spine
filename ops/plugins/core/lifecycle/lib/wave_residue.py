@@ -171,13 +171,20 @@ def _wave_state_path(runtime_root: str, wave_id: str) -> str:
     return os.path.join(runtime_root, "waves", wave_id, "state.json")
 
 
-def _has_exec_receipt(wave_id: str) -> bool:
+def _has_exec_receipt(wave_id: str, runtime_root: str = "") -> bool:
     """Check if EXEC_RECEIPT-WAVE-CLOSE-{wave_id}-*.yaml exists in domain-state.
 
     This is the immutable canonical proof that a wave closed. When state.json
     is missing or stale, a matching EXEC_RECEIPT proves the wave is closed.
+
+    runtime_root: the spine runtime root (parent of waves/). Falls back to
+    $SPINE_STATE if not provided, for backward compatibility.
     """
-    state_root = os.environ.get("SPINE_STATE", "")
+    # Derive state root: runtime_root/../state or SPINE_STATE
+    if runtime_root:
+        state_root = os.path.join(os.path.dirname(runtime_root), "state")
+    else:
+        state_root = os.environ.get("SPINE_STATE", "")
     if not state_root:
         return False
     domain_state = os.path.join(state_root, "domain-state")
@@ -420,7 +427,7 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
         if not wave_id or wave_state is None:
             # Reconstruction: if state.json is missing but EXEC_RECEIPT exists,
             # the wave is provably closed — treat residue as sweepable.
-            if wave_id and _has_exec_receipt(wave_id):
+            if wave_id and _has_exec_receipt(wave_id, runtime_root):
                 dirty, dirty_err = _worktree_is_dirty(full_path)
                 if dirty_err is not None or dirty:
                     items.append(_make_item(
@@ -545,17 +552,32 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
         identity = f"branch:{branch}"
 
         if wave_id is None or wave_state is None:
-            items.append(_make_item(
-                "stale_wave_branch",
-                wave_id=wave_id,
-                path=None,
-                branch=branch,
-                wave_status="unknown",
-                workspace_lifecycle_state=ws_lifecycle,
-                safe_to_sweep=False,
-                ambiguous_reason="no matching wave state.json",
-                identity=identity,
-            ))
+            # Reconstruction: if state.json is missing but EXEC_RECEIPT exists,
+            # the wave is provably closed — branch is sweepable.
+            if wave_id and _has_exec_receipt(wave_id, runtime_root):
+                items.append(_make_item(
+                    "stale_wave_branch",
+                    wave_id=wave_id,
+                    path=None,
+                    branch=branch,
+                    wave_status="closed (reconstructed from EXEC_RECEIPT)",
+                    workspace_lifecycle_state=ws_lifecycle,
+                    safe_to_sweep=True,
+                    ambiguous_reason=None,
+                    identity=identity,
+                ))
+            else:
+                items.append(_make_item(
+                    "stale_wave_branch",
+                    wave_id=wave_id,
+                    path=None,
+                    branch=branch,
+                    wave_status="unknown",
+                    workspace_lifecycle_state=ws_lifecycle,
+                    safe_to_sweep=False,
+                    ambiguous_reason="no matching wave state.json",
+                    identity=identity,
+                ))
             continue
 
         if wave_status != "closed":

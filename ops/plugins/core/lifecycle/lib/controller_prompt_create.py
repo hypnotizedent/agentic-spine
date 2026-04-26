@@ -113,7 +113,10 @@ def _validate_loop_scope(loop_id: str, state_root: str) -> None:
 
     ACTIVE_STATUSES = frozenset({"active", "open", "draft"})
 
-    db_path = Path(state_root) / "shared_authority.db"
+    # Honor LOOPS_DB_PATH override (canonical resolver uses same env var)
+    db_path = Path(
+        os.environ.get("LOOPS_DB_PATH", str(Path(state_root) / "shared_authority.db"))
+    )
     if not db_path.is_file():
         raise ControllerPromptCreateError(
             f"loop authority database not found: {db_path}"

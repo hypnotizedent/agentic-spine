@@ -423,7 +423,7 @@ def _entries_from_scope_files():
 entries = _entries_from_sqlite()
 if entries is None:
     print("ERROR: SQLite loop authority unavailable — cannot list loops", file=sys.stderr)
-    entries = []
+    raise SystemExit(1)
 
 if not entries:
     print("(no loops)")
@@ -752,7 +752,7 @@ def _loops_from_scope_files():
 all_loops = _loops_from_sqlite()
 if all_loops is None:
     print("ERROR: SQLite loop authority unavailable — cannot show summary", file=sys.stderr)
-    all_loops = []
+    raise SystemExit(1)
 
 open_count = 0
 planned_count = 0
