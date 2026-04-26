@@ -108,12 +108,44 @@ check E2 "ops status --json" bash -c "
 
 # E3: SQLite shared authority readable + active-state counts resolve
 AUTHORITY_DB="$SPINE_STATE/shared_authority.db"
-check E3 "SQLite shared authority readable" bash -c "
-    db='$AUTHORITY_DB'
-    [[ -f \"\$db\" ]] || { echo 'shared_authority.db not found at $AUTHORITY_DB'; exit 1; }
-    count=\$(sqlite3 \"\$db\" 'SELECT count(*) FROM sqlite_master;' 2>&1) || { echo 'sqlite3 query failed'; exit 1; }
-    [[ \"\$count\" -gt 0 ]] || { echo 'shared_authority.db has no tables'; exit 1; }
-"
+check E3 "SQLite shared authority readable" bash -c '
+    python3 - "'"$AUTHORITY_DB"'" <<'"'"'PY'"'"'
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+db = Path(sys.argv[1])
+if not db.is_file():
+    raise SystemExit(f"shared_authority.db not found at {db}")
+
+attempts = 5
+delay_s = 0.2
+last_exc = None
+
+for attempt in range(1, attempts + 1):
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5.0)
+        try:
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            count = conn.execute("SELECT count(*) FROM sqlite_master;").fetchone()[0]
+        finally:
+            conn.close()
+        if int(count) <= 0:
+            raise SystemExit("shared_authority.db has no tables")
+        raise SystemExit(0)
+    except sqlite3.OperationalError as exc:
+        last_exc = exc
+        if "locked" not in str(exc).lower() or attempt == attempts:
+            break
+        time.sleep(delay_s)
+
+msg = f"sqlite authority query failed after {attempts} attempts"
+if last_exc is not None:
+    msg += f": {last_exc}"
+raise SystemExit(msg)
+PY
+'
 
 # E4: capabilities registry parseable and non-empty
 check E4 "capability registry parseable" bash -c "
