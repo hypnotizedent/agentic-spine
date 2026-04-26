@@ -27,6 +27,13 @@ GIT_LOCK_TTL="${GIT_LOCK_TTL:-300}"
 
 _GIT_LOCK_DIR=""
 
+_git_lock_emit_retry_hint() {
+  local lock_name="${1:-git.lock}"
+  if declare -F auto_file_lock_retry >/dev/null 2>&1; then
+    auto_file_lock_retry "$lock_name" || true
+  fi
+}
+
 _git_lock_proc_start_ticks() {
   local pid="${1:-}"
   [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 1
@@ -126,13 +133,13 @@ acquire_git_lock() {
   fi
 
   if (( owner_alive == 1 )); then
-    auto_file_lock_retry "$lock_name" || true
+    _git_lock_emit_retry_hint "$lock_name"
     echo "STOP: Another git-mutating ops command is running (lock: ${lock_name} pid=$old_pid age=${age}s)" >&2
     echo "Remedy: retry after the live owner exits; inspect it with: ps -p $old_pid -o pid=,etime=,command=" >&2
     return 1
   fi
 
-  auto_file_lock_retry "$lock_name" || true
+  _git_lock_emit_retry_hint "$lock_name"
   echo "STOP: Unable to acquire ${lock_name}" >&2
   echo "Remedy: rerun the same governed command; if the prior owner is gone, stale-lock recovery will reclaim it automatically." >&2
   return 1
