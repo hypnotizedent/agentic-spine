@@ -133,10 +133,10 @@ resolve_wave_claimed_paths() {
   local terminal_id="${1:-}"
   local wave_kind="${2:-production}"
   [[ -n "$terminal_id" ]] || return 0
-  # Engineering waves are controller-direct / runtime-state-only and should not
-  # claim broad repo paths that collide with production waves on the same
-  # terminal.  Give them a narrow isolated namespace instead.
-  if [[ "$wave_kind" == "engineering" ]]; then
+  # Engineering/proof waves are controller-direct / runtime-state-only and
+  # should not claim broad repo paths that collide with production waves on the
+  # same terminal.  Give them a narrow isolated namespace instead.
+  if [[ "$wave_kind" == "engineering" || "$wave_kind" == "proof" ]]; then
     printf 'runtime/state\n'
     return 0
   fi
@@ -1094,9 +1094,9 @@ cmd_start() {
     exit 1
   fi
   case "$wave_kind" in
-    production|synthetic|engineering) ;;
+    production|synthetic|engineering|proof) ;;
     *)
-      echo "FAIL: invalid wave kind '$wave_kind' (allowed: production|synthetic|engineering)" >&2
+      echo "FAIL: invalid wave kind '$wave_kind' (allowed: production|synthetic|engineering|proof)" >&2
       exit 1
       ;;
   esac
@@ -3342,13 +3342,13 @@ try:
     # ── Synthetic wave fast-close ──
     _wave_kind = str(state.get("wave_kind") or "production").strip()
     _is_synthetic = _wave_kind == "synthetic"
-    _is_engineering = _wave_kind == "engineering"
+    _is_engineering = _wave_kind in ("engineering", "proof")
     _skip_ceremony = _is_synthetic or _is_engineering
 
     # ── Contract enforcement (wave.lifecycle.yaml) ──
     # Close requires: all watcher checks done/failed, preflight run at least once
     # Synthetic/test waves skip preflight and watcher requirements.
-    # Engineering waves skip ceremony (preflight, watcher, role-flow) but
+    # Engineering/proof waves skip ceremony (preflight, watcher, role-flow) but
     # still enforce dispatch integrity and explicit disposition.
     checks = state.get("watcher_checks", [])
     pf = state.get("preflight")
