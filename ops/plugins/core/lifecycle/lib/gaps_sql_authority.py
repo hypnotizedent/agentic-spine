@@ -7,8 +7,10 @@ Follows the same pattern as plans_sql_authority.py:
 YAML projection is decoupled from the mutation path. Mutations write to
 SQLite only. The YAML projection is refreshed on demand via project_to_yaml().
 
-Authority: SQLite (WAL mode, shared_authority.db)
-Projection: optional runtime YAML snapshot (on demand, not auto-generated on mutation)
+Authority: SQLite (WAL mode, shared_authority.db) — sole source of gap truth
+Projection: runtime YAML snapshot (auto-projected by gaps-authority-bridge after
+every mutation). YAML is display-only, never read as authority input.
+D75 verify gate enforces parity between SQLite and YAML projection.
 """
 
 from __future__ import annotations
