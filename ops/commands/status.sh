@@ -96,7 +96,6 @@ PYTHON
 fi
 
 # ── Context mode (L1 visibility surface) ─────────────────────────────────
-# Replaces the former standalone `ops context` command.
 if [[ "$MODE" == "--context" ]]; then
   JOINED_STATE_BIN="$SPINE_REPO/ops/plugins/core/lifecycle/bin/spine-engine-joined-state"
 

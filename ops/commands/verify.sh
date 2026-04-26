@@ -13,7 +13,6 @@ Usage: ops verify [OPTION]
 Health surfaces:
   ops verify                   Spine coherence front-door authority [default]
   ops verify --infra           Preferred estate/workload health baseline (17 gates)
-  ops verify --core-only       Deprecated compatibility alias; same as --infra
   ops verify --engine-smoke    Engine plumbing smoke test
   ops verify --engine-honesty  Engine orchestration proof (dispatch, wave, telemetry)
   ops verify --spine           Same as default (explicit alias)
@@ -25,7 +24,7 @@ Health surfaces:
 
 Runtime backbone (for scripts and automation):
   ops cap run verify.run -- <scope>
-  Scopes: infra | fast (deprecated) | engine | honesty | spine | domain <id> | release
+  Scopes: infra | engine | honesty | spine | domain <id> | release
 EOF
 }
 
@@ -309,7 +308,7 @@ _verify_all() {
   "$SPINE_ROOT/bin/ops" status --brief || rc=1
 
   _section "INFRASTRUCTURE BASELINE (17 gates)"
-  "$VERIFY_RUN" fast || rc=1
+  "$VERIFY_RUN" infra || rc=1
 
   _section "SECRETS"
   "$SPINE_ROOT/bin/ops" cap run secrets.binding || rc=1
@@ -361,14 +360,6 @@ case "${1:-}" in
     echo
     echo "Runtime verify: workload and infrastructure gates"
     exec "$VERIFY_RUN" infra
-    ;;
-  --core-only)
-    echo "SPINE_ROOT=$SPINE_ROOT"
-    echo "VERIFY_MODE=runtime-workload-gates"
-    echo
-    echo "Runtime verify: workload and infrastructure gates"
-    echo "DEPRECATION: ops verify --core-only is a compatibility alias; prefer ops verify --infra." >&2
-    exec "$VERIFY_RUN" infra --alias-source ops.verify.core-only
     ;;
   --engine-honesty)
     echo "SPINE_ROOT=$SPINE_ROOT"

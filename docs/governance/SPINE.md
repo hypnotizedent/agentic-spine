@@ -32,9 +32,6 @@ cd ~/code/agentic-spine
 - Use `./bin/ops cap run <capability> -- ...` when a capability exists.
 - Use foundational verification for entry and truth checks:
   `./bin/ops cap run verify.engine.run` and `./bin/ops cap run spine.verify`.
-- `ops context` and `ops ready` are deprecated compatibility shims, not normal
-  entry grammar.
-
 ## Principle
 
 If an agent cannot understand how to work here by reading the entry surface,
