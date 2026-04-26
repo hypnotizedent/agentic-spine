@@ -9,13 +9,10 @@ BIRTH_BIN="$ROOT/ops/plugins/core/lifecycle/bin/standing-program-intervention-bi
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-watcher_json="$tmpdir/watcher.json"
-metabolizer_json="$tmpdir/metabolizer.json"
+drift_json="$tmpdir/drift.json"
+python3 "$DRIFT_BIN" --json >"$drift_json"
 
-python3 "$DRIFT_BIN" --json --label com.ronny.alerting-probe-cycle >"$watcher_json"
-python3 "$DRIFT_BIN" --json --label com.ronny.operator-ingress-auto-metabolizer >"$metabolizer_json"
-
-python3 - "$watcher_json" "$metabolizer_json" "$LIB_DIR" "$BIRTH_BIN" <<'PYEOF'
+python3 - "$drift_json" "$LIB_DIR" "$BIRTH_BIN" <<'PYEOF'
 import importlib.machinery
 import importlib.util
 import json
@@ -24,14 +21,41 @@ import sys
 import tempfile
 from pathlib import Path
 
-watcher_path = Path(sys.argv[1])
-metabolizer_path = Path(sys.argv[2])
-lib_dir = Path(sys.argv[3])
-birth_path = Path(sys.argv[4])
+drift_path = Path(sys.argv[1])
+lib_dir = Path(sys.argv[2])
+birth_path = Path(sys.argv[3])
 
 sys.path.insert(0, str(lib_dir))
-import standing_program_exception_v1 as spx
 import delegation_broker as db
+import standing_program_exception_v1 as spx
+
+
+EXPECTED_LABELS = [
+    "com.ronny.alerting-probe-cycle",
+    "com.ronny.operator-ingress-auto-metabolizer",
+    "com.ronny.domain-inventory-refresh-daily",
+    "com.ronny.infra-core-smoke",
+    "com.ronny.simplefin-daily-sync",
+]
+ROLLOUT_LABELS = [
+    "com.ronny.domain-inventory-refresh-daily",
+    "com.ronny.infra-core-smoke",
+    "com.ronny.simplefin-daily-sync",
+]
+BLOCKED_LABELS = [
+    "com.ronny.communications-alerts-dispatcher",
+    "com.ronny.log-rotation-daily",
+    "com.ronny.operator-storage-surface-sync",
+    "com.ronny.finance-backup-weekly",
+    "com.ronny.media-capacity-snapshot-daily",
+]
+EXPECTED_TRIGGERS = {
+    "com.ronny.alerting-probe-cycle": ["threshold_breach", "stale_failure"],
+    "com.ronny.operator-ingress-auto-metabolizer": ["missed_heartbeat"],
+    "com.ronny.domain-inventory-refresh-daily": ["stale_failure"],
+    "com.ronny.infra-core-smoke": ["stale_failure"],
+    "com.ronny.simplefin-daily-sync": ["stale_failure"],
+}
 
 
 def load_birth_module(path: Path):
@@ -54,153 +78,114 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-watcher = read_json(watcher_path)
-metabolizer = read_json(metabolizer_path)
+drift = read_json(drift_path)
+labels = list(drift.get("labels") or [])
+programs = list(drift.get("programs") or [])
+by_label = {}
+for program in programs:
+    if isinstance(program, dict):
+        label = str(program.get("label") or "").strip()
+        if label:
+            by_label[label] = program
 
-watcher_programs = watcher.get("programs", [])
-metabolizer_programs = metabolizer.get("programs", [])
-require(len(watcher_programs) == 1, "watcher drift check did not return exactly one program")
-require(len(metabolizer_programs) == 1, "metabolizer drift check did not return exactly one program")
-require(
-    watcher_programs[0].get("enabled_trigger_types") == ["threshold_breach", "stale_failure"],
-    "watcher enabled trigger types drifted",
-)
-require(
-    metabolizer_programs[0].get("enabled_trigger_types") == ["missed_heartbeat"],
-    "metabolizer enabled trigger types drifted",
-)
+require(set(labels) == set(EXPECTED_LABELS), f"bounded V1 label set drifted: {sorted(labels)}")
+require(set(spx.V1_ALLOWED_LABELS.keys()) == set(EXPECTED_LABELS), "V1 allowed-label set drifted")
+
+for label in EXPECTED_LABELS:
+    require(label in by_label, f"drift check missing expected label: {label}")
+    require(
+        by_label[label].get("enabled_trigger_types") == EXPECTED_TRIGGERS[label],
+        f"enabled trigger types drifted for {label}",
+    )
+
+for label in ROLLOUT_LABELS:
+    require(
+        by_label[label].get("proof_channel_type") == "runtime_telemetry",
+        f"proof channel type drifted for {label}",
+    )
+    require(
+        by_label[label].get("evidence_surface") == "host.launchd.scheduler.health.status",
+        f"proof surface drifted for {label}",
+    )
+
+for blocked in BLOCKED_LABELS:
+    require(blocked not in spx.V1_ALLOWED_LABELS, f"blocked label widened into scope: {blocked}")
+    try:
+        spx.v1_labels([blocked])
+    except ValueError:
+        pass
+    else:
+        raise SystemExit(f"blocked label unexpectedly accepted by v1_labels: {blocked}")
 
 
-def specimen(
+def rollout_specimen(
     *,
     label: str,
-    enabled: list[str],
-    active: list[str],
-    trigger_evaluations: dict,
-    health: str,
-    detail: str,
+    condition_met: bool,
+    observed_status: str,
+    last_run_age_seconds: int,
+    stale_threshold_seconds: int,
+    cadence_seconds: int = 86400,
 ) -> dict:
+    trigger = {
+        "enabled": True,
+        "condition_met": condition_met,
+        "required_observations": 2,
+        "evidence_surface": "host.launchd.scheduler.health.status",
+        "evidence_ref": f"/opt/spine-logs/runtime-jobs.ndjson::{label}",
+        "observed_status": observed_status,
+        "observed_counts": {
+            "scheduler_status": observed_status,
+            "last_run_age_seconds": last_run_age_seconds,
+            "stale_threshold_seconds": stale_threshold_seconds,
+            "cadence_seconds": cadence_seconds,
+            "last_exit_code": 0,
+        },
+        "suggested_actions": [
+            "Inspect host.launchd.scheduler.health.status for the label row.",
+            "Restore scheduled cadence execution for the workload on ai-consolidation.",
+        ],
+        "detail": (
+            f"scheduler_status={observed_status} "
+            f"last_run_age_seconds={last_run_age_seconds} "
+            f"stale_threshold_seconds={stale_threshold_seconds}"
+        ),
+    }
     return {
         "label": label,
         "birth_mode": "standing_program",
-        "intended_node_role": "watcher_node" if "alerting" in label else "execution_host",
-        "source_node": "proxmox-home" if "alerting" in label else "ai-consolidation",
-        "proof_channel": {},
-        "proof_channel_type": "cycle_state" if "alerting" in label else "heartbeat",
-        "proof_channel_host": "proxmox-home" if "alerting" in label else "ai-consolidation",
-        "health": health,
-        "detail": detail,
+        "intended_node_role": "execution_host",
+        "source_node": "ai-consolidation",
+        "proof_channel": {
+            "type": "runtime_telemetry",
+            "host": "ai-consolidation",
+            "path": "/opt/spine-logs/runtime-jobs.ndjson",
+            "label_match": label,
+            "stale_threshold_seconds": 90000,
+        },
+        "proof_channel_type": "runtime_telemetry",
+        "proof_channel_host": "ai-consolidation",
+        "health": "stale" if condition_met else "healthy",
+        "detail": trigger["detail"],
         "last_evidence_at_utc": spx.utc_now(),
-        "staleness_seconds": 0,
-        "stale_threshold_seconds": 300,
-        "evidence_surface": "synthetic.verify",
-        "evidence_ref": f"/tmp/{label}.json",
-        "observed_status": health,
-        "observed_counts": {},
-        "enabled_trigger_types": enabled,
-        "active_trigger_types": active,
-        "drift_present": bool(active),
-        "trigger_evaluations": trigger_evaluations,
+        "staleness_seconds": last_run_age_seconds,
+        "stale_threshold_seconds": stale_threshold_seconds,
+        "evidence_surface": "host.launchd.scheduler.health.status",
+        "evidence_ref": f"/opt/spine-logs/runtime-jobs.ndjson::{label}",
+        "observed_status": observed_status,
+        "observed_counts": dict(trigger["observed_counts"]),
+        "enabled_trigger_types": ["stale_failure"],
+        "active_trigger_types": ["stale_failure"] if condition_met else [],
+        "drift_present": condition_met,
+        "trigger_evaluations": {"stale_failure": trigger},
     }
 
-
-healthy_alert = specimen(
-    label="com.ronny.alerting-probe-cycle",
-    enabled=["threshold_breach", "stale_failure"],
-    active=[],
-    health="healthy",
-    detail="healthy specimen",
-    trigger_evaluations={
-        "threshold_breach": {
-            "enabled": True,
-            "condition_met": False,
-            "required_observations": 1,
-            "evidence_surface": "synthetic.verify",
-            "evidence_ref": "/tmp/watcher.json",
-            "observed_status": "healthy",
-            "observed_counts": {"consecutive_failures": 0, "threshold_failure_count_for_intervention": 5},
-            "suggested_actions": ["none"],
-        },
-        "stale_failure": {
-            "enabled": True,
-            "condition_met": False,
-            "required_observations": 2,
-            "evidence_surface": "synthetic.verify",
-            "evidence_ref": "/tmp/watcher.json",
-            "observed_status": "healthy",
-            "observed_counts": {"last_run_age_seconds": 60, "stale_threshold_seconds": 1200},
-            "suggested_actions": ["none"],
-        },
-    },
-)
-
-stale_metabolizer = specimen(
-    label="com.ronny.operator-ingress-auto-metabolizer",
-    enabled=["missed_heartbeat"],
-    active=["missed_heartbeat"],
-    health="stale",
-    detail="stale heartbeat specimen",
-    trigger_evaluations={
-        "missed_heartbeat": {
-            "enabled": True,
-            "condition_met": True,
-            "required_observations": 2,
-            "evidence_surface": "synthetic.verify",
-            "evidence_ref": "/tmp/metabolizer.json",
-            "observed_status": "stale",
-            "observed_counts": {"heartbeat_age_seconds": 601, "stale_threshold_seconds": 300, "queue_pending": 0},
-            "suggested_actions": ["check service"],
-        },
-    },
-)
-
-threshold_alert = specimen(
-    label="com.ronny.alerting-probe-cycle",
-    enabled=["threshold_breach", "stale_failure"],
-    active=["threshold_breach"],
-    health="failed",
-    detail="threshold breach specimen",
-    trigger_evaluations={
-        "threshold_breach": {
-            "enabled": True,
-            "condition_met": True,
-            "required_observations": 1,
-            "evidence_surface": "synthetic.verify",
-            "evidence_ref": "/tmp/watcher.json",
-            "observed_status": "failed",
-            "observed_counts": {"consecutive_failures": 5, "threshold_failure_count_for_intervention": 5},
-            "suggested_actions": ["check timer"],
-        },
-        "stale_failure": {
-            "enabled": True,
-            "condition_met": False,
-            "required_observations": 2,
-            "evidence_surface": "synthetic.verify",
-            "evidence_ref": "/tmp/watcher.json",
-            "observed_status": "healthy",
-            "observed_counts": {"last_run_age_seconds": 60, "stale_threshold_seconds": 1200},
-            "suggested_actions": ["none"],
-        },
-    },
-)
 
 with tempfile.TemporaryDirectory(prefix="autonomous-exception-birth-v1-") as tmp_state:
     os.environ["SPINE_STATE"] = tmp_state
     Path(tmp_state, "interventions").mkdir(parents=True, exist_ok=True)
 
-    result = birth.process_programs([healthy_alert], state_root=tmp_state, dry_run=False)
-    require(result["birthed"] == 0, "healthy specimen birthed an intervention")
-
-    states = spx.build_exception_specimen_states([stale_metabolizer], tmp_state)
-    require(states[0]["operator_state"] == "standing_stale_or_degraded", "drift state did not surface before birth")
-
-    first = birth.process_programs([stale_metabolizer], state_root=tmp_state, dry_run=False)
-    require(first["birthed"] == 0, "first missed-heartbeat observation birthed too early")
-
-    second = birth.process_programs([stale_metabolizer], state_root=tmp_state, dry_run=False)
-    require(second["birthed"] == 1, "second missed-heartbeat observation did not birth exactly one packet")
-
-    loop_id = "LOOP-VERIFY-AUTONOMOUS-EXCEPTION-BIRTH-V1-20260425"
+    loop_id = "LOOP-VERIFY-AUTONOMOUS-EXCEPTION-BIRTH-V1-ROLLOUT-20260425"
     loop_scope_dir = Path(tmp_state) / "loop-scopes"
     loop_scope_dir.mkdir(parents=True, exist_ok=True)
     (loop_scope_dir / f"{loop_id}.scope.md").write_text(
@@ -213,55 +198,100 @@ with tempfile.TemporaryDirectory(prefix="autonomous-exception-birth-v1-") as tmp
         "horizon: now\n"
         "execution_readiness: runnable\n"
         "execution_mode: single_worker\n"
-        "objective: verify intervention delegation path\n"
+        "objective: verify stale_failure rollout path\n"
         "---\n",
         encoding="utf-8",
     )
-    _, metabolizer_doc = spx.find_open_intervention(
-        tmp_state,
-        "com.ronny.operator-ingress-auto-metabolizer",
-        "missed_heartbeat",
-    )
-    require(metabolizer_doc is not None, "metabolizer intervention missing after birth")
-    delegated = db.delegate(
-        loop_id=loop_id,
-        packet_id=str(metabolizer_doc.get("intervention_id")),
-        state_root=tmp_state,
-        objective="verify intervention delegation path",
-        target_role="worker",
-        delegator_terminal="VERIFY",
-    )
-    require(delegated.get("status") == "delegated", "intervention did not enter delegation broker")
-    require(delegated.get("packet_kind") == "intervention", "broker did not classify intervention packet correctly")
-    pickup = db.pickup(tmp_state, delegation_id=str(delegated["delegation_id"]), worker_terminal="VERIFY-WORKER")
-    require(pickup.get("status") == "picked_up", "worker pickup failed")
-    db.transition(tmp_state, str(delegated["delegation_id"]), "executing", wave_id="WAVE-VERIFY")
-    db.transition(tmp_state, str(delegated["delegation_id"]), "landed", wave_id="WAVE-VERIFY", disposition="verify landed")
-    _, landed_doc = spx.find_open_intervention(
-        tmp_state,
-        "com.ronny.operator-ingress-auto-metabolizer",
-        "missed_heartbeat",
-    )
-    require(landed_doc is None, "landed intervention still counted as open")
 
-    third = birth.process_programs([stale_metabolizer], state_root=tmp_state, dry_run=False)
-    require(third["birthed"] == 0, "landed intervention rebirthed without reconfirmation")
+    for label in ROLLOUT_LABELS:
+        healthy = rollout_specimen(
+            label=label,
+            condition_met=False,
+            observed_status="ok",
+            last_run_age_seconds=60,
+            stale_threshold_seconds=173400,
+        )
+        healthy_result = birth.process_programs([healthy], state_root=tmp_state, dry_run=False)
+        require(healthy_result["birthed"] == 0, f"healthy specimen birthed for {label}")
 
-    states = spx.build_exception_specimen_states([stale_metabolizer], tmp_state)
-    require(states[0]["operator_state"] == "standing_stale_or_degraded", "post-landed drift state did not fall back to degraded without intervention")
+        stale = rollout_specimen(
+            label=label,
+            condition_met=True,
+            observed_status="stale",
+            last_run_age_seconds=200000,
+            stale_threshold_seconds=173400,
+        )
 
-    threshold = birth.process_programs([threshold_alert], state_root=tmp_state, dry_run=False)
-    require(threshold["birthed"] == 1, "threshold breach did not birth immediately")
+        pre_states = spx.build_exception_specimen_states([stale], tmp_state)
+        require(
+            pre_states[0]["operator_state"] == "standing_stale_or_degraded",
+            f"pre-birth degraded state did not surface for {label}",
+        )
 
-    path, doc = spx.find_open_intervention(tmp_state, "com.ronny.alerting-probe-cycle", "threshold_breach")
-    require(path is not None and doc is not None, "threshold intervention not found after birth")
-    doc["disposition"] = "landed"
-    spx.atomic_write_yaml(path, doc)
+        first = birth.process_programs([stale], state_root=tmp_state, dry_run=False)
+        require(first["birthed"] == 0, f"first stale observation birthed too early for {label}")
 
-    rebirth = birth.process_programs([threshold_alert], state_root=tmp_state, dry_run=False)
-    require(rebirth["birthed"] == 1, "terminal disposition did not clear the threshold lock")
+        second = birth.process_programs([stale], state_root=tmp_state, dry_run=False)
+        require(second["birthed"] == 1, f"second stale observation did not birth for {label}")
 
-print("PASS: live evaluation surfaces resolved, dedupe held, birth/reset behavior held, and surface states matched")
+        third = birth.process_programs([stale], state_root=tmp_state, dry_run=False)
+        require(third["birthed"] == 0, f"duplicate stale poll birthed again for {label}")
+        require(third["locked"] >= 1, f"duplicate stale poll was not lock-suppressed for {label}")
+
+        path, doc = spx.find_open_intervention(tmp_state, label, "stale_failure")
+        require(path is not None and doc is not None, f"open intervention missing for {label}")
+        require(
+            str(doc.get("dedupe_key") or "") == f"{label}::stale_failure",
+            f"dedupe key drifted for {label}",
+        )
+
+        active_states = spx.build_exception_specimen_states([stale], tmp_state)
+        require(
+            active_states[0]["operator_state"] == "auto_birthed_intervention_active",
+            f"intervention-active state did not surface for {label}",
+        )
+        require(
+            bool(active_states[0]["manual_birth_not_needed"]),
+            f"manual-birth suppression did not surface for {label}",
+        )
+
+        delegated = db.delegate(
+            loop_id=loop_id,
+            packet_id=str(doc.get("intervention_id")),
+            state_root=tmp_state,
+            objective=f"verify stale_failure rollout for {label}",
+            target_role="worker",
+            delegator_terminal="VERIFY",
+        )
+        require(delegated.get("status") == "delegated", f"delegation broker rejected {label}")
+        require(delegated.get("packet_kind") == "intervention", f"broker packet kind drifted for {label}")
+
+        pickup = db.pickup(tmp_state, delegation_id=str(delegated["delegation_id"]), worker_terminal="VERIFY-WORKER")
+        require(pickup.get("status") == "picked_up", f"worker pickup failed for {label}")
+        db.transition(tmp_state, str(delegated["delegation_id"]), "executing", wave_id=f"WAVE-VERIFY-{label}")
+        db.transition(
+            tmp_state,
+            str(delegated["delegation_id"]),
+            "landed",
+            wave_id=f"WAVE-VERIFY-{label}",
+            disposition="verify landed",
+        )
+
+        _, landed_doc = spx.find_open_intervention(tmp_state, label, "stale_failure")
+        require(landed_doc is None, f"landed intervention still counted as open for {label}")
+
+        rebirth_first = birth.process_programs([stale], state_root=tmp_state, dry_run=False)
+        require(
+            rebirth_first["birthed"] == 0,
+            f"rebirth happened without reconfirmation after landed for {label}",
+        )
+        rebirth_second = birth.process_programs([stale], state_root=tmp_state, dry_run=False)
+        require(
+            rebirth_second["birthed"] == 1,
+            f"rebirth did not happen after reconfirmation for {label}",
+        )
+
+print("PASS: bounded label set held, stale_failure rollout birthed exactly once per label::stale_failure, broker routing held, and scope did not widen")
 PYEOF
 
 echo "D434 PASS: autonomous exception birth V1 behavior held"

@@ -738,6 +738,12 @@ def collect_standing_program_health():
     if interventions_dir.is_dir():
         try:
             import yaml as _yaml_sp  # type: ignore
+            bounded_labels = {
+                str(item.get("label") or "").strip()
+                for item in programs
+                if isinstance(item, dict) and str(item.get("label") or "").strip()
+            }
+            terminal_dispositions = {"cancelled", "dismissed", "landed", "resolved", "superseded"}
             for yf in sorted(interventions_dir.glob("*.yaml")) + sorted(interventions_dir.glob("*.yml")):
                 try:
                     doc = _yaml_sp.safe_load(yf.read_text(encoding="utf-8")) or {}
@@ -745,10 +751,13 @@ def collect_standing_program_health():
                     continue
                 if not isinstance(doc, dict):
                     continue
-                if str(doc.get("disposition", "")).strip() != "active":
+                disposition = str(doc.get("disposition", "")).strip().lower()
+                if not disposition or disposition in terminal_dispositions:
+                    continue
+                label = str(doc.get("source_label") or doc.get("label") or yf.stem).strip()
+                if bounded_labels and label and label not in bounded_labels:
                     continue
                 result["active_interventions"] += 1
-                label = str(doc.get("source_label") or doc.get("label") or yf.stem).strip()
                 if label:
                     result["intervention_labels"].append(label)
         except Exception:

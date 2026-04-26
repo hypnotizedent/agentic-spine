@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +21,20 @@ WATCHER_HEALTH_BIN = REPO_ROOT / "ops" / "plugins" / "core" / "bin" / "watcher-h
 METABOLIZER_STATUS_BIN = (
     REPO_ROOT / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "operator-ingress-auto-metabolizer-status"
 )
+SCHEDULER_HEALTH_BIN = (
+    REPO_ROOT / "ops" / "plugins" / "infra" / "host" / "bin" / "launchd-scheduler-health-status"
+)
+
+STALE_FAILURE_ROLLOUT_LABELS = (
+    "com.ronny.domain-inventory-refresh-daily",
+    "com.ronny.infra-core-smoke",
+    "com.ronny.simplefin-daily-sync",
+)
 
 V1_ALLOWED_LABELS: dict[str, tuple[str, ...]] = {
     "com.ronny.alerting-probe-cycle": ("threshold_breach", "stale_failure"),
     "com.ronny.operator-ingress-auto-metabolizer": ("missed_heartbeat",),
+    **{label: ("stale_failure",) for label in STALE_FAILURE_ROLLOUT_LABELS},
 }
 
 OPEN_DISPOSITIONS = frozenset({
@@ -249,6 +260,24 @@ def _run_json(argv: list[str]) -> tuple[dict[str, Any], bool]:
         "stderr": stderr,
         "returncode": proc.returncode,
     }, False
+
+
+@lru_cache(maxsize=1)
+def _scheduler_health_payload() -> tuple[dict[str, Any], bool]:
+    return _run_json(["python3", str(SCHEDULER_HEALTH_BIN), "--json"])
+
+
+def _scheduler_health_row(label: str) -> tuple[dict[str, Any] | None, dict[str, Any], bool]:
+    data, ok = _scheduler_health_payload()
+    rows = ((data.get("data") or {}).get("rows") or []) if isinstance(data, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("label") or "").strip() == label:
+            return row, data, ok
+    return None, data, ok
 
 
 def _surface_result(
@@ -491,12 +520,181 @@ def evaluate_operator_ingress_auto_metabolizer(entry: dict[str, Any]) -> dict[st
     )
 
 
+def _scheduler_evidence_ref(entry: dict[str, Any], label: str) -> str:
+    proof_channel = entry.get("proof_channel") or {}
+    path = str(proof_channel.get("path") or "").strip()
+    return f"{path}::{label}" if path else label
+
+
+def _scheduler_stale_failure_trigger(
+    entry: dict[str, Any],
+    row: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    status = str((row or {}).get("status") or "unknown").strip().lower()
+    last_run_age = (row or {}).get("age_seconds")
+    try:
+        last_run_age = int(last_run_age) if last_run_age is not None else None
+    except (TypeError, ValueError):
+        last_run_age = None
+
+    stale_threshold = (row or {}).get("stale_threshold_seconds")
+    try:
+        stale_threshold = int(stale_threshold) if stale_threshold is not None else None
+    except (TypeError, ValueError):
+        stale_threshold = None
+
+    cadence_seconds = (row or {}).get("cadence_seconds")
+    try:
+        cadence_seconds = int(cadence_seconds) if cadence_seconds is not None else None
+    except (TypeError, ValueError):
+        cadence_seconds = None
+
+    last_exit_code = (row or {}).get("last_exit_code")
+    try:
+        last_exit_code = int(last_exit_code) if last_exit_code is not None else None
+    except (TypeError, ValueError):
+        last_exit_code = None
+
+    required_observations = 1 if status == "failed" else 2
+    label = str(entry.get("label") or "")
+    return {
+        "stale_failure": {
+            "enabled": True,
+            "condition_met": status in {"stale", "failed"},
+            "required_observations": required_observations,
+            "evidence_surface": "host.launchd.scheduler.health.status",
+            "evidence_ref": _scheduler_evidence_ref(entry, label),
+            "observed_status": status,
+            "observed_counts": {
+                "scheduler_status": status,
+                "last_run_age_seconds": last_run_age,
+                "stale_threshold_seconds": stale_threshold,
+                "cadence_seconds": cadence_seconds,
+                "last_exit_code": last_exit_code,
+            },
+            "suggested_actions": [
+                "Inspect host.launchd.scheduler.health.status for the label row.",
+                "Restore scheduled cadence execution for the workload on ai-consolidation.",
+            ],
+            "detail": (
+                f"scheduler_status={status} "
+                f"last_run_age_seconds={last_run_age} "
+                f"stale_threshold_seconds={stale_threshold}"
+            ),
+        },
+    }
+
+
+def evaluate_scheduler_stale_failure_label(entry: dict[str, Any]) -> dict[str, Any]:
+    label = str(entry.get("label") or "")
+    proof_channel = entry.get("proof_channel") or {}
+    evidence_ref = _scheduler_evidence_ref(entry, label)
+    row, data, ok = _scheduler_health_row(label)
+    trigger_evaluations = _scheduler_stale_failure_trigger(entry, row)
+
+    if not ok:
+        detail = str(data.get("error") or data.get("stderr") or "scheduler health unavailable")
+        return _surface_result(
+            label=label,
+            entry=entry,
+            health="unreachable",
+            detail=detail,
+            last_evidence_at_utc=None,
+            staleness_seconds=None,
+            stale_threshold_seconds=None,
+            evidence_surface="host.launchd.scheduler.health.status",
+            evidence_ref=evidence_ref,
+            observed_status="unreachable",
+            observed_counts={},
+            trigger_evaluations=trigger_evaluations,
+        )
+
+    if row is None:
+        return _surface_result(
+            label=label,
+            entry=entry,
+            health="unknown",
+            detail="scheduler health row missing",
+            last_evidence_at_utc=None,
+            staleness_seconds=None,
+            stale_threshold_seconds=int(proof_channel.get("stale_threshold_seconds", 0) or 0) or None,
+            evidence_surface="host.launchd.scheduler.health.status",
+            evidence_ref=evidence_ref,
+            observed_status="missing_row",
+            observed_counts={},
+            trigger_evaluations=trigger_evaluations,
+        )
+
+    status = str(row.get("status") or "unknown").strip().lower()
+    health = {
+        "ok": "healthy",
+        "allowed_nonzero": "healthy",
+        "exempt": "healthy",
+        "stale": "stale",
+        "failed": "failed",
+        "unknown": "unknown",
+    }.get(status, "unknown")
+    last_run_at = str(row.get("last_run_at") or "").strip() or None
+
+    last_run_age = row.get("age_seconds")
+    try:
+        last_run_age = int(last_run_age) if last_run_age is not None else None
+    except (TypeError, ValueError):
+        last_run_age = None
+
+    stale_threshold = row.get("stale_threshold_seconds")
+    try:
+        stale_threshold = int(stale_threshold) if stale_threshold is not None else None
+    except (TypeError, ValueError):
+        stale_threshold = None
+
+    cadence_seconds = row.get("cadence_seconds")
+    try:
+        cadence_seconds = int(cadence_seconds) if cadence_seconds is not None else None
+    except (TypeError, ValueError):
+        cadence_seconds = None
+
+    last_exit_code = row.get("last_exit_code")
+    try:
+        last_exit_code = int(last_exit_code) if last_exit_code is not None else None
+    except (TypeError, ValueError):
+        last_exit_code = None
+
+    detail = (
+        f"scheduler_status={status} "
+        f"last_run_age_seconds={last_run_age} "
+        f"stale_threshold_seconds={stale_threshold}"
+    )
+    return _surface_result(
+        label=label,
+        entry=entry,
+        health=health,
+        detail=detail,
+        last_evidence_at_utc=last_run_at,
+        staleness_seconds=last_run_age,
+        stale_threshold_seconds=stale_threshold,
+        evidence_surface="host.launchd.scheduler.health.status",
+        evidence_ref=evidence_ref,
+        observed_status=status,
+        observed_counts={
+            "scheduler_status": status,
+            "last_run_age_seconds": last_run_age,
+            "stale_threshold_seconds": stale_threshold,
+            "cadence_seconds": cadence_seconds,
+            "last_exit_code": last_exit_code,
+        },
+        trigger_evaluations=trigger_evaluations,
+    )
+
+
 def evaluate_label(label: str) -> dict[str, Any]:
     entry = registry_entry(label)
     if label == "com.ronny.alerting-probe-cycle":
         return evaluate_alerting_probe_cycle(entry)
     if label == "com.ronny.operator-ingress-auto-metabolizer":
         return evaluate_operator_ingress_auto_metabolizer(entry)
+    if label in STALE_FAILURE_ROLLOUT_LABELS:
+        return evaluate_scheduler_stale_failure_label(entry)
     raise ValueError(f"label outside bounded V1 lane: {label}")
 
 
