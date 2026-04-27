@@ -1,6 +1,6 @@
 ---
 status: authoritative
-owner: "@ronny"
+owner: "@human-steward"
 last_verified: 2026-04-07
 scope: spine-minimal-operating-contract
 ---

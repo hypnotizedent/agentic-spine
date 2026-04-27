@@ -1,6 +1,6 @@
 ---
 status: authoritative
-owner: "@ronny"
+owner: "@human-steward"
 scope: translator-authority-doctrine
 version: 1.1
 updated: "2026-03-31"
@@ -32,7 +32,7 @@ Translator authority lives in the repo-owned translator stack:
 
 - `ops/bindings/translator.authority.contract.yaml`
 - `docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`
-- `ops/bindings/communication.protocol.contract.yaml`
+- `ops/bindings/actor.dialogue.contract.yaml`
 - `ops/bindings/prompt.registry.yaml`
 - `ops/bindings/prompt.library.contract.yaml`
 - `ops/plugins/core/session/templates/`
@@ -94,7 +94,7 @@ Spine V3 decomposes operational authority into seven distinct node types. Each n
 ### 1. Operator Console
 
 - **Host**: MacBook (confirmed control-plane entry)
-- **Actor class**: This is a **node/client surface** used by the human operator (Ronny), not an actor. No AI session holds the operator_console role as its identity — agent sessions attached to this surface act as translator, controller, or worker.
+- **Actor class**: This is a **node/client surface** used by the human steward, not an actor. No AI session holds the operator_console role as its identity — agent sessions attached to this surface act as translator, controller, or worker.
 - **Purpose**: inspect, approve, converse, launch, review
 - **Rule**: Should not remain the long-term home of recurring system authority. The human operator observes and approves; the spine executes.
 

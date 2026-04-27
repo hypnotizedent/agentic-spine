@@ -1,6 +1,6 @@
 ---
 status: authoritative
-owner: "@ronny"
+owner: "@human-steward"
 scope: agent-runtime-contract
 ---
 
@@ -14,9 +14,9 @@ This is the canonical agent entry surface for the current aperture.
 
 ## Current Aperture
 
-<!-- Section: VOLATILE — operator-controlled, changes when Ronny lifts or narrows aperture -->
+<!-- Section: VOLATILE — steward-controlled, changes when the human steward lifts or narrows aperture -->
 
-As of 2026-04-25, Ronny lifted the prior `post-stabilization operator
+As of 2026-04-25, the human steward lifted the prior `post-stabilization operator
 surfaces` aperture. The spine is now in `lean spine subtraction and
 control-plane reconciliation` aperture.
 
@@ -47,11 +47,11 @@ Legal work:
   stale parked operator-visible artifacts, and visible compatibility shells
 - verify, status, reconcile, release/distribution hygiene, and provable bug
   fixes anywhere needed to support this aperture
-- self-healing aperture repair when Ronny, acting as human steward, explicitly
-  identifies aperture capture, intent blackholing, parking-as-deferral, or
-  governance ceremony as the blocker to clean work culture; this work must
-  subtract friction from existing engine/ingress/control-plane paths rather than
-  create a parallel plane
+- self-healing aperture repair when the human steward explicitly identifies
+  aperture capture, intent blackholing, parking-as-deferral, or governance
+  ceremony as the blocker to clean work culture; this work must subtract
+  friction from existing engine/ingress/control-plane paths rather than create a
+  parallel plane
 
 Illegal work under this aperture:
 - unrelated product/domain feature expansion that does not serve lean-spine
@@ -63,11 +63,11 @@ Illegal work under this aperture:
 - host/workload changes that are unrelated to telemetry, custody,
   control-plane truth, or subtraction of exposed compatibility paths
 
-Only Ronny may invoke, change, or lift this aperture.
+Only the human steward may invoke, change, or lift this aperture.
 
 Do not invent a freeze, stance, or override.
 
-Ronny may explicitly call out aperture friction for a bounded self-healing
+The human steward may explicitly call out aperture friction for a bounded self-healing
 repair when the aperture itself is blocking the spine from preserving or
 advancing the work's meaning. This is stewardship, not ownership override: the
 agent must respect the aperture's anti-drift purpose while repairing the rule
@@ -75,14 +75,14 @@ that is causing intent loss. The required move is to reconcile the rule in the
 existing authoritative home, keep the change bounded to the named failure, and
 avoid creating duplicate planes, folders, or parallel doctrine.
 
-Do not create new homes, folders, or doctrine surfaces unless Ronny explicitly says where they belong.
+Do not create new homes, folders, or doctrine surfaces unless the human steward explicitly says where they belong.
 
 If bounded-lane promotion is needed, use an existing canonical home and say why
 that home is the right one.
 
 If a task falls outside the current aperture, refuse and name which aperture rule it violates.
 
-If Ronny says the aperture is the blocker, treat that as a steward-guided
+If the human steward says the aperture is the blocker, treat that as a steward-guided
 request to inspect and repair the aperture boundary itself, not as a reason to
 defer the work.
 
@@ -110,7 +110,7 @@ Do not treat archived or historical docs as first-read entry authority.
 
 Non-promoted work, synthesis artifacts, and parked material belong in
 `$SPINE_STATE/` (canonical: `~/code/.runtime/spine/state/`), not in the repo.
-New repo docs require deliberate promotion and Ronny co-sign.
+New repo docs require deliberate promotion and human-steward co-sign.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
 Governed session start: `ops terminal launch --tool <tool> --terminal <name>`

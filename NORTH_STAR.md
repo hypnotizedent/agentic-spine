@@ -81,8 +81,8 @@ The plumbing must work out of the box for the next new computer or node.
 
 ## The Control Plane Is Node Architecture
 
-The target is not Ronny's MacBook carrying control, execution, and memory by
-force of habit.
+The target is not the human steward's workstation carrying control, execution,
+and memory by force of habit.
 
 The target is a node architecture with explicit responsibility boundaries:
 

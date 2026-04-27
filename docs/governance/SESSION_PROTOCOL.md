@@ -1,6 +1,6 @@
 ---
 status: authoritative
-owner: "@ronny"
+owner: "@human-steward"
 last_verified: 2026-04-16
 scope: session-protocol
 ---
@@ -26,9 +26,9 @@ Agent entry is simple:
 
    The operator workstation is an admitting client, not the unattended runtime
    substrate. Autonomous execution belongs on governed nodes and worker lanes,
-   not on Ronny manually carrying context between terminals.
+   not on the human steward manually carrying context between terminals.
 
-   If Ronny, acting as human steward, identifies aperture capture, intent
+   If the human steward identifies aperture capture, intent
    blackholing, or parking-as-deferral as the live failure, do not route the
    request back into deferral because the repair looks like a new primitive or
    governance change. Treat it as a bounded self-healing repair to the
@@ -296,11 +296,11 @@ active deferred intent belongs in the governed plans authority above.
 
 ## Aperture Self-Healing
 
-The aperture is a drift guard, not a veto over human stewardship. When Ronny
-explicitly says the aperture, parking, or governance ceremony is preventing the
-spine from preserving or advancing the meaning of the work, agents must inspect
-the governing rule that caused the blockage and repair that rule in its
-canonical home when the repair is bounded and subtractive.
+The aperture is a drift guard, not a veto over human stewardship. When the
+human steward explicitly says the aperture, parking, or governance ceremony is
+preventing the spine from preserving or advancing the meaning of the work,
+agents must inspect the governing rule that caused the blockage and repair that
+rule in its canonical home when the repair is bounded and subtractive.
 
 Do not answer aperture-capture reports with "this might be outside the
 aperture" or "pause and think about it" unless the requested work is unrelated

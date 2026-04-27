@@ -8,7 +8,7 @@
 #   4. Contract locks repo-owned authority + thin-adapter policy
 #   5. Contract keeps routing vocabulary supplemental, not replacement
 #   6. TRANSLATOR_AUTHORITY_DOCTRINE_V1.md exists
-#   7. Communication protocol defines the human_operator/agent_actor split
+#   7. Actor dialogue defines the human_operator/agent_actor split
 #   8. No live governance text implies AI sessions can act as operator
 #
 # Category: governance-hygiene | Class: invariant | Severity: high
@@ -98,26 +98,26 @@ if [[ ! -f "$DOCTRINE" ]]; then
   append_detail "TRANSLATOR_AUTHORITY_DOCTRINE_V1.md missing"
 fi
 
-# 7. Communication protocol must carry the canonical actor split.
-COMM_PROTOCOL="$ROOT/ops/bindings/communication.protocol.contract.yaml"
-if [[ ! -f "$COMM_PROTOCOL" ]]; then
+# 7. Actor dialogue must carry the canonical actor split.
+ACTOR_DIALOGUE="$ROOT/ops/bindings/actor.dialogue.contract.yaml"
+if [[ ! -f "$ACTOR_DIALOGUE" ]]; then
   FAIL=1
-  append_detail "communication.protocol.contract.yaml missing"
+  append_detail "actor.dialogue.contract.yaml missing"
 elif [[ "$FAIL" -eq 0 ]]; then
-  operator_actor_class="$(yq e '.pathway.nodes[] | select(.role == "operator") | .actor_class' "$COMM_PROTOCOL" 2>/dev/null | head -n 1)"
-  translator_actor_class="$(yq e '.pathway.nodes[] | select(.role == "translator") | .actor_class' "$COMM_PROTOCOL" 2>/dev/null | head -n 1)"
-  controller_actor_class="$(yq e '.pathway.nodes[] | select(.role == "controller") | .actor_class' "$COMM_PROTOCOL" 2>/dev/null | head -n 1)"
+  operator_actor_class="$(yq e '.pathway.nodes[] | select(.role == "operator") | .actor_class' "$ACTOR_DIALOGUE" 2>/dev/null | head -n 1)"
+  translator_actor_class="$(yq e '.pathway.nodes[] | select(.role == "translator") | .actor_class' "$ACTOR_DIALOGUE" 2>/dev/null | head -n 1)"
+  controller_actor_class="$(yq e '.pathway.nodes[] | select(.role == "controller") | .actor_class' "$ACTOR_DIALOGUE" 2>/dev/null | head -n 1)"
   if [[ "$operator_actor_class" != "human_operator" ]]; then
     FAIL=1
-    append_detail "communication protocol operator actor_class=$operator_actor_class (expected human_operator)"
+    append_detail "actor dialogue operator actor_class=$operator_actor_class (expected human_operator)"
   fi
   if [[ "$translator_actor_class" != "agent_actor" ]]; then
     FAIL=1
-    append_detail "communication protocol translator actor_class=$translator_actor_class (expected agent_actor)"
+    append_detail "actor dialogue translator actor_class=$translator_actor_class (expected agent_actor)"
   fi
   if [[ "$controller_actor_class" != "agent_actor" ]]; then
     FAIL=1
-    append_detail "communication protocol controller actor_class=$controller_actor_class (expected agent_actor)"
+    append_detail "actor dialogue controller actor_class=$controller_actor_class (expected agent_actor)"
   fi
 fi
 
