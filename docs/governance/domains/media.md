@@ -7,7 +7,7 @@ Canonical domain pointer for `media`.
 **`~/code/workbench/agents/media/`**
 
 As of 2026-03-30, canonical L3 media product authority lives in the workbench media home.
-Spine retains engine-facing registrations, routing, gates, and compatibility projections only.
+Spine retains engine-facing registrations, routing, gates, and a thin mix of local authority bindings plus compatibility pointers only.
 
 Relocation: `MEDIA_WORKBENCH_HOME_RELOCATION` (new_truth, ratified 2026-03-30)
 Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
@@ -23,7 +23,7 @@ Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
 ## Spine Engine-Facing Surfaces (retained)
 
 - Capability registrations: `ops/capabilities.yaml` (47 `media.*` IDs, all `implementation_repo: workbench`)
-- Compatibility projections: `ops/bindings/domains/media/` (23 files, marked do-not-edit-here)
+- Compatibility projections / thin pointers: `ops/bindings/domains/media/` (22 files total; retained local authority/projection bindings plus workbench-owned symlink pointers)
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain media`
 
 ## Governance Contracts (spine-owned)
