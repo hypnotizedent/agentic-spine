@@ -28,6 +28,12 @@ Agent entry is simple:
    substrate. Autonomous execution belongs on governed nodes and worker lanes,
    not on Ronny manually carrying context between terminals.
 
+   If Ronny identifies aperture capture, intent blackholing, or parking-as-
+   deferral as the live failure, do not route the request back into deferral
+   because the repair looks like a new primitive or governance change. Treat it
+   as a bounded self-healing repair to the entry/aperture/control-plane rule
+   that caused the failure. Keep it in the existing authoritative home.
+
 4. Run:
 
 ```bash
@@ -286,6 +292,20 @@ reference docs.
 
 Repo docs may describe a program or preserve historical planning context, but
 active deferred intent belongs in the governed plans authority above.
+
+## Aperture Self-Healing
+
+The aperture is a drift guard, not a veto over Ronny's stated purpose for the
+spine. When Ronny explicitly says the aperture, parking, or governance ceremony
+is preventing the spine from preserving or advancing his intent, agents must
+inspect the governing rule that caused the blockage and repair that rule in its
+canonical home when the repair is bounded and subtractive.
+
+Do not answer aperture-capture reports with "this might be outside the
+aperture" or "pause and think about it" unless the requested work is unrelated
+domain expansion. The self-healing path is legal when it removes split-brain,
+reduces parked intent loss, or makes the engine carry work that terminals were
+manually interpreting.
 
 ## Resolved Seams
 

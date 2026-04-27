@@ -45,6 +45,10 @@ If an agent cannot understand how to work here by reading the entry surface,
 the doctrine docs, and running the three commands above, the entry surface is
 too complex.
 
+If the entry surface causes Ronny's intent to be parked, renamed, or reprocessed
+instead of carried forward by the engine, the entry surface is wrong and must be
+reconciled before more workflow ceremony is added.
+
 ## Layer Framing
 
 Persist this distinction or the shell will grow back:
