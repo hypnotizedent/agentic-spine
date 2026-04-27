@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# network-shop-audit-status - Composite shop-network SSOT parity audit (local files only)
+# network-shop-audit-status - Composite shop-network parity audit (local files only)
 #
-# Checks (no SSH/ping; pure SSOT + bindings):
+# Checks (no SSH/ping; pure bindings + SSOT):
 #  1) Duplicate IPs in ssh.targets.yaml (IPv4 only)
 #  2) ssh.targets.yaml ↔ DEVICE_IDENTITY_SSOT.md parity (Shop LAN endpoints)
-#  3) ssh.targets.yaml ↔ SHOP_SERVER_SSOT.md parity (shop managed device rows)
-#  4) Cross-SSOT parity (DEVICE_IDENTITY_SSOT ↔ SHOP_SERVER_SSOT)
+#  3) ssh.targets.yaml ↔ vm.lifecycle.yaml parity (shop VM LAN IPs)
+#  4) Cross-binding parity (DEVICE_IDENTITY_SSOT ↔ vm.lifecycle.yaml)
 #  5) Coverage: Shop LAN endpoints in DEVICE_IDENTITY_SSOT must exist in ssh.targets.yaml
+#
+# Note: checks 3+4 formerly parsed SHOP_SERVER_SSOT.md markdown tables.
+# They now read vm.lifecycle.yaml structured authority directly.
 #
 # Exit:
 #  0 PASS
@@ -20,7 +23,7 @@ SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
 
 BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
 SSOT_DEVICE="$SPINE_ROOT/docs/governance/DEVICE_IDENTITY_SSOT.md"
-SSOT_SHOP="$SPINE_ROOT/docs/governance/SHOP_SERVER_SSOT.md"
+VM_LIFECYCLE="$SPINE_ROOT/ops/bindings/vm.lifecycle.yaml"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
@@ -28,7 +31,7 @@ command -v yq >/dev/null 2>&1 || stop "missing dependency: yq (brew install yq)"
 command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
 [[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
 [[ -f "$SSOT_DEVICE" ]] || stop "missing SSOT: $SSOT_DEVICE"
-[[ -f "$SSOT_SHOP" ]] || stop "missing SSOT: $SSOT_SHOP"
+[[ -f "$VM_LIFECYCLE" ]] || stop "missing binding: $VM_LIFECYCLE"
 
 tmpdir="$(mktemp -d /tmp/network-shop-audit.XXXXXX)"
 cleanup(){ rm -rf "$tmpdir" 2>/dev/null || true; }
@@ -39,7 +42,7 @@ findings=0
 echo "network.shop.audit.status"
 echo "binding: $BINDING"
 echo "ssot-device: $SSOT_DEVICE"
-echo "ssot-shop: $SSOT_SHOP"
+echo "vm-lifecycle: $VM_LIFECYCLE"
 echo
 
 # ── Extract bindings: id -> host (IPv4 only) ───────────────────────────────
@@ -69,28 +72,17 @@ for dev,ip in rows:
     print(f"{dev}\t{ip}")
 PY
 
-# ── Extract SHOP_SERVER "Devices" table: id -> ip (best-effort) ────────────
-shop_tsv="$tmpdir/shop.tsv"
-python3 - "$SSOT_SHOP" >"$shop_tsv" <<'PY'
-import re,sys
-path=sys.argv[1]
-rows=[]
-for line in open(path,'r',encoding='utf-8',errors='ignore'):
-    if not line.startswith("|"): continue
-    parts=[p.strip() for p in line.strip().split("|")[1:-1]]
-    # Look for rows like: | WiFi AP | `ap-shop` (EAP225) | `http://192.168.1.185` | ...
-    if len(parts) < 3: continue
-    namecol=parts[1]
-    m=re.search(r"`([a-z0-9\\-]+)`", namecol)
-    if not m: continue
-    dev=m.group(1)
-    ipm=re.search(r"(\\d+\\.\\d+\\.\\d+\\.\\d+)", " ".join(parts))
-    if not ipm: continue
-    ip=ipm.group(1)
-    rows.append((dev, ip))
-for dev,ip in rows:
-    print(f"{dev}\t{ip}")
-PY
+# ── Extract shop VMs from vm.lifecycle.yaml: ssh_target -> lan_ip ──────────
+vmlife_tsv="$tmpdir/vmlife.tsv"
+yq -r '
+  .vms[]
+  | select(.proxmox_host == "pve")
+  | select(.lan_ip != null)
+  | select(.ssh_target != null)
+  | [.ssh_target, (.lan_ip | tostring)] | @tsv
+' "$VM_LIFECYCLE" \
+  | awk -F'\t' 'NF>=2 && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $1 "\t" $2}' \
+  > "$vmlife_tsv"
 
 echo -n "check 1: duplicate IPs in bindings... "
 dup_report="$tmpdir/dup.txt"
@@ -136,60 +128,60 @@ else
   echo "OK"
 fi
 
-echo -n "check 3: binding ↔ SHOP_SERVER parity... "
+echo -n "check 3: binding ↔ vm.lifecycle parity... "
 par3="$tmpdir/par3.txt"
-python3 - "$bindings_tsv" "$shop_tsv" >"$par3" <<'PY'
+python3 - "$bindings_tsv" "$vmlife_tsv" >"$par3" <<'PY'
 import sys
 bind={}
 for line in open(sys.argv[1],'r'):
     dev,ip=line.rstrip("\n").split("\t",1)
     bind[dev]=ip
-shop={}
+vmlife={}
 for line in open(sys.argv[2],'r'):
     dev,ip=line.rstrip("\n").split("\t",1)
-    shop[dev]=ip
+    vmlife[dev]=ip
 drifts=[]
-for dev,ip in shop.items():
+for dev,ip in vmlife.items():
     if dev in bind and bind[dev]!=ip:
         drifts.append((dev,bind[dev],ip))
-for dev,bip,sip in sorted(drifts):
-    print(f"{dev}\t{bip}\t{sip}")
+for dev,bip,vip in sorted(drifts):
+    print(f"{dev}\t{bip}\t{vip}")
 PY
 if [[ -s "$par3" ]]; then
   echo "FAIL"
-  while IFS=$'\t' read -r dev bip sip; do
-    echo "  DRIFT: ${dev} binding=${bip} SHOP_SERVER_SSOT=${sip}"
-    echo "    fix: $SSOT_SHOP (row containing \`${dev}\`)"
+  while IFS=$'\t' read -r dev bip vip; do
+    echo "  DRIFT: ${dev} binding=${bip} vm.lifecycle=${vip}"
+    echo "    fix: $VM_LIFECYCLE or $BINDING"
   done < "$par3"
   findings=$((findings + $(wc -l <"$par3" | tr -d ' ')))
 else
   echo "OK"
 fi
 
-echo -n "check 4: cross-SSOT parity (DEVICE_IDENTITY ↔ SHOP_SERVER)... "
+echo -n "check 4: cross-binding parity (DEVICE_IDENTITY ↔ vm.lifecycle)... "
 par4="$tmpdir/par4.txt"
-python3 - "$device_tsv" "$shop_tsv" >"$par4" <<'PY'
+python3 - "$device_tsv" "$vmlife_tsv" >"$par4" <<'PY'
 import sys
 devss={}
 for line in open(sys.argv[1],'r'):
     dev,ip=line.rstrip("\n").split("\t",1)
     devss[dev]=ip
-shop={}
+vmlife={}
 for line in open(sys.argv[2],'r'):
     dev,ip=line.rstrip("\n").split("\t",1)
-    shop[dev]=ip
+    vmlife[dev]=ip
 drifts=[]
 for dev,ip in devss.items():
-    if dev in shop and shop[dev]!=ip:
-        drifts.append((dev,ip,shop[dev]))
-for dev,dip,sip in sorted(drifts):
-    print(f"{dev}\t{dip}\t{sip}")
+    if dev in vmlife and vmlife[dev]!=ip:
+        drifts.append((dev,ip,vmlife[dev]))
+for dev,dip,vip in sorted(drifts):
+    print(f"{dev}\t{dip}\t{vip}")
 PY
 if [[ -s "$par4" ]]; then
   echo "FAIL"
-  while IFS=$'\t' read -r dev dip sip; do
-    echo "  DRIFT: ${dev} DEVICE_IDENTITY_SSOT=${dip} SHOP_SERVER_SSOT=${sip}"
-    echo "    fix: $SSOT_DEVICE and/or $SSOT_SHOP"
+  while IFS=$'\t' read -r dev dip vip; do
+    echo "  DRIFT: ${dev} DEVICE_IDENTITY_SSOT=${dip} vm.lifecycle=${vip}"
+    echo "    fix: $SSOT_DEVICE and/or $VM_LIFECYCLE"
   done < "$par4"
   findings=$((findings + $(wc -l <"$par4" | tr -d ' ')))
 else
