@@ -22,7 +22,7 @@ enforcement:
 
 **Authority**: This doctrine is the canonical source of truth for translator governance, execution-plane separation, and session-entry analysis requirements. The machine-evaluable contract at `ops/bindings/translator.authority.contract.yaml` MUST reference this document as its `doctrine_source`. Gate D422 enforces structural compliance. The repo-owned translator stack is the single translator authority; tool-local or home-level adapters are deploy targets only and must remain thin wrappers around repo-owned truth.
 
-**Scope**: Applies to every AI agent session (Claude Code, Codex, ChatGPT, any future surface), every operator console interaction, and every automated pipeline that ingests, normalizes, routes, or renders spine state.
+**Scope**: Applies to every AI agent session (Claude Code, Codex, ChatGPT, any future surface), every human operator interaction via the operator console, and every automated pipeline that ingests, normalizes, routes, or renders spine state. AI sessions are always agent actors under explicit roles — never the human operator.
 
 ---
 
@@ -66,11 +66,11 @@ Adapters must not carry:
 
 Spine V3 exists because two real operational systems — **Mint Prints order intake** and the **Media Stack pipeline** — required consistent, predictable automation that humans alone could not sustain.
 
-Mint Prints exposed the problem first: customer order intakes arrived from email, Shopify webhooks, phone calls, and walk-ins. Each channel had different formatting, different urgency signals, and different data quality. When a human operator (or an AI session acting as operator) tried to normalize, route, and execute these intakes in a single surface, errors compounded: orders were misclassified, follow-ups were dropped, and the execution surface had no memory of what the translation surface had decided.
+Mint Prints exposed the problem first: customer order intakes arrived from email, Shopify webhooks, phone calls, and walk-ins. Each channel had different formatting, different urgency signals, and different data quality. When a human operator — or an AI session collapsing translator and executor into one surface — tried to normalize, route, and execute these intakes in a single surface, errors compounded: orders were misclassified, follow-ups were dropped, and the execution surface had no memory of what the translation surface had decided.
 
 The Media Stack exposed the same pattern at infrastructure scale: download queues, library organization, availability tracking, and rename operations all required translation of messy input into structured action — and the translation step kept collapsing into the execution step, producing ungoverned side effects.
 
-The lesson: **when the thing that interprets intent is the same thing that executes action, there is no checkpoint between misunderstanding and consequence.** The Translator Workflow exists to prevent humans (and AI agents) from directly causing chaos in the terminals.
+The lesson: **when the thing that interprets intent is the same thing that executes action, there is no checkpoint between misunderstanding and consequence.** The Translator Workflow exists to ensure that human intent flows through classification before reaching execution — and that AI agent sessions act under explicit roles (translator, controller, worker), never as the authority source.
 
 ### The Technical Failure
 
@@ -94,8 +94,9 @@ Spine V3 decomposes operational authority into seven distinct node types. Each n
 ### 1. Operator Console
 
 - **Host**: MacBook (confirmed control-plane entry)
+- **Actor class**: This is a **node/client surface** used by the human operator (Ronny), not an actor. No AI session holds the operator_console role as its identity — agent sessions attached to this surface act as translator, controller, or worker.
 - **Purpose**: inspect, approve, converse, launch, review
-- **Rule**: Should not remain the long-term home of recurring system authority. The operator observes and approves; the spine executes.
+- **Rule**: Should not remain the long-term home of recurring system authority. The human operator observes and approves; the spine executes.
 
 ### 2. Translator Node
 

@@ -21,14 +21,43 @@ version: "1.0"
 #     │                          │                                     │
 #     └──(status_rendering)──────┘◀────(execution_receipt)─────────────┘
 #
+# ── Actor Vocabulary ─────────────────────────────────────────────────
+#
+# These four terms collapse the overloaded "operator" word into distinct
+# concepts.  Every governed surface should use the specific term, never
+# bare "operator" when the sentence is about authority or identity.
+#
+#   human_operator   — Ronny.  The sole source of intent, approval,
+#                      priority, disposition, and authority.  No AI
+#                      session may act as or become the human_operator.
+#
+#   agent_actor      — Any AI session, terminal, daemon, or autonomous
+#                      process acting under an explicit role (translator,
+#                      controller, worker, verifier) and custody rules.
+#                      Agent actors execute; they do not originate authority.
+#
+#   operator_console — A node/client surface used by the human_operator
+#                      for inspection, approval, and conversation.  It is
+#                      a surface role, not the human.
+#
+#   operator_ingress — Compatibility path term for human-originated input
+#                      reaching the spine.  Not an agent mailbox.  Readback
+#                      labels should prefer "Human input" or "Ronny →" where
+#                      possible.
+#
+# Governing rule: text that implies an AI session can "act as operator"
+# is a vocabulary bug and must be fixed.
+
 pathway:
   nodes:
     - role: operator
+      actor_class: human_operator  # Ronny — the human authority source, never an AI session
       contract: operator.boundary.contract.yaml  # archived (pre-2026-04-01); operator boundary defined inline below
       position: origin
-      description: "Human strategic authority. Emits intent, receives rendered status."
+      description: "Human strategic authority (Ronny). Emits intent, receives rendered status. No AI session may hold this role."
 
     - role: translator
+      actor_class: agent_actor
       contract: translator.authority.contract.yaml
       position: membrane
       description: >
@@ -36,6 +65,7 @@ pathway:
         Never executes, never attests, never claims success.
 
     - role: controller
+      actor_class: agent_actor
       contract: controller.boundary.contract.yaml
       position: execution
       description: >
@@ -49,8 +79,8 @@ pathway:
       format: natural_language
       protocol: synchronous_conversation
       description: >
-        Operator provides unstructured intent. Translator must classify
-        before forwarding — raw Operator text never reaches Controller.
+        Human operator provides unstructured intent. Translator must classify
+        before forwarding — raw human_operator text never reaches Controller.
 
     - from: translator
       to: controller
@@ -77,7 +107,7 @@ pathway:
       protocol: synchronous_conversation
       description: >
         Translator converts receipts and envelopes into plain-language
-        status. Operator never sees raw YAML or gate output.
+        status. Human operator never sees raw YAML or gate output.
 
 # ── Message Type Definitions ────────────────────────────────────────
 message_types:
@@ -85,7 +115,7 @@ message_types:
     direction: operator_to_translator
     format: natural_language
     fields:
-      - intent              # what the Operator wants
+      - intent              # what the human operator wants
       - constraints         # what must not happen
       - priority            # optional urgency signal
     example: >
@@ -148,7 +178,7 @@ message_types:
 anti_patterns:
   - id: operator_direct_to_controller
     description: >
-      Operator must not directly instruct Controller terminals. This
+      Human operator must not directly instruct Controller terminals. This
       bypasses classification, context preservation, and creates
       floating WIP when the Translator loses track of state.
     symptom: "Human typing cap run commands directly in a controller terminal"
@@ -165,7 +195,7 @@ anti_patterns:
     description: >
       Controller must not interpret raw Operator intent. If a request
       is ambiguous, it must be rejected back to Translator.
-    symptom: "Controller terminal making scope/priority decisions"
+    symptom: "Controller terminal making scope/priority decisions (these belong to the human operator)"
     remedy: "Return ambiguous request to Translator for re-classification"
 
   - id: unreceipted_work
