@@ -1772,6 +1772,78 @@ def operator_vision_section(ov: dict, directional_boundary: dict, temporal_stand
     """
 
 
+def evidence_reviews_section(reviews: list) -> str:
+    """Render evidence review readback — what bundles were reviewed and what they found."""
+    if not reviews:
+        return ""
+    rows = ""
+    for r in reviews:
+        cs = r.get("claim_summary", {})
+        reviewed = int(cs.get("reviewed", 0))
+        adopted = int(cs.get("adopted", 0))
+        parked = int(cs.get("parked", 0))
+        residue = int(cs.get("residue", 0))
+        followup = int(cs.get("followup", 0))
+        tension = int(cs.get("tension", 0))
+        downstream = r.get("downstream_refs", [])
+        slug = r.get("bundle_slug", r.get("review_id", "?"))
+        created = r.get("created_at", "")
+        actor = r.get("actor_source", "unknown")
+        note = r.get("operator_note", "")
+        files = int(r.get("bundle_file_count", 0))
+        source_files = r.get("source_files", [])
+        if not isinstance(source_files, list):
+            source_files = []
+
+        summary_parts = []
+        if adopted:
+            summary_parts.append(f'<span style="color:var(--grn)">{adopted} adopted</span>')
+        if parked:
+            summary_parts.append(f'<span style="color:var(--ylw)">{parked} parked</span>')
+        if residue:
+            summary_parts.append(f'<span style="color:var(--t)">{residue} residue</span>')
+        if followup:
+            summary_parts.append(f'<span style="color:var(--blu)">{followup} followup</span>')
+        if tension:
+            summary_parts.append(f'<span style="color:var(--red)">{tension} tension</span>')
+        summary_line = " · ".join(summary_parts) if summary_parts else "no claims classified"
+
+        downstream_line = ""
+        if downstream:
+            if isinstance(downstream, list):
+                downstream_text = " -> ".join(str(ref) for ref in downstream)
+            else:
+                downstream_text = str(downstream)
+            downstream_line = (
+                f'<div style="font-family:var(--m);font-size:.45rem;color:var(--cyn);margin-top:.1rem;opacity:.7">'
+                f'fed {_h(downstream_text)}</div>'
+            )
+        source_line = ""
+        if source_files:
+            source_line = (
+                f'<div style="font-size:.45rem;color:var(--tm);margin-top:.1rem">'
+                f'{len(source_files)} source file(s) recorded</div>'
+            )
+
+        rows += (
+            f'<div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">'
+            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
+            f'<span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(slug)}</span>'
+            f'<span style="font-size:.45rem;color:var(--tm)">{_h(actor)}</span>'
+            f'</div>'
+            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{files} files · {_h(created)}</div>'
+            f'<div style="font-size:.5rem;margin-top:.1rem">{reviewed} claims: {summary_line}</div>'
+            f'<div style="font-size:.45rem;color:var(--tm);margin-top:.1rem">{_h(note)}</div>'
+            f'{source_line}{downstream_line}'
+            f'</div>'
+        )
+    return f"""
+    <details>
+      <summary>Evidence Reviews <span class="det-count">{len(reviews)} bundles</span></summary>
+      <div class="det-body">{rows}</div>
+    </details>"""
+
+
 def operator_front_door_section(fd: dict) -> str:
     """Render the operator default read-model as a compact grid."""
     if not fd:
@@ -1927,6 +1999,7 @@ def generate(payload: dict | None = None) -> str:
     sec_exec = execution_host_section(p["node_roles"])
     sec_birth = birth_mode_section(p.get("birth_mode_audit", {}))
     sec_terminal = terminal_telemetry_section(p.get("terminal_telemetry", {}))
+    sec_reviews = evidence_reviews_section(p.get("evidence_reviews", []))
     sec_comms = comms_incident_card(p["work_state"]["comms_queue"])
     sec_timeline = timeline_section(git_log, p.get("continuity", {}))
     sec_caps = capability_atlas(caps_data, inv_counts)
@@ -1996,6 +2069,7 @@ def generate(payload: dict | None = None) -> str:
   {sec_timeline}
   <section id="workstate-drilldown"><div class="sh">Work State</div>{sec_work}</section>
   {sec_vision}
+  {sec_reviews}
   {sec_infra}
   {sec_caps}
   {sec_gates}

@@ -1749,6 +1749,59 @@ def collect_invocation_counts() -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Evidence reviews
+# ---------------------------------------------------------------------------
+
+def collect_evidence_reviews() -> list[dict]:
+    """Scan .evidence/spine/reviews/ for review-meta.yaml files."""
+    def _int_field(value) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    reviews_dir = EVIDENCE_ROOT / "reviews"
+    if not reviews_dir.is_dir():
+        return []
+    items: list[dict] = []
+    for meta_path in sorted(reviews_dir.glob("*/review-meta.yaml"), reverse=True):
+        doc = _yaml_load(meta_path)
+        if not isinstance(doc, dict):
+            continue
+        cs = doc.get("claim_summary", {})
+        if not isinstance(cs, dict):
+            cs = {}
+        source_files = doc.get("source_files", [])
+        if not isinstance(source_files, list):
+            source_files = []
+        downstream_refs = doc.get("downstream_refs", [])
+        if isinstance(downstream_refs, str):
+            downstream_refs = [ref.strip() for ref in downstream_refs.split(",") if ref.strip()]
+        elif not isinstance(downstream_refs, list):
+            downstream_refs = []
+        items.append({
+            "review_id": doc.get("review_id", meta_path.parent.name),
+            "bundle_slug": doc.get("bundle_slug", ""),
+            "context_domain": doc.get("context_domain", ""),
+            "created_at": doc.get("created_at", ""),
+            "actor_source": doc.get("actor_source", "unknown"),
+            "bundle_file_count": _int_field(doc.get("bundle_file_count", 0)),
+            "source_files": [str(path) for path in source_files],
+            "operator_note": doc.get("operator_note", ""),
+            "claim_summary": {
+                "reviewed": _int_field(cs.get("reviewed", 0)),
+                "adopted": _int_field(cs.get("adopted", 0)),
+                "parked": _int_field(cs.get("parked", 0)),
+                "residue": _int_field(cs.get("residue", 0)),
+                "followup": _int_field(cs.get("followup", 0)),
+                "tension": _int_field(cs.get("tension", 0)),
+            },
+            "downstream_refs": [str(ref) for ref in downstream_refs],
+        })
+    return items[:10]
+
+
+# ---------------------------------------------------------------------------
 # Payload assembly
 # ---------------------------------------------------------------------------
 
@@ -1822,6 +1875,7 @@ def build_payload(compact: bool = False) -> dict:
             operator_vision, active_handoffs, attention
         ),
         "temporal_standing": temporal_standing,
+        "evidence_reviews": collect_evidence_reviews(),
     }
 
     # Front door aggregation — reads from the payload built above

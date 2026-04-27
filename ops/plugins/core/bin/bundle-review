@@ -17,6 +17,14 @@ BUNDLE_PATH=""
 CONTEXT_DOMAIN=""
 REPORT_FILE=""
 OPERATOR_NOTE=""
+ACTOR_SOURCE=""
+CLAIMS_REVIEWED=0
+CLAIMS_ADOPTED=0
+CLAIMS_PARKED=0
+CLAIMS_RESIDUE=0
+CLAIMS_FOLLOWUP=0
+CLAIMS_TENSION=0
+DOWNSTREAM_REFS=""
 
 usage() {
   cat <<'USAGE'
@@ -37,6 +45,14 @@ Options:
   --context-domain <id>            broad domain context (e.g. core, mint, media)
   --operator-note <text>           why this bundle matters
   --report-file <path>             completed report file (required for --write-report)
+  --actor-source <text>            who produced the review (e.g. "claude-code", "ronny")
+  --claims-reviewed <n>            total claims identified in bundle
+  --claims-adopted <n>             claims covered by existing authority
+  --claims-parked <n>              claims parked for later
+  --claims-residue <n>             claims classified as residue/duplicate
+  --claims-followup <n>            claims needing follow-up investigation
+  --claims-tension <n>             claims in tension with existing authority
+  --downstream-refs <csv>          comma-separated downstream loop/packet/commit refs
   --json                           machine-readable output
 
 Notes:
@@ -51,6 +67,16 @@ fail() {
   exit 1
 }
 
+require_nonnegative_int() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "$name must be a non-negative integer (got '$value')"
+}
+
+yaml_single_quote() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
@@ -60,6 +86,14 @@ while [[ $# -gt 0 ]]; do
     --context-domain) CONTEXT_DOMAIN="${2:?--context-domain requires value}"; shift 2 ;;
     --operator-note) OPERATOR_NOTE="${2:?--operator-note requires value}"; shift 2 ;;
     --report-file) REPORT_FILE="${2:?--report-file requires value}"; shift 2 ;;
+    --actor-source) ACTOR_SOURCE="${2:?--actor-source requires value}"; shift 2 ;;
+    --claims-reviewed) CLAIMS_REVIEWED="${2:?--claims-reviewed requires value}"; shift 2 ;;
+    --claims-adopted) CLAIMS_ADOPTED="${2:?--claims-adopted requires value}"; shift 2 ;;
+    --claims-parked) CLAIMS_PARKED="${2:?--claims-parked requires value}"; shift 2 ;;
+    --claims-residue) CLAIMS_RESIDUE="${2:?--claims-residue requires value}"; shift 2 ;;
+    --claims-followup) CLAIMS_FOLLOWUP="${2:?--claims-followup requires value}"; shift 2 ;;
+    --claims-tension) CLAIMS_TENSION="${2:?--claims-tension requires value}"; shift 2 ;;
+    --downstream-refs) DOWNSTREAM_REFS="${2:?--downstream-refs requires value}"; shift 2 ;;
     --json) JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown arg: $1" ;;
@@ -158,6 +192,12 @@ if [[ "$MODE" == "write-report" ]]; then
 
   [[ -n "$REPORT_FILE" ]] || fail "--report-file required for --write-report"
   [[ -f "$REPORT_FILE" ]] || fail "report file not found: $REPORT_FILE"
+  require_nonnegative_int "--claims-reviewed" "$CLAIMS_REVIEWED"
+  require_nonnegative_int "--claims-adopted" "$CLAIMS_ADOPTED"
+  require_nonnegative_int "--claims-parked" "$CLAIMS_PARKED"
+  require_nonnegative_int "--claims-residue" "$CLAIMS_RESIDUE"
+  require_nonnegative_int "--claims-followup" "$CLAIMS_FOLLOWUP"
+  require_nonnegative_int "--claims-tension" "$CLAIMS_TENSION"
 
   # Create review directory
   mkdir -p "$REVIEW_DIR"
@@ -167,6 +207,20 @@ if [[ "$MODE" == "write-report" ]]; then
 
   # Count bundle files for metadata
   file_count="$(find "$BUNDLE_ABS" -type f -name '*.md' | wc -l | tr -d ' ')"
+  source_files_yaml=""
+  while IFS= read -r source_file; do
+    source_files_yaml+="  - '$(yaml_single_quote "$source_file")'"$'\n'
+  done < <(find "$BUNDLE_ABS" -type f -name '*.md' | sort)
+
+  downstream_refs_yaml=""
+  if [[ -n "$DOWNSTREAM_REFS" ]]; then
+    IFS=',' read -r -a downstream_ref_array <<< "$DOWNSTREAM_REFS"
+    for downstream_ref in "${downstream_ref_array[@]}"; do
+      downstream_ref="$(printf "%s" "$downstream_ref" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      [[ -z "$downstream_ref" ]] && continue
+      downstream_refs_yaml+="  - '$(yaml_single_quote "$downstream_ref")'"$'\n'
+    done
+  fi
 
   # Write review metadata
   NOW_ISO="$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -176,12 +230,24 @@ status: non-authoritative
 bundle_path: '$BUNDLE_ABS'
 bundle_slug: $BUNDLE_SLUG
 bundle_file_count: $file_count
+source_files:
+${source_files_yaml:-  []}
 context_domain: '${CONTEXT_DOMAIN:-}'
 operator_note: '${OPERATOR_NOTE:-}'
+actor_source: '${ACTOR_SOURCE:-unknown}'
 report_path: '$REPORT_OUT'
 created_at: '$NOW_ISO'
 created_by: $CAPABILITY
 authority_level: none
+claim_summary:
+  reviewed: $CLAIMS_REVIEWED
+  adopted: $CLAIMS_ADOPTED
+  parked: $CLAIMS_PARKED
+  residue: $CLAIMS_RESIDUE
+  followup: $CLAIMS_FOLLOWUP
+  tension: $CLAIMS_TENSION
+downstream_refs:
+${downstream_refs_yaml:-  []}
 note: This is a non-authoritative review artifact. No claims are promoted by its existence.
 META
 
