@@ -8,6 +8,8 @@
 #   4. Contract locks repo-owned authority + thin-adapter policy
 #   5. Contract keeps routing vocabulary supplemental, not replacement
 #   6. TRANSLATOR_AUTHORITY_DOCTRINE_V1.md exists
+#   7. Communication protocol defines the human_operator/agent_actor split
+#   8. No live governance text implies AI sessions can act as operator
 #
 # Category: governance-hygiene | Class: invariant | Severity: high
 set -euo pipefail
@@ -94,6 +96,52 @@ DOCTRINE="$ROOT/docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md"
 if [[ ! -f "$DOCTRINE" ]]; then
   FAIL=1
   append_detail "TRANSLATOR_AUTHORITY_DOCTRINE_V1.md missing"
+fi
+
+# 7. Communication protocol must carry the canonical actor split.
+COMM_PROTOCOL="$ROOT/ops/bindings/communication.protocol.contract.yaml"
+if [[ ! -f "$COMM_PROTOCOL" ]]; then
+  FAIL=1
+  append_detail "communication.protocol.contract.yaml missing"
+elif [[ "$FAIL" -eq 0 ]]; then
+  operator_actor_class="$(yq e '.pathway.nodes[] | select(.role == "operator") | .actor_class' "$COMM_PROTOCOL" 2>/dev/null | head -n 1)"
+  translator_actor_class="$(yq e '.pathway.nodes[] | select(.role == "translator") | .actor_class' "$COMM_PROTOCOL" 2>/dev/null | head -n 1)"
+  controller_actor_class="$(yq e '.pathway.nodes[] | select(.role == "controller") | .actor_class' "$COMM_PROTOCOL" 2>/dev/null | head -n 1)"
+  if [[ "$operator_actor_class" != "human_operator" ]]; then
+    FAIL=1
+    append_detail "communication protocol operator actor_class=$operator_actor_class (expected human_operator)"
+  fi
+  if [[ "$translator_actor_class" != "agent_actor" ]]; then
+    FAIL=1
+    append_detail "communication protocol translator actor_class=$translator_actor_class (expected agent_actor)"
+  fi
+  if [[ "$controller_actor_class" != "agent_actor" ]]; then
+    FAIL=1
+    append_detail "communication protocol controller actor_class=$controller_actor_class (expected agent_actor)"
+  fi
+fi
+
+# 8. Live governance text must not collapse agent actors into the human operator.
+if [[ "$FAIL" -eq 0 ]]; then
+  banned_hits="$(
+    grep -RInE \
+      -e 'AI session acting as operator' \
+      -e 'acting as operator' \
+      -e 'agent operator' \
+      -e 'raw Operator intent' \
+      "$ROOT/AGENTS.md" \
+      "$ROOT/NORTH_STAR.md" \
+      "$ROOT/docs/governance" \
+      "$ROOT/ops/bindings" \
+      2>/dev/null \
+    | grep -v '/ops/archive/' \
+    | grep -v '/docs/reference/' \
+    || true
+  )"
+  if [[ -n "$banned_hits" ]]; then
+    FAIL=1
+    append_detail "operator actor vocabulary drift: $(printf '%s' "$banned_hits" | head -n 3 | tr '\n' ' ')"
+  fi
 fi
 
 if [[ "$FAIL" -eq 1 ]]; then
