@@ -223,8 +223,6 @@ PY
     printf "  projection residue: %s stale scope file(s)\n" "$PROJECTION_RESIDUE"
   fi
   printf "  open gaps:      %s\n" "$OPEN_GAPS"
-  printf "  active waves:   %s\n" "$ACTIVE_WAVES"
-  printf "  orphaned waves: %s\n" "$ORPHANED_WAVES"
   echo "─── verify / coherence ─────────────────────────────"
   printf "  spine verify:   %s\n" "$VERIFY_STATUS"
   if [[ -n "$VERIFY_TEMPORAL_CLASS" ]]; then
@@ -254,11 +252,6 @@ PY
     echo "─── history ────────────────────────────────────────"
     printf "  %s\n" "$HISTORY_NOTE"
   fi
-  echo "─── execution lane truth ───────────────────────────"
-  printf "  mailroom execution:      %s\n" "capability_backed"
-  printf "  agent tool bridge:       %s\n" "deferred"
-  printf "  interactive delegation:  %s\n" "explicit_worker_pickup_required"
-  printf "  autonomous AI agent:     %s\n" "not_delivered"
   echo "─────────────────────────────────────────────────────"
   exit 0
 fi
@@ -1581,10 +1574,6 @@ if mode == "--brief":
         parts.append(f"Gaps: {open_gap_count} open ({unlinked_gap_count} unlinked)")
     else:
         parts.append("Gaps: unknown (authority degraded)")
-    if joined_state_summary.get("active_waves") is not None:
-        parts.append(
-            f"Waves: {joined_state_summary.get('active_waves', 0)} active / {joined_state_summary.get('orphaned_waves', 0)} orphaned"
-        )
     _engine_vs = joined_state_summary.get("engine_verify_status", "unknown")
     _spine_vs = joined_state_summary.get("spine_verify_status", "unknown")
     _secondary_vs = joined_state_summary.get("secondary_verify_status", "unknown")
@@ -1593,28 +1582,12 @@ if mode == "--brief":
         parts.append("Coherence: attention")
     if inbox_actionable:
         parts.append(f"Inbox: {inbox_actionable} actionable")
-    if terminal_telemetry:
-        parts.append(
-            "Terminals:"
-            f" {len(fresh_terminals)} fresh / {len(fresh_custody_terminals)} custody"
-        )
-        if terminal_telemetry_status != "ok":
-            parts.append(f"Custody: {terminal_telemetry_status}")
     _sp_summary = standing_program_health.get("summary") if isinstance(standing_program_health.get("summary"), dict) else {}
     _sp_total = int(_sp_summary.get("total", 0) or 0)
     if _sp_total:
         _sp_healthy = int(_sp_summary.get("healthy", 0) or 0)
         _sp_degraded = sum(int(_sp_summary.get(key, 0) or 0) for key in ("stale", "failed", "unreachable", "never_run", "unknown"))
         parts.append(f"Standing: {_sp_healthy} healthy / {_sp_degraded} drift")
-    _delegation_active = int(delegation_summary.get("active", 0) or 0)
-    _delegation_stale = int(delegation_summary.get("stale", 0) or 0)
-    if _delegation_active or _delegation_stale:
-        if _delegation_active and _delegation_stale:
-            parts.append(f"Delegations: {_delegation_active} active / {_delegation_stale} stale")
-        elif _delegation_active:
-            parts.append(f"Delegations: {_delegation_active} active")
-        else:
-            parts.append(f"Delegations: {_delegation_stale} stale")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
@@ -1625,12 +1598,10 @@ print("  SPINE STATUS")
 print("=" * 72)
 print()
 
-print("COHERENCE SUMMARY")
+print("VERIFY / HEALTH")
 print("-" * 72)
-print(f"  open loops:         {joined_state_summary.get('open_loops', len(open_loops))}")
+print(f"  open work items:    {joined_state_summary.get('open_loops', len(open_loops))}")
 print(f"  open gaps:          {joined_state_summary.get('open_gaps', open_gap_count)}")
-print(f"  active waves:       {joined_state_summary.get('active_waves', '?')}")
-print(f"  orphaned waves:     {joined_state_summary.get('orphaned_waves', '?')}")
 print(f"  engine verify:      {joined_state_summary.get('engine_verify_status', 'unknown')}")
 print(f"  spine verify:       {joined_state_summary.get('spine_verify_status', 'unknown')}")
 print(f"  secondary verify:   {joined_state_summary.get('secondary_verify_status', 'unknown')}")
@@ -1707,18 +1678,6 @@ if _sp_total:
         print(f"  {label:30s} {health:12s} {detail}")
     print()
 
-if int(delegation_summary.get("count", 0) or 0):
-    print("DELEGATIONS")
-    print("-" * 72)
-    print(f"  total:              {int(delegation_summary.get('count', 0) or 0)}")
-    print(f"  active:             {int(delegation_summary.get('active', 0) or 0)}")
-    print(f"  stale:              {int(delegation_summary.get('stale', 0) or 0)}")
-    for state_name in ("delegated", "picked_up", "executing", "needs_review", "landed", "cancelled"):
-        state_count = int((delegation_summary.get('by_state') or {}).get(state_name, 0) or 0)
-        if state_count:
-            print(f"  {state_name:18s} {state_count}")
-    print()
-
 # ── Open Loops ──
 sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "-": 4, "unknown": 5}
 sorted_loops = sorted(open_loops, key=lambda x: sev_order.get(x["severity"], 9))
@@ -1727,7 +1686,7 @@ sorted_loops = sorted(open_loops, key=lambda x: sev_order.get(x["severity"], 9))
 eligible_loops = [l for l in sorted_loops if l.get("horizon", "now") == "now" and l.get("execution_readiness", "runnable") == "runnable"]
 deferred_loops = [l for l in sorted_loops if l not in eligible_loops]
 
-print(f"OPEN LOOPS ({len(open_loops)})")
+print(f"OPEN WORK ({len(open_loops)})")
 print("-" * 72)
 if not open_loops:
     print("  (none)")
@@ -1780,7 +1739,7 @@ print()
 
 # ── Planned Loops ──
 if planned_loops:
-    print(f"PLANNED LOOPS ({len(planned_loops)})")
+    print(f"PLANNED ({len(planned_loops)})")
     print("-" * 72)
     for loop in planned_loops:
         print(f"  [{loop['severity']:8s}] {loop['owner']:15s} {loop['loop_id']}")
@@ -1903,6 +1862,19 @@ if comms_oneliner:
     print(f"  {comms_oneliner}")
     print()
 
+# ── Delegations (drilldown) ──
+if int(delegation_summary.get("count", 0) or 0):
+    print("DELEGATIONS (DRILLDOWN)")
+    print("-" * 72)
+    print(f"  total:              {int(delegation_summary.get('count', 0) or 0)}")
+    print(f"  active:             {int(delegation_summary.get('active', 0) or 0)}")
+    print(f"  stale:              {int(delegation_summary.get('stale', 0) or 0)}")
+    for state_name in ("delegated", "picked_up", "executing", "needs_review", "landed", "cancelled"):
+        state_count = int((delegation_summary.get('by_state') or {}).get(state_name, 0) or 0)
+        if state_count:
+            print(f"  {state_name:18s} {state_count}")
+    print()
+
 # ── Anomalies ──
 if anomalies:
     print(f"ANOMALIES ({len(anomalies)})")
@@ -1913,7 +1885,7 @@ if anomalies:
 
 # ── Summary line ──
 print("=" * 72)
-parts = [f"{len(open_loops)} loops"]
+parts = [f"{len(open_loops)} open"]
 if planned_loops:
     parts.append(f"{len(planned_loops)} planned")
 if gaps_available and open_gap_count:
