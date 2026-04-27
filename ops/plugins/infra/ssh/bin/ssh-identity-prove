@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# ssh-identity-prove - Prove a declared SSH identity admission works
+#
+# Read-only (SSH proof only, no mutation). No prompts. No known_hosts writes.
+# STOP=2 on preconditions (missing binding, missing yq, missing admission).
+#
+# Usage:
+#   ssh-identity-prove --admission-id macbook-primary__nas__ronadmin
+#   ssh-identity-prove --all
+#   ssh-identity-prove --json --admission-id macbook-primary__nas__ronadmin
+#
+# Reads ops/bindings/ssh.identity.admission.yaml, runs the declared proof
+# command, and compares stdout to expected_stdout. Prints pass/fail.
+
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+BINDING_FILE="$SPINE_ROOT/ops/bindings/ssh.identity.admission.yaml"
+
+if [[ ! -f "$BINDING_FILE" ]]; then
+  echo "STOP (2): missing binding file: $BINDING_FILE"
+  exit 2
+fi
+
+if ! command -v yq >/dev/null 2>&1; then
+  echo "STOP (2): yq is required but not found"
+  exit 2
+fi
+
+ADMISSION_ID=""
+ALL_MODE=0
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --admission-id)
+      ADMISSION_ID="${2:?--admission-id requires a value}"
+      shift 2
+      ;;
+    --all)
+      ALL_MODE=1
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --)
+      shift
+      ;;
+    -h|--help)
+      sed -n '7,13p' "$0" | sed 's/^# //'
+      exit 0
+      ;;
+    *)
+      echo "STOP (2): unknown argument: $1"
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$ADMISSION_ID" && "$ALL_MODE" -eq 0 ]]; then
+  echo "STOP (2): --admission-id <id> or --all is required"
+  exit 2
+fi
+
+prove_one() {
+  local aid="$1"
+  local entry
+  entry="$(yq -o=json ".admissions[] | select(.admission_id == \"$aid\")" "$BINDING_FILE" 2>/dev/null)"
+
+  if [[ -z "$entry" || "$entry" == "null" ]]; then
+    if [[ "$JSON_MODE" -eq 1 ]]; then
+      echo "{\"admission_id\":\"$aid\",\"result\":\"error\",\"reason\":\"not_found\"}"
+    else
+      echo "STOP (2): admission_id '$aid' not found in $BINDING_FILE"
+    fi
+    return 2
+  fi
+
+  local cmd expected target target_user
+  cmd="$(echo "$entry" | jq -r '.proof.command // ""')"
+  expected="$(echo "$entry" | jq -r '.proof.expected_stdout // ""')"
+  target="$(echo "$entry" | jq -r '.target // ""')"
+  target_user="$(echo "$entry" | jq -r '.target_user // ""')"
+
+  if [[ -z "$cmd" ]]; then
+    if [[ "$JSON_MODE" -eq 1 ]]; then
+      echo "{\"admission_id\":\"$aid\",\"result\":\"error\",\"reason\":\"no_proof_command\"}"
+    else
+      echo "FAIL $aid: no proof command declared"
+    fi
+    return 1
+  fi
+
+  local actual exit_code=0
+  actual="$(eval "$cmd" 2>/dev/null)" || exit_code=$?
+
+  local result="fail"
+  local reason=""
+  local proved_at
+  proved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ "$exit_code" -ne 0 ]]; then
+    reason="command_failed (exit=$exit_code)"
+  elif [[ "$(echo "$actual" | head -1 | tr -d '[:space:]')" == "$(echo "$expected" | tr -d '[:space:]')" ]]; then
+    result="pass"
+  else
+    reason="stdout_mismatch (expected='$expected', got='$(echo "$actual" | head -1)')"
+  fi
+
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -cn \
+      --arg admission_id "$aid" \
+      --arg target "$target" \
+      --arg target_user "$target_user" \
+      --arg result "$result" \
+      --arg reason "$reason" \
+      --arg proved_at "$proved_at" \
+      --arg actual "$(echo "$actual" | head -1)" \
+      '{admission_id:$admission_id,target:$target,target_user:$target_user,result:$result,reason:($reason | if . == "" then null else . end),proved_at_utc:$proved_at,actual_stdout:$actual}'
+  else
+    if [[ "$result" == "pass" ]]; then
+      echo "PASS $aid: $target ($target_user) proved at $proved_at"
+    else
+      echo "FAIL $aid: $reason"
+    fi
+  fi
+
+  [[ "$result" == "pass" ]] && return 0 || return 1
+}
+
+overall_exit=0
+
+if [[ "$ALL_MODE" -eq 1 ]]; then
+  count="$(yq -r '.admissions | length' "$BINDING_FILE" 2>/dev/null || echo 0)"
+  if [[ "$count" -eq 0 ]]; then
+    echo "STOP (2): no admissions in $BINDING_FILE"
+    exit 2
+  fi
+  results='[]'
+  for i in $(seq 0 $((count - 1))); do
+    aid="$(yq -r ".admissions[$i].admission_id" "$BINDING_FILE")"
+    if [[ "$JSON_MODE" -eq 1 ]]; then
+      one="$(prove_one "$aid")" || overall_exit=1
+      results="$(echo "$results" | jq --argjson r "$one" '. + [$r]')"
+    else
+      prove_one "$aid" || overall_exit=1
+    fi
+  done
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    echo "$results" | jq '.'
+  fi
+else
+  prove_one "$ADMISSION_ID" || overall_exit=$?
+fi
+
+exit "$overall_exit"
