@@ -24,6 +24,10 @@ Usage:
     [--lane-worker <lane:value>]... \
     [--lane-route-target <lane:value>]... \
     [--lane-branch <lane:value>]... \
+    [--source-ref <ref>] \
+    [--human-intent-id <HI-id>] \
+    [--materialization-status <status>] \
+    [--materialization-ref <ref>] \
     [--allow <lane:glob>]... \
     [--forbid <glob>]... \
     [--check <lane:command>]... \
@@ -40,6 +44,10 @@ LANES_CSV=""
 SEQUENCE_CSV=""
 SEQUENCE_MODE="strict"
 FORCE=0
+SOURCE_REF=""
+HUMAN_INTENT_ID=""
+MATERIALIZATION_STATUS=""
+MATERIALIZATION_REF=""
 
 allow_items=()
 forbid_items=()
@@ -64,6 +72,10 @@ while [[ $# -gt 0 ]]; do
     --lane-worker) lane_worker_items+=("${2:-}"); shift 2 ;;
     --lane-route-target) lane_route_target_items+=("${2:-}"); shift 2 ;;
     --lane-branch) lane_branch_items+=("${2:-}"); shift 2 ;;
+    --source-ref) SOURCE_REF="${2:-}"; shift 2 ;;
+    --human-intent-id) HUMAN_INTENT_ID="${2:-}"; shift 2 ;;
+    --materialization-status) MATERIALIZATION_STATUS="${2:-}"; shift 2 ;;
+    --materialization-ref) MATERIALIZATION_REF="${2:-}"; shift 2 ;;
     --allow) allow_items+=("${2:-}"); shift 2 ;;
     --forbid) forbid_items+=("${2:-}"); shift 2 ;;
     --check) check_items+=("${2:-}"); shift 2 ;;
@@ -125,6 +137,19 @@ sequence_mode: $SEQUENCE_MODE
 created_at: $created_at
 updated_at: $created_at
 YAML
+
+if [[ -n "$SOURCE_REF" ]]; then
+  SOURCE_REF="$SOURCE_REF" yq e -i '.source_ref = strenv(SOURCE_REF)' "$manifest"
+fi
+if [[ -n "$HUMAN_INTENT_ID" ]]; then
+  HUMAN_INTENT_ID="$HUMAN_INTENT_ID" yq e -i '.human_intent_id = strenv(HUMAN_INTENT_ID)' "$manifest"
+fi
+if [[ -n "$MATERIALIZATION_STATUS" ]]; then
+  MATERIALIZATION_STATUS="$MATERIALIZATION_STATUS" yq e -i '.materialization_status = strenv(MATERIALIZATION_STATUS)' "$manifest"
+fi
+if [[ -n "$MATERIALIZATION_REF" ]]; then
+  MATERIALIZATION_REF="$MATERIALIZATION_REF" yq e -i '.materialization_ref = strenv(MATERIALIZATION_REF)' "$manifest"
+fi
 
 for rp in "${related_repos[@]+"${related_repos[@]}"}"; do
   [[ -n "$rp" ]] || orchestration_fail "--related-repo requires a path"

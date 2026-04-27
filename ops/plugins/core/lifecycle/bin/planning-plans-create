@@ -16,6 +16,7 @@ set -euo pipefail
 #     [--activation-trigger manual|date|dependency] \
 #     [--depends-on-loop LOOP-ID] \
 #     [--linked-gaps GAP-1,GAP-2]
+#     [--source-ref REF] [--human-intent-id HI-ID]
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/git-lock.sh"
@@ -35,6 +36,10 @@ WORKTREE_PATH=""
 BRANCH_RETENTION_STATE=""
 TRACKING_REF=""
 PR_URL=""
+SOURCE_REF=""
+HUMAN_INTENT_ID=""
+MATERIALIZATION_STATUS=""
+MATERIALIZATION_REF=""
 USED_SOURCE_LOOP_ALIAS=0
 
 while [[ $# -gt 0 ]]; do
@@ -66,6 +71,10 @@ while [[ $# -gt 0 ]]; do
     --branch-retention-state) BRANCH_RETENTION_STATE="${2:-}"; shift 2 ;;
     --tracking-ref) TRACKING_REF="${2:-}"; shift 2 ;;
     --pr-url) PR_URL="${2:-}"; shift 2 ;;
+    --source-ref) SOURCE_REF="${2:-}"; shift 2 ;;
+    --human-intent-id) HUMAN_INTENT_ID="${2:-}"; shift 2 ;;
+    --materialization-status) MATERIALIZATION_STATUS="${2:-}"; shift 2 ;;
+    --materialization-ref) MATERIALIZATION_REF="${2:-}"; shift 2 ;;
     -h|--help)
       cat <<'EOF'
 Usage: planning-plans-create --plan-id PLAN-ID --loop-id LOOP-ID --owner @owner --horizon later|future --review-date YYYY-MM-DD --description "..." [options]
@@ -82,6 +91,12 @@ Optional branch-memory fields:
   --branch-retention-state keep|auto_prune
   --tracking-ref origin/...
   --pr-url https://...
+
+Optional upstream lineage fields:
+  --source-ref OI-...(.field)
+  --human-intent-id HI-...
+  --materialization-status landed|adopted|deferred|...
+  --materialization-ref LOOP-...
 EOF
       exit 0
       ;;
@@ -130,7 +145,7 @@ fi
 acquire_git_lock plans || exit 1
 trap 'release_git_lock' EXIT INT TERM
 
-python3 - "$ROOT" "$PLAN_ID" "$SOURCE_LOOP_ID" "$TARGET_LOOP_ID" "$OWNER" "$HORIZON" "$REVIEW_DATE" "$DESCRIPTION" "$ACTIVATION_TRIGGER" "$DEPENDS_ON_LOOP" "$LINKED_GAPS" "$BRANCH_REF" "$WORKTREE_PATH" "$BRANCH_RETENTION_STATE" "$TRACKING_REF" "$PR_URL" <<'PY'
+python3 - "$ROOT" "$PLAN_ID" "$SOURCE_LOOP_ID" "$TARGET_LOOP_ID" "$OWNER" "$HORIZON" "$REVIEW_DATE" "$DESCRIPTION" "$ACTIVATION_TRIGGER" "$DEPENDS_ON_LOOP" "$LINKED_GAPS" "$BRANCH_REF" "$WORKTREE_PATH" "$BRANCH_RETENTION_STATE" "$TRACKING_REF" "$PR_URL" "$SOURCE_REF" "$HUMAN_INTENT_ID" "$MATERIALIZATION_STATUS" "$MATERIALIZATION_REF" <<'PY'
 from datetime import timezone
 import re
 import sys
@@ -152,6 +167,10 @@ worktree_path = (sys.argv[13] or "").strip()
 branch_retention_state = (sys.argv[14] or "").strip()
 tracking_ref = (sys.argv[15] or "").strip()
 pr_url = (sys.argv[16] or "").strip()
+source_ref = (sys.argv[17] or "").strip()
+human_intent_id = (sys.argv[18] or "").strip()
+materialization_status = (sys.argv[19] or "").strip()
+materialization_ref = (sys.argv[20] or "").strip()
 
 sys.path.insert(0, str(root / "ops/plugins/core/lifecycle/lib"))
 from plans_sql_authority import (  # type: ignore
@@ -232,6 +251,14 @@ if tracking_ref:
     plan["tracking_ref"] = tracking_ref
 if pr_url:
     plan["pr_url"] = pr_url
+if source_ref:
+    plan["source_ref"] = source_ref
+if human_intent_id:
+    plan["human_intent_id"] = human_intent_id
+if materialization_status:
+    plan["materialization_status"] = materialization_status
+if materialization_ref:
+    plan["materialization_ref"] = materialization_ref
 
 upsert_plan(conn, plan)
 insert_event(
@@ -242,7 +269,14 @@ insert_event(
     to_status="deferred",
     reason="planning.plans.create",
     actor="planning.plans.create",
-    payload={"source_loop_id": source_loop_id, "owner": owner},
+    payload={
+        "source_loop_id": source_loop_id,
+        "owner": owner,
+        "source_ref": source_ref,
+        "human_intent_id": human_intent_id,
+        "materialization_status": materialization_status,
+        "materialization_ref": materialization_ref,
+    },
 )
 project_to_surfaces(
     conn,

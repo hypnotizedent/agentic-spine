@@ -162,6 +162,10 @@ def _compose_frontmatter(
     origin_packet: str = "",
     anti_drift_rule: str = "",
     packet_type: str = "",
+    source_ref: str = "",
+    human_intent_id: str = "",
+    materialization_status: str = "",
+    materialization_ref: str = "",
 ) -> str:
     """Compose YAML frontmatter for the packet."""
     fm: dict[str, Any] = {
@@ -181,6 +185,14 @@ def _compose_frontmatter(
         fm["anti_drift_rule"] = anti_drift_rule
     if packet_type:
         fm["type"] = packet_type
+    if source_ref:
+        fm["source_ref"] = source_ref
+    if human_intent_id:
+        fm["human_intent_id"] = human_intent_id
+    if materialization_status:
+        fm["materialization_status"] = materialization_status
+    if materialization_ref:
+        fm["materialization_ref"] = materialization_ref
 
     return yaml.safe_dump(
         fm,
@@ -248,6 +260,10 @@ def create_packet(
     origin_packet: str = "",
     anti_drift_rule: str = "",
     packet_type: str = "",
+    source_ref: str = "",
+    human_intent_id: str = "",
+    materialization_status: str = "",
+    materialization_ref: str = "",
 ) -> dict[str, Any]:
     """Create a controller-prompt packet with governed frontmatter.
 
@@ -292,6 +308,10 @@ def create_packet(
         origin_packet=origin_packet,
         anti_drift_rule=anti_drift_rule,
         packet_type=packet_type,
+        source_ref=source_ref,
+        human_intent_id=human_intent_id,
+        materialization_status=materialization_status,
+        materialization_ref=materialization_ref,
     )
 
     body = _read_body(body_source, body_inline)
@@ -312,5 +332,9 @@ def create_packet(
         "owner": owner,
         "created": created_date,
         "mutation_permitted": mutation_permitted,
+        "source_ref": source_ref,
+        "human_intent_id": human_intent_id,
+        "materialization_status": materialization_status,
+        "materialization_ref": materialization_ref,
         "message": f"packet created at {packet_path}",
     }

@@ -23,6 +23,7 @@ TEMPLATE="$ROOT/ops/plugins/core/lifecycle/templates/loop-scope.template.md"
 LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
 
 NAME="" OBJECTIVE="" PRIORITY="medium" HORIZON="now" READINESS="runnable" EXEC_MODE="single_worker"
+SOURCE_REF="" HUMAN_INTENT_ID="" MATERIALIZATION_STATUS="" MATERIALIZATION_REF=""
 FORCE=0
 JSON_OUTPUT=0
 declare -a PHASES=()
@@ -38,6 +39,10 @@ while [[ $# -gt 0 ]]; do
     --horizon)   HORIZON="${2:?--horizon requires a value}"; shift 2 ;;
     --readiness)       READINESS="${2:?--readiness requires a value}"; shift 2 ;;
     --execution-mode)  EXEC_MODE="${2:?--execution-mode requires a value}"; shift 2 ;;
+    --source-ref)      SOURCE_REF="${2:?--source-ref requires a value}"; shift 2 ;;
+    --human-intent-id) HUMAN_INTENT_ID="${2:?--human-intent-id requires a value}"; shift 2 ;;
+    --materialization-status) MATERIALIZATION_STATUS="${2:?--materialization-status requires a value}"; shift 2 ;;
+    --materialization-ref) MATERIALIZATION_REF="${2:?--materialization-ref requires a value}"; shift 2 ;;
     --phase)           PHASES+=("${2:?--phase requires a value}"); shift 2 ;;
     --success)   SUCCESS_CRITERIA+=("${2:?--success requires a value}"); shift 2 ;;
     --dod)       DOD_ITEMS+=("${2:?--dod requires a value}"); shift 2 ;;
@@ -47,6 +52,8 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low]"
       echo "       [--horizon now|later|future] [--readiness runnable|blocked]"
       echo "       [--execution-mode single_worker|orchestrator_subagents]"
+      echo "       [--source-ref REF] [--human-intent-id HI-ID]"
+      echo "       [--materialization-status STATUS] [--materialization-ref REF]"
       echo "       [--phase \"Step 1:desc\"]... [--success \"criterion\"]... [--dod \"item\"]..."
       echo "       [--force] [--json]"
       echo ""
@@ -232,6 +239,30 @@ fi
 if [[ "$EXEC_MODE" != "single_worker" ]]; then
   sed -i '' "s/^execution_mode: single_worker$/execution_mode: ${EXEC_MODE}/" "$SCOPE_FILE_TMP"
 fi
+yaml_quote() {
+  python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"
+}
+insert_frontmatter_field_after_execution_mode() {
+  local key="$1"
+  local value="$2"
+  local quoted
+  quoted="$(yaml_quote "$value")"
+  sed -i '' "/^execution_mode:/a\\
+${key}: ${quoted}
+" "$SCOPE_FILE_TMP"
+}
+if [[ -n "$SOURCE_REF" ]]; then
+  insert_frontmatter_field_after_execution_mode "source_ref" "$SOURCE_REF"
+fi
+if [[ -n "$HUMAN_INTENT_ID" ]]; then
+  insert_frontmatter_field_after_execution_mode "human_intent_id" "$HUMAN_INTENT_ID"
+fi
+if [[ -n "$MATERIALIZATION_STATUS" ]]; then
+  insert_frontmatter_field_after_execution_mode "materialization_status" "$MATERIALIZATION_STATUS"
+fi
+if [[ -n "$MATERIALIZATION_REF" ]]; then
+  insert_frontmatter_field_after_execution_mode "materialization_ref" "$MATERIALIZATION_REF"
+fi
 
 # Append scaffold sections for consistent loop structure
 {
@@ -294,8 +325,12 @@ print(json.dumps({
     'execution_readiness': sys.argv[7],
     'execution_mode': sys.argv[8],
     'objective': sys.argv[9],
+    'source_ref': sys.argv[10],
+    'human_intent_id': sys.argv[11],
+    'materialization_status': sys.argv[12],
+    'materialization_ref': sys.argv[13],
 }))
-" "$LOOP_ID" "$(date -u +%Y-%m-%d)" "$LOOP_STATUS" "$SCOPE" "$PRIORITY" "$HORIZON" "$READINESS" "$EXEC_MODE" "$OBJECTIVE")"
+" "$LOOP_ID" "$(date -u +%Y-%m-%d)" "$LOOP_STATUS" "$SCOPE" "$PRIORITY" "$HORIZON" "$READINESS" "$EXEC_MODE" "$OBJECTIVE" "$SOURCE_REF" "$HUMAN_INTENT_ID" "$MATERIALIZATION_STATUS" "$MATERIALIZATION_REF")"
 
 SQLITE_OK=0
 if [[ -x "$LOOPS_BRIDGE" ]]; then

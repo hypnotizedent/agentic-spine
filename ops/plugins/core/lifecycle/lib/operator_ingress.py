@@ -1402,12 +1402,22 @@ def promote_operator_ingress(
         loop_already_exists = (orch_dir / "manifest.yaml").exists()
 
         if not loop_already_exists:
+            human_intent = doc.get("human_intent")
+            human_intent_id = ""
+            source_ref = ingress_id
+            if isinstance(human_intent, dict):
+                human_intent_id = str(human_intent.get("intent_id") or "").strip()
+                source_ref = str(human_intent.get("source_ref") or "").strip() or ingress_id
             proc = subprocess.run(
                 [
                     str(loop_open_script),
                     "--loop-id", loop_id,
                     "--apply-owner", "activation_consumer",
                     "--repo", str(repo_root),
+                    "--source-ref", source_ref,
+                    "--human-intent-id", human_intent_id,
+                    "--materialization-status", "routed",
+                    "--materialization-ref", loop_id,
                 ],
                 capture_output=True,
                 text=True,

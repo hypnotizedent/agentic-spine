@@ -338,10 +338,14 @@ def _projection_entry(plan: dict[str, Any]) -> dict[str, Any]:
         "promoted_at_utc",
         "promoted_loop_id",
         "review_date",
+        "source_ref",
         "source_loop_id",
         "status",
         "target_loop_id",
         "tracking_ref",
+        "human_intent_id",
+        "materialization_status",
+        "materialization_ref",
         "worktree_path",
         "pr_url",
     ]
@@ -363,11 +367,17 @@ def _placeholder_doc_text(plan: dict[str, Any], generated_at_utc: str) -> str:
         f"- source_loop_id: `{plan.get('source_loop_id', '')}`",
         f"- owner: `{plan.get('owner', '')}`",
         f"- review_date: `{plan.get('review_date', '')}`",
+    ]
+    for key in ["source_ref", "human_intent_id", "materialization_status", "materialization_ref"]:
+        value = plan.get(key)
+        if value:
+            lines.append(f"- {key}: `{value}`")
+    lines.extend([
         "",
         "## Description",
         "",
         str(plan.get("description") or ""),
-    ]
+    ])
     branch_lines = []
     for key in ["branch_ref", "branch_retention_state", "tracking_ref", "worktree_path", "pr_url"]:
         value = plan.get(key)
