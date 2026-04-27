@@ -15,9 +15,10 @@ vendor surface, or one workstation staying special.
 The spine is correct only if it reduces operator friction when the estate is
 under stress.
 
-The spine serves Ronny's intent. Governance artifacts exist to preserve,
-advance, and verify that intent; they are not the source of meaning and must not
-turn the intent into parked administrative residue.
+The spine is a clean, honest work culture guided by a human steward. Governance
+artifacts exist to preserve, advance, and verify the meaning of the work; they
+are not the source of meaning and must not turn human guidance into parked
+administrative residue.
 
 Recovery is the test.
 
@@ -115,7 +116,7 @@ Gitea instance. GitHub is a window, not a door.
 - Not a bucket of domain apps
 - Not a human alert queue mistaken for a coordination bus
 - Not governance paperwork mistaken for platform truth
-- Not aperture compliance mistaken for serving the human intent
+- Not aperture compliance mistaken for preserving the meaning of the work
 - Not a system that sounds coherent while recovery is unproven
 - Not a platform whose health can be green while canonical surfaces are stale
   or ambiguous

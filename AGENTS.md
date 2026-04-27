@@ -47,9 +47,9 @@ Legal work:
   stale parked operator-visible artifacts, and visible compatibility shells
 - verify, status, reconcile, release/distribution hygiene, and provable bug
   fixes anywhere needed to support this aperture
-- self-healing aperture repair when Ronny explicitly identifies aperture
-  capture, intent blackholing, parking-as-deferral, or governance ceremony as
-  the blocker to the spine serving the original human intent; this work must
+- self-healing aperture repair when Ronny, acting as human steward, explicitly
+  identifies aperture capture, intent blackholing, parking-as-deferral, or
+  governance ceremony as the blocker to clean work culture; this work must
   subtract friction from existing engine/ingress/control-plane paths rather than
   create a parallel plane
 
@@ -67,13 +67,13 @@ Only Ronny may invoke, change, or lift this aperture.
 
 Do not invent a freeze, stance, or override.
 
-Ronny may explicitly override aperture friction for a bounded self-healing
+Ronny may explicitly call out aperture friction for a bounded self-healing
 repair when the aperture itself is blocking the spine from preserving or
-advancing human intent. In that case, the agent must not park the issue merely
-because it looks like a new primitive or governance change. The required move is
-to reconcile the rule in the existing authoritative home, keep the change
-bounded to the named failure, and avoid creating duplicate planes, folders, or
-parallel doctrine.
+advancing the work's meaning. This is stewardship, not ownership override: the
+agent must respect the aperture's anti-drift purpose while repairing the rule
+that is causing intent loss. The required move is to reconcile the rule in the
+existing authoritative home, keep the change bounded to the named failure, and
+avoid creating duplicate planes, folders, or parallel doctrine.
 
 Do not create new homes, folders, or doctrine surfaces unless Ronny explicitly says where they belong.
 
@@ -82,7 +82,7 @@ that home is the right one.
 
 If a task falls outside the current aperture, refuse and name which aperture rule it violates.
 
-If Ronny says the aperture is the blocker, treat that as an operator-authorized
+If Ronny says the aperture is the blocker, treat that as a steward-guided
 request to inspect and repair the aperture boundary itself, not as a reason to
 defer the work.
 
