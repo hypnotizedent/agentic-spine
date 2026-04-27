@@ -9,7 +9,8 @@
 #   5. Contract keeps routing vocabulary supplemental, not replacement
 #   6. TRANSLATOR_AUTHORITY_DOCTRINE_V1.md exists
 #   7. Actor dialogue defines the human_operator/agent_actor split
-#   8. No live governance text implies AI sessions can act as operator
+#   8. Actor dialogue defines the first-class human intent object
+#   9. No live governance text implies AI sessions can act as operator
 #
 # Category: governance-hygiene | Class: invariant | Severity: high
 set -euo pipefail
@@ -121,7 +122,27 @@ elif [[ "$FAIL" -eq 0 ]]; then
   fi
 fi
 
-# 8. Live governance text must not collapse agent actors into the human operator.
+# 8. Actor dialogue must carry the canonical human intent object.
+if [[ "$FAIL" -eq 0 ]]; then
+  intent_status="$(yq e '.human_intent_object.status // ""' "$ACTOR_DIALOGUE" 2>/dev/null || echo "")"
+  intent_class="$(yq e '.human_intent_object.object_class // ""' "$ACTOR_DIALOGUE" 2>/dev/null || echo "")"
+  required_count="$(yq e '.human_intent_object.required_fields | length' "$ACTOR_DIALOGUE" 2>/dev/null || echo "0")"
+  carrier_count="$(yq e '.human_intent_object.canonical_carriers | length' "$ACTOR_DIALOGUE" 2>/dev/null || echo "0")"
+  if [[ "$intent_status" != "first_class" ]]; then
+    FAIL=1
+    append_detail "actor dialogue human_intent_object.status=$intent_status (expected first_class)"
+  fi
+  if [[ "$intent_class" != "human_intent" ]]; then
+    FAIL=1
+    append_detail "actor dialogue human_intent_object.object_class=$intent_class (expected human_intent)"
+  fi
+  if [[ "$required_count" -lt 6 || "$carrier_count" -lt 3 ]]; then
+    FAIL=1
+    append_detail "actor dialogue human_intent_object incomplete (required_fields=$required_count carriers=$carrier_count)"
+  fi
+fi
+
+# 9. Live governance text must not collapse agent actors into the human operator.
 if [[ "$FAIL" -eq 0 ]]; then
   banned_hits="$(
     grep -RInE \

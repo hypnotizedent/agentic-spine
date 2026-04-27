@@ -184,6 +184,23 @@ def _derive_ingress_id(now: datetime | None = None) -> str:
     return f"OI-{now.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
 
 
+def _derive_human_intent_id(ingress_id: str) -> str:
+    if ingress_id.startswith("OI-"):
+        return "HI-" + ingress_id[3:]
+    return f"HI-{ingress_id}"
+
+
+def _intent_statement(raw_content: str, operator_hint: str) -> str:
+    hint = operator_hint.strip()
+    if hint:
+        return hint
+    for line in raw_content.splitlines():
+        line = line.strip()
+        if line:
+            return line[:240]
+    return "captured human steward intent"
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -268,6 +285,7 @@ def create_operator_ingress(
 
     now = _utcnow()
     ingress_id = _derive_ingress_id(now)
+    intent_id = _derive_human_intent_id(ingress_id)
     target = _ingress_dir(state_root) / f"{ingress_id}.yaml"
     if target.exists():
         raise OperatorIngressError(f"derived ingress path already exists: {target}")
@@ -288,6 +306,14 @@ def create_operator_ingress(
         "disposition": "awaiting_classification",
         "disposition_detail": "Raw input preserved; awaiting membrane classification.",
         "authority_level": "none",
+        "human_intent": {
+            "intent_id": intent_id,
+            "object_class": "human_intent",
+            "authority": "human_operator",
+            "statement": _intent_statement(raw_content, operator_hint),
+            "source_ref": f"{ingress_id}.raw_content",
+            "status": "captured",
+        },
         "raw_content": raw_content,
     }
     if access_identity:
@@ -321,6 +347,7 @@ def create_operator_ingress(
         "submitted_at": doc["submitted_at"],
         "content_type": content_type,
         "operator_hint": doc["operator_hint"],
+        "human_intent_id": intent_id,
     }
 
 
@@ -372,6 +399,11 @@ def list_operator_ingress(
             item["classified_at"] = str(doc["classified_at"])
         if "routed_at" in doc:
             item["routed_at"] = str(doc["routed_at"])
+        human_intent = doc.get("human_intent")
+        if isinstance(human_intent, dict):
+            item["human_intent_id"] = str(human_intent.get("intent_id", ""))
+            item["human_intent_status"] = str(human_intent.get("status", ""))
+            item["human_intent_statement"] = str(human_intent.get("statement", ""))
         # Adoption fields (written by reconciler, read-only here)
         for af in (
             "adoption_state", "adoption_ref", "adoption_ref_kind",
@@ -1050,6 +1082,21 @@ def metabolize_operator_ingress(
     doc["classified_at"] = _iso_utc(now)
     doc["disposition"] = disposition
     doc["disposition_detail"] = disposition_detail
+    human_intent = doc.get("human_intent")
+    if isinstance(human_intent, dict):
+        human_intent["status"] = "routed" if (next_stage or downstream_refs) else "classified"
+        human_intent["classification"] = classification
+        human_intent["disposition"] = disposition
+        if next_stage:
+            human_intent["downstream_ref"] = next_stage
+        elif downstream_refs:
+            human_intent["downstream_ref"] = downstream_refs[0]
+        else:
+            human_intent.pop("downstream_ref", None)
+        if activation_conditions:
+            human_intent["activation_conditions"] = activation_conditions
+        else:
+            human_intent.pop("activation_conditions", None)
 
     if likely_domains:
         doc["likely_domains"] = likely_domains
@@ -1114,6 +1161,11 @@ def metabolize_operator_ingress(
         "activation_conditions": activation_conditions,
         "metabolized_at": doc.get("classified_at", ""),
         "translator_workload": translator_workload or {},
+        "human_intent_id": str(
+            doc.get("human_intent", {}).get("intent_id", "")
+            if isinstance(doc.get("human_intent"), dict)
+            else ""
+        ),
     }
 
 
@@ -1328,6 +1380,10 @@ def promote_operator_ingress(
         doc["promoted_at"] = now_str
         doc["promoted_by"] = "activation_consumer"
         doc["promotion_reason"] = reason
+        human_intent = doc.get("human_intent")
+        if isinstance(human_intent, dict):
+            human_intent["status"] = "routed"
+            human_intent["downstream_ref"] = covering_loop
 
     elif action == "open_loop":
         # Derive a loop ID from the OI hint or content
@@ -1377,6 +1433,10 @@ def promote_operator_ingress(
         doc["promoted_at"] = now_str
         doc["promoted_by"] = "activation_consumer"
         doc["promotion_reason"] = reason
+        human_intent = doc.get("human_intent")
+        if isinstance(human_intent, dict):
+            human_intent["status"] = "routed"
+            human_intent["downstream_ref"] = loop_id
 
     else:
         raise OperatorIngressError(f"unknown promotion action: {action}")
