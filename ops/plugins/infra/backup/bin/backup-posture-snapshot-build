@@ -14,6 +14,8 @@ SCHEDULE="$ROOT/ops/bindings/domains/backup/backup.schedule.yaml"
 SSH_BIND="$ROOT/ops/bindings/ssh.targets.yaml"
 LIFECYCLE="$ROOT/ops/bindings/service.data.lifecycle.registry.yaml"
 BACKUP_STATUS_BIN="$ROOT/ops/plugins/infra/backup/bin/backup-status"
+BRIDGE_YAML="${BACKUP_PLANE_BRIDGE_PATH:-$HOME/code/.runtime/spine/state/backup-plane/bridge.yaml}"
+CANDIDATES_YAML="${BACKUP_PLANE_CANDIDATES_PATH:-$HOME/code/.runtime/spine/state/backup-plane/candidates.yaml}"
 
 OUT="$SNAPSHOT_SURFACE_OUTPUT"
 MODE="$SNAPSHOT_SURFACE_MODE"
@@ -74,7 +76,7 @@ if ! "$BACKUP_STATUS_BIN" >"$STATUS_TMP" 2>&1; then
   STATUS_RC=$?
 fi
 
-python3 - "$INV" "$SCHEDULE" "$SSH_BIND" "$STATUS_TMP" "$STATUS_RC" "$LIFECYCLE" <<'PY' > "$JSON_TMP"
+python3 - "$INV" "$SCHEDULE" "$SSH_BIND" "$STATUS_TMP" "$STATUS_RC" "$LIFECYCLE" "$BRIDGE_YAML" "$CANDIDATES_YAML" <<'PY' > "$JSON_TMP"
 import ipaddress
 import json
 import re
@@ -89,6 +91,8 @@ ssh_path = sys.argv[3]
 status_path = sys.argv[4]
 status_rc = int(sys.argv[5])
 lifecycle_path = sys.argv[6]
+bridge_path = sys.argv[7]
+candidates_path = sys.argv[8]
 
 
 def yq_json(path):
@@ -241,7 +245,8 @@ restore_classes = (inv.get("model", {}) or {}).get("restore_classes", {}) or {}
 
 enabled_targets = [t for t in targets if t.get("enabled") is True]
 
-a_states = {"planned": 0, "production_ready": 0}
+declared_admission_states = (inv.get("model", {}) or {}).get("backup_admission_states", []) or []
+a_states = {s: 0 for s in declared_admission_states} if declared_admission_states else {"planned": 0, "production_ready": 0, "retired": 0}
 invalid_admission = []
 for unit in runtime_units:
     st = unit.get("backup_admission_state")
@@ -373,9 +378,9 @@ for service_id, raw_service in sorted((lifecycle.get("services") or {}).items())
     if not isinstance(raw_service, dict):
         continue
     refs = (raw_service.get("binding_refs") or {})
-    runtime_units = [str(item) for item in (refs.get("backup_runtime_units") or []) if str(item).strip()]
+    svc_runtime_units = [str(item) for item in (refs.get("backup_runtime_units") or []) if str(item).strip()]
     targets_for_service = [str(item) for item in (refs.get("backup_targets") or []) if str(item).strip()]
-    if not runtime_units and not targets_for_service:
+    if not svc_runtime_units and not targets_for_service:
         continue
     lifecycle_backup_rows.append(
         {
@@ -383,7 +388,7 @@ for service_id, raw_service in sorted((lifecycle.get("services") or {}).items())
             "display_name": str(raw_service.get("display_name") or service_id),
             "backup_class": str(raw_service.get("backup_class") or ""),
             "restore_proof_expectation": raw_service.get("restore_proof_expectation") or {},
-            "backup_runtime_units": runtime_units,
+            "backup_runtime_units": svc_runtime_units,
             "backup_targets": targets_for_service,
             "canonical_live_roots": [
                 f"{row.get('host')}:{row.get('path')}"
@@ -397,6 +402,78 @@ for service_id, raw_service in sorted((lifecycle.get("services") or {}).items())
             ],
         }
     )
+
+# Load bridge and candidates from runtime state
+bridge_available = False
+bridge_entries = {}
+try:
+    with open(bridge_path, "r", encoding="utf-8") as f:
+        import yaml as _yaml
+        bridge_data = _yaml.safe_load(f) or {}
+        for entry in bridge_data.get("entries", []):
+            uid = entry.get("unit_id")
+            if uid:
+                bridge_entries[uid] = entry
+        bridge_available = True
+except Exception:
+    pass
+
+candidate_set = set()
+try:
+    with open(candidates_path, "r", encoding="utf-8") as f:
+        import yaml as _yaml
+        cand_data = _yaml.safe_load(f) or {}
+        for c in cand_data.get("candidates", []):
+            cid = c.get("unit_id")
+            if cid:
+                candidate_set.add(cid)
+except Exception:
+    pass
+
+# Build per-unit bridge rows and profile_admission_state
+bridge_rows = []
+mode_counts = {}
+bridge_status_counts = {"mapped": 0, "unmapped": 0}
+profile_state_counts = {"modeled": 0, "candidate_profiled": 0, "unmapped": 0}
+
+for unit in runtime_units:
+    uid = unit.get("unit_id")
+    runtime_mode = unit.get("unit_runtime_mode", "unknown")
+    mode_counts[runtime_mode] = mode_counts.get(runtime_mode, 0) + 1
+
+    be = bridge_entries.get(uid)
+    if be:
+        bs = be.get("bridge_status", "unmapped")
+        dbc = be.get("derived_backup_class")
+    else:
+        bs = "unmapped"
+        dbc = None
+
+    bridge_status_counts[bs] = bridge_status_counts.get(bs, 0) + 1
+
+    # profile_admission_state precedence: candidate_profiled > unmapped > modeled
+    if uid in candidate_set:
+        pas = "candidate_profiled"
+    elif bs == "unmapped":
+        pas = "unmapped"
+    else:
+        pas = "modeled"
+    profile_state_counts[pas] = profile_state_counts.get(pas, 0) + 1
+
+    bridge_rows.append({
+        "unit_id": uid,
+        "unit_runtime_mode": runtime_mode,
+        "spine_data_class": unit.get("data_class"),
+        "derived_backup_class": dbc,
+        "bridge_status": bs,
+        "profile_admission_state": pas,
+    })
+
+# Job execution mode summary
+job_mode_counts = {}
+for job in schedule.get("jobs", []):
+    jm = job.get("job_execution_mode", "unknown")
+    job_mode_counts[jm] = job_mode_counts.get(jm, 0) + 1
 
 posture = {
     "status": "generated",
@@ -412,6 +489,8 @@ posture = {
         "ops/bindings/domains/backup/backup.schedule.yaml",
         "ops/bindings/service.data.lifecycle.registry.yaml",
         "backup.status",
+        "runtime-state:backup-plane/bridge.yaml",
+        "runtime-state:backup-plane/candidates.yaml",
     ],
     "summary": {
         "backup_status_run_state": "ok" if status_rc == 0 else "degraded",
@@ -420,8 +499,7 @@ posture = {
         "backup_status_ok_total": ok,
         "backup_status_degraded_total": degraded,
         "runtime_units_total": len(runtime_units),
-        "runtime_units_planned": a_states["planned"],
-        "runtime_units_production_ready": a_states["production_ready"],
+        "runtime_units_by_admission_state": {k: v for k, v in sorted(a_states.items()) if v > 0},
         "runtime_units_invalid_admission_total": len(invalid_admission),
         "restore_coverage_rows_total": len(restore_rows),
         "restore_coverage_missing_total": len(restore_missing),
@@ -434,7 +512,7 @@ posture = {
         "degraded_rows": degraded_rows,
     },
     "runtime_unit_admission": {
-        "allowed_states": ["planned", "production_ready"],
+        "allowed_states": list(a_states.keys()),
         "invalid_values": invalid_admission,
     },
     "restore_coverage": {
@@ -451,6 +529,17 @@ posture = {
     "schedule_reference": {
         "timezone": schedule.get("timezone"),
         "jobs_count": len(schedule.get("jobs", [])),
+        "job_execution_mode_summary": job_mode_counts,
+    },
+    "backup_plane_bridge": {
+        "bridge_available": bridge_available,
+        "bridge_source": bridge_path if bridge_available else None,
+        "summary": {
+            "unit_runtime_mode_counts": mode_counts,
+            "bridge_status_counts": bridge_status_counts,
+            "profile_admission_state_counts": profile_state_counts,
+        },
+        "rows": bridge_rows,
     },
 }
 
