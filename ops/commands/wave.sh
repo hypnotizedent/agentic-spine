@@ -123,8 +123,7 @@ wave_require_valid_lane() {
   echo "FAIL: invalid wave lane '$lane' (allowed: $(wave_allowed_lanes_display))" >&2
   echo "" >&2
   echo "  'ops wave dispatch' uses fixed governance lanes ($(wave_allowed_lanes_display))." >&2
-  echo "  For arbitrary named lanes like '$lane', use:" >&2
-  echo "    ops dispatch local --lane \"$lane:<shell_command>\" ..." >&2
+  echo "  Lane '$lane' is not in the allowed set." >&2
   exit 1
 }
 
@@ -1006,8 +1005,6 @@ Ownership:
     ops status
     ops verify
     ops cap run <capability>
-  `ops dispatch local` remains available as a compatibility wrapper for
-  explicit local multi-lane research, not a default operator path.
   Use ops wave directly only for explicit multi-terminal orchestration,
   inspection, path-claim repair, or low-level closeout surgery.
 
@@ -2314,8 +2311,6 @@ cmd_dispatch() {
     echo "Usage: ops wave dispatch <WAVE_ID> --lane <lane> --task \"<text>\" [OPTIONS]" >&2
     echo "" >&2
     echo "  Lanes must be one of: $(wave_allowed_lanes_display)" >&2
-    echo "  For arbitrary named lanes, use: ops dispatch local --lane \"name:command\" ..." >&2
-    echo "" >&2
     echo "  Options: --from-role, --to-role, --input-refs, --output-refs, --lock-override" >&2
     exit 1
   fi

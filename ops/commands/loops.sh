@@ -801,26 +801,10 @@ if background_open:
 PY
 }
 
-# ── Collect (deprecated — no-op) ──────────────────────────────────────────
-collect_loops() {
-    echo "=== ops loops collect — DEPRECATED ==="
-    echo ""
-    echo "Loop state moved from open_loops.jsonl to scope files."
-    echo "Canonical tracking: $SCOPES_DIR/*.scope.md"
-    echo ""
-    echo "To see open work:  ops status"
-    echo "To inspect raw loop scopes: ops loops list --open"
-    echo "To create a loop:  create a scope file in $SCOPES_DIR/"
-}
-
 # ── Main ──────────────────────────────────────────────────────────────────
 case "${1:-}" in
     list)
         list_loops "${2:---open}"
-        ;;
-    collect)
-        mkdir -p "$STATE_DIR"
-        collect_loops
         ;;
     close)
         shift
