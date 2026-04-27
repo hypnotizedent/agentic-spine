@@ -55,7 +55,7 @@ A bounded problem slice with a named objective. Opens via `loops.create`
 (enforces WIP cap). Closes via `loop-closeout-finalize` (archives scope,
 generates receipt). If there is no loop, the work is ungoverned.
 
-- State: `.runtime/spine/state/loop-scopes/LOOP-{NAME}-{DATE}.scope.md`
+- State: `$SPINE_STATE/loop-scopes/LOOP-{NAME}-{DATE}.scope.md`
 - Authority: `ops/bindings/loop.closeout.contract.yaml`
 
 ### Packet
@@ -64,8 +64,8 @@ The bounded instruction set for work inside a loop. Says what to do, what to
 load, what artifact to produce, and what is out of scope. A loop contains one
 or many packets. A packet's frontmatter carries `loop_id`.
 
-- Orchestration packets: `.runtime/spine/state/orchestration/{LOOP_ID}/packet.yaml` — governed create/amend/close
-- Controller-prompt packets: `.runtime/spine/state/controller-prompts/` — governed create (`controller_prompt.create`) and governed close (`controller_prompt.close`); packet frontmatter/identity/path binding is governed at birth and death, packet body remains operator-authored; historical packets (pre-governed-create) are valid legacy, not drift
+- Orchestration packets: `$SPINE_STATE/orchestration/{LOOP_ID}/packet.yaml` — governed create/amend/close
+- Controller-prompt packets: `$SPINE_STATE/controller-prompts/` — governed create (`controller_prompt.create`) and governed close (`controller_prompt.close`); packet frontmatter/identity/path binding is governed at birth and death, packet body remains operator-authored; historical packets (pre-governed-create) are valid legacy, not drift
 
 ### Wave
 
@@ -74,7 +74,7 @@ Opens via `wave.execute` (validates authority binding). Closes via
 `wave.finish` (4-surface agreement check: runtime, control-plane,
 projections, residue).
 
-- State: `.runtime/spine/state/orchestration/{LOOP_ID}/waves/`
+- State: `$SPINE_STATE/orchestration/{LOOP_ID}/waves/`
 - Authority: `ops/bindings/wave.closeout.contract.yaml`
 
 ### Handoff
@@ -84,7 +84,7 @@ terminal close, execution-class/posture change, or membrane-to-controller
 transition. Carries:
 summary, active loops, from/to execution classes, input/output references.
 
-- State: `.runtime/spine/state/handoffs/HO-{DATE}-{TIME}.yaml`
+- State: `$SPINE_STATE/handoffs/HO-{DATE}-{TIME}.yaml`
 - Create: `session.handoff.create`
 - Authority: `ops/bindings/handoff.config.yaml`
 - **Emission is manual only** — no automatic trigger fires at session close
@@ -216,10 +216,10 @@ They are not interchangeable.
 | Class | Location Pattern | Writer | Governed | Authority Role |
 |---|---|---|---|---|
 | **Capability receipt** | `.evidence/spine/sessions/RCAP-*/receipt.md` | `cap.sh` (automatic) | yes — every cap run emits one | Execution evidence: proves a capability ran, its exit code, role policy, and prompt provenance. Canonical per run key. |
-| **Wave-close EXEC_RECEIPT** | `.runtime/spine/state/domain-state/EXEC_RECEIPT-WAVE-CLOSE-*.yaml` | `packet_receipt_writer.py` via `wave.finish` | yes — fingerprinted YAML, git-truth validated | Delivery evidence: proves a wave closed with head ancestry, lane outcomes, verify results, and disposition. Canonical per wave. |
-| **Controller-prompt EXEC_RECEIPT** | `.runtime/spine/state/domain-state/EXEC_RECEIPT-CONTROLLER-PROMPT-*.yaml` | `packet_receipt_writer.py` via `controller_prompt.close` | yes — same fingerprinted writer as wave-close | Packet-close evidence: proves a controller-prompt packet reached a terminal disposition with operator summary. Canonical per packet. |
+| **Wave-close EXEC_RECEIPT** | `$SPINE_STATE/domain-state/EXEC_RECEIPT-WAVE-CLOSE-*.yaml` | `packet_receipt_writer.py` via `wave.finish` | yes — fingerprinted YAML, git-truth validated | Delivery evidence: proves a wave closed with head ancestry, lane outcomes, verify results, and disposition. Canonical per wave. |
+| **Controller-prompt EXEC_RECEIPT** | `$SPINE_STATE/domain-state/EXEC_RECEIPT-CONTROLLER-PROMPT-*.yaml` | `packet_receipt_writer.py` via `controller_prompt.close` | yes — same fingerprinted writer as wave-close | Packet-close evidence: proves a controller-prompt packet reached a terminal disposition with operator summary. Canonical per packet. |
 | **Loop closeout receipt** | `.evidence/spine/loop-closeouts/LOOP-*.closeout.md` | `loop-closeout-finalize` (typically chained by `wave.finish`; may also be reached via `orchestration.loop.close`) | partial — governed script, markdown output | Lifecycle evidence: proves a loop closed with disposition, completion level, and scope archive ref. One per loop. |
-| **Narrative receipt** | `.runtime/spine/state/domain-state/spine/*-RECEIPT-*.md` | Agent (convention) | no — convention only, no governed writer | Session evidence: human-readable summary of a slice (what changed, what was proved, what is next). Not canonical authority — if it disagrees with a governed receipt, the governed receipt wins. |
+| **Narrative receipt** | `$SPINE_STATE/domain-state/spine/*-RECEIPT-*.md` | Agent (convention) | no — convention only, no governed writer | Session evidence: human-readable summary of a slice (what changed, what was proved, what is next). Not canonical authority — if it disagrees with a governed receipt, the governed receipt wins. |
 
 When you see "receipt" in the spine, determine which class is meant before
 acting on it. The governed classes (capability, wave-close, controller-prompt,
@@ -281,8 +281,8 @@ reference docs.
 - Read health via `./bin/ops cap run planning.plans.status -- --json`
 - Authority: `shared_authority.db` (`plans` table) via
   [`plans.lifecycle.yaml`](../../ops/bindings/plans.lifecycle.yaml)
-- Projection: `.runtime/spine/state/plans/index.yaml` and
-  `.runtime/spine/state/plans/PLAN-*.md`
+- Projection: `$SPINE_STATE/plans/index.yaml` and
+  `$SPINE_STATE/plans/PLAN-*.md`
 
 Repo docs may describe a program or preserve historical planning context, but
 active deferred intent belongs in the governed plans authority above.

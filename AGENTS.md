@@ -92,8 +92,8 @@ Do not treat archived or historical docs as first-read entry authority.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md), [`SPINE.md`](docs/governance/SPINE.md))
 
 Non-promoted work, synthesis artifacts, and parked material belong in
-`.runtime/spine/state/`, not in the repo. New repo docs require deliberate
-promotion and Ronny co-sign.
+`$SPINE_STATE/` (canonical: `~/code/.runtime/spine/state/`), not in the repo.
+New repo docs require deliberate promotion and Ronny co-sign.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
 Governed session start: `ops terminal launch --tool <tool> --terminal <name>`

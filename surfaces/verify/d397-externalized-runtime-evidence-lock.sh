@@ -14,6 +14,7 @@ fail() {
 
 forbidden_repo_paths=(
   ".archive"
+  ".runtime"
   ".spine"
   ".tmp"
   ".worktrees"

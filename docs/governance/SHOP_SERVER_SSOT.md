@@ -32,7 +32,7 @@ generated from the structured bindings above:
 ./bin/ops cap run infra.shop.readmodel.generate
 ```
 
-Output: `.runtime/spine/state/domain-state/infra.shop.readmodel.md` (runtime only, not committed)
+Output: `$SPINE_STATE/domain-state/infra.shop.readmodel.md` (runtime only, not committed)
 
 ## Generated Projections
 

@@ -5,7 +5,7 @@
 # to execution host (ai-consolidation) Root 1 as a read-only projection.
 #
 # Direction: ai-consolidation pulls FROM MBP (operator console stays at zero LaunchAgents)
-# Target:    ~/.runtime/spine/state/ (Root 1 — governance mirror)
+# Target:    ~/code/.runtime/spine/state/ (Root 1 — governance mirror)
 # Authority: MBP remains sole canonical state root. This copy is read-only.
 #
 # SQLite safety: shared_authority.db is backed up on MBP via sqlite3 .backup

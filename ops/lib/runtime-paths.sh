@@ -275,6 +275,10 @@ spine_runtime_resolve_paths() {
   SPINE_TARGET_REPO="$target_repo"
   SPINE_REPO="$target_repo"
 
+  local authority_contract="${control_root:+$control_root/ops/bindings/root.authority.contract.yaml}"
+  [[ -f "$authority_contract" ]] || authority_contract=""
+  local authority_paths_enabled=1
+  [[ "${SPINE_RUNTIME_PATH_TEST_OVERRIDE:-}" == "1" ]] && authority_paths_enabled=0
   local contract_file=""
   local workspace_root="${SPINE_WORKSPACE_ROOT:-}"
   local runtime_root="${SPINE_RUNTIME_ROOT:-}"
@@ -305,42 +309,63 @@ spine_runtime_resolve_paths() {
   local agent_context_root="${SPINE_AGENT_CONTEXT_ROOT:-}"
   local agent_context_file="${SPINE_AGENT_CONTEXT_FILE:-}"
 
+  if [[ "$authority_paths_enabled" -eq 1 && -n "$authority_contract" ]]; then
+    workspace_root="$(_spine_runtime_contract_value "$authority_contract" '.taxonomy.platform.path' '')"
+  fi
   if [[ -z "$workspace_root" ]]; then
     workspace_root="$(_spine_runtime_contract_value "$contract_file" '.workspace_root' '')"
   fi
   [[ -n "$workspace_root" ]] || workspace_root="$(_spine_guess_workspace_root "$SPINE_CODE")"
   workspace_root="$(_spine_expand_home_token "$workspace_root")"
 
+  if [[ "$authority_paths_enabled" -eq 1 && -n "$authority_contract" ]]; then
+    runtime_root="$(_spine_runtime_contract_value "$authority_contract" '.taxonomy.runtime.path' '')"
+  fi
   if [[ -z "$runtime_root" ]]; then
     runtime_root="$(_spine_runtime_contract_value "$contract_file" '.runtime_root' '')"
   fi
   [[ -n "$runtime_root" ]] || runtime_root="$workspace_root/.runtime/spine"
   runtime_root="$(_spine_expand_home_token "$runtime_root")"
 
+  if [[ "$authority_paths_enabled" -eq 1 && -n "$authority_contract" ]]; then
+    mailroom_root="$(_spine_runtime_contract_value "$authority_contract" '.taxonomy.runtime.subpaths.mailroom' '')"
+  fi
   if [[ -z "$mailroom_root" ]]; then
     mailroom_root="$(_spine_runtime_contract_value "$contract_file" '.mailroom_root' '')"
   fi
   [[ -n "$mailroom_root" ]] || mailroom_root="$runtime_root/mailroom"
   mailroom_root="$(_spine_expand_home_token "$mailroom_root")"
 
+  if [[ "$authority_paths_enabled" -eq 1 && -n "$authority_contract" ]]; then
+    state="$(_spine_runtime_contract_value "$authority_contract" '.taxonomy.runtime.subpaths.state' '')"
+  fi
   if [[ -z "$state" ]]; then
     state="$(_spine_runtime_contract_value "$contract_file" '.state_root' '')"
   fi
   [[ -n "$state" ]] || state="$runtime_root/state"
   state="$(_spine_expand_home_token "$state")"
 
+  if [[ "$authority_paths_enabled" -eq 1 && -n "$authority_contract" ]]; then
+    locks="$(_spine_runtime_contract_value "$authority_contract" '.taxonomy.runtime.subpaths.locks' '')"
+  fi
   if [[ -z "$locks" ]]; then
     locks="$(_spine_runtime_contract_value "$contract_file" '.locks_root' '')"
   fi
   [[ -n "$locks" ]] || locks="$runtime_root/locks"
   locks="$(_spine_expand_home_token "$locks")"
 
+  if [[ "$authority_paths_enabled" -eq 1 && -n "$authority_contract" ]]; then
+    logs="$(_spine_runtime_contract_value "$authority_contract" '.taxonomy.runtime.subpaths.logs' '')"
+  fi
   if [[ -z "$logs" ]]; then
     logs="$(_spine_runtime_contract_value "$contract_file" '.logs_root' '')"
   fi
   [[ -n "$logs" ]] || logs="$runtime_root/logs"
   logs="$(_spine_expand_home_token "$logs")"
 
+  if [[ "$authority_paths_enabled" -eq 1 && -n "$authority_contract" ]]; then
+    tmp="$(_spine_runtime_contract_value "$authority_contract" '.taxonomy.runtime.subpaths.tmp' '')"
+  fi
   if [[ -z "$tmp" ]]; then
     tmp="$(_spine_runtime_contract_value "$contract_file" '.tmp_root' '')"
   fi

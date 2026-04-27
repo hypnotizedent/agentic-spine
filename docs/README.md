@@ -39,7 +39,7 @@ Use the governed plans authority:
 - `./bin/ops cap run planning.plans.status -- --json`
 
 Plan authority lives in runtime shared authority and projects to
-`.runtime/spine/state/plans/PLAN-*.md`.
+`$SPINE_STATE/plans/PLAN-*.md`.
 
 ## Directory Map
 

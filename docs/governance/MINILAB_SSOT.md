@@ -26,7 +26,7 @@ generated from canonical structured bindings by a governed capability.
 ./bin/ops cap run infra.minilab.readmodel.generate
 ```
 
-Output: `.runtime/spine/state/domain-state/infra.minilab.readmodel.md`
+Output: `$SPINE_STATE/domain-state/infra.minilab.readmodel.md`
 
 ## Detailed Home Infrastructure
 

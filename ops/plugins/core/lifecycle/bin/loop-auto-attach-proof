@@ -3,7 +3,9 @@
 # loop-auto-attach-proof — Controlled proof for loop auto-attach semantics
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Exercises all six cases against terminal.sh --dry-run:
+# Exercises all six cases against terminal.sh --dry-run using the verify tool,
+# so the proof can validate loop identity export semantics without requiring
+# synthetic governed wave worktrees for mutating terminal launches:
 #   1. Zero active loops → loop: <none>
 #   2. Single active loop → auto-attached
 #   3. Multiple active loops → ambiguous, no auto-attach
@@ -20,6 +22,7 @@ set -euo pipefail
 SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 TERMINAL_SH="$SPINE_ROOT/ops/commands/terminal.sh"
 ENTRY_COMPILE="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/entry-compile"
+PROOF_TOOL="verify"
 
 PASS=0
 FAIL=0
@@ -111,7 +114,7 @@ echo ""
 echo "── Case 1: Zero active loops"
 # Empty loop-scopes dir
 rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
-OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
+OUTPUT="$(SPINE_RUNTIME_PATH_TEST_OVERRIDE=1 SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool "$PROOF_TOOL" --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
 LOOP="$(extract_loop_id "$OUTPUT")"
 proof "no loop attached" "<none>" "$LOOP"
 echo ""
@@ -120,7 +123,7 @@ echo ""
 echo "── Case 2: Single active loop"
 rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
 write_scope "LOOP-TEST-SINGLE-20260416" "active"
-OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
+OUTPUT="$(SPINE_RUNTIME_PATH_TEST_OVERRIDE=1 SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool "$PROOF_TOOL" --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
 LOOP="$(extract_loop_id "$OUTPUT")"
 proof "single loop auto-attached" "LOOP-TEST-SINGLE-20260416" "$LOOP"
 LOOP_EXPORT="$(extract_loop_export "$OUTPUT")"
@@ -132,7 +135,7 @@ echo "── Case 3: Multiple active loops (ambiguous)"
 rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
 write_scope "LOOP-TEST-ALPHA-20260416" "active"
 write_scope "LOOP-TEST-BETA-20260416" "active"
-OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
+OUTPUT="$(SPINE_RUNTIME_PATH_TEST_OVERRIDE=1 SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool "$PROOF_TOOL" --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
 LOOP="$(extract_loop_id "$OUTPUT")"
 proof "no loop attached (ambiguous)" "<none>" "$LOOP"
 echo ""
@@ -141,7 +144,7 @@ echo ""
 echo "── Case 4: Explicit --loop takes precedence"
 rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
 write_scope "LOOP-TEST-SINGLE-20260416" "active"
-OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --loop LOOP-EXPLICIT-OVERRIDE --dry-run 2>/dev/null)" || true
+OUTPUT="$(SPINE_RUNTIME_PATH_TEST_OVERRIDE=1 SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool "$PROOF_TOOL" --terminal SPINE-CONTROL-01 --loop LOOP-EXPLICIT-OVERRIDE --dry-run 2>/dev/null)" || true
 LOOP="$(extract_loop_id "$OUTPUT")"
 proof "explicit loop preserved" "LOOP-EXPLICIT-OVERRIDE" "$LOOP"
 LOOP_EXPORT="$(extract_loop_export "$OUTPUT")"
@@ -153,7 +156,7 @@ echo "── Case 5: Degraded truth (unreadable loop-scopes)"
 rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
 write_scope "LOOP-TEST-SINGLE-20260416" "active"
 chmod 000 "$TMPDIR/loop-scopes" 2>/dev/null || true
-OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
+OUTPUT="$(SPINE_RUNTIME_PATH_TEST_OVERRIDE=1 SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool "$PROOF_TOOL" --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
 chmod 755 "$TMPDIR/loop-scopes" 2>/dev/null || true
 LOOP="$(extract_loop_id "$OUTPUT")"
 proof "no loop attached (degraded)" "<none>" "$LOOP"
@@ -163,7 +166,7 @@ echo ""
 echo "── Case 6: Worktree identity alignment"
 rm -f "$TMPDIR/loop-scopes/"*.scope.md 2>/dev/null || true
 write_scope "LOOP-TEST-IDENTITY-20260416" "active"
-OUTPUT="$(SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
+OUTPUT="$(SPINE_RUNTIME_PATH_TEST_OVERRIDE=1 SPINE_STATE="$TMPDIR" bash "$TERMINAL_SH" launch --tool "$PROOF_TOOL" --terminal SPINE-CONTROL-01 --dry-run 2>/dev/null)" || true
 LOOP_EXPORT="$(extract_loop_export "$OUTPUT")"
 WT_IDENTITY="$(extract_worktree_identity "$OUTPUT")"
 proof "SPINE_LOOP_ID set" "LOOP-TEST-IDENTITY-20260416" "$LOOP_EXPORT"

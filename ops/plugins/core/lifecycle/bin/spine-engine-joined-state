@@ -173,7 +173,43 @@ def run_cmd(cmd: list[str], *, cwd: Path) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def _read_authority_contract(root: Path) -> dict[str, str]:
+    """Read canonical paths from root.authority.contract.yaml taxonomy."""
+    contract = root / "ops" / "bindings" / "root.authority.contract.yaml"
+    if not contract.is_file():
+        return {}
+    try:
+        with open(contract) as f:
+            data = yaml.safe_load(f) or {}
+        tax = data.get("taxonomy", {})
+        result: dict[str, str] = {}
+        platform = tax.get("platform", {}).get("path")
+        if platform:
+            result["workspace_root"] = platform
+        runtime = tax.get("runtime", {})
+        if runtime.get("path"):
+            result["runtime_root"] = runtime["path"]
+        for key in ("state", "mailroom", "locks", "logs", "tmp"):
+            val = runtime.get("subpaths", {}).get(key)
+            if val:
+                result[key] = val
+        evidence = tax.get("evidence", {})
+        if evidence.get("path"):
+            result["evidence_root"] = evidence["path"]
+        for key in ("sessions",):
+            val = evidence.get("subpaths", {}).get(key)
+            if val:
+                result[f"evidence_{key}"] = val
+        return result
+    except Exception:
+        return {}
+
+
 def resolve_workspace_root(root: Path) -> Path:
+    authority = _read_authority_contract(root)
+    if os.environ.get("SPINE_RUNTIME_PATH_TEST_OVERRIDE") != "1" and "workspace_root" in authority:
+        return Path(authority["workspace_root"])
+
     explicit = str(os.environ.get("SPINE_WORKSPACE_ROOT") or "").strip()
     if explicit:
         return Path(explicit)
@@ -196,17 +232,25 @@ def resolve_workspace_root(root: Path) -> Path:
 
 
 def resolve_paths(root: Path) -> dict[str, Path]:
+    authority = _read_authority_contract(root)
+    authority_first = os.environ.get("SPINE_RUNTIME_PATH_TEST_OVERRIDE") != "1"
     workspace_root = resolve_workspace_root(root)
     state_root = Path(
-        os.environ.get("SPINE_STATE")
+        (authority.get("state") if authority_first else "")
+        or os.environ.get("SPINE_STATE")
+        or (authority.get("state") if not authority_first else "")
         or str(workspace_root / ".runtime" / "spine" / "state")
     )
     runtime_root = Path(
-        os.environ.get("SPINE_RUNTIME_ROOT")
+        (authority.get("runtime_root") if authority_first else "")
+        or os.environ.get("SPINE_RUNTIME_ROOT")
+        or (authority.get("runtime_root") if not authority_first else "")
         or str(state_root.parent)
     )
     receipts_root = Path(
-        os.environ.get("SPINE_RECEIPTS")
+        (authority.get("evidence_sessions") if authority_first else "")
+        or os.environ.get("SPINE_RECEIPTS")
+        or (authority.get("evidence_sessions") if not authority_first else "")
         or str(workspace_root / ".evidence" / "spine" / "sessions")
     )
     gaps_file = Path(
