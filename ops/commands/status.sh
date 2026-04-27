@@ -254,6 +254,11 @@ PY
     echo "─── history ────────────────────────────────────────"
     printf "  %s\n" "$HISTORY_NOTE"
   fi
+  echo "─── execution lane truth ───────────────────────────"
+  printf "  mailroom execution:      %s\n" "capability_backed"
+  printf "  agent tool bridge:       %s\n" "deferred"
+  printf "  interactive delegation:  %s\n" "explicit_worker_pickup_required"
+  printf "  autonomous AI agent:     %s\n" "not_delivered"
   echo "─────────────────────────────────────────────────────"
   exit 0
 fi
@@ -1501,6 +1506,12 @@ if mode == "--json":
         "temporal_truth": temporal_truth_payload,
         "standing_program_health": standing_program_health,
         "delegations": delegation_summary,
+        "execution_lane_truth": {
+            "mailroom_execution": "capability_backed",
+            "agent_tool_bridge": "deferred",
+            "interactive_delegation": "explicit_worker_pickup_required",
+            "autonomous_ai_agent_lane": "not_delivered",
+        },
         "counts": {
             # Direct SQLite-backed open loops are authoritative for loop count.
             # Joined-state may enrich the rows, but it must not widen the set.

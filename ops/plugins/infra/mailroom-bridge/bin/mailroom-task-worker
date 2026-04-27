@@ -65,8 +65,23 @@ def _task_doc(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+# Route targets that are explicitly deferred — tasks using these must be failed
+# with an honest refusal rather than silently skipped.  See
+# dispatch.envelope.contract.yaml §agent_tool_bridge and
+# mailroom.task.worker.contract.yaml §planned_route_targets.
+DEFERRED_ROUTE_TARGETS = frozenset({"agent_tool"})
+
+_AGENT_TOOL_REFUSAL = (
+    "agent_tool route target is deferred: no governed spawn, prompt-injection, "
+    "heartbeat, result-mapping, or receipt-collection bridge exists. "
+    "See dispatch.envelope.contract.yaml §agent_tool_bridge."
+)
+
+
 def _task_supported(doc: dict[str, Any], *, allowlist: set[str], supported_routes: set[str]) -> tuple[bool, str]:
     route_target = str(doc.get("route_target") or "").strip().lower()
+    if route_target in DEFERRED_ROUTE_TARGETS:
+        return False, _AGENT_TOOL_REFUSAL
     if route_target not in supported_routes:
         return False, f"unsupported route_target={route_target or 'unset'}"
     if route_target == "capability":
@@ -256,7 +271,19 @@ def _process_once(*, worker_id: str, claim_limit: int, allowlist: set[str], supp
         supported, reason = _task_supported(doc, allowlist=allowlist, supported_routes=supported_routes)
         task_id = str(doc.get("task_id") or path.stem).strip()
         if not supported:
-            skipped.append({"task_id": task_id, "reason": reason})
+            route_target = str(doc.get("route_target") or "").strip().lower()
+            if route_target in DEFERRED_ROUTE_TARGETS:
+                # Hard refusal: claim then fail so the operator sees an
+                # explicit outcome rather than a silent skip that leaves the
+                # task stuck in the queue forever.
+                try:
+                    _claim_task(task_id, worker_id)
+                    _fail_task(task_id, reason)
+                    failed.append({"task_id": task_id, "status": "failed", "error": reason})
+                except WorkerError:
+                    skipped.append({"task_id": task_id, "reason": f"deferred-refusal claim error: {reason}"})
+            else:
+                skipped.append({"task_id": task_id, "reason": reason})
             continue
         claim_data = _claim_task(task_id, worker_id)
         claimed.append({"task_id": task_id, "state": "running", "worker": worker_id})
