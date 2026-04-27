@@ -1001,8 +1001,13 @@ Usage:
 
 Ownership:
   ops wave is expert/surgery grammar.
-  Normal operator work-start should use:
-    ops dispatch local --loop-id <LOOP_ID> --objective "<text>" --lane "<name>:<shell_command>"
+  The normal operator front door is:
+    ops terminal launch
+    ops status
+    ops verify
+    ops cap run <capability>
+  `ops dispatch local` remains available as a compatibility wrapper for
+  explicit local multi-lane research, not a default operator path.
   Use ops wave directly only for explicit multi-terminal orchestration,
   inspection, path-claim repair, or low-level closeout surgery.
 

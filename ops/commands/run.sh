@@ -19,11 +19,11 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-ops run - Advanced mailroom enqueue helper
+ops run - Compatibility mailroom enqueue shell
 
-  This is an expert/compatibility surface. Autonomous mailroom execution
-  (mailroom.task.enqueue, mailroom.task.worker.once) is the governed path.
-  Use this only for manual mailroom enqueue from the CLI.
+  This is a compatibility shell, not a normal operator front door.
+  Governed mailroom capabilities and worker lanes remain the real execution path.
+  Use this only for explicit manual enqueue from the CLI.
 
 Usage:
   ops run --file <path>      Enqueue a file

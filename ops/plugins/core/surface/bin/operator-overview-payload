@@ -919,18 +919,20 @@ def collect_standing_program_health(status: dict) -> dict:
 
 
 def collect_operator_front_door(payload: dict) -> dict:
-    """Aggregate existing payload data into the four-verb operator model."""
+    """Aggregate existing payload data into an outcome-first operator model."""
     sph = payload.get("standing_program_health", {})
     delegations = payload.get("delegations", {})
     ws = payload.get("work_state", {})
+    spine_now = payload.get("spine_now", {})
     ov = payload.get("operator_vision", {})
     handoffs = payload.get("active_handoffs", {})
     terminal_telemetry = payload.get("terminal_telemetry", {})
     specimens = list(sph.get("v1_exception_specimens", []) or [])
     proof_summary = sph.get("summary", {}) if isinstance(sph.get("summary"), dict) else {}
     delegation_states = delegations.get("by_state", {}) if isinstance(delegations.get("by_state"), dict) else {}
+    completion = ws.get("completion_state", {}) if isinstance(ws.get("completion_state"), dict) else {}
 
-    # --- inspect ---
+    # --- verify ---
     total_standing = int(proof_summary.get("total", 0) or 0)
     active_interventions = int(sph.get("active_interventions", 0) or 0)
     if total_standing:
@@ -955,95 +957,106 @@ def collect_operator_front_door(payload: dict) -> dict:
         birth_modes.get("human_session_only", birth_modes.get("human_session", 0)) or 0
     )
     open_loops = int(ws.get("open_loops", 0) or 0)
-    inspect_parts = []
+    verify_parts = []
     if healthy:
-        inspect_parts.append(f"{healthy} standing healthy")
+        verify_parts.append(f"{healthy} standing healthy")
     if specimen_degraded:
-        inspect_parts.append(f"{specimen_degraded} degraded")
-    if specimen_intervention_active:
-        inspect_parts.append(f"{specimen_intervention_active} intervention-active")
-    inspect_parts.append(f"{open_loops} loops")
+        verify_parts.append(f"{specimen_degraded} degraded")
     telemetry_status = str(terminal_telemetry.get("status", "") or "")
     if telemetry_status and telemetry_status != "ok":
-        inspect_parts.append(f"telemetry {telemetry_status}")
-    inspect = {
+        verify_parts.append(f"telemetry {telemetry_status}")
+    verify_status = str(spine_now.get("verify_status", "unknown") or "unknown")
+    if verify_status and verify_status != "unknown":
+        verify_parts.append(f"verify {verify_status}")
+    verify = {
         "healthy_standing": healthy,
         "degraded_standing": degraded,
         "intervention_active": specimen_intervention_active,
-        "human_session_only": human_session_only,
-        "open_loops": open_loops,
+        "verify_status": verify_status,
         "terminal_telemetry_status": telemetry_status or "unknown",
-        "mapped_open_loops": int(terminal_telemetry.get("mapped_open_loops", 0) or 0),
-        "unmapped_open_loops": int(terminal_telemetry.get("unmapped_open_loops", 0) or 0),
-        "summary": ", ".join(inspect_parts),
+        "summary": ", ".join(verify_parts) if verify_parts else "verify healthy",
     }
 
-    # --- approve ---
+    # --- intent ---
+    intent_parts = [f"{open_loops} open work"]
+    if human_session_only:
+        intent_parts.append(f"{human_session_only} session-only")
+    intent = {
+        "open_work": open_loops,
+        "human_session_only": human_session_only,
+        "summary": ", ".join(intent_parts),
+    }
+
+    # --- blockers ---
     mhw = ov.get("my_human_work_now", {}) if isinstance(ov, dict) else {}
     pending_ingress = int(mhw.get("pending_ingress", 0) or 0)
-    pending_handoffs = int(handoffs.get("count", 0) or 0)
+    operator_asks = int(handoffs.get("count", 0) or 0)
     pending_reviews = int(delegation_states.get("needs_review", 0) or 0)
-    approve_total = pending_ingress + pending_handoffs + pending_reviews
-    approve_parts = []
-    if pending_ingress:
-        approve_parts.append(f"{pending_ingress} pending ingress")
-    if pending_handoffs:
-        approve_parts.append(f"{pending_handoffs} handoff{'s' if pending_handoffs != 1 else ''}")
-    if pending_reviews:
-        approve_parts.append(f"{pending_reviews} review{'s' if pending_reviews != 1 else ''}")
-    approve = {
-        "pending_ingress": pending_ingress,
-        "pending_handoffs": pending_handoffs,
-        "needs_review": pending_reviews,
-        "total": approve_total,
-        "summary": ", ".join(approve_parts) if approve_parts else "nothing pending",
-    }
-
-    # --- intervene ---
-    intervention_labels = list(sph.get("intervention_labels", []) or [])
     open_gaps = int(ws.get("open_gaps", 0) or 0)
-    intervene_total = active_interventions + open_gaps
-    intervene_parts = []
+    blockers_total = pending_ingress + operator_asks + pending_reviews + active_interventions + open_gaps
+    blockers_parts = []
+    if pending_ingress:
+        blockers_parts.append(f"{pending_ingress} pending ingress")
+    if operator_asks:
+        blockers_parts.append(f"{operator_asks} operator ask{'s' if operator_asks != 1 else ''}")
+    if pending_reviews:
+        blockers_parts.append(f"{pending_reviews} review{'s' if pending_reviews != 1 else ''}")
     if active_interventions:
-        intervene_parts.append(f"{active_interventions} active intervention{'s' if active_interventions != 1 else ''}")
-    intervene_parts.append(f"{open_gaps} gaps")
-    intervene = {
+        blockers_parts.append(f"{active_interventions} intervention{'s' if active_interventions != 1 else ''}")
+    if open_gaps:
+        blockers_parts.append(f"{open_gaps} gap{'s' if open_gaps != 1 else ''}")
+    blockers = {
+        "pending_ingress": pending_ingress,
+        "operator_asks": operator_asks,
+        "needs_review": pending_reviews,
         "active_interventions": active_interventions,
-        "intervention_labels": intervention_labels,
         "open_gaps": open_gaps,
-        "total": intervene_total,
-        "summary": ", ".join(intervene_parts),
+        "total": blockers_total,
+        "summary": ", ".join(blockers_parts) if blockers_parts else "all clear",
     }
 
-    # --- execute ---
+    # --- progress ---
     active_waves = int(ws.get("active_waves", 0) or 0)
     active_delegations = sum(int(delegation_states.get(name, 0) or 0) for name in ("delegated", "picked_up", "executing"))
     picked_up = int(delegation_states.get("picked_up", 0) or 0)
     executing = int(delegation_states.get("executing", 0) or 0)
-    execute_total = active_waves + active_delegations
-    execute_parts = []
-    if active_waves:
-        execute_parts.append(f"{active_waves} wave{'s' if active_waves != 1 else ''}")
-    if active_delegations:
-        execute_parts.append(f"{active_delegations} delegation{'s' if active_delegations != 1 else ''}")
+    progress_total = active_waves + active_delegations
+    progress_parts = []
+    if progress_total:
+        progress_parts.append(f"{progress_total} active work")
     if executing:
-        execute_parts.append(f"{executing} executing")
+        progress_parts.append(f"{executing} executing")
     elif picked_up:
-        execute_parts.append(f"{picked_up} picked up")
-    execute = {
+        progress_parts.append(f"{picked_up} picked up")
+    progress = {
         "active_waves": active_waves,
         "active_delegations": active_delegations,
         "picked_up": picked_up,
         "executing": executing,
-        "total": execute_total,
-        "summary": ", ".join(execute_parts) if execute_parts else "idle",
+        "total": progress_total,
+        "summary": ", ".join(progress_parts) if progress_parts else "idle",
+    }
+
+    # --- acceptance ---
+    delivered = int(completion.get("delivered", 0) or 0) + int(completion.get("landed_local", 0) or 0)
+    ambiguous = int(completion.get("ambiguous", 0) or 0)
+    acceptance_parts = [f"{delivered} delivered"]
+    if ambiguous:
+        acceptance_parts.append(f"{ambiguous} ambiguous")
+    acceptance = {
+        "delivered": delivered,
+        "ambiguous": ambiguous,
+        "open": int(completion.get("open", 0) or 0),
+        "parked": int(completion.get("parked", 0) or 0),
+        "summary": ", ".join(acceptance_parts),
     }
 
     return {
-        "inspect": inspect,
-        "approve": approve,
-        "intervene": intervene,
-        "execute": execute,
+        "verify": verify,
+        "intent": intent,
+        "blockers": blockers,
+        "progress": progress,
+        "acceptance": acceptance,
     }
 
 

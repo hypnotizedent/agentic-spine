@@ -52,10 +52,10 @@ DISPATCH_LANE_CWD="$(dispatch_lane_cwd)"
 
 usage() {
   cat <<'EOF'
-ops dispatch - Advanced local multi-lane dispatch bridge
+ops dispatch - Compatibility wrapper for explicit local multi-lane dispatch
 
-  This is an expert/internal surface. Normal operator work flows through
-  governed capabilities (ops cap run wave.execute, delegate.to.execution).
+  This is an expert/compatibility surface, not a normal operator path.
+  Governed capabilities remain the canonical execution path.
   Use this only for explicit local multi-lane research dispatch.
 
 Subcommands:
@@ -98,7 +98,7 @@ Example:
 fail_existing_wave_id() {
   local wave_id="$1"
   fail_with_usage "wave '$wave_id' already exists
-Hint: ops dispatch local is the convenience wrapper that creates and runs the local dispatch wave.
+Hint: ops dispatch local is the compatibility wrapper that creates and runs the local dispatch wave.
   Omit --wave-id to auto-create a new wrapper wave.
   If you already created the wave manually, use: ops wave dispatch $wave_id --lane <lane> --task \"...\""
 }

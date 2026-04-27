@@ -1005,9 +1005,9 @@ def authority_explorer(manifest: dict) -> str:
 
 def work_state_section(ws: dict, active_loops: dict, active_handoffs: dict) -> str:
     items = [
-        ("Loops", str(ws["open_loops"]), "open"),
+        ("Open work", str(ws["open_loops"]), "governed"),
         ("Gaps", str(ws["open_gaps"]), "open"),
-        ("Waves", str(ws["active_waves"]), f"active · {ws['orphaned_waves']} orphaned"),
+        ("Progress", str(ws["active_waves"]), f"workflow detail · {ws['orphaned_waves']} orphaned"),
         ("Inbox", str(ws.get("inbox_lanes", {}).get("parked", 0)), f"parked · {ws.get('inbox_lanes', {}).get('done', 0)} done"),
     ]
     if ws["inbox_active"] > 0:
@@ -1031,7 +1031,7 @@ def work_state_section(ws: dict, active_loops: dict, active_handoffs: dict) -> s
         )
         live_rows.append(
             f'<div class="today-line">'
-            f'<span class="today-line-k">loop</span>'
+            f'<span class="today-line-k">work</span>'
             f'<span class="today-line-v">{_h(item.get("title", item.get("id", "")))}</span>'
             f'<span class="today-line-sub">{_h(detail)}</span>'
             f'</div>'
@@ -1041,35 +1041,33 @@ def work_state_section(ws: dict, active_loops: dict, active_handoffs: dict) -> s
     if handoff_count:
         live_rows.append(
             f'<div class="today-line">'
-            f'<span class="today-line-k">handoffs</span>'
-            f'<span class="today-line-v">{handoff_count} active</span>'
-            f'<span class="today-line-sub">agent asks/blockers waiting on operator</span>'
+            f'<span class="today-line-k">agent asks</span>'
+            f'<span class="today-line-v">{handoff_count} waiting</span>'
+            f'<span class="today-line-sub">continuity or follow-up waiting on operator</span>'
             f'</div>'
         )
     else:
         live_rows.append(
             '<div class="today-line">'
-            '<span class="today-line-k">handoffs</span>'
-            '<span class="today-line-v">0 active</span>'
+            '<span class="today-line-k">agent asks</span>'
+            '<span class="today-line-v">0 waiting</span>'
             '<span class="today-line-sub">no agent-side asks waiting right now</span>'
             '</div>'
         )
 
     handoff_count = int(active_handoffs.get("count", 0) or 0)
-    orphaned = int(ws.get("orphaned_waves", 0) or 0)
     summary_parts = [
-        f"{int(ws['open_loops'])} loops",
+        f"{int(ws['open_loops'])} open",
         f"{int(ws['open_gaps'])} gaps",
-        f"{int(ws['active_waves'])} waves",
     ]
-    if orphaned:
-        summary_parts.append(f"{orphaned} orphaned")
+    if int(ws.get("active_waves", 0) or 0):
+        summary_parts.append(f"{int(ws['active_waves'])} in progress")
     if handoff_count:
-        summary_parts.append(f"{handoff_count} handoffs")
+        summary_parts.append(f"{handoff_count} waiting")
 
     return f"""
     <details>
-      <summary>Execution Ledger <span class="det-count">{_h(' \u00b7 '.join(summary_parts))}</span></summary>
+      <summary>Workflow Drilldown <span class="det-count">{_h(' \u00b7 '.join(summary_parts))}</span></summary>
       <div class="det-body">
         <div class="stats" style="margin-top:.5rem">{stat_cards}</div>
         <div class="today-list">{''.join(live_rows)}</div>
@@ -1348,7 +1346,7 @@ details[open] summary::after{transform:rotate(90deg)}
 .cq-evidence{font-family:var(--m);font-size:.55rem;color:var(--tm);margin-top:.3rem}
 
 /* Front door grid */
-.front-door{display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:1.5rem}
+.front-door{display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;margin-bottom:1.5rem}
 .fd-cell{background:var(--s);border:1px solid var(--b);border-radius:10px;padding:.75rem .85rem;border-top:3px solid var(--b)}
 .fd-cell-grn{border-top-color:var(--grn)}
 .fd-cell-ylw{border-top-color:var(--ylw)}
@@ -1727,117 +1725,69 @@ def operator_vision_section(ov: dict, directional_boundary: dict, temporal_stand
 
 
 def operator_front_door_section(fd: dict) -> str:
-    """Render the four-verb operator front door as a compact grid."""
+    """Render the operator default read-model as a compact grid."""
     if not fd:
         return ""
 
-    inspect = fd.get("inspect", {})
-    approve = fd.get("approve", {})
-    intervene = fd.get("intervene", {})
-    execute = fd.get("execute", {})
+    verify = fd.get("verify", {})
+    intent = fd.get("intent", {})
+    blockers = fd.get("blockers", {})
+    progress = fd.get("progress", {})
+    acceptance = fd.get("acceptance", {})
 
-    # Color logic: inspect
-    if int(inspect.get("degraded_standing", 0) or 0) > 0 or str(inspect.get("terminal_telemetry_status", "") or "") != "ok":
-        inspect_css = "fd-cell-ylw"
+    if str(verify.get("verify_status", "") or "") not in ("", "pass", "unknown") or int(verify.get("degraded_standing", 0) or 0) > 0 or str(verify.get("terminal_telemetry_status", "") or "") != "ok":
+        verify_css = "fd-cell-ylw"
     else:
-        inspect_css = "fd-cell-grn"
+        verify_css = "fd-cell-grn"
 
-    # Color logic: approve
-    if int(approve.get("total", 0) or 0) > 0:
-        approve_css = "fd-cell-ylw"
+    if int(intent.get("open_work", 0) or 0) > 0:
+        intent_css = "fd-cell-blu"
     else:
-        approve_css = "fd-cell-grn"
+        intent_css = "fd-cell-grn"
 
-    # Color logic: intervene
-    if int(intervene.get("total", 0) or 0) > 0:
-        intervene_css = "fd-cell-red"
+    if int(blockers.get("total", 0) or 0) > 0:
+        blockers_css = "fd-cell-red"
     else:
-        intervene_css = "fd-cell-grn"
+        blockers_css = "fd-cell-grn"
 
-    # Color logic: execute
-    if int(execute.get("total", 0) or 0) > 0:
-        execute_css = "fd-cell-blu"
+    if int(progress.get("total", 0) or 0) > 0:
+        progress_css = "fd-cell-blu"
     else:
-        execute_css = "fd-cell-grn"
+        progress_css = "fd-cell-grn"
 
-    # Build count lines
-    healthy = int(inspect.get("healthy_standing", 0) or 0)
-    degraded = int(inspect.get("degraded_standing", 0) or 0)
-    loops = int(inspect.get("open_loops", 0) or 0)
-    inspect_parts = []
-    if healthy:
-        inspect_parts.append(f"{healthy} healthy")
-    if degraded:
-        inspect_parts.append(f"{degraded} degraded")
-    inspect_parts.append(f"{loops} loops")
-    telemetry_status = str(inspect.get("terminal_telemetry_status", "") or "")
-    if telemetry_status and telemetry_status != "ok":
-        inspect_parts.append(f"telemetry {telemetry_status}")
-    inspect_count = " &middot; ".join(inspect_parts)
-
-    pending_i = int(approve.get("pending_ingress", 0) or 0)
-    pending_h = int(approve.get("pending_handoffs", 0) or 0)
-    pending_reviews = int(approve.get("needs_review", 0) or 0)
-    approve_total = int(approve.get("total", 0) or 0)
-    if approve_total == 0:
-        approve_count = "nothing pending"
+    if int(acceptance.get("ambiguous", 0) or 0) > 0:
+        acceptance_css = "fd-cell-ylw"
     else:
-        ap = []
-        if pending_i:
-            ap.append(f"{pending_i} ingress")
-        if pending_h:
-            ap.append(f"{pending_h} handoff{'s' if pending_h != 1 else ''}")
-        if pending_reviews:
-            ap.append(f"{pending_reviews} review{'s' if pending_reviews != 1 else ''}")
-        approve_count = " &middot; ".join(ap)
+        acceptance_css = "fd-cell-grn"
 
-    active_int = int(intervene.get("active_interventions", 0) or 0)
-    open_gaps = int(intervene.get("open_gaps", 0) or 0)
-    if int(intervene.get("total", 0) or 0) == 0:
-        intervene_count = "all clear"
-    else:
-        ip = []
-        if active_int:
-            ip.append(f"{active_int} intervention{'s' if active_int != 1 else ''}")
-        ip.append(f"{open_gaps} gaps")
-        intervene_count = " &middot; ".join(ip)
-
-    waves = int(execute.get("active_waves", 0) or 0)
-    active_delegations = int(execute.get("active_delegations", 0) or 0)
-    executing = int(execute.get("executing", 0) or 0)
-    picked_up = int(execute.get("picked_up", 0) or 0)
-    if int(execute.get("total", 0) or 0) == 0:
-        execute_count = "idle"
-    else:
-        ep = []
-        if waves:
-            ep.append(f"{waves} wave{'s' if waves != 1 else ''}")
-        if active_delegations:
-            ep.append(f"{active_delegations} delegation{'s' if active_delegations != 1 else ''}")
-        if executing:
-            ep.append(f"{executing} executing")
-        elif picked_up:
-            ep.append(f"{picked_up} picked up")
-        execute_count = " &middot; ".join(ep)
+    verify_count = _h(str(verify.get("summary", "verify healthy") or "verify healthy"))
+    intent_count = _h(str(intent.get("summary", "0 open work") or "0 open work"))
+    blockers_count = _h(str(blockers.get("summary", "all clear") or "all clear"))
+    progress_count = _h(str(progress.get("summary", "idle") or "idle"))
+    acceptance_count = _h(str(acceptance.get("summary", "0 delivered") or "0 delivered"))
 
     return f"""
   <div class="fd-sh">Operator</div>
   <div class="front-door">
-    <div class="fd-cell {inspect_css}">
-      <div class="fd-verb">Inspect</div>
-      <div class="fd-count">{inspect_count}</div>
+    <div class="fd-cell {verify_css}">
+      <div class="fd-verb">Verify</div>
+      <div class="fd-count">{verify_count}</div>
     </div>
-    <div class="fd-cell {approve_css}">
-      <div class="fd-verb">Approve</div>
-      <div class="fd-count">{approve_count}</div>
+    <div class="fd-cell {intent_css}">
+      <div class="fd-verb">Intent</div>
+      <div class="fd-count">{intent_count}</div>
     </div>
-    <div class="fd-cell {intervene_css}">
-      <div class="fd-verb">Intervene</div>
-      <div class="fd-count">{intervene_count}</div>
+    <div class="fd-cell {blockers_css}">
+      <div class="fd-verb">Blockers</div>
+      <div class="fd-count">{blockers_count}</div>
     </div>
-    <div class="fd-cell {execute_css}">
-      <div class="fd-verb">Execute</div>
-      <div class="fd-count">{execute_count}</div>
+    <div class="fd-cell {progress_css}">
+      <div class="fd-verb">Progress</div>
+      <div class="fd-count">{progress_count}</div>
+    </div>
+    <div class="fd-cell {acceptance_css}">
+      <div class="fd-verb">Acceptance</div>
+      <div class="fd-count">{acceptance_count}</div>
     </div>
   </div>"""
 

@@ -45,6 +45,10 @@ cd ~/code/agentic-spine
 Everything an agent does lives inside these five objects. If you do not know
 which loop you are in, stop and ask.
 
+These are control-plane truth objects and expert/drilldown grammar. Default
+operator surfaces should center on intent, progress, blockers, acceptance, and
+verify truth rather than lead with these nouns.
+
 ### Loop
 
 A bounded problem slice with a named objective. Opens via `loops.create`
@@ -104,6 +108,10 @@ The truthful kernel progression is:
 `request -> claim -> execute -> outcome/receipt`
 
 Current governed realizations split by transport mode.
+
+Operator-facing defaults should describe outcome and operational state first.
+The lifecycle nouns below remain canonical control-plane truth, not the
+required first-read language for everyday operator posture.
 
 The canonical contract above both realizations lives in
 [`dispatch.envelope.contract.yaml`](../../ops/bindings/dispatch.envelope.contract.yaml)
