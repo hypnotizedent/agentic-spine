@@ -13,6 +13,7 @@ set -euo pipefail
 SSH_TARGETS="${SSH_TARGETS:-ops/bindings/ssh.targets.yaml}"
 VM_LIFECYCLE="${VM_LIFECYCLE:-ops/bindings/vm.lifecycle.yaml}"
 HARDWARE_INV="${HARDWARE_INV:-ops/bindings/hardware.inventory.yaml}"
+OPERATOR_INV="${OPERATOR_INV:-ops/bindings/operator.hardware.inventory.yaml}"
 
 _need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
 _need yq
@@ -21,6 +22,7 @@ _need date
 for f in "$SSH_TARGETS" "$VM_LIFECYCLE" "$HARDWARE_INV"; do
   [[ -f "$f" ]] || { echo "STOP: missing binding: $f" >&2; exit 2; }
 done
+[[ -f "$OPERATOR_INV" ]] || { echo "WARN: operator hardware inventory not found, skipping lifecycle annotation" >&2; }
 
 SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
 OUTPUT_DIR="$SPINE_STATE/domain-state"
@@ -128,6 +130,42 @@ DECOM_VMS="$(yq -r '
     ] | @tsv
 ' "$VM_LIFECYCLE")"
 
+# --- Operator hardware lifecycle (from operator.hardware.inventory.yaml) ---
+OPERATOR_HARDWARE=""
+if [[ -f "$OPERATOR_INV" ]]; then
+  OPERATOR_HARDWARE="$(yq -r '
+    .machines[]
+    | select(.role_candidacy != null)
+    | select((.role_candidacy | length) > 0)
+    | select((.role_candidacy | .[0]) != "none")
+    | [
+        .device_id,
+        (.site // "-"),
+        (.eligibility_state // "unknown"),
+        ((.role_candidacy // []) | join(",")),
+        (.promotion_stage // "unset"),
+        (.platform // "-")
+      ] | @tsv
+  ' "$OPERATOR_INV" 2>/dev/null || true)"
+
+  # Also include ready-device machines (role_candidacy [none]) with notes
+  OPERATOR_HARDWARE_READY="$(yq -r '
+    .machines[]
+    | select(.role_candidacy != null)
+    | select((.role_candidacy | .[0]) == "none")
+    | select(.eligibility_state != null)
+    | select(.eligibility_state != "unknown")
+    | [
+        .device_id,
+        (.site // "-"),
+        (.eligibility_state // "unknown"),
+        "none",
+        "—",
+        (.platform // "-")
+      ] | @tsv
+  ' "$OPERATOR_INV" 2>/dev/null || true)"
+fi
+
 # --- Subnet table (static — derived from ssh.targets site conventions) ---
 # These are stable topology facts; encoding in the generator avoids a new binding.
 
@@ -137,7 +175,7 @@ cat <<HEADER
 # Device Identity Read Model (Generated)
 
 Generated: $NOW
-Sources: ssh.targets.yaml, vm.lifecycle.yaml, hardware.inventory.yaml
+Sources: ssh.targets.yaml, vm.lifecycle.yaml, hardware.inventory.yaml, operator.hardware.inventory.yaml
 Regenerate: \`./bin/ops cap run device.identity.readmodel.generate\`
 
 ---
@@ -208,6 +246,27 @@ if [[ -n "$HARDWARE" ]]; then
   while IFS=$'\t' read -r mid model site cpu ram vmcount; do
     echo "| \`$mid\` | $model | $site | $cpu | $ram | $vmcount |"
   done <<< "$HARDWARE"
+fi
+
+if [[ -n "${OPERATOR_HARDWARE:-}" ]] || [[ -n "${OPERATOR_HARDWARE_READY:-}" ]]; then
+cat <<'HDR'
+
+## Operator Hardware Lifecycle
+
+| Device | Site | Platform | Eligibility | Role Candidacy | Promotion Stage |
+|--------|------|----------|-------------|----------------|-----------------|
+HDR
+
+  if [[ -n "${OPERATOR_HARDWARE:-}" ]]; then
+    while IFS=$'\t' read -r dev site elig candidacy stage platform; do
+      echo "| \`$dev\` | $site | $platform | $elig | $candidacy | **$stage** |"
+    done <<< "$OPERATOR_HARDWARE"
+  fi
+  if [[ -n "${OPERATOR_HARDWARE_READY:-}" ]]; then
+    while IFS=$'\t' read -r dev site elig candidacy stage platform; do
+      echo "| \`$dev\` | $site | $platform | $elig | $candidacy | $stage |"
+    done <<< "$OPERATOR_HARDWARE_READY"
+  fi
 fi
 
 cat <<HDR

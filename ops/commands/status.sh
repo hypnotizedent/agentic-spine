@@ -1286,8 +1286,8 @@ try:
                 except Exception:
                     pass
 
-        def _node_role_posture(_role_name, _inventory, *, _posture, _delivered, _note, _target="", _target_access="", _promoted=True, _counter_semantics="delivered_runtime"):
-            return {
+        def _node_role_posture(_role_name, _inventory, *, _posture, _delivered, _note, _target="", _target_access="", _promoted=True, _counter_semantics="delivered_runtime", _candidate_fields=None):
+            _base = {
                 "role": _role_name,
                 "defined_in_binding": _role_name in _node_types,
                 "promoted": bool(_promoted),
@@ -1298,6 +1298,43 @@ try:
                 "target_access": _target_access,
                 "note": _note,
                 **_inventory,
+            }
+            if _candidate_fields:
+                _base.update(_candidate_fields)
+            return _base
+
+        # --- Join operator hardware inventory for candidate/promotion_stage ---
+        _operator_candidates = {}  # role_name -> list of {device_id, promotion_stage, eligibility_state}
+        _operator_inv_path = spine / "ops" / "bindings" / "operator.hardware.inventory.yaml"
+        if _operator_inv_path.is_file():
+            try:
+                _op_inv = _yaml_daemons.safe_load(_operator_inv_path.read_text(encoding="utf-8")) or {}
+                for _m in (_op_inv.get("machines") or []):
+                    if not isinstance(_m, dict):
+                        continue
+                    _rc = _m.get("role_candidacy") or []
+                    if not isinstance(_rc, list):
+                        continue
+                    for _r in _rc:
+                        if _r and str(_r) != "none":
+                            _operator_candidates.setdefault(str(_r), []).append({
+                                "device_id": str(_m.get("device_id") or ""),
+                                "promotion_stage": str(_m.get("promotion_stage") or "unset"),
+                                "eligibility_state": str(_m.get("eligibility_state") or "unknown"),
+                            })
+            except Exception:
+                pass
+
+        def _candidate_fields(_role_name):
+            """Return candidate metadata for a role from operator hardware, or empty defaults."""
+            _cands = _operator_candidates.get(_role_name, [])
+            if not _cands:
+                return {"candidate": "", "candidate_promotion_stage": "", "candidate_eligibility": ""}
+            _best = _cands[0]
+            return {
+                "candidate": _best["device_id"],
+                "candidate_promotion_stage": _best["promotion_stage"],
+                "candidate_eligibility": _best["eligibility_state"],
             }
 
         exec_host_role = _node_role_posture(
@@ -1312,25 +1349,41 @@ try:
             _target_access=exec_host_target_access,
             _counter_semantics="delivered_runtime",
         )
+        _ver_cand = _candidate_fields("verification_node")
+        _ver_note = (
+            "Defined in node.role.contract.yaml; mapped inventory may exist, but no delivered verification_node target is attested yet."
+        )
+        if _ver_cand.get("candidate"):
+            _ver_note = (
+                f"Candidate exists: {_ver_cand['candidate']} at promotion_stage={_ver_cand['candidate_promotion_stage']}. "
+                "No delivered verification_node target attested."
+            )
         verification_role = _node_role_posture(
             "verification_node",
             verification_inventory,
             _posture="defined_not_delivered",
             _delivered=False,
-            _note=(
-                "Defined in node.role.contract.yaml; mapped inventory may exist, but no delivered verification_node target is attested yet."
-            ),
+            _note=_ver_note,
             _counter_semantics="mapped_inventory",
+            _candidate_fields=_ver_cand,
         )
+        _store_cand = _candidate_fields("storage_evidence_node")
+        _store_note = (
+            "Mapped inventory is shown for planned storage_evidence_node placement, but no separate delivered storage_evidence_node target is attested yet."
+        )
+        if _store_cand.get("candidate"):
+            _store_note = (
+                f"Candidate exists: {_store_cand['candidate']} at promotion_stage={_store_cand['candidate_promotion_stage']}. "
+                "No delivered storage_evidence_node target attested."
+            )
         storage_role = _node_role_posture(
             "storage_evidence_node",
             storage_inventory,
             _posture="defined_not_delivered",
             _delivered=False,
-            _note=(
-                "Mapped inventory is shown for planned storage_evidence_node placement, but no separate delivered storage_evidence_node target is attested yet."
-            ),
+            _note=_store_note,
             _counter_semantics="mapped_inventory",
+            _candidate_fields=_store_cand,
         )
         control_role = {
             "role": "control_node",
@@ -1831,17 +1884,27 @@ if _node_roles:
     )
     if _exec.get("target"):
         print(f"    target:           {_exec.get('target', '')}")
-    print(
+    _ver_candidate = _ver.get("candidate", "")
+    _ver_stage = _ver.get("candidate_promotion_stage", "")
+    _ver_line = (
         "  verification_node: "
         f"{_ver.get('posture', 'unknown')} · "
         f"{_ver_prefix}intended={int(_ver.get('intended_workload_count', 0) or 0)}"
     )
-    print(
+    if _ver_candidate:
+        _ver_line += f"\n    candidate:         {_ver_candidate} (stage={_ver_stage})"
+    print(_ver_line)
+    _store_candidate = _store.get("candidate", "")
+    _store_stage = _store.get("candidate_promotion_stage", "")
+    _store_line = (
         "  storage_evidence:  "
         f"{_store.get('posture', 'unknown')} · "
         f"{_store_prefix}active={int(_store.get('active_workload_count', 0) or 0)} "
         f"{_store_prefix}intended={int(_store.get('intended_workload_count', 0) or 0)}"
     )
+    if _store_candidate:
+        _store_line += f"\n    candidate:         {_store_candidate} (stage={_store_stage})"
+    print(_store_line)
     print(
         "  control_node:      "
         f"{_control.get('posture', 'unknown')} · "
