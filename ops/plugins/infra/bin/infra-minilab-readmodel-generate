@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra.minilab.readmodel.generate
+# Generate home minilab read model from structured authority bindings.
+# Sources: vm.lifecycle.yaml, ssh.targets.yaml, backup.inventory.yaml
+# Output:  $SPINE_STATE/domain-state/infra.minilab.readmodel.md (runtime only)
+
+VM_LIFECYCLE="${VM_LIFECYCLE:-ops/bindings/vm.lifecycle.yaml}"
+SSH_TARGETS="${SSH_TARGETS:-ops/bindings/ssh.targets.yaml}"
+BACKUP_INV="${BACKUP_INV:-ops/bindings/domains/backup/backup.inventory.yaml}"
+NODE_ROLE="${NODE_ROLE:-ops/bindings/node.role.contract.yaml}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+_need yq
+_need date
+
+for f in "$VM_LIFECYCLE" "$SSH_TARGETS" "$BACKUP_INV"; do
+  [[ -f "$f" ]] || { echo "STOP: missing binding: $f" >&2; exit 2; }
+done
+
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+OUTPUT_DIR="$SPINE_STATE/domain-state"
+OUTPUT_FILE="$OUTPUT_DIR/infra.minilab.readmodel.md"
+NOW="$(TZ=UTC date '+%Y-%m-%dT%H:%M:%SZ')"
+
+mkdir -p "$OUTPUT_DIR"
+
+# --- Extract home VMs from vm.lifecycle.yaml ---
+HOME_VMS="$(yq -r '
+  .vms[]
+  | select(.proxmox_host == "proxmox-home")
+  | [
+      (.id | tostring),
+      .hostname,
+      (.status // "unknown"),
+      (.role // "-"),
+      (.lan_ip // "-"),
+      (.tailscale_ip // "-"),
+      (.vm_type // "vm")
+    ] | @tsv
+' "$VM_LIFECYCLE")"
+
+# --- Extract home SSH targets ---
+HOME_SSH="$(yq -r '
+  .ssh.targets[]
+  | select(
+      (.site == "home") or
+      (.tags // [] | map(select(. == "home")) | length > 0)
+    )
+  | select(.id != null)
+  | [
+      .id,
+      (.host // "-"),
+      (.tailscale_ip // "-"),
+      (.access_policy // "-"),
+      (.description // "-")
+    ] | @tsv
+' "$SSH_TARGETS")"
+
+# --- Extract home backup targets ---
+HOME_BACKUPS="$(yq -r '
+  .targets[]
+  | select((.enabled // false) == true)
+  | select(
+      (.host == "proxmox-home") or
+      (.name | test("home-"))
+    )
+  | [
+      .name,
+      (.host // "-"),
+      (.schedule_class // "-"),
+      (.data_class // "-")
+    ] | @tsv
+' "$BACKUP_INV" 2>/dev/null || true)"
+
+# --- Generate markdown ---
+{
+cat <<HEADER
+# Minilab Read Model (Generated)
+
+Generated: $NOW
+Sources: vm.lifecycle.yaml, ssh.targets.yaml, backup.inventory.yaml
+Regenerate: \`./bin/ops cap run infra.minilab.readmodel.generate\`
+
+---
+
+## Home Infrastructure Summary
+
+HEADER
+
+echo "| VMID | Hostname | Type | Status | Role | LAN IP | Tailscale IP |"
+echo "|------|----------|------|--------|------|--------|-------------|"
+if [[ -n "$HOME_VMS" ]]; then
+  while IFS=$'\t' read -r vmid hostname status role lan_ip ts_ip vmtype; do
+    echo "| $vmid | \`$hostname\` | $vmtype | $status | $role | $lan_ip | $ts_ip |"
+  done <<< "$HOME_VMS"
+fi
+
+cat <<'MID'
+
+## SSH Targets (Home)
+
+| ID | Host | Tailscale IP | Access Policy | Description |
+|----|------|-------------|---------------|-------------|
+MID
+
+if [[ -n "$HOME_SSH" ]]; then
+  while IFS=$'\t' read -r id host ts_ip policy desc; do
+    echo "| \`$id\` | $host | $ts_ip | $policy | $desc |"
+  done <<< "$HOME_SSH"
+fi
+
+cat <<'BACKUP_HDR'
+
+## Backup Targets (Home)
+
+| Target | Host | Schedule | Data Class |
+|--------|------|----------|------------|
+BACKUP_HDR
+
+if [[ -n "${HOME_BACKUPS:-}" ]]; then
+  while IFS=$'\t' read -r name host sched dclass; do
+    echo "| \`$name\` | $host | $sched | $dclass |"
+  done <<< "$HOME_BACKUPS"
+else
+  echo "| *(none enabled with home filter)* | - | - | - |"
+fi
+
+cat <<'STORAGE'
+
+## Storage
+
+| Target | Path | Status |
+|--------|------|--------|
+| Proxmox vzdump | /volume1/backups/proxmox_backups | Active |
+| NFS homelab | /volume1/homelab | Mounted on proxmox-home |
+
+STORAGE
+
+cat <<'FOOTER'
+## Authority Pointers
+
+- **Canonical identity and network naming:** `docs/governance/DEVICE_IDENTITY_SSOT.md`
+- **VM lifecycle authority:** `ops/bindings/vm.lifecycle.yaml`
+- **SSH target authority:** `ops/bindings/ssh.targets.yaml`
+- **Backup authority:** `ops/bindings/domains/backup/backup.inventory.yaml`
+- **Detailed home hardware/runbooks:** `~/code/workbench/docs/infrastructure/domains/home/MINILAB_SSOT.md`
+FOOTER
+
+} > "$OUTPUT_FILE"
+
+echo "Generated: $OUTPUT_FILE"
+echo ""
+cat "$OUTPUT_FILE"
