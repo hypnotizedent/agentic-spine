@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# D422 — translator-authority-isolation-lock
+# D422 — membrane-boundary-isolation-lock
 #
-# Enforces translator role boundary:
-#   1. translator.authority.contract.yaml exists with status: authoritative
+# Enforces membrane boundary:
+#   1. membrane.authority.contract.yaml exists with status: authoritative
 #   2. Contract references the canonical doctrine source
 #   3. Contract defines allowed_actions and forbidden_actions
 #   4. Contract locks repo-owned authority + thin-adapter policy
 #   5. Contract keeps routing vocabulary supplemental, not replacement
 #   6. TRANSLATOR_AUTHORITY_DOCTRINE_V1.md exists
-#   7. Actor dialogue defines the human_operator/agent_actor split
-#   8. Actor dialogue defines the first-class human intent object
+#   7. Actor boundary defines the human_operator/agent_actor split
+#   8. Actor boundary defines the first-class human intent object
 #   9. No live governance text implies AI sessions can act as operator
 #
 # Category: governance-hygiene | Class: invariant | Severity: high
@@ -33,15 +33,15 @@ append_detail() {
 }
 
 # 1. Contract must exist and be authoritative
-CONTRACT="$ROOT/ops/bindings/translator.authority.contract.yaml"
+CONTRACT="$ROOT/ops/bindings/membrane.authority.contract.yaml"
 if [[ ! -f "$CONTRACT" ]]; then
   FAIL=1
-  append_detail "translator.authority.contract.yaml missing"
+  append_detail "membrane.authority.contract.yaml missing"
 else
   status="$(yq e '.status' "$CONTRACT" 2>/dev/null || echo "unknown")"
   if [[ "$status" != "authoritative" ]]; then
     FAIL=1
-    append_detail "translator.authority.contract.yaml status=$status (expected authoritative)"
+    append_detail "membrane.authority.contract.yaml status=$status (expected authoritative)"
   fi
 fi
 
@@ -50,7 +50,7 @@ if [[ "$FAIL" -eq 0 ]]; then
   doctrine_source="$(yq e '.doctrine_source' "$CONTRACT" 2>/dev/null || echo "unknown")"
   if [[ "$doctrine_source" != "docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md" ]]; then
     FAIL=1
-    append_detail "translator contract doctrine_source=$doctrine_source (expected docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)"
+    append_detail "membrane contract doctrine_source=$doctrine_source (expected docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)"
   fi
 fi
 
@@ -60,7 +60,7 @@ if [[ "$FAIL" -eq 0 ]]; then
   has_forbidden="$(yq e '.forbidden_actions | length' "$CONTRACT" 2>/dev/null || echo "0")"
   if [[ "$has_allowed" -eq 0 || "$has_forbidden" -eq 0 ]]; then
     FAIL=1
-    append_detail "translator contract missing allowed_actions ($has_allowed) or forbidden_actions ($has_forbidden)"
+    append_detail "membrane contract missing allowed_actions ($has_allowed) or forbidden_actions ($has_forbidden)"
   fi
 fi
 
@@ -68,13 +68,13 @@ fi
 if [[ "$FAIL" -eq 0 ]]; then
   authority_status="$(yq e '.canonical_authority.status' "$CONTRACT" 2>/dev/null || echo "unknown")"
   adapter_rule="$(yq e '.canonical_authority.adapter_policy.rule' "$CONTRACT" 2>/dev/null || echo "unknown")"
-  if [[ "$authority_status" != "repo_translator_stack_is_single_authority" ]]; then
+  if [[ "$authority_status" != "repo_membrane_stack_is_single_authority" ]]; then
     FAIL=1
-    append_detail "translator contract canonical_authority.status=$authority_status (expected repo_translator_stack_is_single_authority)"
+    append_detail "membrane contract canonical_authority.status=$authority_status (expected repo_membrane_stack_is_single_authority)"
   fi
   if [[ "$adapter_rule" != "thin_adapter_only" ]]; then
     FAIL=1
-    append_detail "translator contract adapter_policy.rule=$adapter_rule (expected thin_adapter_only)"
+    append_detail "membrane contract adapter_policy.rule=$adapter_rule (expected thin_adapter_only)"
   fi
 fi
 
@@ -84,11 +84,11 @@ if [[ "$FAIL" -eq 0 ]]; then
   routing_relationship="$(yq e '.routing_class_vocabulary.relationship_to_signal_table' "$CONTRACT" 2>/dev/null || echo "unknown")"
   if [[ "$routing_role" != "supplemental_classification_layer" ]]; then
     FAIL=1
-    append_detail "translator contract routing_class_vocabulary.role=$routing_role (expected supplemental_classification_layer)"
+    append_detail "membrane contract routing_class_vocabulary.role=$routing_role (expected supplemental_classification_layer)"
   fi
   if [[ "$routing_relationship" != "supplement_not_replacement" ]]; then
     FAIL=1
-    append_detail "translator contract routing_class_vocabulary.relationship_to_signal_table=$routing_relationship (expected supplement_not_replacement)"
+    append_detail "membrane contract routing_class_vocabulary.relationship_to_signal_table=$routing_relationship (expected supplement_not_replacement)"
   fi
 fi
 
@@ -99,30 +99,30 @@ if [[ ! -f "$DOCTRINE" ]]; then
   append_detail "TRANSLATOR_AUTHORITY_DOCTRINE_V1.md missing"
 fi
 
-# 7. Actor dialogue must carry the canonical actor split.
-ACTOR_DIALOGUE="$ROOT/ops/bindings/actor.dialogue.contract.yaml"
+# 7. Actor boundary must carry the canonical actor split.
+ACTOR_DIALOGUE="$ROOT/ops/bindings/actor.boundary.contract.yaml"
 if [[ ! -f "$ACTOR_DIALOGUE" ]]; then
   FAIL=1
-  append_detail "actor.dialogue.contract.yaml missing"
+  append_detail "actor.boundary.contract.yaml missing"
 elif [[ "$FAIL" -eq 0 ]]; then
   operator_actor_class="$(yq e '.pathway.nodes[] | select(.role == "operator") | .actor_class' "$ACTOR_DIALOGUE" 2>/dev/null | head -n 1)"
-  translator_actor_class="$(yq e '.pathway.nodes[] | select(.role == "translator") | .actor_class' "$ACTOR_DIALOGUE" 2>/dev/null | head -n 1)"
+  membrane_actor_class="$(yq e '.pathway.nodes[] | select(.role == "membrane") | .actor_class' "$ACTOR_DIALOGUE" 2>/dev/null | head -n 1)"
   controller_actor_class="$(yq e '.pathway.nodes[] | select(.role == "controller") | .actor_class' "$ACTOR_DIALOGUE" 2>/dev/null | head -n 1)"
   if [[ "$operator_actor_class" != "human_operator" ]]; then
     FAIL=1
-    append_detail "actor dialogue operator actor_class=$operator_actor_class (expected human_operator)"
+    append_detail "actor boundary operator actor_class=$operator_actor_class (expected human_operator)"
   fi
-  if [[ "$translator_actor_class" != "agent_actor" ]]; then
+  if [[ "$membrane_actor_class" != "agent_actor" ]]; then
     FAIL=1
-    append_detail "actor dialogue translator actor_class=$translator_actor_class (expected agent_actor)"
+    append_detail "actor boundary membrane actor_class=$membrane_actor_class (expected agent_actor)"
   fi
   if [[ "$controller_actor_class" != "agent_actor" ]]; then
     FAIL=1
-    append_detail "actor dialogue controller actor_class=$controller_actor_class (expected agent_actor)"
+    append_detail "actor boundary controller actor_class=$controller_actor_class (expected agent_actor)"
   fi
 fi
 
-# 8. Actor dialogue must carry the canonical human intent object.
+# 8. Actor boundary must carry the canonical human intent object.
 if [[ "$FAIL" -eq 0 ]]; then
   intent_status="$(yq e '.human_intent_object.status // ""' "$ACTOR_DIALOGUE" 2>/dev/null || echo "")"
   intent_class="$(yq e '.human_intent_object.object_class // ""' "$ACTOR_DIALOGUE" 2>/dev/null || echo "")"
@@ -130,15 +130,15 @@ if [[ "$FAIL" -eq 0 ]]; then
   carrier_count="$(yq e '.human_intent_object.canonical_carriers | length' "$ACTOR_DIALOGUE" 2>/dev/null || echo "0")"
   if [[ "$intent_status" != "first_class" ]]; then
     FAIL=1
-    append_detail "actor dialogue human_intent_object.status=$intent_status (expected first_class)"
+    append_detail "actor boundary human_intent_object.status=$intent_status (expected first_class)"
   fi
   if [[ "$intent_class" != "human_intent" ]]; then
     FAIL=1
-    append_detail "actor dialogue human_intent_object.object_class=$intent_class (expected human_intent)"
+    append_detail "actor boundary human_intent_object.object_class=$intent_class (expected human_intent)"
   fi
   if [[ "$required_count" -lt 6 || "$carrier_count" -lt 3 ]]; then
     FAIL=1
-    append_detail "actor dialogue human_intent_object incomplete (required_fields=$required_count carriers=$carrier_count)"
+    append_detail "actor boundary human_intent_object incomplete (required_fields=$required_count carriers=$carrier_count)"
   fi
 fi
 
@@ -170,5 +170,5 @@ if [[ "$FAIL" -eq 1 ]]; then
   exit 1
 fi
 
-echo "D422 PASS: translator authority isolation verified"
+echo "D422 PASS: membrane boundary isolation verified"
 exit 0

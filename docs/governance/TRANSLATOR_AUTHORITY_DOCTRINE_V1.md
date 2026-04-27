@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@human-steward"
-scope: translator-authority-doctrine
+scope: membrane-boundary-doctrine
 version: 1.1
 updated: "2026-03-31"
 decision_loop_id: LOOP-TRANSLATOR-DOCTRINE-CONSOLIDATION-20260324
@@ -10,17 +10,17 @@ source_triangulation:
   - docs/governance/SESSION_PROTOCOL.md (loop anchorage and floating-WIP prevention)
   - docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md (control-plane placement and entry surface)
   - ops/bindings/node.role.contract.yaml (live physical-node taxonomy and role semantics)
-  - ops/bindings/translator.authority.contract.yaml (machine-evaluable boundary)
+  - ops/bindings/membrane.authority.contract.yaml (machine-evaluable boundary)
 enforcement:
-  gate: D422 (translator-authority-isolation-lock)
-  contract: ops/bindings/translator.authority.contract.yaml
+  gate: D422 (membrane-boundary-isolation-lock)
+  contract: ops/bindings/membrane.authority.contract.yaml
 ---
 
-# Translator Authority Doctrine v1.1
+# Membrane Boundary Doctrine v1.1
 
-**Purpose**: Define the permanent, non-negotiable rules governing the Translator role, the 7-Node execution topology, and the binding "Translator Analysis Framework" that every AI agent session must internalize before executing work.
+**Purpose**: Define the permanent, non-negotiable rules governing the Membrane function, the 7-Node execution topology, and the binding "Membrane Analysis Framework" that every AI agent session must internalize before executing work.
 
-**Authority**: This doctrine is the canonical source of truth for translator governance, execution-plane separation, and session-entry analysis requirements. The machine-evaluable contract at `ops/bindings/translator.authority.contract.yaml` MUST reference this document as its `doctrine_source`. Gate D422 enforces structural compliance. The repo-owned translator stack is the single translator authority; tool-local or home-level adapters are deploy targets only and must remain thin wrappers around repo-owned truth.
+**Authority**: This doctrine is the canonical source of truth for membrane governance, execution-plane separation, and session-entry analysis requirements. The machine-evaluable contract at `ops/bindings/membrane.authority.contract.yaml` MUST reference this document as its `doctrine_source`. Gate D422 enforces structural compliance. The repo-owned membrane stack is the single membrane boundary; tool-local or home-level adapters are deploy targets only and must remain thin wrappers around repo-owned truth.
 
 **Scope**: Applies to every AI agent session (Claude Code, Codex, ChatGPT, any future surface), every human operator interaction via the operator console, and every automated pipeline that ingests, normalizes, routes, or renders spine state. AI sessions are always agent actors under explicit roles — never the human operator.
 
@@ -28,17 +28,17 @@ enforcement:
 
 ## Canonical Authority Surface
 
-Translator authority lives in the repo-owned translator stack:
+Membrane authority lives in the repo-owned membrane stack:
 
-- `ops/bindings/translator.authority.contract.yaml`
+- `ops/bindings/membrane.authority.contract.yaml`
 - `docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`
-- `ops/bindings/actor.dialogue.contract.yaml`
+- `ops/bindings/actor.boundary.contract.yaml`
 - `ops/bindings/prompt.registry.yaml`
 - `ops/bindings/prompt.library.contract.yaml`
 - `ops/plugins/core/session/templates/`
 
 Tool-local or home-level adapters may package tool-native behavior, but they do
-not own translator meaning, routing truth, forbidden-action rules, or runtime
+not own membrane meaning, routing truth, forbidden-action rules, or runtime
 authority.
 
 ## Thin Adapter Boundary
@@ -53,7 +53,7 @@ Adapters may carry only:
 
 Adapters must not carry:
 
-- a parallel translator authority definition
+- a parallel membrane boundary definition
 - a parallel routing taxonomy treated as source-of-truth
 - duplicated boundary rules or forbidden-action rules
 - runtime authority claims over execution, verification, git, or verdicts
@@ -66,17 +66,17 @@ Adapters must not carry:
 
 Spine V3 exists because two real operational systems — **Mint Prints order intake** and the **Media Stack pipeline** — required consistent, predictable automation that humans alone could not sustain.
 
-Mint Prints exposed the problem first: customer order intakes arrived from email, Shopify webhooks, phone calls, and walk-ins. Each channel had different formatting, different urgency signals, and different data quality. When a human operator — or an AI session collapsing translator and executor into one surface — tried to normalize, route, and execute these intakes in a single surface, errors compounded: orders were misclassified, follow-ups were dropped, and the execution surface had no memory of what the translation surface had decided.
+Mint Prints exposed the problem first: customer order intakes arrived from email, Shopify webhooks, phone calls, and walk-ins. Each channel had different formatting, different urgency signals, and different data quality. When a human operator — or an AI session collapsing membrane and executor into one surface — tried to normalize, route, and execute these intakes in a single surface, errors compounded: orders were misclassified, follow-ups were dropped, and the execution surface had no memory of what the membrane surface had decided.
 
-The Media Stack exposed the same pattern at infrastructure scale: download queues, library organization, availability tracking, and rename operations all required translation of messy input into structured action — and the translation step kept collapsing into the execution step, producing ungoverned side effects.
+The Media Stack exposed the same pattern at infrastructure scale: download queues, library organization, availability tracking, and rename operations all required translation of messy input into structured action — and the normalization step kept collapsing into the execution step, producing ungoverned side effects.
 
-The lesson: **when the thing that interprets intent is the same thing that executes action, there is no checkpoint between misunderstanding and consequence.** The Translator Workflow exists to ensure that human intent flows through classification before reaching execution — and that AI agent sessions act under explicit roles (translator, controller, worker), never as the authority source.
+The lesson: **when the thing that interprets intent is the same thing that executes action, there is no checkpoint between misunderstanding and consequence.** The Membrane Workflow exists to ensure that human intent flows through classification before reaching execution — and that AI agent sessions act under explicit roles (membrane, controller, worker), never as the authority source.
 
 ### The Technical Failure
 
 Before V3, the Codex desktop collapsed four roles into one surface:
 
-1. Translator (interpreting what the operator wants)
+1. Membrane (interpreting what the operator wants)
 2. Coordinator (deciding what to do next)
 3. Verifier (judging whether it worked)
 4. Git agent (publishing the result)
@@ -94,16 +94,17 @@ Spine V3 decomposes operational authority into seven distinct node types. Each n
 ### 1. Operator Console
 
 - **Host**: MacBook (confirmed control-plane entry)
-- **Actor class**: This is a **node/client surface** used by the human steward, not an actor. No AI session holds the operator_console role as its identity — agent sessions attached to this surface act as translator, controller, or worker.
+- **Actor class**: This is a **node/client surface** used by the human steward, not an actor. No AI session holds the operator_console role as its identity — agent sessions attached to this surface act as membrane, controller, or worker.
 - **Purpose**: inspect, approve, converse, launch, review
 - **Rule**: Should not remain the long-term home of recurring system authority. The human operator observes and approves; the spine executes.
 
-### 2. Translator Node
+### 2. Membrane Function
 
-- **Host**: VM 207 (`ai-consolidation`), port 8400 (Decision: Option A, locked)
+- **Runtime status**: Function exists as governance vocabulary. A `membrane_node`
+  is valid only if a real runtime service is materialized and promoted.
 - **Purpose**: receive messy input, normalize it, route it, render output
-- **Rule**: The translator is the membrane, not the judge. It may interpret intent, but it must never become the spine seal of success.
-- **See**: [Translator Boundary Rules](#translator-boundary-rules) below
+- **Rule**: The membrane is the boundary, not the judge. It may interpret intent, but it must never become the spine seal of success.
+- **See**: [Membrane Boundary Rules](#membrane-boundary-rules) below
 
 ### 3. Control Node
 
@@ -123,7 +124,7 @@ Spine V3 decomposes operational authority into seven distinct node types. Each n
 ### 5. Verification Node
 
 - **Purpose**: checks, audits, validation, policy gates
-- **Property**: logically isolated from translator authority
+- **Property**: logically isolated from membrane boundary
 - **Rule**: The verifier judges outcomes. It has no stake in translation or execution.
 
 ### 6. Watcher Nodes
@@ -144,9 +145,9 @@ Assign machines by trust boundary, authority set, persistence, and replacement s
 
 ---
 
-## Translator Boundary Rules
+## Membrane Boundary Rules
 
-These rules are non-negotiable. They are enforced structurally by `translator.authority.contract.yaml` and verified by gate D422.
+These rules are non-negotiable. They are enforced structurally by `membrane.authority.contract.yaml` and verified by gate D422.
 
 ### Allowed Actions
 
@@ -162,8 +163,8 @@ These rules are non-negotiable. They are enforced structurally by `translator.au
 
 ### Canonical Concern Classes
 
-These classes are canonical translator vocabulary and are upstreamed in
-`ops/bindings/translator.authority.contract.yaml` as a supplement to the
+These classes are canonical membrane vocabulary and are declared in
+`ops/bindings/membrane.authority.contract.yaml` as a supplement to the
 existing signal table, not a replacement for it.
 
 | Class | Primary Target | Meaning |
@@ -185,21 +186,21 @@ existing signal table, not a replacement for it.
 
 ### The Core Invariant
 
-> **The translator is the membrane, not the judge.**
+> **The membrane is the boundary, not the judge.**
 > It may interpret intent, but it must never become the spine seal of success.
 > It should be always-on, but never final.
 
-The translator may start a workflow, but it must never be the final judge of success under the current spine operating contract. Translator interprets intent; verifier judges outcomes; git agent publishes.
+The membrane may start a workflow, but it must never be the final judge of success under the current spine operating contract. Membrane interprets intent; verifier judges outcomes; git agent publishes.
 
 ---
 
-## The Translator Analysis Framework
+## The Membrane Analysis Framework
 
 **This framework is binding governance.** Every AI agent session — regardless of surface, model, or operator — MUST apply these four checks before executing any work. This is not a suggestion. It is a structural requirement that prevents the most common V3 failure modes.
 
 ### Part 1: Core Assumptions
 
-The Translator must assume:
+The Membrane must assume:
 
 - **The MacBook environment is fully healthy.** Do not waste cycles re-verifying the control plane's basic functionality. The session attach capability already validates this.
 - **The Loop Anchorage is NEVER assumed.** Always verify the `LOOP_ID`. A session without a verified loop scope is a session producing floating WIP. The first act of every session is to confirm: *What loop am I operating under?*
@@ -208,7 +209,7 @@ The Translator must assume:
 
 ### Part 2: Significant Context Verification
 
-Before routing any work, the Translator must establish three distinctions:
+Before routing any work, the Membrane must establish three distinctions:
 
 1. **State Mutating vs. Read-Only Fact-Finding**
    - Is this request going to change files, state, or system configuration? Or is it purely investigative?
@@ -217,14 +218,14 @@ Before routing any work, the Translator must establish three distinctions:
 
 2. **Correct Execution Target**
    - MacBook (control plane): governance operations, verify runs, loop management, local dev
-   - VM 207 (ai-consolidation): translator service, RAG queries, AI-adjacent workloads
+   - VM 207 (ai-consolidation): membrane service, RAG queries, AI-adjacent workloads
    - VM 106 / domain VMs: infrastructure changes, service operations, domain-specific execution
    - Remote hosts: SSH-governed capability dispatch per `ssh.targets.yaml`
 
 3. **Capability Bounds**
    - Does a governed capability already exist for this task? If yes, use it. (Principle 13)
    - Is the requested action within the current session's authority? Check the entry packet's `forbidden_actions` list.
-   - Would this action collapse translator + executor + verifier into one surface? If yes, stop. That is the anti-pattern.
+   - Would this action collapse membrane + executor + verifier into one surface? If yes, stop. That is the anti-pattern.
 
 ### Part 3: The Most Common Mistake — Floating WIP
 
@@ -258,35 +259,31 @@ This is not a formality. This question enforces:
 1. **Loop anchorage** — work is attached to a governed scope before execution begins
 2. **Session initialization** — the entry packet, policy, and friction snapshot are loaded
 3. **Operator intent clarity** — the human has stated what "done" looks like
-4. **Translator boundary** — the agent is asking, not assuming. Asking is translation. Assuming is execution.
+4. **Membrane boundary** — the agent is asking, not assuming. Asking is normalization. Assuming is execution.
 
 If the operator cannot answer this question, the session should operate in read-only fact-finding mode until a loop scope is established.
 
 ---
 
-## Deployment Architecture (Option A — Locked)
+## Materialization Boundary
 
-The Translator Node will be deployed as an always-on FastAPI service on VM 207:
+The membrane is not automatically a node. Current truth is:
 
-- **Host**: VM 207 (`ai-consolidation`), Tailscale at `100.71.17.29`
-- **Port**: 8400
-- **Endpoints**: `POST /ingest`, `POST /normalize`, `POST /route`, `GET /status`
-- **Normalization**: Rules-based classifier (v1), optional local model for ambiguous inputs
-- **Session state**: SQLite (light, durable across reboots)
-- **Routing**: Spine concerns → control plane, Domain concerns → domain agents
-- **Fallback**: When classification is uncertain, route to control plane
+- `membrane_function` — intake, normalization, classification, routing, and rendering.
+- `membrane_node` — valid only if a real runtime service is materialized and promoted.
+- Legacy `translator_node` vocabulary is compatibility residue until a dedicated node-role migration.
 
 **What NOT to build (ever):**
 
-- Do not give the translator git access
-- Do not give the translator loop closure authority
-- Do not route translator output directly to execution without a governed capability call
-- Do not add a chat UI to the translator service — chat surfaces remain thin clients calling the translator's HTTP API
+- Do not give the membrane git access
+- Do not give the membrane loop closure authority
+- Do not route membrane output directly to execution without a governed capability call
+- Do not add a chat UI to the membrane service — chat surfaces remain thin clients calling the membrane API if such a service is materialized
 - Do not solve boundary enforcement with prompting when you can solve it with network isolation
 
-**Integration**: The translator normalizes input and produces a structured spine request. That request is handed to `wave.execute.start` or to a direct capability call. The translator does not call wave.execute itself — it emits a structured packet and a human-readable routing suggestion. The operator or an authorized orchestrator session makes the execution call.
+**Integration**: The membrane normalizes input and produces a structured spine request. That request is handed to `wave.execute.start` or to a direct capability call. The membrane does not call wave.execute itself — it emits a structured packet and a human-readable routing suggestion. The operator or an authorized orchestrator session makes the execution call.
 
-This preserves the separation: **translator is the membrane, wave.execute is the execution surface, verification gates are the judges.**
+This preserves the separation: **membrane is the boundary, wave.execute is the execution surface, verification gates are the judges.**
 
 ---
 
@@ -300,8 +297,8 @@ This preserves the separation: **translator is the membrane, wave.execute is the
 | `LOCAL_CONTROL_PLANE_CONTRACT.md` | Current control-plane placement and workstation entry-surface authority. |
 | `ops/bindings/node.role.contract.yaml` | Current node taxonomy and role-semantics authority. |
 | `EXECUTION_NODE_SPEC.md` | Archived historical draft only. Not part of the live authority stack. |
-| `translator.authority.contract.yaml` | Machine-evaluable enforcement. MUST reference this doctrine as `doctrine_source`. |
-| `D422 gate` | Structural verification of translator isolation. |
+| `membrane.authority.contract.yaml` | Machine-evaluable enforcement. MUST reference this doctrine as `doctrine_source`. |
+| `D422 gate` | Structural verification of membrane isolation. |
 
 Tool-local or home-level adapters may reference these authorities, but they do
 not replace them.

@@ -228,16 +228,16 @@ evaluate_role_policy() {
         CAP_ROLE_POLICY_OVERRIDE_USED="true"
     fi
 
-    # ── Translator posture: full execution block ──────────────────────────
-    # translator.authority.contract.yaml forbids ALL capability execution,
+    # ── Membrane/translator compatibility posture: full execution block ───
+    # membrane.authority.contract.yaml forbids ALL capability execution,
     # verification authority, loop advancement, and dispatch — not just
     # mutating caps. This gate fires before the safety-class check so that
-    # translator sessions cannot run ANY cap without explicit override.
+    # translator compatibility sessions cannot run ANY cap without explicit override.
     session_posture="${SPINE_SESSION_POSTURE:-}"
     if [[ "$session_posture" == "translator" && "$CAP_ROLE_POLICY_OVERRIDE_USED" != "true" ]]; then
         CAP_BLOCKER_REASON="translator_posture_execution_forbidden"
         CAP_ROLE_POLICY_BLOCK_REASON="$CAP_BLOCKER_REASON"
-        CAP_ROLE_POLICY_BLOCK_MESSAGE="session posture 'translator' cannot execute capabilities — re-enter on a controller or worker surface"
+        CAP_ROLE_POLICY_BLOCK_MESSAGE="session posture 'translator' (membrane compatibility role) cannot execute capabilities — re-enter on a controller or worker surface"
         return 1
     fi
 
@@ -320,7 +320,7 @@ emit_role_policy_stop() {
 
     next_step="rerun from a worker-bound execution surface or set $override_env and $override_reason_env with governed justification"
     if [[ "$session_posture" == "translator" ]]; then
-        next_step="re-enter on a controller or worker surface; translator posture cannot execute any capability. Override only with governed justification via $override_env and $override_reason_env"
+        next_step="re-enter on a controller or worker surface; translator/membrane posture cannot execute any capability. Override only with governed justification via $override_env and $override_reason_env"
     fi
 
     cat <<EOF
