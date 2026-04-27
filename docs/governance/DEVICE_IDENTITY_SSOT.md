@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-22
+last_verified: 2026-04-27
 verification_method: spine-capabilities
 scope: all-infrastructure
 github_issue: "#615"
@@ -10,32 +10,17 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 
 # DEVICE IDENTITY SSOT
 
-> **This is the authoritative high-level naming and network summary for kept devices.**
+> **This document defines stable naming rules and topology conventions.**
 >
-> For current operator-owned machine identity and eligibility → CHECK `ops/bindings/operator.hardware.inventory.yaml`.
-> For current SSH/access-path truth → CHECK `ops/bindings/ssh.targets.yaml`.
-> Do not use this document alone to infer live device roles or current node realization.
-> For service endpoints/ports/health routes → CHECK `docs/governance/SERVICE_REGISTRY.yaml`.
-> Before creating ANY new device/VM/service → FOLLOW THESE RULES.
+> Factual host/IP/VM tables are generated from structured bindings.
+> Run `./bin/ops cap run device.identity.readmodel.generate` for the current
+> device identity read model.
 >
-> Last Verified: March 22, 2026
-
----
-
-## Purpose
-
-This document establishes:
-
-1. **Naming Rules** - How hosts, VMs, and services MUST be named
-2. **High-Level Device and Network Summary** - Canonical naming and current high-level network placement
-3. **Verification Commands** - How to prove each device is healthy
-4. **Retired Surface Notes** - Which historical operator surfaces are no longer governed authority
-
-**Related Documents:**
-- `ops/bindings/operator.hardware.inventory.yaml` - Current operator-owned machine identity and eligibility truth
-- `ops/bindings/ssh.targets.yaml` - Current SSH/access-path truth
-- `docs/governance/SERVICE_REGISTRY.yaml` - Service-level endpoints and health checks
-- `docs/governance/SPINE.md` - Daily authority chain and operator workflow
+> For current SSH/access-path truth -> CHECK `ops/bindings/ssh.targets.yaml`.
+> For VM lifecycle state -> CHECK `ops/bindings/vm.lifecycle.yaml`.
+> For hardware inventory -> CHECK `ops/bindings/hardware.inventory.yaml`.
+> For operator-owned machine identity -> CHECK `ops/bindings/operator.hardware.inventory.yaml`.
+> For service endpoints/ports/health routes -> CHECK `docs/governance/SERVICE_REGISTRY.yaml`.
 
 ---
 
@@ -71,339 +56,37 @@ This document establishes:
 
 ---
 
-## Sites / Physical Locations
+## Sites / Topology Memory
 
-### MacBook (Mobile Workstation)
+### Subnets
 
-| Property | Value |
-|----------|-------|
-| Tailscale hostname | `macbook` |
-| Tailscale IP | 100.85.186.7 |
-| Role | Workstation, Spine CLI (RAG paused) |
-| Network | Mobile (any network via Tailscale) |
-| Verification | `tailscale ip -4` → 100.85.186.7 |
+| Subnet | Site | Gateway | Notes |
+|--------|------|---------|-------|
+| 192.168.1.0/24 | Shop | 192.168.1.1 (UDR6) | Production infrastructure; DNS -> Pi-hole (.204) |
+| 10.0.0.0/24 | Home | 10.0.0.1 (UDR7) | Home lab |
+| 100.x.x.x/32 | Tailscale | MagicDNS | Mesh overlay network |
 
-### Home Minilab
+### Site Characteristics
 
-| Property | Value |
-|----------|-------|
-| Location | Home residence |
-| Subnet | 10.0.0.0/24 |
-| Gateway | 10.0.0.1 (Ubiquiti UDR) |
-| Proxmox Host | `proxmox-home` (Beelink Mini) |
-| Active media VM | `media-home` (VM 106) — 10.0.0.106 / 100.113.72.41 |
-| LXCs | `pihole-home` active, `download-home` soft-decommissioned |
-| NAS | Synology 918+ (`nas`) |
-| Home Assistant | `ha` (VM on proxmox-home) |
-| Vaultwarden (legacy) | `vault` decommissioned 2026-02-16 (superseded by `infra-core`) |
-
-**Verification:**
-```bash
-ssh proxmox-home "qm list && pct list"
-ping -c1 nas pihole-home ha
-ssh media-home docker ps
-```
-
-### Shop Rack (R730XD + N2024P + UDR6)
-
-| Property | Value |
-|----------|-------|
-| Location | Shop building |
-| Subnet | 192.168.1.0/24 |
-| Gateway | 192.168.1.1 (UniFi UDR6) |
-| Router | `udr-shop` — 192.168.1.1 (UniFi Dream Router 6) |
-| Switch mgmt IP | 192.168.1.2 (Dell N2024P) |
-| iDRAC | `idrac-shop` — 192.168.1.250 (LAN-only) |
-| Proxmox Host | `pve` (Dell R730XD) |
-| Production VMs | infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); finance-stack, mint-data, mint-apps (Mint); download-stack, streaming-stack (residual media fallback after media-home cutover); immich-1 (deferred) |
-| Legacy tombstone VM | `docker-host` historical identity only; not canonical runtime and not expected to stay as a live guest |
-| NVR | `nvr-shop` — 192.168.1.216 (LAN-only) |
-| WiFi AP | `ap-shop` — 192.168.1.185 (LAN-only) |
-
-**Verification:**
-```bash
-ssh pve "qm list"
-# For switch/iDRAC: physical access or console cable required
-```
-
-**LAN-only endpoints (Shop):**
-- `udr-shop` — 192.168.1.1
-- `switch-shop` — 192.168.1.2
-- `idrac-shop` — 192.168.1.250
-- `nvr-shop` — 192.168.1.216
-- `ap-shop` — 192.168.1.185
+- **Shop**: Dell R730XD hypervisor (`pve`), Dell N2024P switch, UDR6 gateway, LAN-only peripherals (NVR, AP, iDRAC). Production VMs on 192.168.1.x.
+- **Home**: Beelink SER7 (`proxmox-home`), Synology NAS (`nas`), UDR7 gateway. Media/HA/DNS on 10.0.0.x.
+- **Tailscale mesh**: All cross-site access. MagicDNS for hostname resolution.
 
 ---
 
-## Foundational Host SSOTs
+## Authority Pointers
 
-This SSOT is intentionally small: **names + identity + high-level network**.
-Deep, mutable infra detail lives in the surviving live summaries:
-
-- `ops/bindings/operator.hardware.inventory.yaml` - Operator-owned machine identity and candidacy
-- `ops/bindings/ssh.targets.yaml` - Access-path truth and current SSH routing
-- [MINILAB_SSOT.md](MINILAB_SSOT.md) - Home minilab baseline
-- [STACK_REGISTRY.yaml](STACK_REGISTRY.yaml) - Stack-to-host inventory
-- [SERVICE_REGISTRY.yaml](SERVICE_REGISTRY.yaml) - Service endpoints and health routes
-
-## Canonical Network Summary
-
-### Tailscale Host Table (Canonical)
-
-| Host | Tailscale IP | Location | Role |
-|------|-------------|----------|------|
-| macbook | 100.85.186.7 | Mobile | Workstation + Spine CLI (RAG deferred) |
-| pve | 100.96.211.33 | Shop | Proxmox VE (shop hypervisor) |
-| docker-host | 100.92.156.118 | Shop | Tombstone restore identity only for legacy Mint OS history (non-canonical) |
-| infra-core | 100.92.91.128 | Shop | Core infra (Cloudflared, Pi-hole, Infisical, Vaultwarden, Authentik) |
-| observability | 100.120.163.70 | Shop | Observability (Prometheus, Grafana, Loki) |
-| dev-tools | 100.90.167.39 | Shop | Dev tools (Gitea, runner, postgres) |
-| ai-consolidation | 100.71.17.29 | Shop | AI services (Qdrant, AnythingLLM) (VM 207) |
-| automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
-| download-stack | 100.107.36.76 | Shop | Residual downloads + *arr fallback after media-home cutover |
-| streaming-stack | 100.123.207.64 | Shop | Residual streaming fallback (Jellyfin, Navidrome, Jellyseerr, Bazarr, Homarr, Spotisub) after media-home cutover |
-| immich-1 | 100.114.101.50 | Shop | Photos (VM 203) |
-| finance-stack | 100.76.153.100 | Shop | Finance (Firefly III, Paperless, Ghostfolio) (VM 211) |
-| mint-data | 100.106.72.25 | Shop | Mint data plane (PostgreSQL, MinIO, Redis) (VM 212) |
-| mint-apps | 100.79.183.14 | Shop | Mint app plane (artwork, quote-page, order-intake) (VM 213) |
-| proxmox-home | 100.103.99.62 | Home | Proxmox VE (home host) |
-| media-home | 100.113.72.41 | Home | Canonical home media plane (VM 106) |
-| nas | 100.102.199.111 | Home | Synology NAS |
-| ha | 100.67.120.1 | Home | Home Assistant |
-| pihole-home | 100.105.148.96 | Home | Pi-hole (home DNS) |
-
-### LAN Endpoints (No Tailscale)
-
-| Location | Canonical Name | LAN IP | Purpose |
-|----------|----------------|--------|---------|
-| Home | `udr-home` | 10.0.0.1 | Gateway / UniFi controller |
-| Shop | `udr-shop` | 192.168.1.1 | Gateway / UniFi controller (UDR6) |
-| Shop | `switch-shop` | 192.168.1.2 | L2 switch (Dell N2024P) |
-| Shop | `idrac-shop` | 192.168.1.250 | Out-of-band management (iDRAC) |
-| Shop | `nvr-shop` | 192.168.1.216 | Camera recorder (NVR) |
-| Shop | `ap-shop` | 192.168.1.185 | WiFi access point |
-
-Notes (Shop LAN-only endpoints):
-- Reachability (ping) was verified from inside the shop LAN via `pve` on 2026-02-09 (`network.lan.device.status`: `RCAP-20260209-143218__network.lan.device.status__Rp8c773204`).
-- If any LAN-only endpoint becomes unreachable, assume physical/VLAN/DHCP drift first (not Tailscale); fall back to console access where applicable.
-
-### Shop VM LAN IPs (Static or reserved — used for local routing; NFS uses LAN IPs)
-
-| VM | Canonical Name | LAN IP | VMID | MAC | Notes |
-|----|----------------|--------|------|-----|-------|
-| pve (hypervisor) | `pve` | 192.168.1.184 | — | 44:a8:42:22:2c:a6 | Proxmox host; NFS server |
-| docker-host (tombstone) | `docker-host` | 192.168.1.200 | 200 | bc:24:11:bb:d0:b6 | Historical identity only. Do not reuse as production hostname/routes if restored; use isolated sandbox identity instead. |
-| automation-stack | `automation-stack` | 192.168.1.110 | 202 | bc:24:11:31:bc:5a | Automation (n8n, Ollama, Open WebUI). DHCP lease at .110 (no VMID parity). |
-| immich (shop) | `immich` | 192.168.1.203 | 203 | bc:24:11:b8:e7:40 | Shop photos (Tailscale: `immich-1`). |
-| infra-core | `infra-core` | 192.168.1.204 | 204 | bc:24:11:19:84:3c | Static IP; Pi-hole DNS |
-| observability | `observability` | 192.168.1.205 | 205 | bc:24:11:5a:79:ed | Static IP |
-| dev-tools | `dev-tools` | 192.168.1.206 | 206 | bc:24:11:d9:d6:bc | Static IP |
-| ai-consolidation | `ai-consolidation` | 192.168.1.8 | 207 | bc:24:11:42:0e:b4 | DHCP lease at .8 (no VMID parity). AI workloads (Qdrant, AnythingLLM). |
-| download-stack | `download-stack` | 192.168.1.209 | 209 | bc:24:11:44:d0:7b | Residual media fallback; NFS mounts use this IP |
-| streaming-stack | `streaming-stack` | 192.168.1.210 | 210 | bc:24:11:09:5d:76 | Residual media fallback; NFS mounts use this IP |
-| finance-stack | `finance-stack` | 192.168.1.211 | 211 | bc:24:11:6f:74:82 | Finance (Firefly III, Paperless, Ghostfolio) |
-| mint-data | `mint-data` | 192.168.1.212 | 212 | bc:24:11:2b:85:2b | Fresh-slate data plane (PostgreSQL + MinIO + Redis) |
-| mint-apps | `mint-apps` | 192.168.1.213 | 213 | bc:24:11:39:7a:46 | Fresh-slate app plane (artwork, quote-page, order-intake) |
-| communications-stack | `communications-stack` | 192.168.1.26 | 214 | bc:24:11:24:82:05 | Stalwart mail server (static .26). Tailscale: 100.115.16.37. |
-| surveillance-stack | `surveillance-stack` | 192.168.1.215 | 215 | — | Frigate/go2rtc surveillance platform. Tailscale: 100.89.1.111. Live compose authority: `/srv/config/surveillance`; `/opt/stacks/surveillance` is a thin entrypoint symlink. |
-| archive-smb | `archive-smb` | 192.168.1.217 | 220 | — | Archive SMB file-plane LXC on shop LAN. SSH auth drift observed 2026-03-18; use `pve` control path until repaired. |
-
-### Subnet Table
-
-| Subnet | Location | Gateway | DHCP Range | Notes |
-|--------|----------|---------|------------|-------|
-| 192.168.1.0/24 | Shop | 192.168.1.1 (UDR6) | .100-.199 | Production infrastructure; DNS → Pi-hole (.204) |
-| 10.0.0.0/24 | Home | 10.0.0.1 (UDR7) | .100-.199 | Home lab |
-| 100.x.x.x/32 | Tailscale | MagicDNS | N/A | Mesh overlay network |
-
-### Quick Checks
-
-```bash
-# All Tailscale devices
-tailscale status
-
-# Tier 1 health (critical infrastructure)
-for host in pve infra-core proxmox-home; do
-  echo "=== $host ===" && ssh -o ConnectTimeout=5 $host uptime 2>/dev/null || echo "UNREACHABLE"
-done
-
-# Service endpoints
-./bin/ops cap run mint.public.ingress.proof
-# Expected: canonical Mint public ingress receipt with fresh-slate targets
-
-curl -s https://secrets.ronny.works/api/status
-curl -s https://n8n.ronny.works/healthz
-```
-
-### Dashboards
-
-| Dashboard | URL | Purpose |
-|-----------|-----|---------|
-| Grafana | https://grafana.ronny.works | Monitoring |
-| n8n | https://n8n.ronny.works | Automation workflows |
-| Proxmox (Shop) | https://pve:8006 | VM management |
-| Proxmox (Home) | https://proxmox-home:8006 | LXC management |
-| Home Assistant | http://ha:8123 | Home automation |
-| Infisical | https://secrets.ronny.works | Secrets management |
-
----
-
-## Device Registry
-
-### Tier 1: Critical Infrastructure (Must be reachable for ops to work)
-
-| Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
-|--------|-------------------|--------------|------|----------|--------------|
-| MacBook Pro M4 | `macbook` | 100.85.186.7 | Workstation + Spine CLI (RAG deferred) | Mobile | `ping macbook` |
-| Dell R730XD | `pve` | 100.96.211.33 | Proxmox Host (Shop) | Shop | `ssh pve uptime` |
-| infra-core VM | `infra-core` | 100.92.91.128 | Core Infra (VM 204) | Shop | `ssh infra-core docker ps` |
-| observability VM | `observability` | 100.120.163.70 | Observability (VM 205) | Shop | `ssh observability docker ps` |
-| Beelink Mini | `proxmox-home` | 100.103.99.62 | Proxmox Host (Home) | Home | `ssh proxmox-home uptime` |
-
-### Tier 2: Production Services (Core)
-
-| Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
-|--------|-------------------|--------------|------|----------|--------------|
-| automation-stack VM | `automation-stack` | 100.98.70.70 | n8n + Ollama | Shop | `curl -s https://n8n.ronny.works/healthz` |
-| dev-tools VM | `dev-tools` | 100.90.167.39 | Gitea + runner | Shop | `curl -s https://git.ronny.works/api/healthz` |
-| ai-consolidation VM | `ai-consolidation` | 100.71.17.29 | Qdrant + AnythingLLM (VM 207) | Shop | `curl -s http://100.71.17.29:3002/api/ping` |
-
-### Tier 2: Production Services (Media)
-
-| Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
-|--------|-------------------|--------------|------|----------|--------------|
-| media-home VM | `media-home` | 100.113.72.41 | Canonical home media plane (VM 106) | Home | `ssh media-home docker ps` |
-| download-stack VM | `download-stack` | 100.107.36.76 | Residual downloads + *arr fallback (VM 209) | Shop | `ssh download-stack docker ps` |
-| streaming-stack VM | `streaming-stack` | 100.123.207.64 | Residual streaming fallback (VM 210) | Shop | `ssh streaming-stack docker ps` |
-
-### Tier 2: Production Services (Finance + Mint)
-
-| Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
-|--------|-------------------|--------------|------|----------|--------------|
-| finance-stack VM | `finance-stack` | 100.76.153.100 | Finance (Firefly III, Paperless, Ghostfolio) (VM 211) | Shop | `ssh finance-stack docker ps` |
-| mint-data VM | `mint-data` | 100.106.72.25 | Mint data plane (PostgreSQL, MinIO, Redis) (VM 212) | Shop | `ssh mint-data docker ps` |
-| mint-apps VM | `mint-apps` | 100.79.183.14 | Mint app plane (artwork, quote-page, order-intake) (VM 213) | Shop | `ssh mint-apps docker ps` |
-
-### Deferred (Out of Scope for Foundational Core)
-
-| Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
-|--------|-------------------|--------------|------|----------|--------------|
-| immich-1 VM | `immich-1` | 100.114.101.50 | Photos (Shop) | Shop | `curl -s http://immich-1:2283/api/server/ping` |
-
-### Legacy Hold (Non-Canonical)
-
-| Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
-|--------|-------------------|--------------|------|----------|--------------|
-| docker-host VM | `docker-host` | 100.92.156.118 | Legacy Mint OS hold only; not authoritative for fresh-slate Mint | Shop | `vm-200-docker-host-primary` cold restore capsule only; no live SSH/runtime expected |
-
-### Tier 3: Home Services
-
-| Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
-|--------|-------------------|--------------|------|----------|--------------|
-| Home Assistant | `ha` | 100.67.120.1 | Home Automation | Home | `curl -s http://ha:8123/api/` |
-| Synology NAS | `nas` | 100.102.199.111 | Storage | Home | `ping nas` |
-| Pi-hole home | `pihole-home` | 100.105.148.96 | Home DNS filtering | Home | `curl -s http://pihole-home/admin/` |
-
-### Tier 4: Endpoints (Non-critical)
-
-| Device | Tailscale Hostname | Tailscale IP | Role | Notes |
-|--------|-------------------|--------------|------|-------|
-| iPhone | `iphone` | 100.73.199.85 | Mobile | Personal |
-| Firestick | `firestick` | 100.68.235.100 | Streaming | Often offline |
-| windows-mint | `windows-mint` | 100.65.199.32 | Windows PC (192.168.12.x, site unconfirmed) | Candidate only — no remote admin plane, no exit node |
-| windows-parents | `windows-parents` | 100.102.167.111 | Support PC | Remote support |
-
----
-
-## Verification Commands
-
-### Quick Health Check (All Tier 1)
-
-```bash
-# Run from macbook - verifies core infrastructure
-for host in pve infra-core proxmox-home; do
-  echo "=== $host ==="
-  ssh -o ConnectTimeout=5 $host uptime 2>/dev/null || echo "UNREACHABLE"
-done
-```
-
-**Expected Output (Healthy):**
-```
-=== pve ===
- 14:32:01 up 5 days,  2:15,  0 users,  load average: 0.15, 0.20, 0.18
-=== infra-core ===
- 14:32:02 up 5 days,  2:14,  0 users,  load average: 0.45, 0.38, 0.35
-=== proxmox-home ===
- 14:32:03 up 12 days,  4:22,  0 users,  load average: 0.08, 0.12, 0.10
-```
-
-### Service-Level Checks
-
-```bash
-# Canonical Mint public ingress
-./bin/ops cap run mint.public.ingress.proof
-# Expected: PASS receipt proving fresh-slate Mint public ingress
-
-# Infisical (Secrets)
-curl -s https://secrets.ronny.works/api/status
-# Expected: HTTP 200
-
-# n8n
-curl -s http://automation-stack:5678/healthz
-# Expected: {"status":"ok"}
-
-# Automation-stack latency budget (repeated sampling + n8n quick timing)
-./bin/ops cap run automation.stack.latency.status --json
-# Expected: status=pass|warn|incident with p95/p99 and failed sample counts
-
-# Optional: local RAG stack (currently deferred)
-# curl -s http://localhost:3002/api/ping
-# Expected: {"online":true}
-```
-
-### Automation-Stack Latency Thresholds (Self-Driving Cadence)
-
-Source of truth: `~/code/workbench/agents/home/bindings/automation.stack.latency.slo.yaml`
-
-| Metric | Warn | Incident | Notes |
-|--------|------|----------|-------|
-| Aggregate p95 latency | 900ms | 1500ms | Repeated samples across automation-stack service endpoints |
-| Aggregate p99 latency | 1300ms | 2200ms | Captures jitter spikes that single probes miss |
-| `n8n.infra.health.quick` duration | 2000ms | 5000ms | Control-loop readiness signal |
-| Failed samples | 1+ | 3+ | Any failed endpoint sample counts against budget |
-
-This budget is consumed by `stability.control.snapshot` via `automation.stack.latency.status`.
-
-### VM Status Check (Proxmox)
-
-```bash
-# Shop VMs
-ssh pve "qm list"
-# Expected: VMs 200, 202-213 running (201 decommissioned)
-
-# Home VMs
-ssh proxmox-home "qm list"
-# Expected: VM 100 running; VM 101 stopped; VM 102 decommissioned (stopped)
-```
-
----
-
-## Stream Deck as Workflow Entrypoint
-
-Legacy Stream Deck automation was retired on March 11, 2026. Spine no longer treats
-`com.ronny.streamdeck.ha` or any workbench Stream Deck runtime as governed active
-authority. If Stream Deck returns, reintroduce it as a fresh governed surface rather
-than reviving the retired runtime.
-
----
-
-## Known Unknowns
-
-This SSOT does **not** track loop status (it drifts too easily).
-
-Use the canonical work tracker instead:
-- `./bin/ops status`
-- `$SPINE_STATE/loop-scopes/*.scope.md` for raw scope drill-down only
+| Domain | Authority File | What It Answers |
+|--------|---------------|-----------------|
+| SSH targets / access paths | `ops/bindings/ssh.targets.yaml` | How to reach each host (IP, user, policy) |
+| VM lifecycle | `ops/bindings/vm.lifecycle.yaml` | What VMs exist, status, workloads, IPs |
+| Hardware inventory | `ops/bindings/hardware.inventory.yaml` | Physical machines, storage controllers, recovery |
+| Operator hardware | `ops/bindings/operator.hardware.inventory.yaml` | Operator-owned machine candidacy |
+| Service endpoints | `docs/governance/SERVICE_REGISTRY.yaml` | Service-level health, ports, URLs |
+| Stack registry | `docs/governance/STACK_REGISTRY.yaml` | Stack-to-host inventory |
+| Minilab read model | `./bin/ops cap run infra.minilab.readmodel.generate` | Home site generated summary |
+| Shop read model | `./bin/ops cap run infra.shop.readmodel.generate` | Shop site generated summary |
+| Device identity read model | `./bin/ops cap run device.identity.readmodel.generate` | Estate-wide generated summary |
 
 ---
 
@@ -412,34 +95,29 @@ Use the canonical work tracker instead:
 ### Adding a New Device
 
 1. Choose name following Naming Rules above
-2. Add to appropriate Tier in Device Registry
-3. Add verification command
-4. Run verification and paste output to validate
-5. Commit with `fix(identity): add {device} to SSOT`
+2. Add entry to appropriate binding (`ssh.targets.yaml`, `vm.lifecycle.yaml`)
+3. Run `./bin/ops cap run device.identity.readmodel.generate` to verify it appears
+4. Commit binding changes
 
 ### Updating an IP
 
-1. Update this document FIRST
+1. Update the authority binding (`ssh.targets.yaml` and/or `vm.lifecycle.yaml`)
 2. Update `docs/governance/SERVICE_REGISTRY.yaml` if service-level mapping changes
-3. Commit with `fix(identity): update {device} IP`
+3. Run readmodel generator to verify
 
 ### Removing a Device
 
-1. Move to "Decommissioned" section (don't delete immediately)
-2. Document decommission date and reason
-3. Remove from `docs/governance/SERVICE_REGISTRY.yaml`
-4. After 30 days, remove from this doc entirely
+1. Set status to `decommissioned` in `vm.lifecycle.yaml` with date and reason
+2. Mark SSH target as `optional: true` or remove if no longer needed
+3. After 30 days, clean up decommissioned entries
 
 ---
 
-## Decommissioned Devices
+## Retired Surfaces
 
-| Device | Former IP | Decommissioned | Reason |
-|--------|-----------|----------------|--------|
-| `immich-home` | 100.83.160.109 | 2026-02-20 | VM 101 destroyed; shop `immich-1` (VM 203) is sole instance |
-| `media-stack` | 100.117.1.53 | 2026-02-10 | VM 201 destroyed; split to download-stack (209) + streaming-stack (210) |
-| `download-home` | 100.125.138.110 | 2026-02-20 | LXC 103 destroyed; shop download-stack (VM 209) is canonical |
-| `vault` | 100.93.142.63 | 2026-02-16 | VM 102 decommissioned; superseded by vaultwarden on infra-core. |
+- **Stream Deck automation**: Retired March 11, 2026. Not governed active authority.
+- **Factual host/IP tables in this doc**: Retired April 27, 2026. Replaced by generated read model from structured bindings.
+- **Manual verification command lists**: Replaced by `./bin/ops verify --infra` and per-capability receipts.
 
 ---
 
@@ -448,76 +126,4 @@ Use the canonical work tracker instead:
 - **#615** - This document (Device identity SSOT + Stream Deck entrypoint)
 - **#440** - Master workflow session (parent)
 - **#609** - Post-PVE reliability improvements (identity supports infra work)
-- **#613** - Switch NO-CARRIER diagnosis (CLOSED - VM reachability resolved)
 - **#618** - Dell N2024P console debug + recovery (physical task, open)
-- **#614** - Orchestration layer plan (depends on identity)
-- **#610** - Reboot Health Gate (pre/post validation)
-
----
-
-## Runbooks
-
-| Runbook | Purpose | Script |
-|---------|---------|--------|
-| `docs/governance/REBOOT_HEALTH_GATE.md` | Pre/post reboot validation | `scripts/infra/reboot_gate.sh` |
-| `docs/governance/BACKUP_GOVERNANCE.md` | Backup what/where/how/verify | `scripts/infra/backup_verify.sh` |
-| `docs/governance/NETWORK_RUNBOOK.md` | Network change procedures | - |
-| External recovery runbook | Cold start recovery lives in workbench docs; query `~/code/workbench` directly | - |
-
-### Latest Audit
-
-- `docs/reference/audits/BACKUP_AUDIT_2026-01-25.md` - Current backup status + gaps
-
----
-
-## Evidence / Receipts
-
-### 2026-02-05 Physical Truth Baseline (#32)
-
-| Capability | Receipt | Status |
-|------------|---------|--------|
-| nodes.status | `~/code/.evidence/spine/sessions/RCAP-20260205-155125__nodes.status__Rzvvh72648/receipt.md` | FAIL (historical, pre-decommission split not complete) |
-| services.health.status | `~/code/.evidence/spine/sessions/RCAP-20260205-155156__services.health.status__R5omv73468/receipt.md` | 5/5 OK |
-
-**Verification Commands Run:**
-- `tailscale ip -4` → 100.85.186.7 (macbook)
-- `tailscale status` → Full device list verified
-
-**Closed Loop:**
-- LOOP-N2024P-DIAG-20260205 (Dell N2024P post-reset diagnostics complete)
-
-**IP Conflict Resolution:**
-- SERVICE_REGISTRY.yaml macbook IP corrected: 100.115.158.91 → 100.85.186.7
-
----
-
-## Quick Reference Card
-
-> **Note:** Detailed host tables, subnet info, and dashboards are now in the
-> [Canonical Network Summary](#canonical-network-summary) section above.
-
-**Print-friendly summary:**
-
-```
-CRITICAL HOSTS (Tier 1):
-  macbook      100.85.186.7    Workstation + RAG
-  infra-core   100.92.91.128   Core infra (VM 204)
-  pve          100.96.211.33   Proxmox (shop)
-  proxmox-home 100.103.99.62   Proxmox (home)
-
-SUBNETS:
-  192.168.1.0/24   Shop (UDR6, R730XD, VMs)
-  10.0.0.0/24      Home (UDR7, Beelink, NAS)
-  100.x.x.x        Tailscale mesh
-
-QUICK CHECKS:
-  tailscale status             # All devices
-  ssh infra-core docker ps     # Core infra containers
-  ssh pve qm list              # Shop VMs
-  ssh proxmox-home pct list    # Home LXCs
-
-DASHBOARDS:
-  https://grafana.ronny.works  # Monitoring
-  https://n8n.ronny.works      # Automation
-  https://secrets.ronny.works  # Infisical
-```

@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra.device.identity.readmodel.generate
+# Generate device identity read model from structured authority bindings.
+# Sources: ssh.targets.yaml, vm.lifecycle.yaml, hardware.inventory.yaml
+# Output:  $SPINE_STATE/domain-state/device.identity.readmodel.md (runtime only)
+#
+# This replaces the factual host/IP/VM tables that were previously maintained
+# manually in docs/governance/DEVICE_IDENTITY_SSOT.md. The doc now contains
+# only stable naming rules, topology memory, and authority pointers.
+
+SSH_TARGETS="${SSH_TARGETS:-ops/bindings/ssh.targets.yaml}"
+VM_LIFECYCLE="${VM_LIFECYCLE:-ops/bindings/vm.lifecycle.yaml}"
+HARDWARE_INV="${HARDWARE_INV:-ops/bindings/hardware.inventory.yaml}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+_need yq
+_need date
+
+for f in "$SSH_TARGETS" "$VM_LIFECYCLE" "$HARDWARE_INV"; do
+  [[ -f "$f" ]] || { echo "STOP: missing binding: $f" >&2; exit 2; }
+done
+
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+OUTPUT_DIR="$SPINE_STATE/domain-state"
+OUTPUT_FILE="$OUTPUT_DIR/device.identity.readmodel.md"
+NOW="$(TZ=UTC date '+%Y-%m-%dT%H:%M:%SZ')"
+
+mkdir -p "$OUTPUT_DIR"
+
+# --- Tailscale host table (all targets with tailscale_ip) ---
+TS_HOSTS="$(yq -r '
+  .ssh.targets[]
+  | select(.tailscale_ip != null)
+  | select(.tailscale_ip != "")
+  | [
+      .id,
+      .tailscale_ip,
+      (.site // "-"),
+      (.description // "-" | split(".") | .[0])
+    ] | @tsv
+' "$SSH_TARGETS")"
+
+# Infer site from host IP where .site is missing
+if [[ -n "$TS_HOSTS" ]]; then
+  TS_HOSTS_FIXED=""
+  while IFS=$'\t' read -r id ts_ip site desc; do
+    if [[ "$site" == "-" ]]; then
+      host="$(yq -r ".ssh.targets[] | select(.id == \"$id\") | .host // \"\"" "$SSH_TARGETS")"
+      case "$host" in
+        192.168.1.*) site="shop" ;;
+        10.0.0.*) site="home" ;;
+        100.*) site="mesh" ;;
+      esac
+    fi
+    TS_HOSTS_FIXED+="${id}	${ts_ip}	${site}	${desc}"$'\n'
+  done <<< "$TS_HOSTS"
+  TS_HOSTS="${TS_HOSTS_FIXED%$'\n'}"
+fi
+
+# --- LAN-only devices (no tailscale, access_method: lan_only or no tailscale_ip) ---
+LAN_ONLY="$(yq -r '
+  .ssh.targets[]
+  | select(.access_policy == "lan_only")
+  | [
+      .id,
+      .host,
+      (.site // "shop"),
+      (.description // "-" | split(".") | .[0])
+    ] | @tsv
+' "$SSH_TARGETS")"
+
+# --- Shop VMs from vm.lifecycle ---
+SHOP_VMS="$(yq -r '
+  .vms[]
+  | select(.proxmox_host == "pve")
+  | select(.status != "template")
+  | [
+      .hostname,
+      (.id | tostring),
+      (.status // "unknown"),
+      (.lan_ip // "-"),
+      (.tailscale_ip // "-"),
+      (.vm_type // "vm"),
+      (.role // "-")
+    ] | @tsv
+' "$VM_LIFECYCLE")"
+
+# --- Home VMs from vm.lifecycle ---
+HOME_VMS="$(yq -r '
+  .vms[]
+  | select(.proxmox_host == "proxmox-home")
+  | [
+      .hostname,
+      (.id | tostring),
+      (.status // "unknown"),
+      (.lan_ip // "-"),
+      (.tailscale_ip // "-"),
+      (.vm_type // "vm"),
+      (.role // "-")
+    ] | @tsv
+' "$VM_LIFECYCLE")"
+
+# --- Hardware summary ---
+HARDWARE="$(yq -r '
+  .machines[]
+  | [
+      .machine_id,
+      .model,
+      (.site // "-"),
+      (.cpu // "-"),
+      (.ram // "-"),
+      (.active_vm_count // 0 | tostring)
+    ] | @tsv
+' "$HARDWARE_INV")"
+
+# --- Decommissioned devices ---
+DECOM_VMS="$(yq -r '
+  .vms[]
+  | select(.status == "decommissioned" or .status == "tombstone")
+  | select(.decommissioned_at != null)
+  | [
+      .hostname,
+      (.tailscale_ip // "-"),
+      (.decommissioned_at // "-"),
+      (.closure_class // "-")
+    ] | @tsv
+' "$VM_LIFECYCLE")"
+
+# --- Subnet table (static — derived from ssh.targets site conventions) ---
+# These are stable topology facts; encoding in the generator avoids a new binding.
+
+# --- Generate markdown ---
+{
+cat <<HEADER
+# Device Identity Read Model (Generated)
+
+Generated: $NOW
+Sources: ssh.targets.yaml, vm.lifecycle.yaml, hardware.inventory.yaml
+Regenerate: \`./bin/ops cap run device.identity.readmodel.generate\`
+
+---
+
+## Tailscale Host Table
+
+| Host | Tailscale IP | Site | Role Summary |
+|------|-------------|------|-------------|
+HEADER
+
+if [[ -n "$TS_HOSTS" ]]; then
+  while IFS=$'\t' read -r id ts_ip site desc; do
+    echo "| \`$id\` | $ts_ip | $site | $desc |"
+  done <<< "$TS_HOSTS"
+fi
+
+cat <<'HDR'
+
+## LAN-Only Endpoints (No Tailscale)
+
+| ID | LAN IP | Site | Description |
+|----|--------|------|-------------|
+HDR
+
+if [[ -n "$LAN_ONLY" ]]; then
+  while IFS=$'\t' read -r id host site desc; do
+    echo "| \`$id\` | $host | $site | $desc |"
+  done <<< "$LAN_ONLY"
+fi
+
+cat <<'HDR'
+
+## Shop VMs (pve)
+
+| Hostname | VMID | Type | Status | LAN IP | Tailscale IP | Role |
+|----------|------|------|--------|--------|-------------|------|
+HDR
+
+if [[ -n "$SHOP_VMS" ]]; then
+  while IFS=$'\t' read -r hostname vmid status lan_ip ts_ip vmtype role; do
+    echo "| \`$hostname\` | $vmid | $vmtype | $status | $lan_ip | $ts_ip | $role |"
+  done <<< "$SHOP_VMS"
+fi
+
+cat <<'HDR'
+
+## Home VMs (proxmox-home)
+
+| Hostname | VMID | Type | Status | LAN IP | Tailscale IP | Role |
+|----------|------|------|--------|--------|-------------|------|
+HDR
+
+if [[ -n "$HOME_VMS" ]]; then
+  while IFS=$'\t' read -r hostname vmid status lan_ip ts_ip vmtype role; do
+    echo "| \`$hostname\` | $vmid | $vmtype | $status | $lan_ip | $ts_ip | $role |"
+  done <<< "$HOME_VMS"
+fi
+
+cat <<'HDR'
+
+## Physical Hardware
+
+| Machine | Model | Site | CPU | RAM | Active VMs |
+|---------|-------|------|-----|-----|------------|
+HDR
+
+if [[ -n "$HARDWARE" ]]; then
+  while IFS=$'\t' read -r mid model site cpu ram vmcount; do
+    echo "| \`$mid\` | $model | $site | $cpu | $ram | $vmcount |"
+  done <<< "$HARDWARE"
+fi
+
+cat <<HDR
+
+## Subnets
+
+| Subnet | Site | Gateway | Notes |
+|--------|------|---------|-------|
+| 192.168.1.0/24 | Shop | 192.168.1.1 (UDR6) | Production infrastructure; DNS -> Pi-hole (.204) |
+| 10.0.0.0/24 | Home | 10.0.0.1 (UDR7) | Home lab |
+| 100.x.x.x/32 | Tailscale | MagicDNS | Mesh overlay network |
+
+HDR
+
+if [[ -n "${DECOM_VMS:-}" ]]; then
+cat <<'HDR'
+## Decommissioned Devices
+
+| Hostname | Former Tailscale IP | Decommissioned | Closure Class |
+|----------|-------------------|----------------|--------------|
+HDR
+  while IFS=$'\t' read -r hostname ts_ip decom closure; do
+    echo "| \`$hostname\` | $ts_ip | $decom | $closure |"
+  done <<< "$DECOM_VMS"
+  echo
+fi
+
+cat <<'FOOTER'
+## Authority Pointers
+
+- **Naming rules and topology memory:** `docs/governance/DEVICE_IDENTITY_SSOT.md`
+- **SSH target authority:** `ops/bindings/ssh.targets.yaml`
+- **VM lifecycle authority:** `ops/bindings/vm.lifecycle.yaml`
+- **Hardware inventory:** `ops/bindings/hardware.inventory.yaml`
+- **Service endpoints:** `docs/governance/SERVICE_REGISTRY.yaml`
+- **Operator hardware:** `ops/bindings/operator.hardware.inventory.yaml`
+FOOTER
+
+} > "$OUTPUT_FILE"
+
+echo "Generated: $OUTPUT_FILE"
+echo ""
+cat "$OUTPUT_FILE"
