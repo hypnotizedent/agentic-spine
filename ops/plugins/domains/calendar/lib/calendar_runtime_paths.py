@@ -1,1 +1,0 @@
-/Users/ronnyworks/code/workbench/agents/calendar/spine-plugin-calendar/lib/calendar_runtime_paths.py
