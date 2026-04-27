@@ -52,10 +52,14 @@ DISPATCH_LANE_CWD="$(dispatch_lane_cwd)"
 
 usage() {
   cat <<'EOF'
-ops dispatch - Local multi-lane dispatch bridge
+ops dispatch - Advanced local multi-lane dispatch bridge
+
+  This is an expert/internal surface. Normal operator work flows through
+  governed capabilities (ops cap run wave.execute, delegate.to.execution).
+  Use this only for explicit local multi-lane research dispatch.
 
 Subcommands:
-  local    Convenience wrapper that creates and runs a local multi-lane dispatch wave
+  local    Create and run a local multi-lane dispatch wave
 
 Usage:
   ops dispatch local --loop-id <LOOP_ID> --objective "<text>" \
@@ -70,26 +74,6 @@ Options:
   --parallel              Execute lanes in parallel (default: serial)
   --wave-kind <kind>      Wave kind: engineering (default), production, synthetic
   --dry-run               Show plan without executing
-
-Ownership:
-  ops dispatch local creates and owns the local wrapper wave lifecycle.
-  If you already created a wave manually, use `ops wave dispatch` instead.
-
-Example:
-  ops dispatch local \
-    --loop-id LOOP-RESEARCH-20260408 \
-    --objective "Domain binding inventory" \
-    --lane "immich:find ops/bindings/domains/immich -type f" \
-    --lane "ha:find ../workbench/agents/home/bindings -type f" \
-    --lane "media:find ops/bindings/domains/media -type f"
-
-  # Parallel execution:
-  ops dispatch local --parallel \
-    --loop-id LOOP-RESEARCH-20260408 \
-    --objective "Domain binding inventory" \
-    --lane "immich:find ops/bindings/domains/immich -type f" \
-    --lane "ha:find ../workbench/agents/home/bindings -type f" \
-    --lane "media:find ops/bindings/domains/media -type f"
 EOF
 }
 

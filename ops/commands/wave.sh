@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# ops wave - Manual wave lifecycle (surgery / explicit low-level control)
+# ops wave - Advanced wave lifecycle (expert surgery / internal engine use)
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Low-level manual wave lifecycle for surgery, inspection, and explicit
-# multi-terminal orchestration. Not the default operator work-start path.
-#
-# For bounded local work, use the canonical work-start surface:
-#   ops dispatch local --loop-id <LOOP_ID> --objective "<text>" --lane "<name>:<cmd>"
+# This is an expert/internal surface. Normal operator work flows through
+# governed capabilities (ops cap run wave.execute, delegate.to.execution).
+# Engine internals (wave-execute, orchestration-wave, dispatch.sh) call
+# this directly; operators should not need to.
 #
 # Usage:
 #   ops wave start <WAVE_ID> --objective "<text>" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths "a,b"] [--worktree auto|off] [--repo <path>]

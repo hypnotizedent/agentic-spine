@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# ops loops - Expert loop surgery (SQLite sole authority, scope-file projection)
+# ops loops - Advanced loop surgery (expert/internal only)
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Usage:
-#   ops loops list [--open|--closed|--all]   List loops from SQLite authority
-#   ops loops close <loop_id> --disposition <state> [--completion-level <level>]  Mark loop as closed (updates scope)
-#   ops loops show <loop_id>                  Show loop scope file
-#   ops loops summary                         Show loop counts by status/severity
-#   ops loops collect                         (deprecated) Legacy receipt scanner
+# This is an expert/internal surface. The canonical operator path is:
+#   ops status                          Unified work status (front door)
+#   ops cap run orchestration.loop.close  Governed loop closeout
 #
-# Canonical operator-facing current-work surface is `ops status`. This command
-# remains expert drilldown for raw loop inspection, closeout surgery, and
-# archival inspection.
+# Use this only for raw SQLite loop inspection, scope-file drilldown,
+# or manual closeout surgery when the governed path cannot complete.
 # SQLite (loops_sql_authority) is the sole authority for loop state; scope files
 # are projections for display only, never read as authority input.
 # See: LOOP-MAILROOM-CONSOLIDATION-20260210 for the migration rationale.
@@ -34,7 +30,11 @@ DISPOSITION_CONTRACT="$SPINE_REPO/ops/bindings/closeout.disposition.contract.yam
 
 usage() {
     cat <<'EOF'
-ops loops - Expert loop surgery (SQLite sole authority)
+ops loops - Advanced loop surgery (expert/internal only)
+
+  Normal operator path: ops status
+  Governed closeout:    ops cap run orchestration.loop.close
+  Use this only for raw inspection or manual surgery.
 
 Usage:
   ops loops list [--open|--closed|--all]   List loops from SQLite authority (default: open only)
@@ -43,20 +43,9 @@ Usage:
   ops loops show <loop_id>                  Show loop scope file (projection)
   ops loops summary                         Show loop counts by status/severity
 
-Deprecated:
-  ops loops collect                         Legacy receipt scanner (writes JSONL)
-
-Normal operator path:
-  - ./bin/ops status
-
-Expert scope of this command:
-  - raw SQLite loop inspection
-  - scope-file drilldown (display only)
-  - manual closeout surgery
-
 Truth sources:
-  - authority: SQLite via loops_sql_authority (sole source)
-  - projection: .runtime/spine/state/loop-scopes/*.scope.md (display only, never authority input)
+  authority:   SQLite via loops_sql_authority (sole source)
+  projection:  .runtime/spine/state/loop-scopes/*.scope.md (display only, never authority input)
 EOF
 }
 

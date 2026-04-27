@@ -19,7 +19,11 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-ops run - Enqueue work into mailroom
+ops run - Advanced mailroom enqueue helper
+
+  This is an expert/compatibility surface. Autonomous mailroom execution
+  (mailroom.task.enqueue, mailroom.task.worker.once) is the governed path.
+  Use this only for manual mailroom enqueue from the CLI.
 
 Usage:
   ops run --file <path>      Enqueue a file
@@ -29,11 +33,6 @@ Usage:
 Options:
   --timeout <sec>   Wait timeout in seconds (default: 120)
   --async           Enqueue and exit immediately (don't wait)
-
-Examples:
-  ops run --fixture S20260201-180000__email_received__R0001.md
-  ops run --file ~/prompts/task.md --timeout 180
-  ops run --inline "Summarize the system status" --async
 EOF
 }
 
