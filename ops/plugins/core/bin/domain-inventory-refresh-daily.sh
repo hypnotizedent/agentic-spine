@@ -3,7 +3,6 @@ set -euo pipefail
 
 # Scheduled runner: domain inventory observed-feed refresh
 # LaunchAgent template: com.ronny.domain-inventory-refresh-daily
-# W69 freshness recovery: D188
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../../../lib/runtime-managed-worktree.sh"
@@ -22,6 +21,6 @@ spine_job_run \
   "domain-inventory-refresh-daily:domain-inventory-refresh" \
   "$REFRESH_CMD" --once --check
 
-echo "[domain-inventory-refresh-daily] autonomous ledger reconcile enabled (media/ha/network)"
+echo "[domain-inventory-refresh-daily] observed-feed refresh enabled (network snapshots + media snapshot)"
 
 echo "[domain-inventory-refresh-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
