@@ -98,7 +98,7 @@ for current operator rules and the first read for any agent session.
 - Current aperture and authority: this file
 - Platform identity: [`NORTH_STAR.md`](NORTH_STAR.md)
 - Operating contract: [`docs/governance/SPINE.md`](docs/governance/SPINE.md)
-- Translator doctrine: [`docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`](docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)
+- Membrane doctrine: [`docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`](docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)
 - Root authority: [`ops/bindings/root.authority.contract.yaml`](ops/bindings/root.authority.contract.yaml)
 
 ## Session Rules
