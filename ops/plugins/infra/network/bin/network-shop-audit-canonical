@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
 
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
-SSOT_DEVICE="$SPINE_ROOT/docs/governance/DEVICE_IDENTITY_SSOT.md"
+VM_LIFECYCLE="$SPINE_ROOT/ops/bindings/vm.lifecycle.yaml"
 GOV_DIR="$SPINE_ROOT/docs/governance"
 UNIFI_AGENT="$SPINE_ROOT/ops/plugins/providers/bin/unifi-agent.sh"
 PARITY_SCRIPT="$SCRIPT_DIR/network-shop-audit-status"
@@ -29,7 +29,7 @@ command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
 command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
-[[ -f "$SSOT_DEVICE" ]] || stop "missing SSOT: $SSOT_DEVICE"
+[[ -f "$VM_LIFECYCLE" ]] || stop "missing binding: $VM_LIFECYCLE"
 [[ -f "$PARITY_SCRIPT" ]] || stop "missing parity script: $PARITY_SCRIPT"
 
 tmpdir="$(mktemp -d /tmp/network-shop-audit-canonical.XXXXXX)"
@@ -40,7 +40,7 @@ findings=0
 
 echo "network.shop.audit.canonical"
 echo "binding: $SSH_BINDING"
-echo "ssot-device: $SSOT_DEVICE"
+echo "vm-lifecycle: $VM_LIFECYCLE"
 echo
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -65,61 +65,40 @@ elif [[ "$parity_rc" -ne 0 ]]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
-# STEP 2: Load canonical expected shop map from DEVICE_IDENTITY_SSOT.md
+# STEP 2: Load canonical expected shop map from structured bindings
 # ══════════════════════════════════════════════════════════════════════════
 
-# Parse "LAN-only endpoints (Shop)" section
+# Build canonical map from ssh.targets.yaml (shop-site IPv4 targets)
+# and vm.lifecycle.yaml (shop VMs with LAN IPs). No markdown parsing.
 canonical_map="$tmpdir/canonical_map.tsv"
-python3 - "$SSOT_DEVICE" > "$canonical_map" <<'PY'
-import re, sys
 
-path = sys.argv[1]
-lines = open(path, 'r', encoding='utf-8', errors='ignore').readlines()
+# SSH targets with shop-site IPv4 addresses
+yq -r '
+  .ssh.targets[]
+  | select(.id != null)
+  | select(
+      (.site == "shop") or
+      (.host // "" | test("^192\\.168\\.1\\."))
+    )
+  | select(.host != null)
+  | select(.host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"))
+  | [.id, .host] | @tsv
+' "$SSH_BINDING" > "$canonical_map"
 
-devices = {}
+# Add shop VMs from vm.lifecycle that may not be in ssh.targets with IPv4
+yq -r '
+  .vms[]
+  | select(.proxmox_host == "pve")
+  | select(.lan_ip != null)
+  | select(.ssh_target != null)
+  | select(.status != "decommissioned" and .status != "tombstone")
+  | [.ssh_target, (.lan_ip | tostring)] | @tsv
+' "$VM_LIFECYCLE" \
+  | awk -F'\t' 'NF>=2 && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $1 "\t" $2}' \
+  >> "$canonical_map"
 
-# Parse LAN-only endpoints (Shop) — format: "- `id` — IP"
-in_lan_section = False
-for line in lines:
-    if 'LAN-only endpoints (Shop)' in line:
-        in_lan_section = True
-        continue
-    if in_lan_section:
-        if line.startswith('---') or (line.startswith('#') and 'LAN-only' not in line):
-            in_lan_section = False
-            continue
-        m = re.match(r'^-\s+`([a-z0-9-]+)`\s+.*?(\d+\.\d+\.\d+\.\d+)', line)
-        if m:
-            devices[m.group(1)] = m.group(2)
-
-# Parse "Shop VM LAN IPs" table
-in_vm_section = False
-for line in lines:
-    if 'Shop VM LAN IPs' in line:
-        in_vm_section = True
-        continue
-    if in_vm_section:
-        if line.startswith('---') or (line.startswith('#') and 'VM LAN' not in line):
-            in_vm_section = False
-            continue
-        if not line.startswith('|'):
-            continue
-        parts = [p.strip() for p in line.strip().split('|')[1:-1]]
-        if len(parts) < 4:
-            continue
-        name_col = parts[1].strip('`').strip()
-        ip_col = parts[2].strip()
-        notes_col = parts[5].strip().lower() if len(parts) > 5 else ""
-        if not re.match(r'^\d+\.\d+\.\d+\.\d+$', ip_col):
-            continue
-        if "decommissioned" in notes_col:
-            continue
-        if name_col and name_col not in ('Canonical Name', '----'):
-            devices[name_col] = ip_col
-
-for dev, ip in sorted(devices.items()):
-    print(f"{dev}\t{ip}")
-PY
+# Deduplicate (ssh.targets wins if both present)
+sort -t$'\t' -k1,1 -u -o "$canonical_map" "$canonical_map"
 
 echo "== canonical.map =="
 while IFS=$'\t' read -r dev ip; do
