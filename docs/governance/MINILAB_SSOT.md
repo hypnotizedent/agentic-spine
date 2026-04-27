@@ -18,7 +18,7 @@ generated from canonical structured bindings by a governed capability.
 - **VM lifecycle:** `ops/bindings/vm.lifecycle.yaml` (home VMs: proxmox_host=proxmox-home)
 - **SSH targets:** `ops/bindings/ssh.targets.yaml` (home targets: site=home)
 - **Backup inventory:** `ops/bindings/domains/backup/backup.inventory.yaml`
-- **Identity and naming:** `docs/governance/DEVICE_IDENTITY_SSOT.md`
+- **Naming/topology conventions:** `docs/governance/DEVICE_IDENTITY_SSOT.md`
 
 ## Generated Read Model
 

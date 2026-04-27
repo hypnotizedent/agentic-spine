@@ -86,7 +86,7 @@ All must PASS for core to be healthy.
 | D31 | Home output sink lock (home-root logs/out/err not allowlisted) |
 | D33 | Extraction pause lock (`ops/bindings/extraction.mode.yaml` mode must be `paused` or `active`) |
 | D34 | Loop ledger integrity lock (summary counts must match deduped reducer output) |
-| D35 | Infra relocation parity lock (cross-SSOT consistency for service moves during cutover/cleanup) |
+| D35 | Retired infra relocation parity lock (former cross-SSOT consistency check) |
 | D36 | Legacy exception hygiene lock (stale/near-expiry exception enforcement) |
 | D38 | Extraction hygiene lock (EXTRACTION_PROTOCOL enforcement) |
 | D41 | Hidden-root governance lock (home-root inventory + forbidden pattern enforcement) |
@@ -100,7 +100,7 @@ All must PASS for core to be healthy.
 | D51 | Caddy proto lock (X-Forwarded-Proto on Authentik upstreams) |
 | D52 | UDR6 gateway assertion (shop docs reference 192.168.1.0/24) |
 | D53 | Change pack integrity lock (template + sequencing + companion files) |
-| D54 | SSOT IP parity lock (device identity ↔ shop server ↔ bindings) |
+| D54 | Retired markdown SSOT IP parity lock (superseded by binding/read-model truth) |
 | D55 | Secrets runtime readiness lock (composite: D20 + D25) |
 | D56 | Agent entry surface lock (composite: D26 + D32 + D46) |
 | D57 | Infra identity cohesion lock (composite: D37 + D39) |

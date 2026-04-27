@@ -45,7 +45,7 @@ Plan authority lives in runtime shared authority and projects to
 
 - `docs/core/` - core contracts and state summaries
 - `docs/contracts/` - stable human-read contracts referenced by bindings/plugins
-- `docs/governance/` - live governance and SSOTs
+- `docs/governance/` - live governance, conventions, and thin read-model entrypoints
 - `docs/governance/domains/` - supporting domain-specific reference, not L1 entry doctrine
 - `docs/reference/` - non-authoritative support material
 - `docs/reference/generated/` - generated projections and legacy-generated notes that remain machine-useful but non-authoritative

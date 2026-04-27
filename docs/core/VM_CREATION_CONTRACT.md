@@ -11,7 +11,10 @@ scope: vm-lifecycle-governance
 > operating, and decommissioning a Proxmox VM under spine governance.
 >
 > **Authority boundary:**
-> - This contract defines the process. Hardware/topology facts live in `docs/governance/DEVICE_IDENTITY_SSOT.md` and `docs/governance/STACK_REGISTRY.yaml`.
+> - This contract defines the process. VM/access facts live in structured bindings
+>   (`ops/bindings/vm.lifecycle.yaml`, `ops/bindings/ssh.targets.yaml`) and are
+>   projected by `device.identity.readmodel.generate`. Stable naming/topology
+>   conventions live in `docs/governance/DEVICE_IDENTITY_SSOT.md`.
 > - Service placement rules live in `ops/bindings/infra.placement.policy.yaml`.
 > - Storage tier placement lives in `ops/bindings/infra.storage.placement.policy.yaml`.
 > - Per-VM state lives in `ops/bindings/vm.lifecycle.yaml` (the lifecycle binding).
@@ -35,7 +38,7 @@ PLAN ──▶ PROVISION ──▶ REGISTER ──▶ VALIDATE ──▶ OPERATE
 
 ## Phase 1: PLAN
 
-**Goal:** Declare intent, assign VMID, define resource envelope, identify SSOT impacts.
+**Goal:** Declare intent, assign VMID, define resource envelope, identify binding/read-model impacts.
 
 ### Required Artifacts
 
@@ -56,18 +59,17 @@ PLAN ──▶ PROVISION ──▶ REGISTER ──▶ VALIDATE ──▶ OPERATE
 - **Storage tier:** Consult `infra.storage.placement.policy.yaml` — does this VM need a dedicated data disk (ZFS zvol), NFS mount, or boot-only?
 - **Access policy:** `lan_first` (shop same-site), `tailscale_required` (cross-site), or `lan_only` (no Tailscale). Determines `ssh.targets.yaml` routing and gate behavior.
 
-### SSOT Impact Preview
+### Authority Impact Preview
 
 The following files WILL need updates by the end of REGISTER phase:
 
 | File | Update Required |
 |------|----------------|
 | `ops/bindings/vm.lifecycle.yaml` | New entry (this phase) |
-| `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device entry with host and IP identity |
-| `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device entry with IPs |
 | `docs/governance/SERVICE_REGISTRY.yaml` | Service entries for hosted services |
 | `docs/governance/STACK_REGISTRY.yaml` | Stack entry |
 | `ops/bindings/ssh.targets.yaml` | SSH target entry |
+| `./bin/ops cap run device.identity.readmodel.generate` | Regenerate device identity read model from bindings |
 | `docs/governance/SERVICE_REGISTRY.yaml` | Host `compose_target` metadata that generates compose targets |
 | `docs/governance/SERVICE_REGISTRY.yaml` | Service `health` / `healthcheck` metadata that generates health probes |
 | `ops/bindings/backup.inventory.yaml` | Backup target entry |
@@ -144,12 +146,14 @@ Update `vm.lifecycle.yaml` status back to `planning` or `abandoned`.
 
 ## Phase 3: REGISTER
 
-**Goal:** Make the VM visible to spine tooling by updating all required SSOTs and bindings.
+**Goal:** Make the VM visible to spine tooling by updating required structured authorities and generated read models.
 
-### Required SSOT Updates
+### Required Authority Updates
 
 Each update MUST be committed. Do not hand-edit `ops/bindings/docker.compose.targets.yaml`
 or `ops/bindings/services.health.yaml`; rebuild them from `SERVICE_REGISTRY.yaml`.
+Do not add host/IP facts to `DEVICE_IDENTITY_SSOT.md`; regenerate the device
+identity read model from bindings instead.
 The order below minimizes drift window:
 
 | # | File | What to Add | Commit Scope |
@@ -157,13 +161,12 @@ The order below minimizes drift window:
 | 1 | `ops/bindings/vm.lifecycle.yaml` | Update status to `registered`, add Tailscale IP | lifecycle |
 | 2 | `ops/bindings/ssh.targets.yaml` | SSH target entry (id, host, user, tags) | connectivity |
 | 3 | `docs/governance/SERVICE_REGISTRY.yaml` | Host `compose_target` metadata with stack paths | stack discovery authority |
-| 4 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device row (hostname, LAN IP, TS IP, VMID) | identity |
-| 5 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device identity row | host identity |
-| 6 | `docs/governance/SERVICE_REGISTRY.yaml` | Service entries (host, port, health, container) | service truth |
-| 7 | `docs/governance/STACK_REGISTRY.yaml` | Stack entry (stack_id, path, deploy_method) | stack truth |
-| 8 | `./bin/ops cap run service.registry.projection.build` | Rebuild `docker.compose.targets.yaml` + `services.health.yaml` from SERVICE_REGISTRY | generated projections |
-| 9 | `ops/bindings/backup.inventory.yaml` | Backup target entry for vzdump artifacts | backup coverage |
-| 10 | `ops/bindings/secrets.namespace.policy.yaml` | Secret key paths (if services need Infisical) | secrets |
+| 4 | `./bin/ops cap run device.identity.readmodel.generate` | Confirm generated host/IP/VM readback includes the VM | identity read model |
+| 5 | `docs/governance/SERVICE_REGISTRY.yaml` | Service entries (host, port, health, container) | service truth |
+| 6 | `docs/governance/STACK_REGISTRY.yaml` | Stack entry (stack_id, path, deploy_method) | stack truth |
+| 7 | `./bin/ops cap run service.registry.projection.build` | Rebuild `docker.compose.targets.yaml` + `services.health.yaml` from SERVICE_REGISTRY | generated projections |
+| 8 | `ops/bindings/backup.inventory.yaml` | Backup target entry for vzdump artifacts | backup coverage |
+| 9 | `ops/bindings/secrets.namespace.policy.yaml` | Secret key paths (if services need Infisical) | secrets |
 
 ### Validation Gate
 
@@ -229,7 +232,7 @@ Update `vm.lifecycle.yaml` status to `active`.
 
 - **Adding services:** Update `SERVICE_REGISTRY.yaml`, rebuild `service.registry.projection.build`, then run `spine.verify` and `verify.infra.run`
 - **Removing services:** Update `SERVICE_REGISTRY.yaml`, rebuild projections, then run `spine.verify` and `verify.infra.run`
-- **Resizing VM:** Update `vm.lifecycle.yaml` resources + SHOP_SERVER_SSOT VM inventory
+- **Resizing VM:** Update `vm.lifecycle.yaml` resources, then regenerate shop/device read models
 - **Relocating services:** Follow INFRA_RELOCATION_PROTOCOL.md
 
 ---
@@ -255,7 +258,7 @@ Update `vm.lifecycle.yaml` status to `active`.
 | 3 | Capture final snapshot | `vzdump <VMID> --storage <backup-storage>` (optional, per policy) |
 | 4 | Destroy VM | `qm destroy <VMID> --purge` |
 | 5 | Clean ZFS dataset | `zfs destroy <dataset>` (if dedicated dataset exists) |
-| 6 | Remove from all SSOTs | Reverse of REGISTER phase — all 10 files |
+| 6 | Remove generated-authority references | Reverse of REGISTER phase for structured bindings and generated projections |
 | 7 | Update lifecycle binding | Set `status: decommissioned`, add `decommissioned_at` |
 | 8 | Run spine + estate verify | `./bin/ops cap run spine.verify && ./bin/ops cap run verify.infra.run` |
 | 9 | Close loop | `./bin/ops close loop <LOOP_ID>` |
@@ -293,7 +296,7 @@ Every phase is reversible until the next phase begins. Once a phase is completed
 |-------|----------------|
 | PLAN | Delete lifecycle entry, close loop as abandoned |
 | PROVISION | `qm destroy <VMID> --purge`, revert lifecycle to planning/abandoned |
-| REGISTER | Revert all SSOT commits, set lifecycle status to `provisioned` |
+| REGISTER | Revert structured-authority commits, set lifecycle status to `provisioned`, regenerate read models |
 | VALIDATE | If validation fails, either fix and retry or rollback to REGISTER |
 | OPERATE | N/A (steady state — changes follow their own protocols) |
 | DECOMMISSION | Cannot be rolled back after `qm destroy`. Final backup is the safety net. |
@@ -301,7 +304,7 @@ Every phase is reversible until the next phase begins. Once a phase is completed
 ### Rollback Evidence
 
 Every rollback must produce:
-1. A commit reverting SSOT changes
+1. A commit reverting structured-authority changes
 2. An updated lifecycle binding entry showing the rollback
 3. A note in the loop scope explaining why rollback occurred
 
@@ -316,6 +319,6 @@ Every rollback must produce:
 | `ops/bindings/infra.placement.policy.yaml` | Where VMs are allowed to be placed |
 | `ops/bindings/infra.storage.placement.policy.yaml` | What storage tier each VM should use |
 | `docs/governance/INFRA_RELOCATION_PROTOCOL.md` | Protocol for moving services between VMs |
-| `docs/governance/DEVICE_IDENTITY_SSOT.md` | Hardware-level VM identity |
+| `docs/governance/DEVICE_IDENTITY_SSOT.md` | Naming/topology conventions; generated device read model entrypoint |
 | `docs/governance/SERVICE_REGISTRY.yaml` | Service-to-host mapping |
 | `docs/core/STACK_LIFECYCLE.md` | Stack-level operations within a VM |

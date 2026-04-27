@@ -17,7 +17,7 @@ This is the spine-facing summary for the shop rack and shop-managed endpoints.
 | Substrate | `ops/bindings/hardware.inventory.yaml` |
 | Storage | `ops/bindings/shop.storage.map.yaml` + `ops/bindings/shop.media.pressure.authority.yaml` |
 | Runtime | `ops/bindings/vm.lifecycle.yaml` + `docs/governance/STACK_REGISTRY.yaml` |
-| Network | `docs/governance/DEVICE_IDENTITY_SSOT.md` + `ops/bindings/ssh.targets.yaml` |
+| Network | `ops/bindings/ssh.targets.yaml` + `docs/governance/DEVICE_IDENTITY_SSOT.md` naming/topology conventions |
 | Ingress | `ops/bindings/shop.ingress.map.yaml` + `ops/bindings/domain.routing.registry.yaml` |
 | Backup | `ops/bindings/domains/backup/backup.inventory.yaml` |
 | Monitoring | `docs/governance/SERVICE_REGISTRY.yaml` + `ops/bindings/services.health.yaml` |
