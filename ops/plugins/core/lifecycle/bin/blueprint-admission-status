@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""blueprint-admission-status — Read-only readback of operator blueprint admission matrix."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("BLOCKED: PyYAML not installed")
+
+ROOT = Path(__file__).resolve().parents[5]
+ADMISSION_PATH = ROOT / "ops" / "bindings" / "operator.blueprint.admission.yaml"
+
+
+def load_matrix() -> dict:
+    if not ADMISSION_PATH.exists():
+        return {"error": f"Admission matrix not found: {ADMISSION_PATH}"}
+    with open(ADMISSION_PATH) as f:
+        return yaml.safe_load(f)
+
+
+def render_text(data: dict) -> str:
+    lines: list[str] = []
+    if "error" in data:
+        return data["error"]
+
+    entries = data.get("entries", [])
+    summary = data.get("summary", {})
+
+    lines.append("=== OPERATOR BLUEPRINT ADMISSION STATUS ===")
+    lines.append("")
+    lines.append(f"Total files: {summary.get('total_files', '?')}")
+    lines.append(f"  Blueprint (L1): {summary.get('blueprint_l1', '?')}")
+    lines.append(f"  Domain vision (L3): {summary.get('domain_vision_l3', '?')}")
+    lines.append(f"  Reference only: {summary.get('reference_only', '?')}")
+    lines.append("")
+
+    decisions = summary.get("decisions", {})
+    lines.append("Decisions:")
+    for k, v in decisions.items():
+        lines.append(f"  {k}: {v}")
+    lines.append("")
+
+    statuses = summary.get("statuses", {})
+    lines.append("Statuses:")
+    for k, v in statuses.items():
+        lines.append(f"  {k}: {v}")
+    lines.append("")
+
+    proof = summary.get("materialization_proof", {})
+    if proof:
+        lines.append("Materialization proof:")
+        lines.append(f"  Specimen: {proof.get('specimen', '?')}")
+        lines.append(f"  Source: {proof.get('source', '?')}")
+        lines.append(f"  Target: {proof.get('target', '?')}")
+        lines.append(f"  Gate: {proof.get('gate', '?')}")
+        lines.append(f"  Commits: {', '.join(proof.get('commits', []))}")
+        lines.append(f"  Evidence: {proof.get('evidence', '?')}")
+        lines.append("")
+
+    lines.append("--- Entry Details ---")
+    lines.append("")
+
+    for e in entries:
+        eid = e.get("id", "?")
+        title = e.get("title", "?")
+        decision = e.get("decision", "?")
+        status = e.get("status", "?")
+        layer = e.get("layer", "?")
+        intent_class = e.get("operator_intent_class", "?")
+        claim = e.get("claim_type", "?")
+
+        lines.append(f"[{eid}] {title}")
+        lines.append(f"  class={intent_class}  layer={layer}  decision={decision}  status={status}  claim={claim}")
+
+        if e.get("materialization_target"):
+            mt = e["materialization_target"]
+            lines.append(f"  materialized_to: {mt.get('authority', '?')}")
+            lines.append(f"  proof: {mt.get('proof', '?')}")
+
+        gap = e.get("materialization_gap")
+        if gap and decision != "reference_only":
+            lines.append(f"  gap: {gap.strip()}")
+
+        trigger = e.get("shelf_trigger")
+        if trigger:
+            lines.append(f"  trigger: {trigger.strip()}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="blueprint-admission-status",
+        description="Read-only readback of operator blueprint admission matrix.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit JSON output.",
+    )
+    parser.add_argument(
+        "--id",
+        type=str,
+        default=None,
+        help="Filter to a single entry by BPA-NNN id.",
+    )
+    parser.add_argument(
+        "--decision",
+        type=str,
+        default=None,
+        choices=["materialize", "shelf", "tombstone", "reference_only"],
+        help="Filter entries by admission decision.",
+    )
+    parser.add_argument(
+        "--status",
+        type=str,
+        default=None,
+        help="Filter entries by admission status.",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Verify dependencies and exit.",
+    )
+    args = parser.parse_args()
+
+    if args.self_check:
+        if not ADMISSION_PATH.exists():
+            print(f"BLOCKED: {ADMISSION_PATH} not found")
+            return 1
+        print(f"OK: {ADMISSION_PATH}")
+        return 0
+
+    data = load_matrix()
+    if "error" in data:
+        print(data["error"], file=sys.stderr)
+        return 1
+
+    entries = data.get("entries", [])
+    if args.id:
+        entries = [e for e in entries if e.get("id") == args.id]
+    if args.decision:
+        entries = [e for e in entries if e.get("decision") == args.decision]
+    if args.status:
+        entries = [e for e in entries if e.get("status") == args.status]
+    data["entries"] = entries
+
+    if args.json_output:
+        out = {
+            "entries": entries,
+            "summary": data.get("summary", {}),
+        }
+        print(json.dumps(out, indent=2, default=str))
+    else:
+        print(render_text(data))
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
