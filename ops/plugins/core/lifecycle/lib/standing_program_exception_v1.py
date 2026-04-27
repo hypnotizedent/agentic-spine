@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -50,6 +51,7 @@ TERMINAL_DISPOSITIONS = frozenset({
     "superseded",
 })
 OBSERVATION_STATE_BASENAME = "AUTONOMOUS-EXCEPTION-BIRTH-PATH-V1-OBSERVATIONS.json"
+TRANSIENT_HEALTH_STATES = frozenset({"unknown", "unreachable"})
 
 
 def utc_now() -> str:
@@ -698,7 +700,19 @@ def evaluate_label(label: str) -> dict[str, Any]:
 
 
 def evaluate_labels(labels: list[str] | None = None) -> list[dict[str, Any]]:
-    return [evaluate_label(label) for label in v1_labels(labels)]
+    results: list[dict[str, Any]] = []
+    for label in v1_labels(labels):
+        result = evaluate_label(label)
+        # Remote proof readers can occasionally miss one poll due to a transient
+        # SSH/readback wobble. Retry once before surfacing a degraded operator
+        # read model.
+        if str(result.get("health") or "").strip().lower() in TRANSIENT_HEALTH_STATES:
+            time.sleep(0.2)
+            retried = evaluate_label(label)
+            if str(retried.get("health") or "").strip().lower() not in TRANSIENT_HEALTH_STATES:
+                result = retried
+        results.append(result)
+    return results
 
 
 def build_exception_specimen_states(

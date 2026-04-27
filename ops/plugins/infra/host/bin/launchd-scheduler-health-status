@@ -15,6 +15,7 @@ import json
 import os
 import plistlib
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -359,14 +360,20 @@ PY"""
         f"{user}@{host}",
         remote_script,
     ]
-    result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "").strip()
-        return {"reachable": False, "error": err or f"ssh exit {result.returncode}"}
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {"reachable": False, "error": "invalid_remote_json"}
+    last_error = {"reachable": False, "error": "invalid_remote_json"}
+    for attempt in range(2):
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            try:
+                return json.loads(result.stdout)
+            except json.JSONDecodeError:
+                last_error = {"reachable": False, "error": "invalid_remote_json"}
+        else:
+            err = (result.stderr or result.stdout or "").strip()
+            last_error = {"reachable": False, "error": err or f"ssh exit {result.returncode}"}
+        if attempt == 0:
+            time.sleep(0.2)
+    return last_error
 
 
 def mtime_evidence(paths: list[str]) -> JobEvidence:
@@ -558,6 +565,7 @@ def build_payload(root: Path) -> dict[str, Any]:
         template_path = str(entry.get("template_path", "")).strip()
         plist_path = (root / template_path) if template_path else Path()
         plist_payload = load_plist(plist_path)
+        remote_required = label in REMOTE_SYSTEMD_LABELS
 
         cadence_seconds, schedule = cadence_from_plist(plist_payload)
         job_name = label.replace("com.ronny.", "", 1)
@@ -592,23 +600,31 @@ def build_payload(root: Path) -> dict[str, Any]:
             runtime_is_scheduled = runtime_evidence.execution_source.endswith("_scheduler")
             if not runtime_is_scheduled and runtime_evidence.source == "runtime-jobs":
                 runtime_evidence = JobEvidence(timestamp=None, exit_code=None, source="none")
-
-            log_paths = [
-                str(plist_payload.get("StandardOutPath", "") or ""),
-                str(plist_payload.get("StandardErrorPath", "") or ""),
-            ]
-            mtime = mtime_evidence(log_paths)
-            evidence = choose_evidence(runtime_evidence, mtime)
-            launchctl_exit = launchctl_last_exit_code(label)
-            if launchctl_exit is not None:
-                evidence = JobEvidence(
-                    timestamp=evidence.timestamp,
-                    exit_code=launchctl_exit,
-                    source=evidence.source if evidence.source != "none" else "launchctl",
-                    execution_source=evidence.execution_source,
-                )
+            if remote_required:
+                # Remote-systemd labels are not authoritative on the local host.
+                # Use mirrored runtime-jobs evidence if it is present, but do not
+                # let stale local mtimes or launchctl noise masquerade as a real
+                # stale scheduler failure when the remote proof hop wobbles.
+                evidence = runtime_evidence
+            else:
+                log_paths = [
+                    str(plist_payload.get("StandardOutPath", "") or ""),
+                    str(plist_payload.get("StandardErrorPath", "") or ""),
+                ]
+                mtime = mtime_evidence(log_paths)
+                evidence = choose_evidence(runtime_evidence, mtime)
+                launchctl_exit = launchctl_last_exit_code(label)
+                if launchctl_exit is not None:
+                    evidence = JobEvidence(
+                        timestamp=evidence.timestamp,
+                        exit_code=launchctl_exit,
+                        source=evidence.source if evidence.source != "none" else "launchctl",
+                        execution_source=evidence.execution_source,
+                    )
 
         status, age_seconds, stale_threshold = classify_status(now, evidence, cadence_seconds)
+        if remote_required and not (remote_probe and remote_probe.get("reachable")) and status == "stale":
+            status = "unknown"
         expectation = scheduler_expectations.get(label, {}) if isinstance(scheduler_expectations, dict) else {}
         if label in exempt_labels and status in {"stale", "failed"}:
             status = "exempt"
