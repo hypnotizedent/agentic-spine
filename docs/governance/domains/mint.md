@@ -1,39 +1,47 @@
 # mint
 
-Canonical domain policy for `mint`.
+Canonical domain boundary for `mint`.
 
-**Mint product work lives in [`mint-modules`](https://github.com/hypnotizedent/mint-modules), not in spine.**
-Spine-side Mint surfaces are shared infrastructure only (SSH targets, secrets, verify, status projections).
+**Mint product and runtime authority live in [`mint-modules`](https://github.com/hypnotizedent/mint-modules), not in spine.**
+Spine retains only the governed shim/readback boundary plus the shared-infra contracts that still pay rent.
 
 - Authority: `docs/governance/SPINE.md`
-- Runtime contracts: `ops/bindings/domains/mint.bundle.yaml`
-- Public ingress contract: `ops/bindings/domains/mint/mint.public.ingress.contract.yaml`
-- **Status authority**: `ops/bindings/domains/mint/mint.module.status.projected.yaml` (read via `mint.module.status.projection.build`)
-- **Order business truth authority**: `ops/bindings/domains/mint/mint.order.truth.authority.yaml`
+- Spine domain bundle: `ops/bindings/domains/mint.bundle.yaml`
+- Product/runtime contract home: `~/code/mint-modules/contracts/`
+- Spine routing shims: `ops/plugins/domains/mint/bin/`
+- Spine shared-infra keep-set:
+  - `ops/bindings/domains/mint/mint.operator.storage.contract.yaml`
+  - `ops/bindings/domains/mint/mint.secrets.promotion.contract.yaml`
+  - `ops/bindings/domains/mint/mint.storage.findings.map.yaml`
+  - `ops/bindings/domains/mint/mint.storage.guard.policy.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain mint`
 
 ## Registered Capabilities (5 of 5)
 
-Mint status/proof capability registration is now complete for the governed read surfaces:
+All 5 registered Mint capabilities delegate to `mint-modules`:
 - `mint.deploy.status` — read-only Docker/container status via mint-modules shim
 - `mint.live.baseline.status` — read-only live baseline status surface
-- `mint.module.status.projection.build` — refresh governed status projection
+- `mint.module.status.projection.build` — refresh governed status projection via mint-modules shim
 - `mint.modules.health` — read-only health summary via mint-modules shim
 - `mint.runtime.proof` — read-only deep runtime proof via mint-modules shim
 
-## Extraction Status
+## Boundary Status
 
-L1 subtraction complete (2026-04-25). 48 unregistered scripts, lib/, schema/,
-contracts/, and storage/ directories removed. 5 thin shims remain in
-`ops/plugins/domains/mint/bin/` — each delegates via `exec` to `mint-modules`.
-All 4 read capabilities now carry `implementation_repo: mint-modules`.
-Runtime state (36 subdirs under `/Users/ronnyworks/code/.runtime/spine/state/mint/`)
-remains external to the repo and is not subject to extraction.
+L3 move-out is complete for Mint product/runtime authority. Spine keeps:
+- 5 thin capability-routing shims in `ops/plugins/domains/mint/bin/`
+- thin product authority pointers under `ops/bindings/domains/mint/`
+- the shared-infra keep-set listed above
+
+Workbench `agents/mint-agent/` may retain operator tooling, but it is not the
+owner of Mint runtime truth.
+
+Runtime state under `/Users/ronnyworks/code/.runtime/spine/state/mint/` remains
+external to the repo and is not part of the Mint authority move-out question.
 
 ## Order Truth
 
 **Canonical business truth for future order-facing modules**:
-- Read `ops/bindings/domains/mint/mint.order.truth.authority.yaml`
+- Read `ops/bindings/domains/mint/mint.order.truth.authority.yaml` (spine pointer to `mint-modules` authority)
 - Use it for order vs quote vs revision vs artwork-binding semantics
 - Do not infer business order truth from seed IDs, artwork job IDs, legacy `visual_id`, or code presence
 
