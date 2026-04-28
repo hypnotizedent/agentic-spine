@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -17,12 +18,97 @@ sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 
 import operator_ingress as oi
 
-# Execution host constants — daemon runs here, not locally.
-# State root must match the systemd unit Environment (spine-operator-ingress-auto-metabolizer.service).
-_EXEC_HOST_TARGET_ID = "ai-consolidation"
-_EXEC_HOST_STATE_ROOT = "/home/ubuntu/code/.runtime/spine/state"
-_EXEC_HOST_HEARTBEAT = f"{_EXEC_HOST_STATE_ROOT}/inputs/operator-ingress/.auto-metabolizer-heartbeat.json"
+_LABEL = "com.ronny.operator-ingress-auto-metabolizer"
+_FALLBACK_EXEC_HOST_TARGET_ID = "ai-consolidation"
+_FALLBACK_EXEC_HOST_STATE_ROOT = "/home/ubuntu/code/.runtime/spine/state"
 _STALE_THRESHOLD_SECONDS = 300  # 5 minutes — local heartbeat older than this triggers remote probe
+
+
+def _load_yaml_file(path: Path) -> dict:
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_scheduler_entry() -> dict:
+    registry = _load_yaml_file(ROOT / "ops" / "bindings" / "launchd.scheduler.registry.yaml")
+    labels = registry.get("labels") if isinstance(registry.get("labels"), list) else []
+    for entry in labels:
+        if isinstance(entry, dict) and entry.get("label") == _LABEL:
+            return entry
+    return {}
+
+
+def _parse_systemd_environment(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if not path.is_file():
+        return env
+    pattern = re.compile(r'^Environment=["\']?([^="\']+)=([^"\']*)["\']?$')
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        match = pattern.match(line)
+        if match:
+            env[match.group(1)] = match.group(2)
+    return env
+
+
+def _derive_state_root_from_heartbeat(path: str) -> str:
+    suffix = "/inputs/operator-ingress/.auto-metabolizer-heartbeat.json"
+    return path[: -len(suffix)] if path.endswith(suffix) else ""
+
+
+def _resolve_custody_metadata(local_state_root: str | None = None) -> dict:
+    entry = _load_scheduler_entry()
+    proof = entry.get("proof_channel") if isinstance(entry.get("proof_channel"), dict) else {}
+    systemd_unit_path = str(entry.get("systemd_unit_path") or "")
+    systemd_env = _parse_systemd_environment(ROOT / systemd_unit_path) if systemd_unit_path else {}
+
+    risks: list[str] = []
+    exec_host_id = str(entry.get("active_runtime_host") or proof.get("host") or "")
+    exec_host_source = "launchd.scheduler.registry"
+    if not exec_host_id:
+        exec_host_id = _FALLBACK_EXEC_HOST_TARGET_ID
+        exec_host_source = "hardcoded_fallback"
+        risks.append("execution_host_id fell back to hardcoded ai-consolidation")
+
+    exec_state_root = str(systemd_env.get("SPINE_STATE") or "")
+    exec_state_source = "systemd_unit_environment" if exec_state_root else ""
+    if not exec_state_root:
+        exec_state_root = _derive_state_root_from_heartbeat(str(proof.get("path") or ""))
+        exec_state_source = "launchd.scheduler.registry.proof_channel.path" if exec_state_root else ""
+    if not exec_state_root:
+        exec_state_root = _FALLBACK_EXEC_HOST_STATE_ROOT
+        exec_state_source = "hardcoded_fallback"
+        risks.append("execution_host_runtime_path fell back to hardcoded state root")
+
+    local_runtime_path = local_state_root or os.environ.get("SPINE_STATE", "")
+    local_heartbeat = (
+        str(Path(local_runtime_path) / "inputs" / "operator-ingress" / ".auto-metabolizer-heartbeat.json")
+        if local_runtime_path
+        else ""
+    )
+    exec_heartbeat = str(Path(exec_state_root) / "inputs" / "operator-ingress" / ".auto-metabolizer-heartbeat.json")
+    if local_runtime_path and local_runtime_path != exec_state_root:
+        risks.append("operator_console/local runtime path differs from execution_host runtime path; custody depends on state sync/API path")
+
+    return {
+        "custody_topology": "operator_console_local_readback_plus_execution_host_worker",
+        "source_of_truth": "$SPINE_STATE/inputs/operator-ingress/OI-*.yaml with human_intent nested inside each OI YAML",
+        "local_runtime_path": local_runtime_path,
+        "local_heartbeat_path": local_heartbeat,
+        "execution_host_id": exec_host_id,
+        "execution_host_id_source": exec_host_source,
+        "execution_host_runtime_path": exec_state_root,
+        "execution_host_runtime_path_source": exec_state_source,
+        "execution_host_heartbeat_path": exec_heartbeat,
+        "scheduler_label": _LABEL,
+        "systemd_unit_path": systemd_unit_path,
+        "custody_risk": risks or ["none_detected"],
+    }
 
 
 def _format_age(seconds: int | None) -> str:
@@ -61,16 +147,16 @@ def _heartbeat_state(status: str, worker: dict) -> str:
     return "unavailable"
 
 
-def _resolve_ssh_host() -> str | None:
-    """Resolve ai-consolidation SSH host via ssh-resolve.sh."""
+def _resolve_ssh_host(target_id: str) -> str | None:
+    """Resolve execution host SSH host via ssh-resolve.sh."""
     resolver = ROOT / "ops" / "lib" / "ssh-resolve.sh"
     if not resolver.is_file():
         return None
     # Source the resolver and call ssh_resolve_tailscale_ip, falling back to host
     script = f"""
         source "{resolver}"
-        ts="$(ssh_resolve_tailscale_ip "{_EXEC_HOST_TARGET_ID}")"
-        host="$(ssh_resolve_host "{_EXEC_HOST_TARGET_ID}")"
+        ts="$(ssh_resolve_tailscale_ip "{target_id}")"
+        host="$(ssh_resolve_host "{target_id}")"
         echo "${{ts:-$host}}"
     """
     try:
@@ -84,14 +170,32 @@ def _resolve_ssh_host() -> str | None:
         return None
 
 
-def _fetch_remote_heartbeat() -> dict | None:
+def _resolve_ssh_user(target_id: str) -> str:
+    resolver = ROOT / "ops" / "lib" / "ssh-resolve.sh"
+    if not resolver.is_file():
+        return "ubuntu"
+    script = f'source "{resolver}"; ssh_resolve_user "{target_id}" "ubuntu"'
+    try:
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=5)
+        user = result.stdout.strip()
+        return user or "ubuntu"
+    except Exception:
+        return "ubuntu"
+
+
+def _fetch_remote_heartbeat(custody: dict) -> dict | None:
     """SSH to execution host and read the heartbeat file. Returns parsed JSON or None."""
-    host = _resolve_ssh_host()
+    target_id = str(custody.get("execution_host_id") or "")
+    heartbeat = str(custody.get("execution_host_heartbeat_path") or "")
+    if not target_id or not heartbeat:
+        return None
+    host = _resolve_ssh_host(target_id)
     if not host:
         return None
+    user = _resolve_ssh_user(target_id)
     # Resolve machine identity opts
     resolver = ROOT / "ops" / "lib" / "ssh-resolve.sh"
-    id_script = f'source "{resolver}"; ssh_resolve_machine_identity_opts "{_EXEC_HOST_TARGET_ID}"'
+    id_script = f'source "{resolver}"; ssh_resolve_machine_identity_opts "{target_id}"'
     try:
         id_result = subprocess.run(
             ["bash", "-c", id_script],
@@ -105,8 +209,8 @@ def _fetch_remote_heartbeat() -> dict | None:
         "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
         "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
         *identity_opts,
-        f"ubuntu@{host}",
-        f"cat {_EXEC_HOST_HEARTBEAT}",
+        f"{user}@{host}",
+        f"cat {heartbeat}",
     ]
     for attempt in range(2):
         try:
@@ -188,9 +292,12 @@ def main() -> int:
     if "--self-check" in sys.argv:
         try:
             import yaml  # noqa: F401
+            custody = _resolve_custody_metadata(os.environ.get("SPINE_STATE", ""))
+            if not custody.get("execution_host_id") or not custody.get("execution_host_runtime_path"):
+                raise RuntimeError("custody metadata resolution incomplete")
             print("operator.ingress.auto_metabolize.status self-check PASS")
             return 0
-        except ImportError as exc:
+        except Exception as exc:
             print(
                 f"operator.ingress.auto_metabolize.status self-check FAIL: {exc}",
                 file=sys.stderr,
@@ -199,6 +306,7 @@ def main() -> int:
 
     args = parser.parse_args()
     state_root = os.environ.get("SPINE_STATE", "")
+    custody = _resolve_custody_metadata(state_root)
     if not state_root and not args.remote:
         msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
         if args.json_output:
@@ -223,14 +331,14 @@ def main() -> int:
             age = worker.get("heartbeat_age_seconds")
             has_heartbeat = bool(worker.get("heartbeat_at"))
             if not has_heartbeat or (age is not None and age > _STALE_THRESHOLD_SECONDS):
-                remote_hb = _fetch_remote_heartbeat()
+                remote_hb = _fetch_remote_heartbeat(custody)
                 if remote_hb:
                     result = _heartbeat_to_result(remote_hb)
                     source = "remote"
 
     # --remote or local failed entirely
     if result is None:
-        remote_hb = _fetch_remote_heartbeat()
+        remote_hb = _fetch_remote_heartbeat(custody)
         if remote_hb:
             result = _heartbeat_to_result(remote_hb)
             source = "remote"
@@ -250,6 +358,7 @@ def main() -> int:
                     "queue_pending": 0,
                     "last_processed": [],
                     "stale_threshold_seconds": _STALE_THRESHOLD_SECONDS,
+                    "custody": custody,
                     "error": msg,
                 }, indent=2))
             else:
@@ -276,6 +385,7 @@ def main() -> int:
             "queue_pending": queue["pending"],
             "last_processed": worker.get("last_ingress_ids", []),
             "stale_threshold_seconds": _STALE_THRESHOLD_SECONDS,
+            "custody": custody,
         }
         print(json.dumps(out, indent=2))
     else:

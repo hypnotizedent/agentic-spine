@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""human-intent-artifact-trigger-status — readback for artifact standing trigger."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+from human_intent_inventory import DEFAULT_EXTRA_ROOTS
+
+STATE_FILENAMES = {
+    "snapshot": ".human-artifact-trigger-snapshot.json",
+    "heartbeat": ".human-artifact-trigger-heartbeat.json",
+}
+
+
+def _state_root() -> Path:
+    return Path(os.environ.get("SPINE_STATE", Path.home() / "code" / ".runtime" / "spine" / "state"))
+
+
+def _ingress_dir() -> Path:
+    return _state_root() / "inputs" / "operator-ingress"
+
+
+def _state_path(kind: str) -> Path:
+    return _ingress_dir() / STATE_FILENAMES[kind]
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _env_roots() -> list[str]:
+    raw = os.environ.get("HUMAN_INTENT_ARTIFACT_ROOTS", "")
+    return [part for part in raw.split(os.pathsep) if part.strip()]
+
+
+def _default_existing_roots() -> list[str]:
+    return [str(path) for path in DEFAULT_EXTRA_ROOTS if path.exists()]
+
+
+def _build_status() -> dict[str, Any]:
+    heartbeat_path = _state_path("heartbeat")
+    snapshot_path = _state_path("snapshot")
+    heartbeat = _read_json(heartbeat_path)
+    snapshot = _read_json(snapshot_path)
+    roots = heartbeat.get("roots") or [row.get("path") for row in snapshot.get("roots", []) if isinstance(row, dict)]
+    if not roots:
+        roots = _env_roots() or _default_existing_roots()
+    return {
+        "version": 1,
+        "capability": "human.intent.artifact.trigger.status",
+        "read_state": "ok" if heartbeat else "missing_heartbeat",
+        "routing_model": "one_human_intent_lifecycle_many_source_origins",
+        "mutation_permitted": False,
+        "source_path_role": "provenance_only",
+        "state_root": str(_state_root()),
+        "heartbeat_path": str(heartbeat_path),
+        "heartbeat_exists": heartbeat_path.exists(),
+        "heartbeat_at": heartbeat.get("recorded_at"),
+        "snapshot_path": str(snapshot_path),
+        "snapshot_exists": snapshot_path.exists(),
+        "snapshot_sha256": snapshot.get("snapshot_sha256") or heartbeat.get("snapshot_sha256"),
+        "file_count": snapshot.get("file_count", 0),
+        "missing_root_count": snapshot.get("missing_root_count", heartbeat.get("missing_root_count", 0)),
+        "trigger_effective": snapshot.get("trigger_effective", heartbeat.get("trigger_effective", False)),
+        "roots": roots,
+        "change_detected": heartbeat.get("change_detected"),
+        "last_reconcile_at": heartbeat.get("last_reconcile_at"),
+        "last_reconcile_exit_code": heartbeat.get("last_reconcile_exit_code"),
+        "last_status": heartbeat.get("status", "never_run"),
+        "reconcile_summary": heartbeat.get("reconcile_summary", {}),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="human-intent-artifact-trigger-status",
+        description="Read heartbeat and snapshot state for the human artifact standing trigger.",
+    )
+    parser.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON output.")
+    parser.add_argument("--self-check", action="store_true", help="Verify dependencies and exit.")
+    args = parser.parse_args()
+
+    if args.self_check:
+        try:
+            _build_status()
+            print("human.intent.artifact.trigger.status self-check PASS")
+            return 0
+        except Exception as exc:
+            print(f"human.intent.artifact.trigger.status self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    payload = _build_status()
+    if args.json_output:
+        print(json.dumps(payload, indent=2, sort_keys=False))
+    else:
+        print(
+            "human.intent.artifact.trigger.status: "
+            f"{payload['last_status']} heartbeat={payload['heartbeat_at'] or 'never'} "
+            f"change_detected={payload['change_detected']}"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

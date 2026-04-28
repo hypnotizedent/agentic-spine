@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""human-intent-artifact-trigger-once — standing trigger for artifact readback."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+from human_intent_inventory import DEFAULT_EXTRA_ROOTS
+
+STATE_FILENAMES = {
+    "snapshot": ".human-artifact-trigger-snapshot.json",
+    "heartbeat": ".human-artifact-trigger-heartbeat.json",
+}
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _state_root() -> Path:
+    return Path(os.environ.get("SPINE_STATE", Path.home() / "code" / ".runtime" / "spine" / "state"))
+
+
+def _ingress_dir() -> Path:
+    return _state_root() / "inputs" / "operator-ingress"
+
+
+def _state_path(kind: str) -> Path:
+    return _ingress_dir() / STATE_FILENAMES[kind]
+
+
+def _env_roots() -> list[Path]:
+    raw = os.environ.get("HUMAN_INTENT_ARTIFACT_ROOTS", "")
+    return [Path(part).expanduser() for part in raw.split(os.pathsep) if part.strip()]
+
+
+def _select_roots(args: argparse.Namespace) -> list[Path]:
+    roots = [Path(root).expanduser() for root in args.root]
+    roots.extend(_env_roots())
+    if args.include_default_roots:
+        roots.extend(DEFAULT_EXTRA_ROOTS)
+    if not roots:
+        roots.extend(path for path in DEFAULT_EXTRA_ROOTS if path.exists())
+    seen: set[str] = set()
+    selected: list[Path] = []
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(root)
+    return selected
+
+
+def _iter_files(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    if root.is_file():
+        return [root]
+    return sorted(path for path in root.rglob("*") if path.is_file() and path.name != ".DS_Store")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _build_snapshot(roots: list[Path]) -> dict[str, Any]:
+    files: list[dict[str, Any]] = []
+    root_rows: list[dict[str, Any]] = []
+    missing_root_count = 0
+    for root in roots:
+        exists = root.exists()
+        if not exists:
+            missing_root_count += 1
+        root_row = {
+            "path": str(root),
+            "exists": exists,
+            "kind": "file" if root.is_file() else ("directory" if root.is_dir() else "missing"),
+        }
+        root_rows.append(root_row)
+        for path in _iter_files(root):
+            try:
+                stat = path.stat()
+                files.append({
+                    "path": str(path),
+                    "size_bytes": stat.st_size,
+                    "sha256": _sha256(path),
+                })
+            except OSError as exc:
+                files.append({
+                    "path": str(path),
+                    "error": str(exc),
+                })
+    basis = {"roots": root_rows, "files": files}
+    snapshot_digest = hashlib.sha256(
+        json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "version": 1,
+        "recorded_at": _utcnow(),
+        "source_path_role": "provenance_only",
+        "canonical_state_path": "$SPINE_STATE/inputs/operator-ingress/",
+        "roots": root_rows,
+        "files": files,
+        "file_count": len(files),
+        "missing_root_count": missing_root_count,
+        "trigger_effective": bool(files),
+        "snapshot_sha256": snapshot_digest,
+    }
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _run_reconcile(args: argparse.Namespace, roots: list[Path]) -> dict[str, Any]:
+    command = [
+        sys.executable,
+        str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "human-intent-artifact-reconcile"),
+        "--json",
+    ]
+    if args.oi_limit:
+        command.extend(["--oi-limit", str(args.oi_limit)])
+    for root in roots:
+        command.extend(["--root", str(root)])
+    result = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout_seconds)
+    parsed: dict[str, Any] = {}
+    if result.stdout.strip():
+        try:
+            parsed = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            parsed = {}
+    return {
+        "command": command,
+        "exit_code": result.returncode,
+        "stdout_json": parsed,
+        "stderr": result.stderr.strip(),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="human-intent-artifact-trigger-once",
+        description="Detect admitted artifact-root changes and invoke the existing human-intent artifact reconciler.",
+    )
+    parser.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON output.")
+    parser.add_argument("--root", action="append", default=[], help="Admitted artifact root/path to scan. May be repeated.")
+    parser.add_argument("--include-default-roots", action="store_true", help="Also scan the current default human-source roots when they exist.")
+    parser.add_argument("--oi-limit", type=int, default=0, help="Limit OI rows passed to reconcile; 0 means all.")
+    parser.add_argument("--timeout-seconds", type=int, default=120, help="Maximum reconcile runtime.")
+    parser.add_argument("--force", action="store_true", help="Run reconcile even if no content-significant change is detected.")
+    parser.add_argument("--self-check", action="store_true", help="Verify dependencies and exit.")
+    args = parser.parse_args()
+
+    if args.self_check:
+        try:
+            import yaml  # noqa: F401
+            _build_snapshot([])
+            print("human.intent.artifact.trigger.once self-check PASS")
+            return 0
+        except Exception as exc:
+            print(f"human.intent.artifact.trigger.once self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    roots = _select_roots(args)
+    snapshot = _build_snapshot(roots)
+    prior = _read_json(_state_path("snapshot"))
+    prior_heartbeat = _read_json(_state_path("heartbeat"))
+    change_detected = prior.get("snapshot_sha256") != snapshot.get("snapshot_sha256")
+    should_reconcile = args.force or change_detected
+
+    reconcile_result: dict[str, Any] | None = None
+    status = "unchanged"
+    exit_code = 0
+    if should_reconcile:
+        reconcile_result = _run_reconcile(args, roots)
+        exit_code = int(reconcile_result.get("exit_code", 1))
+        status = "reconciled" if exit_code == 0 else "reconcile_failed"
+        if exit_code == 0:
+            _atomic_write_json(_state_path("snapshot"), snapshot)
+
+    heartbeat = {
+        "version": 1,
+        "recorded_at": _utcnow(),
+        "capability": "human.intent.artifact.trigger.once",
+        "routing_model": "one_human_intent_lifecycle_many_source_origins",
+        "mutation_permitted": True,
+        "source_path_role": "provenance_only",
+        "state_root": str(_state_root()),
+        "heartbeat_path": str(_state_path("heartbeat")),
+        "snapshot_path": str(_state_path("snapshot")),
+        "roots": [str(root) for root in roots],
+        "change_detected": change_detected,
+        "forced": args.force,
+        "status": status,
+        "last_reconcile_at": _utcnow() if should_reconcile else prior_heartbeat.get("last_reconcile_at"),
+        "last_reconcile_exit_code": exit_code if should_reconcile else prior_heartbeat.get("last_reconcile_exit_code"),
+        "snapshot_sha256": snapshot.get("snapshot_sha256"),
+        "previous_snapshot_sha256": prior.get("snapshot_sha256"),
+        "file_count": snapshot.get("file_count", 0),
+        "missing_root_count": snapshot.get("missing_root_count", 0),
+        "trigger_effective": snapshot.get("trigger_effective", False),
+        "reconcile_capability": "human.intent.artifact.reconcile",
+    }
+    if reconcile_result is not None:
+        heartbeat["reconcile_summary"] = (reconcile_result.get("stdout_json") or {}).get("artifact_summary", {})
+        if reconcile_result.get("stderr"):
+            heartbeat["reconcile_stderr"] = reconcile_result["stderr"]
+    elif prior_heartbeat.get("reconcile_summary"):
+        heartbeat["reconcile_summary"] = prior_heartbeat["reconcile_summary"]
+    _atomic_write_json(_state_path("heartbeat"), heartbeat)
+
+    out = dict(heartbeat)
+    if args.json_output:
+        print(json.dumps(out, indent=2, sort_keys=False))
+    else:
+        print(f"human.intent.artifact.trigger.once: {status} change_detected={str(change_detected).lower()} files={snapshot.get('file_count', 0)}")
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
