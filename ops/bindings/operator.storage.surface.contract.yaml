@@ -4,7 +4,7 @@ owner: "@ronny"
 last_verified: 2026-04-09
 scope: operator-storage-surface
 version: 1
-updated_at: "2026-04-09"
+updated_at: "2026-04-28"
 
 # Operator Storage Surface Contract
 # Shared authority for workstation client-storage surfaces.
@@ -61,6 +61,14 @@ operator_storage_decision_surface:
         - protection_effect
         - retention_effect
         - evidence_ref
+    - axis: shared_storage_escalation
+      meaning: Human decision that a workload actually requires cross-node state continuity instead of autonomous local storage.
+      storage_effect_fields:
+        - cross_node_state_continuity_required
+        - same_dataset_multi_writer_required
+        - hypervisor_live_migration_required
+        - shared_storage_candidate
+        - rejection_reason
   decision_record_shape:
     required_fields:
       - decision_id
@@ -72,6 +80,28 @@ operator_storage_decision_surface:
       - operator_decision_required
       - evidence_ref
     notes: Decision records describe intent and authority changes only; they do not perform moves, copies, or backup runtime changes.
+  operator_blueprint_drains:
+    - drain_id: OBD-STORAGE-SHARED-STORAGE-20260428
+      source_ref: /Users/ronnyworks/Desktop/Archive/Shared storage.md
+      status: drained_to_contract
+      summary: Autonomous nodes are local-storage-first; shared storage is not default infrastructure.
+      canonical_rules:
+        - rule_id: autonomous-local-first
+          if: "node can be rebuilt from bootstrap, identity, role, and declared data restore"
+          then: "do not require shared storage; use local storage plus explicit backup/recovery promises"
+        - rule_id: shared-storage-only-with-state-continuity
+          if: "same workload must restart elsewhere with the same live filesystem or data"
+          then: "file a shared_storage_escalation decision before introducing shared storage"
+        - rule_id: multi-writer-requires-explicit-decision
+          if: "multiple nodes must read/write the same dataset"
+          then: "operator decision must declare the dataset, writers, protection model, and recovery proof"
+        - rule_id: hypervisor-cluster-is-a-phase-change
+          if: "VM live migration or clustered failover is required"
+          then: "treat shared storage as a deliberate architecture phase, not a default node property"
+      anti_drift:
+        - Do not recommend Ceph/shared storage merely because multiple nodes exist.
+        - Do not turn autonomous node rebuildability into hidden shared-storage dependency.
+        - Do not store runtime mount/probe facts in this contract.
   sensitive_data_extra_copy_example:
     decision_id: example-sensitive-data-extra-copy
     axis: extra_copy

@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-22
+last_verified: 2026-04-28
 scope: cross-plane-storage-scaffold-authority
 version: 1
 ontology:
@@ -27,6 +27,8 @@ ontology:
       meaning: Generated clutter or placeholder residue with no canonical authority claim.
     - scaffold_class: drained_retired
       meaning: Previously used root that is now intentionally drained and no longer canonical.
+    - scaffold_class: autonomous_local
+      meaning: Local node storage for autonomous/rebuildable nodes; not shared storage and not a cross-node continuity promise.
 surfaces:
   - device: pve
     path: /md1400/backups
@@ -165,10 +167,11 @@ surfaces:
     authority_state: workbench_backup_plane
     retention_state: active
     canonicality: canonical
-    detail: Device backup root now contains the workbench-managed MacBook canonical archive path only; legacy ronny-macbook rsync residue was removed. Canonical implementation home migrated from agents/device-backup to backup-plane/ (Packet 01, 2026-04-27).
+    detail: Device backup root for workbench-managed recovery subjects. Device-specific child names and latest artifacts are runtime evidence, not storage authority. Canonical implementation home migrated from agents/device-backup to backup-plane/ (Packet 01, 2026-04-27).
     blockers: ""
     source_refs:
       - workbench/backup-plane
+      - ops/bindings/operator.storage.surface.contract.yaml#OBD-STORAGE-SHARED-STORAGE-20260428
   - device: synology918
     path: /volume1/backups/synoreport
     scaffold_class: defect_cruft
@@ -241,3 +244,24 @@ surfaces:
     blockers: ownership_and_restore_value_not_yet_reconciled
     source_refs:
       - ops/bindings/synology918.storage.manifest.yaml
+
+operator_blueprint_drains:
+  - drain_id: OBD-STORAGE-SHARED-STORAGE-20260428
+    source_ref: /Users/ronnyworks/Desktop/Archive/Shared storage.md
+    applied_to:
+      - ontology.classes.autonomous_local
+      - surfaces.synology918:/volume1/backups/devices
+    summary: Shared storage is not the default for autonomous nodes; local storage plus declared backup/recovery proof remains the boring default until cross-node state continuity is intentionally chosen.
+    decision_boundary:
+      local_storage_default_when:
+        - node owns its workload and local state
+        - node can be wiped, rebuilt, enrolled, and converged
+        - data recovery is handled by declared backup/recovery subjects
+      shared_storage_required_when:
+        - workload must fail over elsewhere with the same live data
+        - multiple nodes must read/write the same dataset
+        - hypervisor live migration or clustered failover is an explicit requirement
+    anti_drift:
+      - Multiple autonomous nodes do not imply Ceph or shared block storage.
+      - Backup/recovery strategy is the first-class storage answer for rebuildable systems.
+      - Runtime device names and current child paths belong in evidence/readback, not this authority.
