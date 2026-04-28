@@ -22,6 +22,7 @@ This is a narrow governed write:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -269,6 +270,80 @@ def _validate_inputs(raw_content: str, content_type: str, state_root: str) -> No
         raise OperatorIngressError("raw_content is required")
 
 
+def _normalize_artifact_content(raw_content: str) -> str:
+    return "\n".join(line.rstrip() for line in raw_content.strip().splitlines())
+
+
+def _submission_fingerprint(raw_content: str, content_type: str) -> str:
+    payload = json.dumps(
+        {
+            "content_type": content_type,
+            "raw_content": _normalize_artifact_content(raw_content),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _canonical_lifecycle_readback(doc: dict[str, Any]) -> dict[str, str]:
+    """Return operator-facing OI/HI lifecycle terms without inventing a queue."""
+    human_intent = doc.get("human_intent") if isinstance(doc.get("human_intent"), dict) else {}
+    lifecycle_state = str(doc.get("lifecycle_state", "submitted")).strip() or "submitted"
+    human_intent_status = str(human_intent.get("status", "")).strip() or "captured"
+    disposition = str(doc.get("disposition", "")).strip()
+    adoption_state = str(doc.get("adoption_state", "")).strip()
+    proof_ref = str(doc.get("proof_ref") or doc.get("receipt_ref") or doc.get("receipt_path") or "").strip()
+
+    if proof_ref or human_intent_status == "proved":
+        canonical_state = "proved"
+    elif adoption_state == "landed":
+        canonical_state = "carried"
+    elif adoption_state == "reconciled" or disposition == "no_op_preserved":
+        canonical_state = "reconciled"
+    elif lifecycle_state == "routed":
+        canonical_state = "carried"
+    elif lifecycle_state == "classified":
+        canonical_state = "translated"
+    elif disposition == "deferred":
+        canonical_state = "needs_operator_decision"
+    else:
+        canonical_state = "captured"
+
+    return {
+        "operator_ingress_state": lifecycle_state,
+        "human_intent_status": human_intent_status,
+        "canonical_state": canonical_state,
+    }
+
+
+def _find_duplicate_ingress(
+    *,
+    state_root: str,
+    fingerprint: str,
+) -> tuple[dict[str, Any], Path] | tuple[None, None]:
+    ingress_dir = _ingress_dir(state_root)
+    if not ingress_dir.is_dir():
+        return None, None
+    for path in sorted(ingress_dir.glob("OI-*.yaml"), reverse=True):
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        candidate = str(doc.get("submission_fingerprint", "")).strip()
+        if not candidate:
+            candidate_raw = doc.get("raw_content")
+            candidate_type = str(doc.get("content_type", ""))
+            if isinstance(candidate_raw, str) and candidate_type in ALLOWED_CONTENT_TYPES:
+                candidate = _submission_fingerprint(candidate_raw, candidate_type)
+        if candidate == fingerprint:
+            return doc, path
+    return None, None
+
+
 def create_operator_ingress(
     *,
     state_root: str,
@@ -282,7 +357,7 @@ def create_operator_ingress(
     source_ip: str = "",
     submitted_via: str = "operator_surface_submit",
 ) -> dict[str, Any]:
-    """Create a non-authoritative operator ingress object.
+    """Create a non-authoritative OI object with embedded HI readback.
 
     Returns a result dict with ingress_id, path, lifecycle_state, and
     disposition.
@@ -292,6 +367,46 @@ def create_operator_ingress(
     _validate_inputs(raw_content, content_type, state_root)
 
     now = _utcnow()
+    submission_fingerprint = _submission_fingerprint(raw_content, content_type)
+    duplicate_doc, duplicate_path = _find_duplicate_ingress(
+        state_root=state_root,
+        fingerprint=submission_fingerprint,
+    )
+    if duplicate_doc is not None and duplicate_path is not None:
+        human_intent = (
+            duplicate_doc.get("human_intent")
+            if isinstance(duplicate_doc.get("human_intent"), dict)
+            else {}
+        )
+        lifecycle = _canonical_lifecycle_readback(duplicate_doc)
+        return {
+            "status": "duplicate",
+            "ok": True,
+            "created": False,
+            "duplicate": True,
+            "duplicate_of": str(duplicate_doc.get("ingress_id", duplicate_path.stem)),
+            "idempotency_status": "duplicate_of_existing_oi",
+            "idempotency_scope": "content_artifact",
+            "idempotency_note": "Duplicate detection ignores transport/source provenance and compares submitted artifact content.",
+            "ingress_id": str(duplicate_doc.get("ingress_id", duplicate_path.stem)),
+            "path": str(duplicate_path),
+            "journal_path": "",
+            "lifecycle_state": str(duplicate_doc.get("lifecycle_state", "submitted")),
+            "disposition": str(duplicate_doc.get("disposition", "awaiting_classification")),
+            "disposition_detail": str(
+                duplicate_doc.get(
+                    "disposition_detail",
+                    "Raw input preserved; awaiting membrane classification.",
+                )
+            ),
+            "submitted_at": str(duplicate_doc.get("submitted_at", "")),
+            "content_type": str(duplicate_doc.get("content_type", content_type)),
+            "operator_hint": str(duplicate_doc.get("operator_hint", "")),
+            "human_intent_id": str(human_intent.get("intent_id", "")),
+            "human_intent_status": lifecycle["human_intent_status"],
+            "canonical_state": lifecycle["canonical_state"],
+        }
+
     ingress_id = _derive_ingress_id(now)
     intent_id = _derive_human_intent_id(ingress_id)
     target = _ingress_dir(state_root) / f"{ingress_id}.yaml"
@@ -308,6 +423,8 @@ def create_operator_ingress(
         "source_device": source_device,
         "source_app": source_app,
         "submitted_via": submitted_via,
+        "submission_fingerprint": submission_fingerprint,
+        "idempotency_scope": "content_artifact",
         "content_type": content_type,
         "operator_hint": operator_hint.strip(),
         "lifecycle_state": "submitted",
@@ -336,16 +453,30 @@ def create_operator_ingress(
         allow_unicode=True,
     )
     _atomic_write(target, content)
-    journal_path = _append_ingress_lifecycle_event(
-        state_root=state_root,
-        event="submitted",
-        ingress_id=ingress_id,
-        path=target,
-        after=copy.deepcopy(doc),
-    )
+    try:
+        journal_path = _append_ingress_lifecycle_event(
+            state_root=state_root,
+            event="submitted",
+            ingress_id=ingress_id,
+            path=target,
+            after=copy.deepcopy(doc),
+        )
+    except OperatorIngressError:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        raise
+
+    lifecycle = _canonical_lifecycle_readback(doc)
 
     return {
-        "status": "ok",
+        "status": "submitted",
+        "ok": True,
+        "created": True,
+        "duplicate": False,
+        "idempotency_status": "created",
+        "idempotency_scope": "content_artifact",
         "ingress_id": ingress_id,
         "path": str(target),
         "journal_path": journal_path,
@@ -356,6 +487,8 @@ def create_operator_ingress(
         "content_type": content_type,
         "operator_hint": doc["operator_hint"],
         "human_intent_id": intent_id,
+        "human_intent_status": lifecycle["human_intent_status"],
+        "canonical_state": lifecycle["canonical_state"],
     }
 
 
@@ -364,7 +497,7 @@ def list_operator_ingress(
     state_root: str,
     limit: int = 20,
 ) -> dict[str, Any]:
-    """List recent operator ingress objects."""
+    """List recent OI/HI lifecycle objects."""
     ingress_dir = _ingress_dir(state_root)
     if not ingress_dir.is_dir():
         return {"count": 0, "items": []}
@@ -392,6 +525,8 @@ def list_operator_ingress(
             ),
             "source_device": str(doc.get("source_device", "")),
             "source_app": str(doc.get("source_app", "")),
+            "submitted_via": str(doc.get("submitted_via", "")),
+            "idempotency_scope": str(doc.get("idempotency_scope", "content_artifact")),
             "path": str(path),
         }
         # Include metabolization fields when present
@@ -438,6 +573,8 @@ def list_operator_ingress(
             state_root=state_root,
             path=path,
         )
+        item["canonical_lifecycle"] = _canonical_lifecycle_readback(doc)
+        item["canonical_state"] = item["canonical_lifecycle"]["canonical_state"]
         items.append(item)
         if len(items) >= limit:
             break

@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""human-intent-artifact-reconcile — manual trigger for artifact-content readback."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+from human_intent_inventory import DEFAULT_EXTRA_ROOTS, build_inventory
+
+
+def _state_root() -> Path:
+    return Path(os.environ.get("SPINE_STATE", Path.home() / "code" / ".runtime" / "spine" / "state"))
+
+
+def _evidence_root() -> Path:
+    return Path(os.environ.get("SPINE_EVIDENCE_ROOT", Path.home() / "code" / ".evidence" / "spine"))
+
+
+def _env_roots() -> list[Path]:
+    raw = os.environ.get("HUMAN_INTENT_ARTIFACT_ROOTS", "")
+    if not raw.strip():
+        return []
+    return [Path(part).expanduser() for part in raw.split(os.pathsep) if part.strip()]
+
+
+def _select_roots(args: argparse.Namespace) -> list[Path] | None:
+    roots = [Path(root).expanduser() for root in args.root]
+    roots.extend(_env_roots())
+    if args.include_default_roots:
+        roots.extend(DEFAULT_EXTRA_ROOTS)
+    if not roots:
+        return None
+    seen: set[str] = set()
+    selected: list[Path] = []
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(root)
+    return selected
+
+
+def _artifact_payload(inventory: dict[str, Any]) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for row in inventory.get("items", []):
+        if not isinstance(row, dict) or row.get("source_kind") != "path_drop_source":
+            continue
+        artifacts.append({
+            "source_id": row.get("source_id", ""),
+            "source_ref": row.get("source_ref", ""),
+            "source_path_role": (row.get("considered_as") or {}).get("source_path_role", "provenance_only"),
+            "artifact_scope": row.get("artifact_scope", "unknown"),
+            "content_signal": row.get("content_signal", []),
+            "meaning_summary": row.get("meaning_summary", ""),
+            "canonical_state": row.get("canonical_state", ""),
+            "inventory_disposition": row.get("disposition", ""),
+            "recommended_disposition": row.get("recommended_disposition", ""),
+            "carrier_kind": row.get("carrier_kind", "none"),
+            "carrier_ref": row.get("carrier_ref", ""),
+            "proof_ref": row.get("proof_ref", ""),
+            "next_missing_step": row.get("next_missing_step", ""),
+            "considered_as": row.get("considered_as", {}),
+        })
+    return artifacts
+
+
+def _build_readback(args: argparse.Namespace) -> dict[str, Any]:
+    state_root = _state_root()
+    evidence_root = _evidence_root()
+    roots = _select_roots(args)
+    inventory = build_inventory(
+        repo=ROOT,
+        state_root=state_root,
+        evidence_root=evidence_root,
+        extra_roots=roots,
+        oi_limit=args.oi_limit or None,
+    )
+    artifacts = _artifact_payload(inventory)
+    by_recommendation: dict[str, int] = {}
+    for artifact in artifacts:
+        key = str(artifact.get("recommended_disposition") or "unknown")
+        by_recommendation[key] = by_recommendation.get(key, 0) + 1
+    return {
+        "version": 1,
+        "capability": "human.intent.artifact.reconcile",
+        "trigger_mode": "manual",
+        "automatic_trigger_implemented": False,
+        "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "mutation_permitted": False,
+        "routing_model": "one_human_intent_lifecycle_many_source_origins",
+        "roots_considered": inventory.get("sources", {}).get("path_drop_roots", []),
+        "inventory_summary": inventory.get("summary", {}),
+        "artifact_summary": {
+            "total_artifacts": len(artifacts),
+            "by_recommended_disposition": by_recommendation,
+        },
+        "routes": {
+            "human_intent_inventory_status": "same build_inventory read model; artifact rows are path_drop_source rows",
+            "operator_blueprint_admission": "matched source_ref/source_alias entries are reported as already carried/proved",
+            "operator_ingress_model": "unmatched in-scope artifacts recommend needs operator decision; submit/admit via existing OI capability when the operator chooses",
+        },
+        "standing_program_hook_readiness": {
+            "ready": True,
+            "hook_target": "./bin/ops cap run human.intent.artifact.reconcile -- --json",
+            "honest_gap": "No always-on file watcher is implemented in this capability.",
+            "required_future_trigger": "A standing program or submit adapter can call this manual trigger after admitted roots change.",
+        },
+        "artifacts": artifacts,
+    }
+
+
+def _print_text(payload: dict[str, Any], limit: int) -> None:
+    summary = payload["artifact_summary"]
+    print("=== HUMAN INTENT ARTIFACT RECONCILE ===")
+    print("trigger_mode: manual")
+    print("automatic_trigger_implemented: false")
+    print(f"artifacts: {summary['total_artifacts']}")
+    print("recommended: " + ", ".join(
+        f"{key}={value}"
+        for key, value in sorted(summary["by_recommended_disposition"].items())
+    ))
+    print("")
+    artifacts = payload["artifacts"]
+    if limit:
+        artifacts = artifacts[:limit]
+    for artifact in artifacts:
+        print(
+            f"{artifact['recommended_disposition']} | {artifact['artifact_scope']} | "
+            f"{artifact['meaning_summary']}"
+        )
+        print(f"  provenance: {artifact['source_ref']}")
+        if artifact.get("next_missing_step") and artifact["next_missing_step"] != "none":
+            print(f"  next: {artifact['next_missing_step']}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="human-intent-artifact-reconcile",
+        description="Manual artifact-content reconciliation trigger over admitted human-source paths.",
+    )
+    parser.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON output.")
+    parser.add_argument("--limit", type=int, default=25, help="Limit printed artifacts in text mode; 0 means all.")
+    parser.add_argument("--oi-limit", type=int, default=0, help="Limit OI rows; 0 means all.")
+    parser.add_argument(
+        "--root",
+        action="append",
+        default=[],
+        help="Admitted artifact root/path to scan. May be repeated.",
+    )
+    parser.add_argument(
+        "--include-default-roots",
+        action="store_true",
+        help="Also scan the current default human-source roots when they exist.",
+    )
+    parser.add_argument("--self-check", action="store_true", help="Verify dependencies and exit.")
+    args = parser.parse_args()
+
+    if args.self_check:
+        try:
+            import yaml  # noqa: F401
+            print("human.intent.artifact.reconcile self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"human.intent.artifact.reconcile self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    payload = _build_readback(args)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, sort_keys=False))
+    else:
+        _print_text(payload, args.limit)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

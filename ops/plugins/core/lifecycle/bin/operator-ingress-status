@@ -20,7 +20,7 @@ import operator_ingress as oi
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="operator-ingress-status",
-        description="List recent operator ingress objects.",
+        description="List recent OI/HI human-intent lifecycle objects.",
     )
     parser.add_argument(
         "--limit",
@@ -53,9 +53,25 @@ def main() -> int:
     if "--self-check" in sys.argv:
         try:
             import yaml  # noqa: F401
+            sample = {
+                "ingress_id": "OI-SELF-CHECK",
+                "lifecycle_state": "submitted",
+                "disposition": "awaiting_classification",
+                "human_intent": {
+                    "intent_id": "HI-SELF-CHECK",
+                    "status": "captured",
+                    "statement": "self-check",
+                },
+            }
+            lifecycle = oi.build_intent_chain_readback(sample, state_root="/tmp")
+            if lifecycle["source"]["human_intent_id"] != "HI-SELF-CHECK":
+                raise RuntimeError("OI/HI readback chain omitted human_intent_id")
             print("operator.ingress.status self-check PASS")
             return 0
         except ImportError as exc:
+            print(f"operator.ingress.status self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
             print(f"operator.ingress.status self-check FAIL: {exc}", file=sys.stderr)
             return 1
 
@@ -100,9 +116,11 @@ def main() -> int:
                     chain = item.get("intent_chain_readback", {}) if isinstance(item.get("intent_chain_readback"), dict) else {}
                     proof = chain.get("proof_receipt", {}) if isinstance(chain.get("proof_receipt"), dict) else {}
                     missing = chain.get("next_missing_seam", "")
+                    hi = item.get("human_intent_id", "")
+                    canonical_state = item.get("canonical_state", "")
                     print(
-                        f"  {item['ingress_id']}  {item.get('content_type', ''):18s}  "
-                        f"{item.get('lifecycle_state', ''):12s}  {item.get('disposition', '')}"
+                        f"  {item['ingress_id']}  {hi or 'HI pending'}  {item.get('content_type', ''):18s}  "
+                        f"OI={item.get('lifecycle_state', ''):10s}  HI={canonical_state or item.get('human_intent_status', '')}  {item.get('disposition', '')}"
                         f"{adoption_col}{ref_col}"
                     )
                     if proof.get("ref") or missing:
@@ -138,9 +156,11 @@ def main() -> int:
                 chain = item.get("intent_chain_readback", {}) if isinstance(item.get("intent_chain_readback"), dict) else {}
                 proof = chain.get("proof_receipt", {}) if isinstance(chain.get("proof_receipt"), dict) else {}
                 missing = chain.get("next_missing_seam", "")
+                hi = item.get("human_intent_id", "")
+                canonical_state = item.get("canonical_state", "")
                 print(
-                    f"  {item['ingress_id']}  {item['content_type']:18s}  "
-                    f"{item['lifecycle_state']:12s}  {item['disposition']}"
+                    f"  {item['ingress_id']}  {hi or 'HI pending'}  {item['content_type']:18s}  "
+                    f"OI={item['lifecycle_state']:10s}  HI={canonical_state or item.get('human_intent_status', '')}  {item['disposition']}"
                     f"{adoption_col}{ref_col}"
                 )
                 if proof.get("ref") or missing:

@@ -2,12 +2,12 @@
 """operator-surface-server — tiny operator surface server.
 
 Serves precomputed cockpit HTML and mobile JSON from a static directory, plus
-bounded operator ingress form/POST and a phone-readable ingress readback page.
+bounded OI/HI submit/readback pages.
 
 Dynamic paths:
-  GET  /submit   → render operator ingress form
-  POST /submit   → create non-authoritative operator ingress object
-  GET  /ingress  → phone-readable readback of recent ingress objects
+  GET  /submit   → render OI/HI submit form
+  POST /submit   → capture the same OI/HI object as operator.ingress.submit
+  GET  /ingress  → phone-readable OI/HI lifecycle readback
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 from functools import partial
 from http.server import HTTPServer, SimpleHTTPRequestHandler
@@ -104,8 +105,8 @@ def _surface_tab(label: str, href: str, hint: str, active: bool = False) -> str:
 def _surface_nav(active: str) -> str:
     tabs = [
         _surface_tab("Board", "/", "glance view", active == "board"),
-        _surface_tab("Submit", "/submit", "operator ingress", active == "submit"),
-        _surface_tab("Submissions", "/ingress", "readback", active == "ingress"),
+        _surface_tab("Submit", "/submit", "human intent", active == "submit"),
+        _surface_tab("Submissions", "/ingress", "OI/HI readback", active == "ingress"),
     ]
     return f'<div class="surface-nav" aria-label="Operator surface tabs">{"".join(tabs)}</div>'
 
@@ -176,6 +177,12 @@ def _render_page(title: str, body: str, *, active: str, eyebrow: str = "Operator
       border-radius:5px; vertical-align:middle;
     }}
     .badge-submitted {{ background:rgba(251,191,36,.15); color:var(--y); }}
+    .badge-captured {{ background:rgba(251,191,36,.15); color:var(--y); }}
+    .badge-translated {{ background:rgba(34,211,238,.15); color:var(--c); }}
+    .badge-carried {{ background:rgba(52,211,153,.15); color:var(--g); }}
+    .badge-proved {{ background:rgba(52,211,153,.15); color:var(--g); }}
+    .badge-needs_operator_decision {{ background:rgba(248,113,113,.15); color:var(--r); }}
+    .badge-duplicate {{ background:rgba(154,171,192,.15); color:var(--m); }}
     .badge-classified {{ background:rgba(34,211,238,.15); color:var(--c); }}
     .badge-routed {{ background:rgba(52,211,153,.15); color:var(--g); }}
   </style>
@@ -204,25 +211,26 @@ def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> 
     raw_content = _H(values.get("raw_content", ""))
     body = f"""
     <div class="card {'err' if error else ''}">
-      <div class="section-lead">Submit human-steward input here. It stays non-authoritative until classified or routed through the existing lifecycle.</div>
+      <div class="section-lead">Submit human-steward intent here. The browser is provenance only; the captured artifact becomes the same OI/HI object used by operator.ingress.submit.</div>
       {error_html}
       <form method="post" action="/submit" id="submitForm">
         <input type="hidden" name="source_app" value="browser">
-        <label for="content_type">Type</label>
+        <label for="content_type">Artifact type</label>
         <select name="content_type" id="content_type">
           <option value="note" {'selected' if content_type == 'note' else ''}>note</option>
           <option value="conversation" {'selected' if content_type == 'conversation' else ''}>conversation</option>
           <option value="url" {'selected' if content_type == 'url' else ''}>url</option>
           <option value="voice_transcript" {'selected' if content_type == 'voice_transcript' else ''}>voice_transcript</option>
         </select>
-        <label for="operator_hint">Hint (optional)</label>
+        <label for="operator_hint">Intent hint (optional)</label>
         <input type="text" name="operator_hint" id="operator_hint" value="{hint}" placeholder="One-line intent signal">
-        <label for="raw_content">Content</label>
+        <label for="raw_content">Artifact content</label>
         <textarea name="raw_content" id="raw_content" placeholder="Paste thought, note, conversation, transcript, or URL here.">{raw_content}</textarea>
-        <button class="btn" type="submit" id="submitBtn">Submit</button>
+        <button class="btn" type="submit" id="submitBtn">Submit Human Intent</button>
       </form>
       <div class="helper-row">
-        <span class="helper-chip">raw capture only</span>
+        <span class="helper-chip">OI/HI capture</span>
+        <span class="helper-chip">source is provenance</span>
         <span class="helper-chip">no authority promotion here</span>
         <a class="helper-chip" href="/ingress">see recent submissions</a>
       </div>
@@ -235,7 +243,7 @@ def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> 
         e.preventDefault();
         if(btn.disabled) return;
         btn.disabled=true;
-        btn.textContent='Submitting\u2026';
+        btn.textContent='Submitting...';
         var body=new URLSearchParams(new FormData(form)).toString();
         var ctrl=new AbortController();
         var timer=setTimeout(function(){{ ctrl.abort(); }},15000);
@@ -255,7 +263,7 @@ def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> 
         }}).catch(function(err){{
           clearTimeout(timer);
           btn.disabled=false;
-          btn.textContent='Submit';
+          btn.textContent='Submit Human Intent';
           var msg=err.name==='AbortError'?'Request timed out. Tap to retry.':err.message||'Network error. Tap to retry.';
           var flash=document.createElement('div');
           flash.className='flash err';
@@ -269,21 +277,26 @@ def _submit_form_html(error: str = "", values: dict[str, str] | None = None) -> 
     </script>
     """
     return _render_page(
-        "Submit Operator Ingress",
+        "Submit Human Intent",
         body,
         active="submit",
-        subtitle="Capture notes, conversations, links, or transcripts into the governed operator-ingress lane.",
+        subtitle="Capture notes, conversations, links, or transcripts into the governed OI/HI lifecycle.",
     )
 
 
-def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
-    """Phone-readable readback of recent operator ingress objects."""
+def _ingress_readback_html(state_root: str, submitted_id: str = "", duplicate: bool = False) -> str:
+    """Phone-readable readback of recent OI/HI objects."""
     data = oi.list_operator_ingress(state_root=state_root, limit=20)
     items = data.get("items", [])
 
     success_html = ""
     if submitted_id:
-        success_html = f'<div class="flash ok">Accepted: <strong>{_H(submitted_id)}</strong></div>'
+        submitted_item = next((item for item in items if str(item.get("ingress_id", "")) == submitted_id), {})
+        hi = str(submitted_item.get("human_intent_id", "")).strip()
+        state = str(submitted_item.get("canonical_state", "")).strip() or "captured"
+        prefix = "Already captured; no duplicate object created" if duplicate else "Submitted and captured"
+        hi_html = f" / <strong>{_H(hi)}</strong>" if hi else ""
+        success_html = f'<div class="flash ok">{_H(prefix)}: <strong>{_H(submitted_id)}</strong>{hi_html} · {_H(state)}</div>'
 
     rows = ""
     for item in items:
@@ -303,14 +316,20 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
         proof = chain.get("proof_receipt", {}) if isinstance(chain.get("proof_receipt"), dict) else {}
         proof_ref = _H(str(proof.get("ref", "")))
         next_missing = _H(str(chain.get("next_missing_seam", "")))
+        human_intent_id = _H(str(item.get("human_intent_id", "")))
+        human_intent_status = _H(str(item.get("human_intent_status", "")))
+        canonical_state = str(item.get("canonical_state", "") or "captured")
+        canonical_state_html = _H(canonical_state)
+        submitted_via = _H(str(item.get("submitted_via", "")))
+        idempotency_scope = _H(str(item.get("idempotency_scope", "content_artifact")))
 
         # Badge: adoption_state is prominent when present, lifecycle_state secondary
         if adoption_state:
             badge_cls = f"badge-{adoption_state}"
             badge_label = adoption_state
         else:
-            badge_cls = f"badge-{state}" if state in ("submitted", "classified", "routed") else ""
-            badge_label = state
+            badge_cls = f"badge-{canonical_state}"
+            badge_label = canonical_state
 
         # Outcome detail line: shows disposition and classification
         outcome_parts = []
@@ -345,10 +364,8 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
         elif next_missing and next_missing != "none":
             proof_line = f"<div class='item-meta'>next missing: {next_missing}</div>"
 
-        # Membrane badge (secondary when adoption is present)
-        membrane_badge = ""
-        if adoption_state:
-            membrane_badge = f"<span class='badge badge-{state}' style='font-size:0.7em;opacity:0.7'>{_H(state)}</span>"
+        # OI state remains secondary to canonical HI readback.
+        oi_badge = f"<span class='badge badge-{state}' style='font-size:0.7em;opacity:0.7'>{_H(state)}</span>"
 
         rows += f"""
         <div class="item">
@@ -356,12 +373,14 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
             <span class="item-id">{iid}</span>
             <span class="badge {badge_cls}">{_H(badge_label)}</span>
           </div>
+          {"<div class='item-meta'>HI " + human_intent_id + " · " + human_intent_status + "</div>" if human_intent_id else ""}
           {"<div class='item-hint'>" + hint + "</div>" if hint else ""}
           {adoption_line}
-          <div class="item-meta">{outcome_line}{(' ' + membrane_badge) if membrane_badge else ''}</div>
+          <div class="item-meta">OI {state} · HI {canonical_state_html} {oi_badge}</div>
+          {"<div class='item-meta'>" + outcome_line + "</div>" if outcome_line else ""}
           {detail_line}
           {proof_line}
-          <div class="item-meta">{ctype} · {submitted}</div>
+          <div class="item-meta">{ctype} · {submitted}{(' · via ' + submitted_via) if submitted_via else ''} · idempotency scope: {idempotency_scope}</div>
         </div>
         """
     if not rows:
@@ -371,26 +390,80 @@ def _ingress_readback_html(state_root: str, submitted_id: str = "") -> str:
 
     body = f"""
     <div class="card">
-      <div class="section-lead">Recent operator-ingress objects with their current lifecycle state. This is readback, not authority.</div>
+      <div class="section-lead">Recent OI/HI objects with lifecycle readback. Source, transport, and location are provenance; artifact content is the captured scope.</div>
       {success_html}
       {rows}
       <div class="helper-row">
-        <a class="helper-chip" href="/submit">submit another note</a>
+        <a class="helper-chip" href="/submit">submit another intent</a>
         <span class="helper-chip">20 most recent items</span>
       </div>
       <div class="item-meta" style="margin-top:.5rem;font-size:.7rem;opacity:.5">reading from {state_root_display}</div>
     </div>
     """
     return _render_page(
-        "Operator Ingress Readback",
+        "Human Intent Readback",
         body,
         active="ingress",
-        subtitle="Read the latest submissions and see whether they are still submitted, classified, or already routed.",
+        subtitle="Read submitted, captured, translated, reconciled, carried, and proved human intent without a parallel web grammar.",
     )
 
 
+def _self_check() -> None:
+    with tempfile.TemporaryDirectory(prefix="operator-surface-submit-") as tmp:
+        state_root = Path(tmp)
+        try:
+            oi.create_operator_ingress(
+                state_root=str(state_root),
+                raw_content="",
+                content_type="note",
+                submitted_via="operator_surface_submit.self_check",
+            )
+        except oi.OperatorIngressError:
+            pass
+        else:
+            raise RuntimeError("empty submit unexpectedly succeeded")
+        ingress_dir = state_root / "inputs" / "operator-ingress"
+        if ingress_dir.exists() and list(ingress_dir.glob("OI-*.yaml")):
+            raise RuntimeError("failed submit created an OI ghost object")
+
+        first = oi.create_operator_ingress(
+            state_root=str(state_root),
+            raw_content="web self-check harmless human intent artifact",
+            content_type="note",
+            operator_hint="web self-check",
+            source_device="phone",
+            source_app="browser",
+            submitted_via="operator_surface_submit.self_check",
+        )
+        duplicate = oi.create_operator_ingress(
+            state_root=str(state_root),
+            raw_content="web self-check harmless human intent artifact",
+            content_type="note",
+            operator_hint="same artifact over another transport",
+            source_device="desktop",
+            source_app="operator.ingress.submit",
+            submitted_via="operator_surface_submit.self_check",
+        )
+        files = list(ingress_dir.glob("OI-*.yaml"))
+        if first.get("status") != "submitted" or first.get("human_intent_status") != "captured":
+            raise RuntimeError(f"unexpected submit result: {first}")
+        if duplicate.get("status") != "duplicate" or duplicate.get("created"):
+            raise RuntimeError(f"duplicate submit was not idempotent: {duplicate}")
+        if len(files) != 1:
+            raise RuntimeError(f"duplicate submit wrote {len(files)} OI objects")
+
+        form = _submit_form_html()
+        readback = _ingress_readback_html(str(state_root), first["ingress_id"])
+        for needle in ("Submit Human Intent", "OI/HI", "source is provenance"):
+            if needle not in form:
+                raise RuntimeError(f"submit form missing {needle!r}")
+        for needle in ("Submitted and captured", "HI ", "idempotency scope: content_artifact"):
+            if needle not in readback:
+                raise RuntimeError(f"readback missing {needle!r}")
+
+
 class QuietHandler(SimpleHTTPRequestHandler):
-    """Serve static operator surfaces plus bounded operator ingress submit."""
+    """Serve static operator surfaces plus bounded OI/HI submit."""
 
     def log_message(self, format, *args):
         # Only log errors, not every request
@@ -467,7 +540,8 @@ class QuietHandler(SimpleHTTPRequestHandler):
         if clean == "/ingress":
             qs = parse_qs(parsed.query)
             submitted_id = qs.get("submitted", [""])[0]
-            self._send_html(200, _ingress_readback_html(str(STATE_ROOT), submitted_id=submitted_id))
+            duplicate = qs.get("duplicate", ["0"])[0] == "1"
+            self._send_html(200, _ingress_readback_html(str(STATE_ROOT), submitted_id=submitted_id, duplicate=duplicate))
             return
         return super().do_GET()
 
@@ -506,7 +580,7 @@ class QuietHandler(SimpleHTTPRequestHandler):
             )
         except oi.OperatorIngressError as exc:
             if wants_json:
-                self._send_json(400, {"status": "error", "error": str(exc)})
+                self._send_json(400, {"status": "error", "created": False, "error": str(exc)})
             else:
                 self._send_html(400, _submit_form_html(str(exc), payload if 'payload' in locals() else None))
             return
@@ -517,8 +591,9 @@ class QuietHandler(SimpleHTTPRequestHandler):
             self._send_json(200, result)
         else:
             ingress_id = quote(result["ingress_id"])
+            duplicate = "&duplicate=1" if result.get("duplicate") else ""
             self.send_response(303)
-            self.send_header("Location", f"/ingress?submitted={ingress_id}")
+            self.send_header("Location", f"/ingress?submitted={ingress_id}{duplicate}")
             self.send_header("Content-Length", "0")
             self.end_headers()
 
@@ -527,7 +602,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Static operator surface server")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--dir", type=str, default=str(DEFAULT_DIR))
+    parser.add_argument("--self-check", action="store_true", help="Verify OI/HI submit/readback behavior and exit.")
     args = parser.parse_args()
+
+    if args.self_check:
+        try:
+            _self_check()
+        except Exception as exc:
+            print(f"operator-surface-server self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+        print("operator-surface-server self-check PASS")
+        return 0
 
     serve_dir = Path(args.dir)
     serve_dir.mkdir(parents=True, exist_ok=True)

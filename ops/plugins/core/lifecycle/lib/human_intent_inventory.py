@@ -8,6 +8,8 @@ any source material or creating a new authority home.
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,110 @@ DEFAULT_EXTRA_ROOTS = (
     Path("/Users/ronnyworks/Documents/4.16 drop"),
     Path("/Users/ronnyworks/Documents/pre 3.25 notes"),
     Path("/Users/ronnyworks/Documents/spine notes 4.13.2026"),
+)
+
+TEXT_EXTENSIONS = {
+    ".csv",
+    ".json",
+    ".log",
+    ".md",
+    ".rst",
+    ".text",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+
+MAX_CONTENT_BYTES = 128 * 1024
+
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
+
+_SCOPE_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "spine_control_plane",
+        (
+            "control plane",
+            "operator_console",
+            "execution_host",
+            "watcher_node",
+            "storage_evidence_node",
+            "verification_node",
+            "custody",
+            "attestation",
+        ),
+    ),
+    (
+        "spine_governance",
+        (
+            "spine",
+            "governance",
+            "aperture",
+            "authority",
+            "contract",
+            "doctrine",
+            "session protocol",
+            "north star",
+        ),
+    ),
+    (
+        "spine_workflow",
+        (
+            "loop",
+            "packet",
+            "wave",
+            "handoff",
+            "receipt",
+            "verify",
+            "capability",
+            "mailroom",
+            "operator ingress",
+        ),
+    ),
+    (
+        "node_architecture",
+        (
+            "node",
+            "node class",
+            "topology",
+            "placement",
+            "execution class",
+            "node role",
+            "fleet",
+        ),
+    ),
+    (
+        "domain_product",
+        (
+            "immich",
+            "media",
+            "finance",
+            "knowledge",
+            "shamela",
+            "communications",
+            "home assistant",
+        ),
+    ),
+    (
+        "reference_context",
+        (
+            "epistemology",
+            "framework",
+            "theory",
+            "ashby",
+            "cybernetics",
+            "reference only",
+            "context only",
+        ),
+    ),
+    (
+        "out_of_scope",
+        (
+            "not for spine",
+            "outside the spine",
+            "external only",
+            "personal note",
+        ),
+    ),
 )
 
 
@@ -38,6 +144,110 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _read_artifact_text(path: Path) -> tuple[str, int, bool]:
+    if path.suffix.lower() not in TEXT_EXTENSIONS:
+        return "", 0, False
+    try:
+        data = path.read_bytes()[:MAX_CONTENT_BYTES]
+    except OSError:
+        return "", 0, False
+    return data.decode("utf-8", errors="replace"), len(data), True
+
+
+def _first_meaningful_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped in {"---", "..."}:
+            continue
+        heading = _HEADING_RE.match(stripped)
+        if heading:
+            return heading.group(1).strip()
+        if stripped.startswith(("status:", "owner:", "created:", "scope:")):
+            continue
+        return stripped
+    return ""
+
+
+def _summarize_text(text: str, fallback: str = "") -> str:
+    basis = _first_meaningful_line(text) or fallback
+    return " ".join(basis.split())[:240]
+
+
+def _content_signals(text: str) -> list[str]:
+    lowered = text.lower()
+    signals: list[str] = []
+    for scope, keywords in _SCOPE_KEYWORDS:
+        if any(keyword in lowered for keyword in keywords):
+            signals.append(scope)
+    if "must" in lowered or "required" in lowered or "acceptance" in lowered:
+        signals.append("explicit_requirement")
+    if "todo" in lowered or "blocker" in lowered or "gap" in lowered:
+        signals.append("open_work")
+    if "done" in lowered or "proved" in lowered or "receipt" in lowered:
+        signals.append("proof_or_completion")
+    return sorted(set(signals))
+
+
+def _artifact_scope(text: str) -> str:
+    signals = _content_signals(text)
+    for scope, _keywords in _SCOPE_KEYWORDS:
+        if scope in signals:
+            return scope
+    return "unknown"
+
+
+def _recommended_disposition(
+    *,
+    disposition: str,
+    artifact_scope: str,
+    source_ref_known: bool,
+    matches: list[str],
+) -> str:
+    if matches or disposition == "duplicate_of_existing_source":
+        return "duplicate/reconciled"
+    if disposition in {"already_materialized", "already_carried", "already_reconciled"} or source_ref_known:
+        return "already carried/proved"
+    if artifact_scope == "out_of_scope":
+        return "out of scope"
+    if artifact_scope == "reference_context":
+        return "shelved until trigger"
+    if disposition == "needs_operator_decision":
+        return "needs operator decision"
+    if disposition in {"reference_only", "explicit_no_op_or_reference"}:
+        return "out of scope" if artifact_scope == "out_of_scope" else "already carried/proved"
+    return "needs operator decision"
+
+
+def _artifact_content_fields(
+    *,
+    path: Path,
+    digest: str,
+    disposition: str,
+    source_ref_known: bool,
+    matches: list[str],
+) -> dict[str, Any]:
+    text, bytes_considered, content_read = _read_artifact_text(path)
+    scope = _artifact_scope(text) if content_read else "unreadable_or_binary"
+    signals = _content_signals(text) if content_read else []
+    return {
+        "artifact_scope": scope,
+        "content_signal": signals,
+        "meaning_summary": _summarize_text(text, fallback=path.name) if content_read else path.name,
+        "recommended_disposition": _recommended_disposition(
+            disposition=disposition,
+            artifact_scope=scope,
+            source_ref_known=source_ref_known,
+            matches=matches,
+        ),
+        "considered_as": {
+            "content_read": content_read,
+            "content_bytes_considered": bytes_considered,
+            "content_sha256": digest,
+            "source_path_role": "provenance_only",
+        },
+    }
+
+
 def _iter_files(root: Path) -> list[Path]:
     if not root.exists():
         return []
@@ -48,6 +258,16 @@ def _iter_files(root: Path) -> list[Path]:
         for path in root.rglob("*")
         if path.is_file() and path.name != ".DS_Store"
     )
+
+
+def _resolve_ref(value: str, *, repo: Path, state_root: Path, evidence_root: Path) -> str:
+    if not value:
+        return ""
+    expanded = value.replace("$SPINE_STATE", str(state_root))
+    expanded = expanded.replace("$SPINE_EVIDENCE_ROOT", str(evidence_root))
+    expanded = expanded.replace("$SPINE_CODE", str(repo))
+    expanded = os.path.expanduser(os.path.expandvars(expanded))
+    return str(Path(expanded)) if expanded.startswith("/") else expanded
 
 
 def _row(
@@ -303,6 +523,9 @@ def _collect_drain_rows(repo: Path) -> list[dict[str, Any]]:
 
 def _collect_path_rows(
     *,
+    repo: Path,
+    state_root: Path,
+    evidence_root: Path,
     extra_roots: list[Path],
     known_hashes: dict[str, list[str]],
     existing_source_refs: dict[str, dict[str, Any]],
@@ -315,8 +538,9 @@ def _collect_path_rows(
             except OSError:
                 continue
             matches = [m for m in known_hashes.get(digest, []) if m != str(path)]
-            source_ref_known = str(path) in existing_source_refs
-            known_row = existing_source_refs.get(str(path), {})
+            resolved_path = _resolve_ref(str(path), repo=repo, state_root=state_root, evidence_root=evidence_root)
+            source_ref_known = str(path) in existing_source_refs or resolved_path in existing_source_refs
+            known_row = existing_source_refs.get(str(path), existing_source_refs.get(resolved_path, {}))
             if matches:
                 capture_status = "captured"
                 review_status = "duplicate_captured"
@@ -347,6 +571,13 @@ def _collect_path_rows(
                 operator_summary = f"sha256={digest[:16]} matches={len(matches)}"
                 canonical_state = "captured"
                 disposition = "needs_operator_decision"
+            content_fields = _artifact_content_fields(
+                path=path,
+                digest=digest,
+                disposition=disposition,
+                source_ref_known=source_ref_known,
+                matches=matches,
+            )
             rows.append(
                 _finalize_row(_row(
                     source_id=f"path:{path}",
@@ -362,7 +593,7 @@ def _collect_path_rows(
                     operator_visible_summary=operator_summary,
                     canonical_state=canonical_state,
                     disposition=disposition,
-                ))
+                ) | content_fields)
             )
     return rows
 
@@ -387,7 +618,12 @@ def build_inventory(
         for ref in [str(row.get("source_ref") or ""), *[str(a) for a in row.get("source_aliases", [])]]:
             if ref:
                 existing_refs[ref] = row
+                resolved = _resolve_ref(ref, repo=repo, state_root=state_root, evidence_root=evidence_root)
+                existing_refs[resolved] = row
     path_rows = _collect_path_rows(
+        repo=repo,
+        state_root=state_root,
+        evidence_root=evidence_root,
         extra_roots=extra_roots if extra_roots is not None else [p for p in DEFAULT_EXTRA_ROOTS if p.exists()],
         known_hashes=known_hashes,
         existing_source_refs=existing_refs,

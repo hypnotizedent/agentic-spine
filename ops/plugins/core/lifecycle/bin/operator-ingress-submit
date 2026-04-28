@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -30,13 +31,13 @@ import operator_ingress as oi
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="operator-ingress-submit",
-        description="Create a non-authoritative operator ingress object.",
+        description="Submit human intent into the canonical OI/HI lifecycle.",
     )
     parser.add_argument(
         "--content-type",
         required=True,
         choices=sorted(oi.ALLOWED_CONTENT_TYPES),
-        help="Ingress content type.",
+        help="Submitted artifact content type.",
     )
     parser.add_argument(
         "--raw-content",
@@ -93,9 +94,39 @@ def main() -> int:
     if "--self-check" in sys.argv:
         try:
             import yaml  # noqa: F401
+            with tempfile.TemporaryDirectory(prefix="operator-ingress-submit-") as tmp:
+                state_root = Path(tmp)
+                first = oi.create_operator_ingress(
+                    state_root=str(state_root),
+                    raw_content="self-check harmless human intent artifact",
+                    content_type="note",
+                    operator_hint="self-check",
+                    source_device="self-check-cli",
+                    source_app="operator.ingress.submit",
+                    submitted_via="operator_ingress.submit.self_check",
+                )
+                second = oi.create_operator_ingress(
+                    state_root=str(state_root),
+                    raw_content="self-check harmless human intent artifact",
+                    content_type="note",
+                    operator_hint="self-check from another transport",
+                    source_device="self-check-web",
+                    source_app="operator_surface_submit",
+                    submitted_via="operator_ingress.submit.self_check",
+                )
+                files = list((state_root / "inputs" / "operator-ingress").glob("OI-*.yaml"))
+                if first.get("status") != "submitted" or not first.get("created"):
+                    raise RuntimeError(f"unexpected create result: {first}")
+                if second.get("status") != "duplicate" or second.get("created"):
+                    raise RuntimeError(f"duplicate was not idempotent: {second}")
+                if len(files) != 1:
+                    raise RuntimeError(f"duplicate self-check wrote {len(files)} OI objects")
             print("operator.ingress.submit self-check PASS")
             return 0
         except ImportError as exc:
+            print(f"operator.ingress.submit self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
             print(f"operator.ingress.submit self-check FAIL: {exc}", file=sys.stderr)
             return 1
 
@@ -138,7 +169,7 @@ def main() -> int:
                 if "application/json" in ctype and body.strip():
                     result = json.loads(body)
                 else:
-                    result = {"status": "ok", "ingress_id": "submitted (non-JSON response)"}
+                    result = {"status": "submitted", "ingress_id": "submitted (non-JSON response)"}
         except urllib.error.HTTPError as exc:
             # 303 redirect means success — extract ingress_id from Location header
             if exc.code == 303:
@@ -147,7 +178,9 @@ def main() -> int:
                 if "submitted=" in location:
                     ingress_id = location.split("submitted=")[-1].split("&")[0]
                 result = {
-                    "status": "ok",
+                    "status": "submitted",
+                    "created": True,
+                    "duplicate": False,
                     "ingress_id": urllib.parse.unquote(ingress_id),
                     "lifecycle_state": "submitted",
                     "disposition": "awaiting_classification",
@@ -160,14 +193,14 @@ def main() -> int:
                 except Exception:
                     msg = body
                 if args.json_output:
-                    print(json.dumps({"status": "error", "error": msg}, indent=2))
+                    print(json.dumps({"status": "error", "created": False, "error": msg}, indent=2))
                 else:
                     print(f"operator.ingress.submit FAIL (remote): {msg}", file=sys.stderr)
                 return 1
         except Exception as exc:
             hint = "Set CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET or use --local for local-only write." if "403" in str(exc) or "urlopen" in str(exc).lower() else ""
             if args.json_output:
-                err = {"status": "error", "error": str(exc), "write_root": "canonical (unreachable)"}
+                err = {"status": "error", "created": False, "error": str(exc), "write_root": "canonical (unreachable)"}
                 if hint:
                     err["hint"] = hint
                 print(json.dumps(err, indent=2))
@@ -181,7 +214,9 @@ def main() -> int:
             result["write_root"] = "canonical (remote)"
             print(json.dumps(result, indent=2))
         else:
-            print(f"CREATED: {result.get('ingress_id', '?')}  [{args.content_type}]  state={result.get('lifecycle_state', '?')}  root=canonical")
+            action = "DUPLICATE" if result.get("duplicate") else "SUBMITTED"
+            hi = result.get("human_intent_id") or "HI pending"
+            print(f"{action}: {result.get('ingress_id', '?')}  {hi}  [{args.content_type}]  state={result.get('lifecycle_state', '?')}  root=canonical")
         return 0
 
     # --- Local submission (--local): write directly to SPINE_STATE ---
@@ -189,7 +224,7 @@ def main() -> int:
     if not state_root:
         msg = "SPINE_STATE not set; call spine_runtime_resolve_paths first"
         if args.json_output:
-            print(json.dumps({"status": "error", "error": msg}, indent=2))
+            print(json.dumps({"status": "error", "created": False, "error": msg}, indent=2))
         else:
             print(f"operator.ingress.submit FAIL: {msg}", file=sys.stderr)
         return 1
@@ -207,7 +242,7 @@ def main() -> int:
         )
     except oi.OperatorIngressError as exc:
         if args.json_output:
-            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+            print(json.dumps({"status": "error", "created": False, "error": str(exc)}, indent=2))
         else:
             print(f"operator.ingress.submit FAIL: {exc}", file=sys.stderr)
         return 1
@@ -216,7 +251,8 @@ def main() -> int:
         result["write_root"] = f"local ({state_root})"
         print(json.dumps(result, indent=2))
     else:
-        print(f"CREATED: {result['ingress_id']}  [{result.get('content_type', args.content_type)}]  state={result['lifecycle_state']}  root=local ({state_root})")
+        action = "DUPLICATE" if result.get("duplicate") else "SUBMITTED"
+        print(f"{action}: {result['ingress_id']}  {result.get('human_intent_id', 'HI pending')}  [{result.get('content_type', args.content_type)}]  state={result['lifecycle_state']}  root=local ({state_root})")
     return 0
 
 
