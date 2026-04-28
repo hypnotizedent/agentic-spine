@@ -56,6 +56,16 @@ supersedes: []
 <!-- Prior loops, plans, or contracts this loop replaces. Agents must not create sibling loops for these. -->
 <!-- Example: "- LOOP-OLD-NAME-20260301 (scope absorbed into this loop)" -->
 
+## Workflow Readback
+
+<!-- Agents use this section to avoid rediscovering ceremony from memory. -->
+- **Evidence**: collect source refs, run keys, files, receipts, or operator approval before mutation.
+- **Loop**: this scope is the bounded parent objective; attach related work here instead of creating siblings.
+- **Packet**: create or use a packet when there is a bounded research or implementation slice.
+- **Execution**: use governed capabilities, waves, delegation, or mailroom tasks; fallback shell only when no surface exists.
+- **Verification**: record `verify.engine.run`, `spine.verify`, and scoped capability receipts as evidence refs.
+- **Close decision**: use `slice_complete` when more work remains and `loop_complete` when success criteria are met; if a new next step exists, packetize it before final readback.
+
 ## Execution Commands
 
 <!-- Authors: list the governed mutating/orchestration capabilities for this loop before any raw shell fallback. -->

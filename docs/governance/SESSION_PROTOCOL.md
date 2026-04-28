@@ -125,6 +125,20 @@ The canonical contract above both realizations lives in
 (`execution_lane_contract`). Interactive delegation and mailroom task execution
 are current realizations of one execution-lane model, not separate kernels.
 
+### Canonical Workflow Lifecycle
+
+A spine work item should read the same way every time: evidence enters first
+(human words, file paths, status, traces, receipts, or operator approval); the
+agent attaches it to an existing loop or creates one; a packet exists only when
+there is a bounded research or implementation slice; execution runs through a
+governed capability, worker handoff, mailroom task, or wave; verification writes
+run keys and receipts; closeout records `slice_complete` when more work remains
+or `loop_complete` when success criteria are met. If the work exposes a next
+step, create or attach the next packet before final readback. If operator
+approval removes the only review gate and close eligibility passes, the agent
+should close the eligible object and report the receipt instead of asking the
+human steward to rediscover ceremony.
+
 ### Interactive Control-Surface Handoff
 
 `delegate.to.execution` remains available for interactive control-surface
@@ -199,7 +213,8 @@ operator intent
 
 ## Default Close Path
 
-When work is done, follow this sequence:
+Close path is not a separate ceremony; it is the evidence-to-decision-to-receipt
+tail of the same lifecycle. When work is done, follow this sequence:
 
 1. **Worktree** — commit, push, merge to main, then: `git-worktree-hygiene --apply --maintenance --brief`
 2. **Wave** — `./bin/ops cap run wave.finish`
