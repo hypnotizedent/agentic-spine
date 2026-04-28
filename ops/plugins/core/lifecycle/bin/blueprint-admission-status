@@ -21,7 +21,50 @@ def load_matrix() -> dict:
     if not ADMISSION_PATH.exists():
         return {"error": f"Admission matrix not found: {ADMISSION_PATH}"}
     with open(ADMISSION_PATH) as f:
-        return yaml.safe_load(f)
+        data = yaml.safe_load(f)
+    if isinstance(data, dict):
+        data["summary"] = computed_summary(data.get("entries", []), data.get("summary", {}))
+    return data
+
+
+def computed_summary(entries: list[dict], existing: dict | None = None) -> dict:
+    existing = existing or {}
+    summary = dict(existing)
+    decisions = {"materialize": 0, "shelf": 0, "reference_only": 0, "tombstone": 0}
+    statuses = {"proved": 0, "materializing": 0, "shelved": 0, "classified": 0}
+    blueprint_l1 = 0
+    domain_vision_l3 = 0
+    reference_only = 0
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        decision = str(entry.get("decision", "") or "")
+        status = str(entry.get("status", "") or "")
+        if decision:
+            decisions[decision] = decisions.get(decision, 0) + 1
+        if status:
+            statuses[status] = statuses.get(status, 0) + 1
+        intent_class = str(entry.get("operator_intent_class", "") or "")
+        layer = str(entry.get("layer", "") or "")
+        if intent_class == "blueprint" and layer == "L1":
+            blueprint_l1 += 1
+        elif intent_class == "domain_vision" and layer == "L3":
+            domain_vision_l3 += 1
+        elif intent_class == "reference_only":
+            reference_only += 1
+
+    summary.update(
+        {
+            "total_files": len(entries),
+            "blueprint_l1": blueprint_l1,
+            "domain_vision_l3": domain_vision_l3,
+            "reference_only": reference_only,
+            "decisions": decisions,
+            "statuses": statuses,
+        }
+    )
+    return summary
 
 
 def render_text(data: dict) -> str:

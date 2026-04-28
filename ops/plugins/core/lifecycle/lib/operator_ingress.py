@@ -1,6 +1,6 @@
-"""operator_ingress — bounded non-authoritative operator vision intake lifecycle.
+"""operator_ingress — bounded non-authoritative human intent intake lifecycle.
 
-Writes raw operator-originated ingress objects into the existing runtime inputs
+Writes human-steward ingress objects into the existing runtime inputs
 lane and supports lifecycle transitions (classification + routing) without
 inventing new homes or authority surfaces.
 
@@ -16,7 +16,7 @@ This is a narrow governed write:
   - preserves raw content and provenance
   - does not mutate authority surfaces
   - does not create packets or tasks
-  - classification/routing reuses existing operator-vision vocabulary
+  - classification/routing uses the canonical operator-ingress taxonomy
 """
 
 from __future__ import annotations
@@ -45,8 +45,8 @@ ALLOWED_CONTENT_TYPES = {
 # These are the only legal forward transitions.
 LIFECYCLE_STATES = ("submitted", "classified", "routed")
 
-# Dispositions reuse existing operator-vision vocabulary from the forensic floor
-# and Packet 35 ingress model contract. No new public taxonomy.
+# Dispositions are the bounded operator-ingress lifecycle vocabulary.
+# No new public taxonomy.
 ALLOWED_DISPOSITIONS = {
     "awaiting_classification",  # birth state
     "attached",                 # linked to existing loop/packet/design track
@@ -55,8 +55,7 @@ ALLOWED_DISPOSITIONS = {
     "no_op_preserved",          # valuable context, no action needed
 }
 
-# Classification categories reuse the existing operator-vision route vocabulary
-# from BINDING-OPERATOR-VISION-*.md and forensic floor traces.
+# Classification categories are the canonical operator-ingress route vocabulary.
 ALLOWED_CLASSIFICATIONS = {
     "bind_to_existing_seam",
     "staged_only_runtime_input",
@@ -288,7 +287,7 @@ def create_operator_ingress(
     Returns a result dict with ingress_id, path, lifecycle_state, and
     disposition.
 
-    This is a one-way operator submission object, not a bidirectional mailbox.
+    This is a one-way human intent object, not a bidirectional mailbox.
     """
     _validate_inputs(raw_content, content_type, state_root)
 
@@ -546,6 +545,91 @@ def _resolve_loop_proof_ref(loop_id: str, state_root: str) -> tuple[str, str]:
     return "", ""
 
 
+_INFERRED_LOOP_PROOF_KINDS = {
+    "closed_loop_scope",
+    "live_loop_scope",
+    "orchestration_closed_marker",
+    "orchestration_manifest",
+}
+
+
+def _materialization_bindings(
+    evidence_ref: str,
+    doc: dict[str, Any],
+    *,
+    path: Path | None = None,
+) -> list[str]:
+    """Return OI/HI source identifiers found in the evidence artifact."""
+    if not evidence_ref:
+        return []
+
+    candidates: list[tuple[str, str]] = []
+    ingress_id = str(doc.get("ingress_id", path.stem if path else "")).strip()
+    if ingress_id:
+        candidates.append(("ingress_id", ingress_id))
+
+    human_intent = doc.get("human_intent") if isinstance(doc.get("human_intent"), dict) else {}
+    for key, label in (
+        ("intent_id", "human_intent_id"),
+        ("source_ref", "source_ref"),
+    ):
+        value = str(human_intent.get(key, "")).strip()
+        if value:
+            candidates.append((label, value))
+
+    try:
+        content = Path(evidence_ref).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    return [label for label, value in candidates if value and value in content]
+
+
+def _operator_review_readback(
+    *,
+    doc: dict[str, Any],
+    path: Path | None,
+    materialization_ref: str,
+    materialization_kind: str,
+    proof_ref: str,
+    proof_kind: str,
+) -> dict[str, Any]:
+    """Classify whether materialization evidence is explicit or inferred."""
+    bindings = _materialization_bindings(proof_ref, doc, path=path)
+    evidence_kind = proof_kind or ""
+    binding = "missing"
+    state = "not_required"
+    reason = ""
+
+    if proof_ref and bindings:
+        binding = "explicit_oi_bound"
+    elif materialization_ref and materialization_kind == "loop":
+        binding = "inferred_loop_ref"
+        state = "required"
+        if evidence_kind in _INFERRED_LOOP_PROOF_KINDS:
+            reason = "inferred_loop_binding"
+        else:
+            reason = "missing_oi_bound_receipt"
+    elif materialization_ref:
+        binding = "missing"
+        state = "required"
+        reason = "missing_oi_bound_receipt"
+
+    if proof_ref and not bindings and evidence_kind in _INFERRED_LOOP_PROOF_KINDS:
+        state = "required"
+        reason = reason or "inferred_loop_binding"
+
+    return {
+        "operator_review": state,
+        "review_reason": reason,
+        "materialization_binding": binding,
+        "materialization_evidence_ref": proof_ref,
+        "materialization_evidence_kind": evidence_kind,
+        "materialization_evidence_binds": bindings,
+        "intent_match_confidence": "high" if bindings else ("low" if materialization_ref else "unknown"),
+    }
+
+
 def build_intent_chain_readback(
     doc: dict[str, Any],
     *,
@@ -588,6 +672,14 @@ def build_intent_chain_readback(
     proof_kind = "explicit_ref" if proof_ref else ""
     if not proof_ref and materialization_kind == "loop":
         proof_ref, proof_kind = _resolve_loop_proof_ref(materialization_ref, state_root)
+    review = _operator_review_readback(
+        doc=doc,
+        path=path,
+        materialization_ref=materialization_ref,
+        materialization_kind=materialization_kind,
+        proof_ref=proof_ref,
+        proof_kind=proof_kind,
+    )
 
     next_missing_seam = "none"
     if not human_intent.get("intent_id"):
@@ -600,6 +692,8 @@ def build_intent_chain_readback(
         next_missing_seam = "adoption_materialization_ref"
     elif not proof_ref:
         next_missing_seam = "proof_receipt_ref"
+    elif review.get("operator_review") == "required":
+        next_missing_seam = "operator_review_required"
 
     return {
         "source": {
@@ -634,10 +728,20 @@ def build_intent_chain_readback(
             "ref_kind": materialization_kind,
             "reconciled_at": str(doc.get("reconciled_at", "")).strip(),
             "reason": str(doc.get("reconciliation_reason", "")).strip(),
+            "binding": review["materialization_binding"],
+            "evidence_binds": review["materialization_evidence_binds"],
         },
         "proof_receipt": {
             "ref": proof_ref,
             "kind": proof_kind,
+        },
+        "operator_review": {
+            "state": review["operator_review"],
+            "reason": review["review_reason"],
+            "intent_match_confidence": review["intent_match_confidence"],
+            "evidence_ref": review["materialization_evidence_ref"],
+            "evidence_kind": review["materialization_evidence_kind"],
+            "evidence_binds": review["materialization_evidence_binds"],
         },
         "next_missing_seam": next_missing_seam,
     }
@@ -1744,7 +1848,7 @@ def process_promotable_operator_ingress(
 # Adoption reconciliation — post-routing truth
 # ---------------------------------------------------------------------------
 
-ADOPTION_STATES = ("unresolved", "adopted", "landed", "orphaned")
+ADOPTION_STATES = ("unresolved", "adopted", "landed", "orphaned", "review_required")
 
 _LOOP_REF_RE = re.compile(r"^LOOP-")
 
@@ -1874,6 +1978,22 @@ def reconcile_operator_ingress_adoption(
         else:
             new_state, reason = _resolve_loop_adoption(loop_candidate, state_root)
             adoption_ref = loop_candidate
+            if new_state in ("adopted", "landed"):
+                proof_ref, proof_kind = _resolve_loop_proof_ref(loop_candidate, state_root)
+                review = _operator_review_readback(
+                    doc=doc,
+                    path=path,
+                    materialization_ref=loop_candidate,
+                    materialization_kind="loop",
+                    proof_ref=proof_ref,
+                    proof_kind=proof_kind,
+                )
+                if review.get("operator_review") == "required":
+                    new_state = "review_required"
+                    reason = (
+                        f"{reason}; operator review required: "
+                        f"{review.get('review_reason') or 'missing_oi_bound_receipt'}"
+                    )
 
         # Check existing adoption block for idempotency
         old_state = doc.get("adoption_state")
@@ -1893,6 +2013,13 @@ def reconcile_operator_ingress_adoption(
             doc["adopted_at"] = now
         if new_state == "landed" and not doc.get("landed_at"):
             doc["landed_at"] = now
+        if new_state == "review_required":
+            doc["operator_review"] = "required"
+            doc["review_reason"] = reason
+            doc.pop("adopted_at", None)
+            doc.pop("landed_at", None)
+        elif doc.get("operator_review") == "required":
+            doc["operator_review"] = "not_required"
 
         content = yaml.safe_dump(
             doc,

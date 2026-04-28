@@ -137,8 +137,8 @@ def board_section(payload: dict) -> str:
     posture = payload.get("current_posture", {}) if isinstance(payload.get("current_posture"), dict) else {}
     aperture = payload.get("aperture", {}) if isinstance(payload.get("aperture"), dict) else {}
     continuity = payload.get("continuity", {}) if isinstance(payload.get("continuity"), dict) else {}
-    ov = payload.get("operator_vision", {})
-    mhw = ov.get("my_human_work_now", {}) if isinstance(ov, dict) else {}
+    human_input = payload.get("human_input", {})
+    mhw = human_input.get("my_human_work_now", {}) if isinstance(human_input, dict) else {}
 
     pending_ingress = int(mhw.get("pending_ingress", 0) or 0)
     actionable_attention = [a for a in attention if a.get("priority") in {"high", "medium"}]
@@ -273,7 +273,7 @@ def board_section(payload: dict) -> str:
             '<div class="hero-loop-none">No live work</div>'
             '<div class="hero-loop-cta-wrap">'
             '<a class="hero-loop-cta" data-surface-link="/submit">Submit a note</a>'
-            '<span class="hero-loop-cta-sub">park raw operator ingress</span>'
+            '<span class="hero-loop-cta-sub">create operator ingress</span>'
             '</div>'
             '</div>'
         )
@@ -780,8 +780,8 @@ def attention_section(attention: list[dict]) -> str:
 def waiting_section(payload: dict) -> str:
     active_handoffs = payload.get("active_handoffs", {}) if isinstance(payload.get("active_handoffs"), dict) else {}
     handoff_items = active_handoffs.get("items", []) or []
-    operator_vision = payload.get("operator_vision", {}) if isinstance(payload.get("operator_vision"), dict) else {}
-    pending_ingress = int(operator_vision.get("my_human_work_now", {}).get("pending_ingress", 0) or 0)
+    human_input = payload.get("human_input", {}) if isinstance(payload.get("human_input"), dict) else {}
+    pending_ingress = int(human_input.get("my_human_work_now", {}).get("pending_ingress", 0) or 0)
     attention_items = [
         item for item in (payload.get("attention", []) or [])
         if item.get("priority") in {"high", "medium"}
@@ -1253,6 +1253,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;ba
 .attn-dot.r{background:var(--red)}
 .waiting-meta{font-size:.5rem;color:var(--t);margin-top:.1rem}
 .waiting-empty{font-size:.58rem;color:var(--tm);font-style:italic}
+.recovery-row{display:flex;align-items:baseline;gap:.45rem;padding:.32rem 0;border-bottom:1px solid rgba(26,35,50,.45)}
+.recovery-row:last-child{border-bottom:none}
+.recovery-row-text{font-family:var(--m);font-size:.52rem;color:var(--tm);line-height:1.45;overflow-wrap:anywhere}
+.recovery-row-text strong{color:var(--tb);font-weight:700}
+.recovery-source{font-family:var(--m);font-size:.48rem;color:var(--t);opacity:.65;margin-top:.45rem}
 
 /* Section headers */
 .sh{font-size:.55rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--t);margin-bottom:.5rem;margin-top:1.5rem;opacity:.6}
@@ -1418,17 +1423,16 @@ function filterCaps(e, domain) {
 """
 
 
-def operator_vision_section(ov: dict, directional_boundary: dict, temporal_standing: dict) -> str:
-    """Build the operator-vision contribution surface — the lead story."""
-    if not ov:
+def human_input_section(human_input: dict, directional_boundary: dict, temporal_standing: dict) -> str:
+    """Build the canonical human input contribution surface."""
+    if not human_input:
         return ""
 
-    mhw = ov.get("my_human_work_now", {})
-    chain = ov.get("chain_status", {})
-    traces = ov.get("what_became_of_my_input", [])
-    built = ov.get("what_my_ideas_built", {})
-    waiting = ov.get("what_is_waiting_on_me", {})
-    recent = ov.get("recent_ingress", [])
+    mhw = human_input.get("my_human_work_now", {})
+    chain = human_input.get("chain_status", {})
+    waiting = human_input.get("what_is_waiting_on_me", {})
+    recent = human_input.get("recent_ingress", [])
+    blueprint = human_input.get("blueprint_admission", {}) if isinstance(human_input.get("blueprint_admission"), dict) else {}
     op_to_agents = directional_boundary.get("operator_to_agents", {})
     agents_to_operator = directional_boundary.get("agents_to_operator", {})
     temporal_summary = temporal_standing.get("summary", {})
@@ -1442,23 +1446,16 @@ def operator_vision_section(ov: dict, directional_boundary: dict, temporal_stand
     total = mhw.get("total_raw_inputs", 0)
     recent_count = mhw.get("recent_ingress", 0)
     pending_ingress = mhw.get("pending_ingress", 0)
-    advanced = mhw.get("advanced_to_contract", 0)
-    adj_ev = mhw.get("adjacent_evidence", 0)
-    parked_p = mhw.get("parked_prep", 0)
-    parked_nl = mhw.get("parked_no_lifecycle", 0)
-    oos = mhw.get("out_of_spine", 0)
     floats = mhw.get("float_risk_count", 0)
-    delivered = mhw.get("delivered_packets", 0)
-    contracts = mhw.get("contracts", 0)
-    derived = mhw.get("derived_conclusions", 0)
+    blueprint_count = mhw.get("blueprint_admission", 0)
 
     # Primary: only actionable counts. Background counts available in detail sections below.
     stats = f"""
     <div class="stats" style="grid-template-columns:repeat(4,1fr)">
       <div class="stat"><div class="stat-v">{pending_ingress}</div><div class="stat-l">Pending</div><div class="stat-sub">awaiting membrane</div></div>
       <div class="stat{'  style=\"border-color:var(--ylw)\"' if floats > 0 else ''}"><div class="stat-v" style="{'color:var(--ylw)' if floats > 0 else ''}">{floats}</div><div class="stat-l">Float Risk</div><div class="stat-sub">needs lifecycle</div></div>
-      <div class="stat"><div class="stat-v">{delivered}</div><div class="stat-l">Delivered</div><div class="stat-sub">packets</div></div>
-      <div class="stat"><div class="stat-v">{total}</div><div class="stat-l">Total Inputs</div><div class="stat-sub">{advanced} advanced · {parked_p} parked</div></div>
+      <div class="stat"><div class="stat-v">{blueprint_count}</div><div class="stat-l">Blueprint</div><div class="stat-sub">admission matrix</div></div>
+      <div class="stat"><div class="stat-v">{total}</div><div class="stat-l">Total Inputs</div><div class="stat-sub">{recent_count} OI · {blueprint_count} old</div></div>
     </div>"""
 
     split_html = f"""
@@ -1724,83 +1721,157 @@ def operator_vision_section(ov: dict, directional_boundary: dict, temporal_stand
       <div class="det-body">{recent_rows}</div>
     </details>"""
 
-    # Per-input lineage
-    disp_colors = {
-        "advanced_to_contract": ("var(--grn)", "ADV"),
-        "adjacent_evidence": ("var(--blu)", "ADJ"),
-        "parked_prep": ("var(--prp)", "PREP"),
-        "parked_no_lifecycle": ("var(--ylw)", "PARK"),
-        "out_of_spine": ("var(--t)", "OUT"),
-        "staged": ("var(--t)", "STG"),
-    }
-
-    trace_rows = ""
-    current_batch = ""
-    for t in traces:
-        batch = t.get("batch", "")
-        if batch != current_batch:
-            current_batch = batch
-            trace_rows += (
-                f'<div style="padding:.35rem 0 .15rem;font-size:.5rem;font-weight:600;'
-                f'color:var(--t);opacity:.5;border-top:1px solid var(--b);margin-top:.25rem">'
-                f'Batch {_h(batch)}</div>'
-            )
-        disp = t.get("disposition", "staged")
-        color, tag = disp_colors.get(disp, ("var(--t)", "?"))
-        detail = t.get("detail", "")
-        downstream = t.get("downstream", [])
-        downstream_html = ""
-        if downstream:
-            ds_items = " → ".join(_h(str(d)) for d in downstream)
-            downstream_html = f'<div style="font-family:var(--m);font-size:.45rem;color:var(--cyn);margin-top:.1rem;opacity:.7">↳ {ds_items}</div>'
-
-        trace_rows += (
-            f'<div style="padding:.35rem 0;border-bottom:1px solid rgba(26,35,50,.5)">'
-            f'<div style="display:flex;align-items:baseline;gap:.4rem">'
-            f'<span style="font-family:var(--m);font-size:.55rem;color:var(--tb);flex:1">{_h(t["file"])}</span>'
-            f'<span style="font-size:.45rem;font-weight:600;padding:.1rem .3rem;border-radius:3px;'
-            f'background:rgba(42,52,68,.75);color:{color}">{tag}</span>'
-            f'</div>'
-            f'<div style="font-size:.5rem;color:var(--tm);margin-top:.1rem">{_h(detail)}</div>'
-            f'{downstream_html}'
-            f'</div>'
+    decision_rows = ""
+    decisions = blueprint.get("decisions", {}) if isinstance(blueprint.get("decisions"), dict) else {}
+    statuses = blueprint.get("statuses", {}) if isinstance(blueprint.get("statuses"), dict) else {}
+    for label, count in sorted(decisions.items()):
+        decision_rows += (
+            f'<div class="attn-item"><div class="attn-dot" style="background:var(--cyn)"></div>'
+            f'{_h(label)}: {_h(str(count))}</div>'
         )
-
-    trace_html = f"""
+    status_line = ", ".join(f"{key}={value}" for key, value in sorted(statuses.items()))
+    blueprint_html = f"""
     <details>
-      <summary>What Became of My Input <span class="det-count">{len(traces)} inputs traced</span></summary>
-      <div class="det-body">{trace_rows}</div>
-    </details>"""
-
-    # What my ideas built
-    built_rows = ""
-    for c in built.get("contracts", []):
-        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--grn)"></div>Contract: {_h(c)}</div>'
-    for p in built.get("delivered_packets", []):
-        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--blu)"></div>{_h(p)}</div>'
-    for r in built.get("retired_packets", []):
-        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--t)"></div>{_h(r)}</div>'
-    for d in built.get("derived_conclusions", []):
-        built_rows += f'<div class="attn-item"><div class="attn-dot" style="background:var(--prp)"></div>Derived: {_h(d)}</div>'
-
-    built_html = ""
-    if built_rows:
-        built_html = f"""
-    <details>
-      <summary>What My Ideas Built <span class="det-count">{delivered} packets · {contracts} contracts</span></summary>
-      <div class="det-body">{built_rows}</div>
+      <summary>Old Input Admission <span class="det-count">{int(blueprint.get("count", 0) or 0)} entries</span></summary>
+      <div class="det-body">
+        <div style="font-family:var(--m);font-size:.5rem;color:var(--tm);margin-bottom:.35rem">{_h(blueprint.get("source", ""))}</div>
+        {decision_rows or '<div style="font-size:.6rem;color:var(--t)">admission matrix unavailable</div>'}
+        <div style="font-family:var(--m);font-size:.5rem;color:var(--tm);margin-top:.35rem">{_h(status_line)}</div>
+      </div>
     </details>"""
 
     return f"""
-    <div class="sh">Operator Vision</div>
+    <div class="sh">Human Input</div>
     {stats}
     {split_html}
     {temporal_html}
     {chain_html}
     {recent_html}
-    {trace_html}
-    {built_html}
+    {blueprint_html}
     """
+
+
+def recovery_estate_section(recovery: dict) -> str:
+    """Render recovery/estate readback inside the existing cockpit."""
+    if not recovery:
+        return ""
+
+    posture = str(recovery.get("posture", "unknown") or "unknown")
+    if posture == "ok":
+        css = "grn"
+        label = "Recoverable"
+    elif posture == "attention":
+        css = "ylw"
+        label = "Needs Attention"
+    else:
+        css = "red"
+        label = "Unknown"
+
+    backup = recovery.get("backup_posture", {}) if isinstance(recovery.get("backup_posture"), dict) else {}
+    runtime = recovery.get("recovery_runtime", {}) if isinstance(recovery.get("recovery_runtime"), dict) else {}
+    tm = recovery.get("time_machine", {}) if isinstance(recovery.get("time_machine"), dict) else {}
+    loops = recovery.get("open_recovery_loops", {}) if isinstance(recovery.get("open_recovery_loops"), dict) else {}
+    gaps = recovery.get("gaps", {}) if isinstance(recovery.get("gaps"), dict) else {}
+    monitor = recovery.get("backup_monitor", {}) if isinstance(recovery.get("backup_monitor"), dict) else {}
+
+    degraded = int(backup.get("degraded_total", 0) or 0)
+    targets = int(backup.get("enabled_targets_total", 0) or 0)
+    ok_total = int(backup.get("ok_total", 0) or 0)
+    restore_missing = int(backup.get("restore_coverage_missing_total", 0) or 0)
+    lane_budget = int(backup.get("lane_over_budget_total", 0) or 0)
+    recovery_loop_count = int(loops.get("count", 0) or 0)
+    recovery_gap_count = int(gaps.get("recovery_count", 0) or 0)
+
+    degraded_rows = ""
+    for row in backup.get("degraded_rows", [])[:6]:
+        degraded_rows += (
+            f'<div class="recovery-row"><span class="sdot y"></span>'
+            f'<span class="recovery-row-text">{_h(row)}</span></div>'
+        )
+    if not degraded_rows:
+        degraded_rows = '<div class="waiting-empty">no degraded backup rows in the posture snapshot</div>'
+
+    loop_rows = ""
+    for item in loops.get("items", [])[:6]:
+        dot = "y" if item.get("blocked_by") else "g"
+        loop_rows += (
+            f'<div class="recovery-row"><span class="sdot {dot}"></span>'
+            f'<span class="recovery-row-text"><strong>{_h(item.get("id", ""))}</strong> {_h(item.get("title", ""))}</span></div>'
+        )
+    if not loop_rows:
+        loop_rows = '<div class="waiting-empty">no open recovery/backup loops surfaced</div>'
+
+    gap_rows = ""
+    for item in gaps.get("items", [])[:6]:
+        gap_rows += (
+            f'<div class="recovery-row"><span class="sdot r"></span>'
+            f'<span class="recovery-row-text"><strong>{_h(item.get("gap_id", ""))}</strong> {_h(item.get("description", ""))}</span></div>'
+        )
+    if not gap_rows:
+        gap_rows = '<div class="waiting-empty">no recovery-tagged open gaps</div>'
+
+    audit_rows = ""
+    for item in runtime.get("recent_audit", [])[:5]:
+        dot = "g" if item.get("result") == "success" else "y"
+        audit_rows += (
+            f'<div class="recovery-row"><span class="sdot {dot}"></span>'
+            f'<span class="recovery-row-text">{_h(item.get("timestamp_utc", ""))} · {_h(item.get("gate_id", ""))} · {_h(item.get("action_id", ""))} · {_h(item.get("result", ""))}</span></div>'
+        )
+    if not audit_rows:
+        audit_rows = '<div class="waiting-empty">no recovery dispatch audit entries</div>'
+
+    tm_bits = []
+    if tm.get("available"):
+        tm_bits.append("running" if tm.get("running") else "idle")
+        if tm.get("phase"):
+            tm_bits.append(str(tm.get("phase")))
+        if tm.get("latest_backup"):
+            tm_bits.append(str(tm.get("latest_backup")))
+    else:
+        tm_bits.append(str(tm.get("status", "unavailable") or "unavailable"))
+    tm_line = " · ".join(tm_bits)
+
+    return f"""
+    <section id="recovery-drilldown">
+      <div class="sh">Recovery / Estate Recovery</div>
+      <div class="posture {css}">
+        <div class="p-dot"></div>
+        <div>
+          <div class="p-text">{_h(label)}</div>
+          <div class="p-sub">{_h(recovery.get("caption", ""))}</div>
+        </div>
+      </div>
+      <div class="stats" style="grid-template-columns:repeat(4,1fr)">
+        <div class="stat"><div class="stat-v">{ok_total}/{targets}</div><div class="stat-l">Backups</div><div class="stat-sub">{degraded} degraded</div></div>
+        <div class="stat"><div class="stat-v">{restore_missing}</div><div class="stat-l">Restore Gaps</div><div class="stat-sub">coverage missing</div></div>
+        <div class="stat"><div class="stat-v">{lane_budget}</div><div class="stat-l">Lane Budget</div><div class="stat-sub">over budget</div></div>
+        <div class="stat"><div class="stat-v">{recovery_loop_count}</div><div class="stat-l">Open Loops</div><div class="stat-sub">{recovery_gap_count} recovery gaps</div></div>
+      </div>
+      <details open>
+        <summary>Backup Posture <span class="det-count">{_h(backup.get("backup_status_run_state", "unknown"))} · {_h(backup.get("generated_at_utc", ""))}</span></summary>
+        <div class="det-body">
+          <div class="today-note">{_h(backup.get("summary_line", ""))}</div>
+          {degraded_rows}
+          <div class="recovery-source">{_h(backup.get("source", ""))}</div>
+        </div>
+      </details>
+      <details>
+        <summary>Runtime Readback <span class="det-count">{runtime.get("action_count", 0)} actions · monitor {_h(monitor.get("last_run_utc", "unknown"))}</span></summary>
+        <div class="det-body">
+          <div class="today-note">Time Machine: {_h(tm_line)}</div>
+          <div class="today-note">Recovery actions: {runtime.get("deterministic_actions", 0)} deterministic · {runtime.get("freshness_actions", 0)} freshness · {runtime.get("cooldown_count", 0)} cooldowns</div>
+          {audit_rows}
+        </div>
+      </details>
+      <details>
+        <summary>Open Recovery Work <span class="det-count">{recovery_loop_count} loops · {recovery_gap_count} gaps</span></summary>
+        <div class="det-body">
+          {loop_rows}
+          <div style="height:.45rem"></div>
+          {gap_rows}
+        </div>
+      </details>
+    </section>"""
 
 
 def evidence_reviews_section(reviews: list) -> str:
@@ -2019,8 +2090,8 @@ def generate(payload: dict | None = None) -> str:
     sec_board = board_section(p)
     sec_standing_exceptions = standing_exception_section(p)
     sec_waiting = waiting_section(p)
-    sec_vision = operator_vision_section(
-        p.get("operator_vision", {}),
+    sec_vision = human_input_section(
+        p.get("human_input", {}),
         p.get("directional_boundary", {}),
         p.get("temporal_standing", {}),
     )
@@ -2031,6 +2102,7 @@ def generate(payload: dict | None = None) -> str:
     sec_birth = birth_mode_section(p.get("birth_mode_audit", {}))
     sec_terminal = terminal_telemetry_section(p.get("terminal_telemetry", {}))
     sec_reviews = evidence_reviews_section(p.get("evidence_reviews", []))
+    sec_recovery = recovery_estate_section(p.get("recovery_estate", {}))
     sec_comms = comms_incident_card(p["work_state"]["comms_queue"])
     sec_timeline = timeline_section(git_log, p.get("continuity", {}))
     sec_caps = capability_atlas(caps_data, inv_counts)
@@ -2076,6 +2148,7 @@ def generate(payload: dict | None = None) -> str:
     </div>
     <div class="surface-nav" aria-label="Operator surface tabs">
       <span class="surface-tab active">Board <span class="surface-tab-hint">you are here</span></span>
+      <a class="surface-tab" href="#recovery-drilldown">Recovery <span class="surface-tab-hint">estate</span></a>
       <a class="surface-tab" data-surface-link="/submit">Submit <span class="surface-tab-hint">operator ingress</span></a>
       <a class="surface-tab" data-surface-link="/ingress">Submissions <span class="surface-tab-hint">readback</span></a>
     </div>
@@ -2099,6 +2172,7 @@ def generate(payload: dict | None = None) -> str:
   {sec_waiting}
   {sec_timeline}
   <section id="workstate-drilldown"><div class="sh">Work State</div>{sec_work}</section>
+  {sec_recovery}
   {sec_vision}
   {sec_reviews}
   {sec_infra}
