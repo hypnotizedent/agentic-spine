@@ -193,6 +193,12 @@ if [[ -x "$SYNC_STATUS_BIN" && -x "$(command -v "$JQ_BIN" 2>/dev/null || true)" 
   fi
 fi
 
+decision_surface_status="$(contract_scalar '.operator_storage_decision_surface.status')"
+[[ -n "$decision_surface_status" ]] || decision_surface_status="missing"
+decision_axes_json="$("$YQ_BIN" e -o=json '.operator_storage_decision_surface.supported_decision_axes // []' "$CONTRACT" 2>/dev/null || echo '[]')"
+decision_axis_count="$("$YQ_BIN" e '(.operator_storage_decision_surface.supported_decision_axes // []) | length' "$CONTRACT" 2>/dev/null || echo 0)"
+sensitive_extra_copy_example_json="$("$YQ_BIN" e -o=json '.operator_storage_decision_surface.sensitive_data_extra_copy_example // {}' "$CONTRACT" 2>/dev/null || echo '{}')"
+
 if [[ "$runtime_root_state" != "ready" || "$mint_status" == "fail" || "$archives_status" == "fail" || "$sync_status" == "fail" ]]; then
   overall_status="fail"
 elif [[ "$mint_status" == "warn" || "$archives_status" == "warn" || "$sync_status" == "warn" ]]; then
@@ -219,6 +225,10 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg sync_agent "$sync_agent" \
     --arg sync_pending "$sync_pending" \
     --arg sync_conflicts "$sync_conflicts" \
+    --arg decision_surface_status "$decision_surface_status" \
+    --arg decision_axis_count "$decision_axis_count" \
+    --argjson decision_axes "$decision_axes_json" \
+    --argjson sensitive_extra_copy_example "$sensitive_extra_copy_example_json" \
     '{
       capability: $capability,
       status: $status,
@@ -246,13 +256,19 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
           pending: ($sync_pending | tonumber),
           conflicts: ($sync_conflicts | tonumber)
         }
+      },
+      storage_decision_surface: {
+        status: $decision_surface_status,
+        supported_axis_count: ($decision_axis_count | tonumber),
+        supported_decision_axes: $decision_axes,
+        sensitive_data_extra_copy_example: $sensitive_extra_copy_example
       }
     }'
   exit 0
 fi
 
 if [[ "$BRIEF" -eq 1 ]]; then
-  echo "status=${overall_status} runtime_root=${runtime_root_state} mint=${mint_status} mint_mode=${mint_mode} mint_mount=${mint_mount} mint_assist=${mint_assist} archives=${archives_status} archives_mount=${archives_mount_state} archives_assist=${archives_assist_state} archives_entries=${archives_entry_count} sync=${sync_status} sync_agent=${sync_agent} sync_pending=${sync_pending} sync_conflicts=${sync_conflicts}"
+  echo "status=${overall_status} runtime_root=${runtime_root_state} mint=${mint_status} mint_mode=${mint_mode} mint_mount=${mint_mount} mint_assist=${mint_assist} archives=${archives_status} archives_mount=${archives_mount_state} archives_assist=${archives_assist_state} archives_entries=${archives_entry_count} sync=${sync_status} sync_agent=${sync_agent} sync_pending=${sync_pending} sync_conflicts=${sync_conflicts} storage_decision_surface=${decision_surface_status} storage_decision_axes=${decision_axis_count}"
   exit 0
 fi
 
@@ -273,6 +289,8 @@ echo "sync_status: ${sync_status}"
 echo "sync_launch_agent_state: ${sync_agent}"
 echo "sync_pending_entries: ${sync_pending}"
 echo "sync_conflicts: ${sync_conflicts}"
+echo "storage_decision_surface: ${decision_surface_status}"
+echo "storage_decision_axes: ${decision_axis_count}"
 if [[ "$archives_entry_count" -gt 0 ]]; then
   echo "archives_local_entry_list:"
   printf '%s\n' "$archives_entries" | sed 's/^/  - /'

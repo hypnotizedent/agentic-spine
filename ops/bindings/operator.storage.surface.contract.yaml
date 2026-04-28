@@ -13,6 +13,79 @@ updated_at: "2026-04-09"
 
 runtime_workbench_root: /Users/ronnyworks/code/workbench
 
+operator_storage_decision_surface:
+  status: authoritative
+  scope: bounded-human-decisions-that-change-storage-placement-copy-or-protection
+  anti_scope:
+    - broad_storage_ontology
+    - physical_migration_plan
+    - backup_runtime_policy
+  axis_separation:
+    where_stored:
+      authority_ref: ops/bindings/storage.scaffold.authority.yaml
+      fields:
+        - device
+        - path
+        - scaffold_class
+        - canonicality
+      meaning: Declares the storage surface and whether it is canonical, secondary, staging, retained, or noncanonical.
+    how_stored:
+      authority_ref: ops/bindings/state.storage.policy.yaml
+      fields:
+        - yaml_storage.allowed_data_classes
+        - sqlite_storage.allowed_data_classes
+        - decision_matrix.data_class
+      meaning: Declares whether the state/control artifact belongs in human-reviewable YAML or runtime SQLite.
+    operator_decision:
+      authority_ref: ops/bindings/operator.storage.surface.contract.yaml
+      fields:
+        - operator_storage_decision_surface.supported_decision_axes
+        - operator_storage_decision_surface.decision_record_shape
+      meaning: Declares the small set of human choices that may change copy, placement, or protection intent.
+  supported_decision_axes:
+    - axis: extra_copy
+      meaning: Human decision to add or retain an additional copy without changing the canonical primary.
+      storage_effect_fields:
+        - requested_copy_delta
+        - target_copy_surface_class
+        - target_canonicality
+    - axis: placement_override
+      meaning: Human decision to place data on a non-default surface or keep accepted risk in place.
+      storage_effect_fields:
+        - requested_surface_ref
+        - override_reason
+        - review_by
+    - axis: protection_override
+      meaning: Human decision to change protection expectations such as review hold, quarantine, or deletion block.
+      storage_effect_fields:
+        - protection_effect
+        - retention_effect
+        - evidence_ref
+  decision_record_shape:
+    required_fields:
+      - decision_id
+      - axis
+      - sensitivity
+      - subject_ref
+      - current_canonical_surface_ref
+      - storage_effect
+      - operator_decision_required
+      - evidence_ref
+    notes: Decision records describe intent and authority changes only; they do not perform moves, copies, or backup runtime changes.
+  sensitive_data_extra_copy_example:
+    decision_id: example-sensitive-data-extra-copy
+    axis: extra_copy
+    sensitivity: sensitive
+    subject_ref: service.data.lifecycle.registry.yaml#paperless_documents
+    current_canonical_surface_ref: storage.scaffold.authority.yaml#pve:/md1400/archive
+    storage_effect:
+      requested_copy_delta: 1
+      target_copy_surface_class: backup_secondary
+      target_canonicality: secondary
+      protection_effect: Add a declared secondary copy while preserving the canonical primary and storage format.
+    operator_decision_required: true
+    evidence_ref: operator-decision-record-required-before-implementation
+
 bootstrap:
   installer_script_path: /Users/ronnyworks/code/workbench/scripts/root/operator/install-client-storage-surfaces.sh
   sync_root: ~/Operator Sync

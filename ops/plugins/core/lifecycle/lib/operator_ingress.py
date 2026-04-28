@@ -179,6 +179,15 @@ def _ingress_lifecycle_journal_path(state_root: str) -> Path:
     return _ingress_dir(state_root) / "lifecycle.ndjson"
 
 
+def _evidence_root() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_EVIDENCE_ROOT",
+            str(Path.home() / "code" / ".evidence" / "spine"),
+        )
+    )
+
+
 def _derive_ingress_id(now: datetime | None = None) -> str:
     now = now or _utcnow()
     return f"OI-{now.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
@@ -425,6 +434,11 @@ def list_operator_ingress(
             w3 = translator_workload.get("W3")
             if isinstance(w3, dict) and "execution_dispatched" in w3:
                 item["execution_dispatched"] = bool(w3["execution_dispatched"])
+        item["intent_chain_readback"] = build_intent_chain_readback(
+            doc,
+            state_root=state_root,
+            path=path,
+        )
         items.append(item)
         if len(items) >= limit:
             break
@@ -479,6 +493,154 @@ def _unique_preserve_order(values: list[str]) -> list[str]:
         seen.add(cleaned)
         out.append(cleaned)
     return out
+
+
+def _ref_kind(ref: str) -> str:
+    if ref.startswith("LOOP-"):
+        return "loop"
+    if ref.startswith("PACKET-"):
+        return "packet"
+    if ref.startswith("GAP-"):
+        return "gap"
+    if "." in ref:
+        return "capability_or_route"
+    return "runtime_route"
+
+
+def _first_ref(value: Any) -> str:
+    if isinstance(value, list):
+        for item in value:
+            text = str(item).strip()
+            if text:
+                return text
+        return ""
+    return str(value or "").strip()
+
+
+def _resolve_loop_proof_ref(loop_id: str, state_root: str) -> tuple[str, str]:
+    """Return the strongest existing proof/readback file for a loop ref."""
+    if not loop_id:
+        return "", ""
+
+    evidence_closeout = _evidence_root() / "loop-closeouts" / f"{loop_id}.closeout.md"
+    if evidence_closeout.is_file():
+        return str(evidence_closeout), "loop_closeout_receipt"
+
+    sr = Path(state_root)
+    archived_scope = sr / "archive" / "closed-loop-scopes" / f"{loop_id}.scope.md"
+    if archived_scope.is_file():
+        return str(archived_scope), "closed_loop_scope"
+
+    live_scope = sr / "loop-scopes" / f"{loop_id}.scope.md"
+    if live_scope.is_file():
+        return str(live_scope), "live_loop_scope"
+
+    closed_yaml = sr / "orchestration" / loop_id / "closed.yaml"
+    if closed_yaml.is_file():
+        return str(closed_yaml), "orchestration_closed_marker"
+
+    manifest_yaml = sr / "orchestration" / loop_id / "manifest.yaml"
+    if manifest_yaml.is_file():
+        return str(manifest_yaml), "orchestration_manifest"
+
+    return "", ""
+
+
+def build_intent_chain_readback(
+    doc: dict[str, Any],
+    *,
+    state_root: str,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Build a compact read-time HI/OI -> carrier -> proof chain.
+
+    This is readback only: it follows fields that already exist on the OI and
+    nearby loop/receipt surfaces without mutating the ingress object.
+    """
+    ingress_id = str(doc.get("ingress_id", path.stem if path else "")).strip()
+    lifecycle_state = str(doc.get("lifecycle_state", "submitted")).strip()
+    disposition = str(doc.get("disposition", "awaiting_classification")).strip()
+    human_intent = doc.get("human_intent") if isinstance(doc.get("human_intent"), dict) else {}
+
+    downstream_ref = str(doc.get("next_stage", "")).strip()
+    if not downstream_ref:
+        downstream_ref = _first_ref(doc.get("downstream_refs"))
+    translator_workload = doc.get("translator_workload")
+    if not downstream_ref and isinstance(translator_workload, dict):
+        w2 = translator_workload.get("W2")
+        if isinstance(w2, dict):
+            downstream_ref = str(w2.get("routing_target", "")).strip()
+
+    materialization_ref = str(doc.get("adoption_ref", "")).strip() or downstream_ref
+    materialization_state = str(doc.get("adoption_state", "")).strip()
+    materialization_kind = str(doc.get("adoption_ref_kind", "")).strip()
+    if not downstream_ref and materialization_ref:
+        downstream_ref = materialization_ref
+    if not materialization_kind and materialization_ref:
+        materialization_kind = _ref_kind(materialization_ref)
+
+    proof_ref = str(
+        doc.get("proof_ref")
+        or doc.get("receipt_ref")
+        or doc.get("receipt_path")
+        or ""
+    ).strip()
+    proof_kind = "explicit_ref" if proof_ref else ""
+    if not proof_ref and materialization_kind == "loop":
+        proof_ref, proof_kind = _resolve_loop_proof_ref(materialization_ref, state_root)
+
+    next_missing_seam = "none"
+    if not human_intent.get("intent_id"):
+        next_missing_seam = "human_intent_id"
+    elif lifecycle_state in PENDING_LIFECYCLE_STATES or disposition == "awaiting_classification":
+        next_missing_seam = "classification"
+    elif not downstream_ref:
+        next_missing_seam = "downstream_carrier"
+    elif not materialization_ref:
+        next_missing_seam = "adoption_materialization_ref"
+    elif not proof_ref:
+        next_missing_seam = "proof_receipt_ref"
+
+    return {
+        "source": {
+            "ingress_id": ingress_id,
+            "human_intent_id": str(human_intent.get("intent_id", "")).strip(),
+            "human_intent_statement": str(human_intent.get("statement", "")).strip(),
+            "source_ref": str(human_intent.get("source_ref", "")).strip(),
+            "submitted_at": str(doc.get("submitted_at", "")).strip(),
+            "source_device": str(doc.get("source_device", "")).strip(),
+            "source_app": str(doc.get("source_app", "")).strip(),
+            "ingress_path": str(path or ""),
+        },
+        "current_state": {
+            "lifecycle_state": lifecycle_state,
+            "human_intent_status": str(human_intent.get("status", "")).strip(),
+            "disposition": disposition,
+            "classification": str(doc.get("classification", "")).strip(),
+        },
+        "downstream_carrier": {
+            "ref": downstream_ref,
+            "kind": _ref_kind(downstream_ref) if downstream_ref else "",
+            "refs": doc.get("downstream_refs", []) if isinstance(doc.get("downstream_refs"), list) else [],
+            "execution_dispatched": bool(
+                translator_workload.get("W3", {}).get("execution_dispatched", False)
+                if isinstance(translator_workload, dict) and isinstance(translator_workload.get("W3"), dict)
+                else False
+            ),
+        },
+        "adoption_materialization": {
+            "state": materialization_state,
+            "ref": materialization_ref,
+            "ref_kind": materialization_kind,
+            "reconciled_at": str(doc.get("reconciled_at", "")).strip(),
+            "reason": str(doc.get("reconciliation_reason", "")).strip(),
+        },
+        "proof_receipt": {
+            "ref": proof_ref,
+            "kind": proof_kind,
+        },
+        "next_missing_seam": next_missing_seam,
+    }
 
 
 def _token_hits(text: str, keywords: tuple[str, ...]) -> bool:
