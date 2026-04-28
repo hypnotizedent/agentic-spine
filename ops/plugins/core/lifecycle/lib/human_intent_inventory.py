@@ -64,8 +64,11 @@ def _row(
     proof_ref: str = "",
     next_missing_step: str = "",
     operator_visible_summary: str = "",
+    source_aliases: list[str] | None = None,
+    canonical_state: str = "",
+    disposition: str = "",
 ) -> dict[str, Any]:
-    return {
+    row = {
         "source_id": source_id,
         "source_kind": source_kind,
         "source_ref": source_ref,
@@ -78,7 +81,56 @@ def _row(
         "proof_ref": proof_ref,
         "next_missing_step": next_missing_step,
         "operator_visible_summary": operator_visible_summary,
+        "canonical_state": canonical_state,
+        "disposition": disposition,
     }
+    if source_aliases:
+        row["source_aliases"] = source_aliases
+    return row
+
+
+def _canonical_state_and_disposition(
+    *,
+    source_kind: str,
+    capture_status: str,
+    review_status: str,
+    carrier_kind: str,
+    proof_ref: str,
+    next_missing_step: str,
+) -> tuple[str, str]:
+    if review_status == "source_not_linked" or capture_status == "semantic_only":
+        return "captured", "needs_operator_decision"
+    if review_status == "duplicate_captured":
+        return "reconciled", "duplicate_of_existing_source"
+    if review_status in {"proved", "drained", "drained_to_contract"} or proof_ref:
+        return "proved", "already_materialized" if review_status == "proved" else "already_carried"
+    if carrier_kind not in {"none", ""}:
+        if review_status == "shelved":
+            return "carried", "shelved_until_trigger"
+        if review_status in {"reference_only", "classified"}:
+            return "reconciled", "reference_only"
+        return "carried", "attached_to_carrier"
+    if next_missing_step and next_missing_step != "none":
+        return "translated", "awaiting_materialization_trigger"
+    if source_kind == "operator_ingress":
+        return "translated", "in_human_intent_lane"
+    return "reconciled", "explicit_no_op_or_reference"
+
+
+def _finalize_row(row: dict[str, Any]) -> dict[str, Any]:
+    canonical_state, disposition = _canonical_state_and_disposition(
+        source_kind=str(row.get("source_kind") or ""),
+        capture_status=str(row.get("capture_status") or ""),
+        review_status=str(row.get("review_status") or ""),
+        carrier_kind=str(row.get("carrier_kind") or ""),
+        proof_ref=str(row.get("proof_ref") or ""),
+        next_missing_step=str(row.get("next_missing_step") or ""),
+    )
+    if not row.get("canonical_state"):
+        row["canonical_state"] = canonical_state
+    if not row.get("disposition"):
+        row["disposition"] = disposition
+    return row
 
 
 def _index_known_files(state_root: Path, evidence_root: Path) -> dict[str, list[str]]:
@@ -118,7 +170,7 @@ def _collect_oi_rows(state_root: Path, limit: int | None = None) -> list[dict[st
         elif disposition in {"deferred", "no_op_preserved"}:
             review_status = "shelved" if disposition == "deferred" else "reference_only"
         rows.append(
-            _row(
+            _finalize_row(_row(
                 source_id=str(doc.get("ingress_id") or path.stem),
                 source_kind="operator_ingress",
                 source_ref=str(path),
@@ -139,7 +191,7 @@ def _collect_oi_rows(state_root: Path, limit: int | None = None) -> list[dict[st
                     else ""
                 ),
                 operator_visible_summary=str(doc.get("disposition_detail") or ""),
-            )
+            ))
         )
     return rows
 
@@ -161,11 +213,13 @@ def _collect_blueprint_rows(repo: Path) -> list[dict[str, Any]]:
             proof_ref = str(materialization.get("proof") or "")
         elif entry.get("decision") == "reference_only":
             carrier_kind = "reference"
+        aliases = entry.get("source_aliases") if isinstance(entry.get("source_aliases"), list) else []
         rows.append(
-            _row(
+            _finalize_row(_row(
                 source_id=str(entry.get("id") or ""),
                 source_kind="blueprint_admission",
                 source_ref=str(entry.get("source_ref") or ""),
+                source_aliases=[str(alias) for alias in aliases],
                 title_or_hint=str(entry.get("title") or ""),
                 capture_status="captured",
                 review_status=str(entry.get("status") or entry.get("decision") or ""),
@@ -174,7 +228,7 @@ def _collect_blueprint_rows(repo: Path) -> list[dict[str, Any]]:
                 proof_ref=proof_ref,
                 next_missing_step=str(entry.get("shelf_trigger") or entry.get("materialization_gap") or ""),
                 operator_visible_summary=str(entry.get("summary") or ""),
-            )
+            ))
         )
     return rows
 
@@ -189,7 +243,7 @@ def _collect_review_rows(evidence_root: Path) -> list[dict[str, Any]]:
         bits = ", ".join(f"{k}={v}" for k, v in summary.items())
         downstream = doc.get("downstream_refs") if isinstance(doc.get("downstream_refs"), list) else []
         rows.append(
-            _row(
+            _finalize_row(_row(
                 source_id=str(doc.get("review_id") or meta.parent.name),
                 source_kind="evidence_review",
                 source_ref=str(doc.get("bundle_path") or meta.parent),
@@ -201,7 +255,7 @@ def _collect_review_rows(evidence_root: Path) -> list[dict[str, Any]]:
                 proof_ref=str(doc.get("report_path") or meta),
                 next_missing_step="none",
                 operator_visible_summary=f"{doc.get('bundle_file_count', '?')} files; {bits}",
-            )
+            ))
         )
     return rows
 
@@ -230,7 +284,7 @@ def _collect_drain_rows(repo: Path) -> list[dict[str, Any]]:
         doc = _load_yaml(path)
         for drain in _find_drains(doc, path):
             rows.append(
-                _row(
+                _finalize_row(_row(
                     source_id=str(drain.get("drain_id") or f"drain:{path.name}"),
                     source_kind="contract_drain",
                     source_ref=str(drain.get("source_ref") or ""),
@@ -242,7 +296,7 @@ def _collect_drain_rows(repo: Path) -> list[dict[str, Any]]:
                     proof_ref=str(drain.get("_authority_path") or path),
                     next_missing_step="none",
                     operator_visible_summary=str(drain.get("summary") or ""),
-                )
+                ))
             )
     return rows
 
@@ -251,7 +305,7 @@ def _collect_path_rows(
     *,
     extra_roots: list[Path],
     known_hashes: dict[str, list[str]],
-    existing_source_refs: set[str],
+    existing_source_refs: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for root in extra_roots:
@@ -262,26 +316,39 @@ def _collect_path_rows(
                 continue
             matches = [m for m in known_hashes.get(digest, []) if m != str(path)]
             source_ref_known = str(path) in existing_source_refs
+            known_row = existing_source_refs.get(str(path), {})
             if matches:
                 capture_status = "captured"
                 review_status = "duplicate_captured"
                 carrier_kind = "source"
                 carrier_ref = matches[0]
                 next_missing = "none"
+                proof_ref = carrier_ref
+                operator_summary = f"sha256={digest[:16]} matches={len(matches)}"
+                canonical_state = "reconciled"
+                disposition = "duplicate_of_existing_source"
             elif source_ref_known:
-                capture_status = "source_linked"
-                review_status = "drained_or_referenced"
-                carrier_kind = "source_ref"
-                carrier_ref = str(path)
+                capture_status = "captured"
+                review_status = str(known_row.get("review_status") or "drained_or_referenced")
+                carrier_kind = str(known_row.get("carrier_kind") or "source_ref")
+                carrier_ref = str(known_row.get("carrier_ref") or known_row.get("source_id") or path)
                 next_missing = "none"
+                proof_ref = str(known_row.get("proof_ref") or carrier_ref)
+                operator_summary = str(known_row.get("operator_visible_summary") or f"linked to {known_row.get('source_id', 'known source')}")
+                canonical_state = str(known_row.get("canonical_state") or "reconciled")
+                disposition = str(known_row.get("disposition") or "already_reconciled")
             else:
                 capture_status = "semantic_only"
                 review_status = "source_not_linked"
                 carrier_kind = "none"
                 carrier_ref = ""
                 next_missing = "create admission/review/drain link or mark out_of_scope"
+                proof_ref = ""
+                operator_summary = f"sha256={digest[:16]} matches={len(matches)}"
+                canonical_state = "captured"
+                disposition = "needs_operator_decision"
             rows.append(
-                _row(
+                _finalize_row(_row(
                     source_id=f"path:{path}",
                     source_kind="path_drop_source",
                     source_ref=str(path),
@@ -290,10 +357,12 @@ def _collect_path_rows(
                     review_status=review_status,
                     carrier_kind=carrier_kind,
                     carrier_ref=carrier_ref,
-                    proof_ref=carrier_ref if matches or source_ref_known else "",
+                    proof_ref=proof_ref,
                     next_missing_step=next_missing,
-                    operator_visible_summary=f"sha256={digest[:16]} matches={len(matches)}",
-                )
+                    operator_visible_summary=operator_summary,
+                    canonical_state=canonical_state,
+                    disposition=disposition,
+                ))
             )
     return rows
 
@@ -313,7 +382,11 @@ def build_inventory(
     rows.extend(_collect_drain_rows(repo))
 
     known_hashes = _index_known_files(state_root, evidence_root)
-    existing_refs = {str(row.get("source_ref") or "") for row in rows}
+    existing_refs: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        for ref in [str(row.get("source_ref") or ""), *[str(a) for a in row.get("source_aliases", [])]]:
+            if ref:
+                existing_refs[ref] = row
     path_rows = _collect_path_rows(
         extra_roots=extra_roots if extra_roots is not None else [p for p in DEFAULT_EXTRA_ROOTS if p.exists()],
         known_hashes=known_hashes,
@@ -324,10 +397,14 @@ def build_inventory(
     by_capture: dict[str, int] = {}
     by_review: dict[str, int] = {}
     by_kind: dict[str, int] = {}
+    by_canonical_state: dict[str, int] = {}
+    by_disposition: dict[str, int] = {}
     for row in rows:
         by_capture[row["capture_status"]] = by_capture.get(row["capture_status"], 0) + 1
         by_review[row["review_status"]] = by_review.get(row["review_status"], 0) + 1
         by_kind[row["source_kind"]] = by_kind.get(row["source_kind"], 0) + 1
+        by_canonical_state[row["canonical_state"]] = by_canonical_state.get(row["canonical_state"], 0) + 1
+        by_disposition[row["disposition"]] = by_disposition.get(row["disposition"], 0) + 1
 
     return {
         "version": 1,
@@ -343,11 +420,13 @@ def build_inventory(
         "summary": {
             "total_rows": len(rows),
             "by_source_kind": by_kind,
+            "by_canonical_state": by_canonical_state,
+            "by_disposition": by_disposition,
             "by_capture_status": by_capture,
             "by_review_status": by_review,
             "source_not_linked": sum(1 for r in rows if r["review_status"] == "source_not_linked"),
             "semantic_only": sum(1 for r in rows if r["capture_status"] == "semantic_only"),
+            "needs_operator_decision": sum(1 for r in rows if r["disposition"] == "needs_operator_decision"),
         },
         "items": rows,
     }
-

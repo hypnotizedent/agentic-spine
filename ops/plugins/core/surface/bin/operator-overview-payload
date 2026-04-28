@@ -1405,12 +1405,15 @@ def _collect_human_intent_inventory_summary() -> dict:
         {
             "source_id": row.get("source_id", ""),
             "source_ref": row.get("source_ref", ""),
+            "canonical_state": row.get("canonical_state", ""),
+            "disposition": row.get("disposition", ""),
             "capture_status": row.get("capture_status", ""),
             "review_status": row.get("review_status", ""),
             "next_missing_step": row.get("next_missing_step", ""),
         }
         for row in inventory.get("items", [])
-        if row.get("capture_status") == "semantic_only"
+        if row.get("disposition") == "needs_operator_decision"
+        or row.get("capture_status") == "semantic_only"
         or row.get("review_status") == "source_not_linked"
         or (
             row.get("next_missing_step")
@@ -1421,6 +1424,7 @@ def _collect_human_intent_inventory_summary() -> dict:
     return {
         "available": True,
         "capability": "human.intent.inventory.status",
+        "operator_model": "one_human_intent_lifecycle_many_source_origins",
         "summary": summary,
         "attention": attention,
     }
@@ -1532,10 +1536,12 @@ def collect_human_input() -> dict:
             "total_raw_inputs": total_raw,
             "recent_ingress": len(recent_ingress),
             "pending_ingress": pending_ingress,
+            "pending_new_submissions": pending_ingress,
             "blueprint_admission": int(blueprint_admission.get("count", 0) or 0),
             "known_input_sources": total_raw,
             "source_not_linked": int(inv_summary.get("source_not_linked", 0) or 0),
             "semantic_only": int(inv_summary.get("semantic_only", 0) or 0),
+            "needs_operator_decision": int(inv_summary.get("needs_operator_decision", 0) or 0),
             "float_risk_count": 0,
         },
         "recent_ingress": recent_ingress,
