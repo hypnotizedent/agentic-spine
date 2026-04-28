@@ -148,6 +148,15 @@ _fail_args() {
   exit 2
 }
 
+_loop_closeout_already_materialized() {
+  local loop_id="${1:?loop id required}"
+  local active_scope="$SPINE_STATE/loop-scopes/${loop_id}.scope.md"
+  local archived_scope="$SPINE_STATE/archive/closed-loop-scopes/${loop_id}.scope.md"
+  local closeout_receipt="$SPINE_EVIDENCE_ROOT/loop-closeouts/${loop_id}.closeout.md"
+
+  [[ ! -f "$active_scope" && -f "$archived_scope" && -f "$closeout_receipt" ]]
+}
+
 # Generate next sequential wave ID: WAVE-YYYYMMDD-NN
 _next_wave_id() {
   local today
@@ -1596,6 +1605,14 @@ for p in pending:
       fi
 
       echo "Running wave.finish..."
+      if _loop_closeout_already_materialized "$loop_id"; then
+        echo "wave.finish already materialized: loop scope is archived and closeout receipt exists for $loop_id"
+        echo "Treating close propagation as idempotent success."
+        _delegation_transition_complete "$loop_id" "$wave_id" "$disposition" || true
+        echo ""
+        return 0
+      fi
+
       local finish_repo_root=""
       finish_repo_root="$finish_repo_root_seed"
       [[ -n "$finish_repo_root" ]] || {
