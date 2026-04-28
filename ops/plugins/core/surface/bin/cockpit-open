@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cockpit.open — regenerate and open the operator cockpit.
+# cockpit.open — regenerate and open the server-backed operator cockpit.
 #
 # Usage: ./bin/ops cap run cockpit.open
 #
@@ -8,9 +8,36 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
 OUTPUT="${SPINE_STATE:-$HOME/code/.runtime/spine/state}/domain-state/SPINE_COCKPIT.html"
+STATE_ROOT="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+SURFACE_DIR="$STATE_ROOT/operator-surface"
+URL="${OPERATOR_COCKPIT_URL:-http://127.0.0.1:8900/}"
+PORT="${OPERATOR_COCKPIT_PORT:-8900}"
+LOG="$SURFACE_DIR/server.log"
+PIDFILE="$SURFACE_DIR/server.pid"
 
 # Regenerate
-python3 "$REPO/ops/plugins/core/surface/bin/cockpit-generate"
+python3 "$REPO/ops/plugins/core/surface/bin/operator-surface-regenerate"
+
+# Ensure the local canonical cockpit server is available for submit/readback
+# routes. The static HTML remains a compatibility derivative.
+if ! curl -fsS "$URL" >/dev/null 2>&1; then
+  mkdir -p "$SURFACE_DIR"
+  nohup python3 "$REPO/ops/plugins/core/surface/bin/operator-surface-server" \
+    --port "$PORT" \
+    --dir "$SURFACE_DIR" \
+    > "$LOG" 2>&1 &
+  echo "$!" > "$PIDFILE"
+  for _ in 1 2 3 4 5; do
+    if curl -fsS "$URL" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+fi
 
 # Open
-open "$OUTPUT"
+if curl -fsS "$URL" >/dev/null 2>&1; then
+  open "$URL"
+else
+  open "$OUTPUT"
+fi

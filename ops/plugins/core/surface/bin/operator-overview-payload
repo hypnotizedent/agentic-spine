@@ -44,6 +44,7 @@ EVIDENCE_ROOT = Path(
     )
 )
 SURFACE_OUTPUT_DIR = STATE_ROOT / "operator-surface"
+COCKPIT_CONTRACT = REPO / "ops" / "bindings" / "operator.cockpit.contract.yaml"
 
 TEMPORAL_NOW_SECONDS = 6 * 60 * 60
 TEMPORAL_RECENT_SECONDS = 72 * 60 * 60
@@ -103,6 +104,49 @@ def _load_previous_operator_payload() -> dict:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def collect_operator_cockpit_contract(generated_utc: str) -> dict:
+    """Expose the canonical cockpit surface contract in the shared payload."""
+    return {
+        "contract_id": "operator-cockpit-surface-family",
+        "contract_ref": "ops/bindings/operator.cockpit.contract.yaml",
+        "contract_available": COCKPIT_CONTRACT.is_file(),
+        "loop_id": "LOOP-HUMAN-AGENT-FLOW-CANONICAL-RECONCILIATION-20260428",
+        "generated_utc": generated_utc,
+        "route_root": "http://127.0.0.1:8900/",
+        "static_snapshot_path": str(SURFACE_OUTPUT_DIR / "index.html"),
+        "payload_path": str(SURFACE_OUTPUT_DIR / "payload.json"),
+        "mobile_path": str(SURFACE_OUTPUT_DIR / "mobile.json"),
+        "legacy_snapshot_path": str(STATE_ROOT / "domain-state" / "SPINE_COCKPIT.html"),
+        "legacy_snapshot_status": "compatibility_derivative",
+        "panels": [
+            "board",
+            "engine",
+            "kernel",
+            "nodes",
+            "recovery",
+            "operator_input",
+            "operator_vision",
+            "system",
+            "requests",
+        ],
+        "routes": {
+            "board": "/",
+            "recovery": "/#recovery-drilldown",
+            "submit": "/submit",
+            "submissions": "/ingress",
+            "payload": "/payload.json",
+            "mobile": "/mobile.json",
+        },
+        "submit": {
+            "route": "/submit",
+            "method": "POST",
+            "writes": "$SPINE_STATE/inputs/operator-ingress/OI-*.yaml",
+            "authority": "non_authoritative_until_metabolized",
+            "readback_route": "/ingress",
+        },
+    }
 
 
 def _truncate_title(text: str, limit: int) -> str:
@@ -1986,10 +2030,12 @@ def build_payload(compact: bool = False) -> dict:
     active_loops["focus"] = _select_focus(active_loops.get("items", []), router_primary_id)
     continuity = collect_continuity(previous_payload, active_loops.get("items", []))
     recovery_estate = collect_recovery_estate(generated_utc, status, active_loops)
+    operator_cockpit = collect_operator_cockpit_contract(generated_utc)
 
     payload: dict = {
         "version": 5,
         "generated_utc": generated_utc,
+        "operator_cockpit": operator_cockpit,
         "continuity": continuity,
         "human_input": human_input,
         "spine_now": collect_spine_now(status),

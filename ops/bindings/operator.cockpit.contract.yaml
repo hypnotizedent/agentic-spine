@@ -1,0 +1,83 @@
+---
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-04-28"
+scope: operator-cockpit-surface-family
+version: 1
+
+purpose: >
+  Declare the existing operator cockpit as Ronny's canonical master dashboard
+  for /code. The cockpit is one surface family backed by the shared
+  operator-overview payload; it is not a new dashboard plane.
+
+authority:
+  root_payload_capability: surface.operator.overview.payload
+  canonical_generator: ops/plugins/core/surface/bin/operator-surface-regenerate
+  canonical_server: ops/plugins/core/surface/bin/operator-surface-server
+  canonical_local_url: http://127.0.0.1:8900/
+  served_snapshot: $SPINE_STATE/operator-surface/index.html
+  legacy_static_snapshot: $SPINE_STATE/domain-state/SPINE_COCKPIT.html
+  legacy_static_status: compatibility_derivative
+
+surface_family:
+  board:
+    route: /
+    type: read
+    source: operator-overview-payload
+  recovery:
+    route: /#recovery-drilldown
+    type: read
+    source: recovery_estate
+  submissions:
+    route: /ingress
+    type: read
+    source: operator_ingress
+  submit:
+    route: /submit
+    type: bounded_mutation
+    writes: $SPINE_STATE/inputs/operator-ingress/OI-*.yaml
+    authority: non_authoritative_until_metabolized
+  payload:
+    route: /payload.json
+    type: read
+    source: operator-overview-payload
+  mobile:
+    route: /mobile.json
+    type: read
+    source: operator-overview-payload
+
+dashboard_panels:
+  - board
+  - engine
+  - kernel
+  - nodes
+  - recovery
+  - operator_input
+  - operator_vision
+  - system
+  - requests
+
+rules:
+  - id: one_payload_root
+    statement: Cockpit and mobile leaves consume the shared operator-overview payload.
+  - id: no_parallel_dashboard
+    statement: Add cockpit capability by extending this surface family, not by creating a new dashboard.
+  - id: server_routes_are_first_class
+    statement: /submit and /ingress are part of the cockpit runtime and require the operator-surface server.
+  - id: static_is_compatibility
+    statement: Static file snapshots may exist for compatibility, but the canonical local operator URL is server-backed.
+  - id: submit_readback_required
+    statement: Submit must create operator-ingress readback that agents can see through existing OI/HI surfaces.
+
+verification:
+  routes:
+    - GET /
+    - GET /submit
+    - GET /ingress
+    - GET /payload.json
+    - GET /mobile.json
+  capabilities:
+    - surface.operator.overview.payload
+    - surface.mobile.dashboard.status
+    - cockpit.generate
+    - cockpit.open
