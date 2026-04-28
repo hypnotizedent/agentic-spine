@@ -2912,7 +2912,19 @@ print(f"  Status: dispatched")
 if from_role or to_role:
     print(f"  Role transition: {from_role or '?'} -> {to_role or '?'} (gate={transition_gate or 'none'})")
 if lane == "execution":
-    print(f"  NOTE: execution lane is deny-scoped from canonical docs surfaces")
+    claimed_paths = packet.get("claimed_paths") if isinstance(packet.get("claimed_paths"), list) else []
+    docs_claims = [
+        str(path).strip()
+        for path in claimed_paths
+        if str(path).strip() == "docs" or str(path).strip().startswith("docs/")
+    ]
+    if docs_claims:
+        print(
+            "  NOTE: execution lane includes explicitly claimed canonical docs paths: "
+            + ", ".join(docs_claims)
+        )
+    else:
+        print(f"  NOTE: execution lane is deny-scoped from canonical docs surfaces")
 elif lane == "audit":
     print(f"  NOTE: audit lane is read-only")
 PYDISP

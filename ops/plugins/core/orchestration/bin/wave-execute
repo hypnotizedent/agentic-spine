@@ -221,6 +221,106 @@ _has_passthrough_flag() {
   return 1
 }
 
+_infer_claimed_paths_from_delegation_packet() {
+  local loop_id="${1:-}"
+  [[ -n "$loop_id" ]] || return 0
+  [[ -n "${SPINE_STATE:-}" ]] || return 0
+
+  python3 - "$SPINE_STATE" "$loop_id" <<'PYCLAIMINFER'
+import os
+import re
+import sys
+
+try:
+    import yaml
+except Exception:
+    yaml = None
+
+state_root = sys.argv[1]
+loop_id = sys.argv[2]
+delegations_dir = os.path.join(state_root, "delegations")
+repo_root = os.environ.get("SPINE_REPO") or os.getcwd()
+
+def load_doc(path):
+    try:
+        raw = open(path, "r", encoding="utf-8").read()
+    except OSError:
+        return {}
+    if yaml is not None:
+        try:
+            loaded = yaml.safe_load(raw) or {}
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+    out = {}
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        out[key.strip()] = value.strip().strip("'\"")
+    return out
+
+def delegation_sort_key(path):
+    return os.path.getmtime(path)
+
+delegation_paths = []
+if os.path.isdir(delegations_dir):
+    for name in os.listdir(delegations_dir):
+        if name.endswith((".yaml", ".yml")):
+            delegation_paths.append(os.path.join(delegations_dir, name))
+
+packet_path = ""
+for path in sorted(delegation_paths, key=delegation_sort_key, reverse=True):
+    doc = load_doc(path)
+    if str(doc.get("loop_id") or "").strip() != loop_id:
+        continue
+    if str(doc.get("delegation_state") or "").strip() not in {"picked_up", "executing", "delegated"}:
+        continue
+    packet_path = str(doc.get("packet_path") or "").strip()
+    if packet_path:
+        break
+
+if not packet_path or not os.path.exists(packet_path):
+    raise SystemExit(0)
+
+text = open(packet_path, "r", encoding="utf-8").read()
+allowed_singletons = {"AGENTS.md", "NORTH_STAR.md", "CLAUDE.md"}
+allowed_prefixes = (
+    "bin/",
+    "docs/",
+    "mailroom/",
+    "ops/",
+    "surfaces/",
+)
+token_re = re.compile(r"(?<![A-Za-z0-9_./-])(?:\.\/)?(?:AGENTS\.md|NORTH_STAR\.md|CLAUDE\.md|(?:bin|docs|mailroom|ops|surfaces)/[A-Za-z0-9_./:@%+=,-]+)")
+
+seen = set()
+paths = []
+for match in token_re.finditer(text):
+    candidate = match.group(0).strip("`'\".,);]")
+    while candidate.startswith("./"):
+        candidate = candidate[2:]
+    candidate = candidate.rstrip("/")
+    if not candidate:
+        continue
+    if candidate in allowed_singletons:
+        pass
+    elif not candidate.startswith(allowed_prefixes):
+        continue
+    if ".." in candidate.split("/"):
+        continue
+    absolute = os.path.join(repo_root, candidate)
+    if not os.path.exists(absolute):
+        continue
+    if candidate not in seen:
+        seen.add(candidate)
+        paths.append(candidate)
+
+if paths:
+    print(",".join(paths))
+PYCLAIMINFER
+}
+
 _preferred_checkout_dir() {
   # Prefer the caller's PWD when it's inside a governed sibling worktree
   # of SP (same git-common-dir). Otherwise fall back to SP so we keep the
@@ -742,6 +842,7 @@ cmd_start() {
   local wave_id=""
   local objective=""
   local -a passthrough_args=()
+  local inferred_claimed_paths=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -837,6 +938,13 @@ for b in d.get('blockers',[]):
   local wave_start_args=("$wave_id" --loop-id "$loop_id")
   if [[ -n "$objective" ]]; then
     wave_start_args+=(--objective "$objective")
+  fi
+  if ! _has_passthrough_flag "--claimed-paths" "${passthrough_args[@]+"${passthrough_args[@]}"}"; then
+    inferred_claimed_paths="$(_infer_claimed_paths_from_delegation_packet "$loop_id" 2>/dev/null || true)"
+    if [[ -n "$inferred_claimed_paths" ]]; then
+      wave_start_args+=(--claimed-paths "$inferred_claimed_paths")
+      echo "Claim scope: inferred from delegated packet paths: $inferred_claimed_paths"
+    fi
   fi
   # Pass through any additional wave.sh start flags
   if [[ ${#passthrough_args[@]} -gt 0 ]]; then
