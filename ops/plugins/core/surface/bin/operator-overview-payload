@@ -30,6 +30,7 @@ sys.path.insert(0, str(REPO / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 
 import standing_program_exception_v1 as spx
 import operator_ingress as oi
+import human_intent_inventory as hii
 STATE_ROOT = Path(
     os.environ.get(
         "SPINE_STATE",
@@ -1340,6 +1341,47 @@ def _collect_blueprint_admission_summary() -> dict:
     }
 
 
+def _collect_human_intent_inventory_summary() -> dict:
+    try:
+        inventory = hii.build_inventory(
+            repo=REPO,
+            state_root=STATE_ROOT,
+            evidence_root=EVIDENCE_ROOT,
+            oi_limit=None,
+        )
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": str(exc),
+            "summary": {},
+            "attention": [],
+        }
+    summary = inventory.get("summary", {})
+    attention = [
+        {
+            "source_id": row.get("source_id", ""),
+            "source_ref": row.get("source_ref", ""),
+            "capture_status": row.get("capture_status", ""),
+            "review_status": row.get("review_status", ""),
+            "next_missing_step": row.get("next_missing_step", ""),
+        }
+        for row in inventory.get("items", [])
+        if row.get("capture_status") == "semantic_only"
+        or row.get("review_status") == "source_not_linked"
+        or (
+            row.get("next_missing_step")
+            and row.get("next_missing_step") != "none"
+            and row.get("source_kind") in {"path_drop_source", "operator_ingress"}
+        )
+    ][:12]
+    return {
+        "available": True,
+        "capability": "human.intent.inventory.status",
+        "summary": summary,
+        "attention": attention,
+    }
+
+
 def collect_human_input() -> dict:
     """Collect canonical human-steward input readback.
 
@@ -1434,7 +1476,11 @@ def collect_human_input() -> dict:
                 pending_ingress += 1
 
     blueprint_admission = _collect_blueprint_admission_summary()
-    total_raw = len(recent_ingress) + int(blueprint_admission.get("count", 0) or 0)
+    human_intent_inventory = _collect_human_intent_inventory_summary()
+    inv_summary = human_intent_inventory.get("summary", {}) if human_intent_inventory.get("available") else {}
+    total_raw = int(inv_summary.get("total_rows", 0) or 0) or (
+        len(recent_ingress) + int(blueprint_admission.get("count", 0) or 0)
+    )
 
     # --- Assemble -------------------------------------------------------------
     return {
@@ -1443,10 +1489,14 @@ def collect_human_input() -> dict:
             "recent_ingress": len(recent_ingress),
             "pending_ingress": pending_ingress,
             "blueprint_admission": int(blueprint_admission.get("count", 0) or 0),
+            "known_input_sources": total_raw,
+            "source_not_linked": int(inv_summary.get("source_not_linked", 0) or 0),
+            "semantic_only": int(inv_summary.get("semantic_only", 0) or 0),
             "float_risk_count": 0,
         },
         "recent_ingress": recent_ingress,
         "blueprint_admission": blueprint_admission,
+        "human_intent_inventory": human_intent_inventory,
         "what_is_waiting_on_me": {
             "parked_without_lifecycle": 0,
             "floating_items": 0,
