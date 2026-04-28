@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Worktree lifecycle classifier for worktree-lifecycle-cleanup.
+
+This is intentionally boring: it reports enough structured state for the
+cleanup wrapper to decide what is safe to archive/delete. It does not mutate.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True)
+
+
+def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return run(["git", "-C", str(repo), *args])
+
+
+def parse_worktree_list(repo: Path) -> list[dict[str, Any]]:
+    proc = git(repo, "worktree", "list", "--porcelain")
+    if proc.returncode != 0:
+        return []
+    rows: list[dict[str, Any]] = []
+    row: dict[str, Any] = {}
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            if row:
+                rows.append(row)
+                row = {}
+            continue
+        key, _, value = line.partition(" ")
+        if key == "worktree":
+            row["path"] = value
+        elif key == "HEAD":
+            row["head"] = value
+        elif key == "branch":
+            row["branch_ref"] = value
+            row["branch"] = value.removeprefix("refs/heads/")
+        elif key == "detached":
+            row["detached"] = True
+        else:
+            row[key] = value or True
+    if row:
+        rows.append(row)
+    return rows
+
+
+def is_dirty(path: Path) -> bool:
+    proc = git(path, "status", "--porcelain", "--untracked-files=all")
+    return proc.returncode != 0 or bool(proc.stdout.strip())
+
+
+def merged_into(repo: Path, branch_ref: str | None, main_ref: str) -> bool:
+    if not branch_ref:
+        return False
+    proc = git(repo, "merge-base", "--is-ancestor", branch_ref, main_ref)
+    return proc.returncode == 0
+
+
+def load_lease(path: Path) -> dict[str, Any]:
+    lease_path = path / ".spine-lane-lease.yaml"
+    if not lease_path.exists():
+        return {"present": False, "active": False}
+
+    raw = lease_path.read_text(encoding="utf-8", errors="replace")
+    lease: dict[str, Any] = {"present": True, "active": False, "path": str(lease_path)}
+    for line in raw.splitlines():
+        if ":" not in line or line.lstrip().startswith("#"):
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key in {"status", "owner", "loop_or_wave_id", "heartbeat_at", "ttl_hours"}:
+            lease[key] = value
+
+    status = str(lease.get("status") or "").lower()
+    heartbeat = str(lease.get("heartbeat_at") or "")
+    ttl_raw = str(lease.get("ttl_hours") or "0")
+    active = status == "active"
+    try:
+        ttl_hours = float(ttl_raw)
+        if heartbeat and ttl_hours > 0:
+            hb = datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
+            age_hours = (datetime.now(timezone.utc) - hb).total_seconds() / 3600
+            lease["age_hours"] = round(age_hours, 3)
+            if age_hours > ttl_hours:
+                active = False
+    except Exception:
+        pass
+    lease["active"] = bool(active)
+    return lease
+
+
+def classify_owner(state_root: Path, identity: str | None) -> tuple[str | None, str | None]:
+    if not identity:
+        return None, None
+    loop_scope = state_root / "loop-scopes" / f"{identity}.scope.md"
+    closed_scope = state_root / "archive" / "closed-loop-scopes" / f"{identity}.scope.md"
+    wave_state = state_root.parent / "waves" / identity / "state.json"
+    if loop_scope.exists():
+        return "loop", "active"
+    if closed_scope.exists():
+        return "loop", "closed"
+    if wave_state.exists():
+        try:
+            data = json.loads(wave_state.read_text(encoding="utf-8"))
+            return "wave", str(data.get("status") or data.get("lifecycle") or "unknown")
+        except Exception:
+            return "wave", "unknown"
+    return None, None
+
+
+def stash_rows(repo: Path) -> list[dict[str, Any]]:
+    proc = git(repo, "stash", "list", "--format=%gd%x09%H%x09%gs")
+    if proc.returncode != 0:
+        return []
+    rows = []
+    for raw in proc.stdout.splitlines():
+        parts = raw.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        ref, commit, subject = parts
+        rows.append(
+            {
+                "ref": ref,
+                "commit": commit,
+                "subject": subject,
+                "branch": None,
+                "message": subject,
+                "age_hours": None,
+                "cleanup_candidate": False,
+                "issues": ["manual_review_required"],
+                "warnings": [],
+            }
+        )
+    return rows
+
+
+def temp_clone_rows(root: Path) -> list[dict[str, Any]]:
+    if not root.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for path in sorted(p for p in root.iterdir() if p.is_dir()):
+        rows.append(
+            {
+                "path": str(path),
+                "branch": None,
+                "origin_kind": "unknown",
+                "origin_exists": None,
+                "age_hours": None,
+                "dirty": is_dirty(path) if (path / ".git").exists() else True,
+            }
+        )
+    return rows
+
+
+def resolve_repo() -> Path:
+    explicit = os.environ.get("SPINE_TARGET_REPO") or os.environ.get("SPINE_REPO")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    proc = run(["git", "rev-parse", "--show-toplevel"])
+    if proc.returncode == 0 and proc.stdout.strip():
+        return Path(proc.stdout.strip()).resolve()
+    return Path.cwd().resolve()
+
+
+def common_repo_name(repo: Path) -> str:
+    proc = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if proc.returncode == 0 and proc.stdout.strip():
+        common_dir = Path(proc.stdout.strip()).resolve()
+        if common_dir.name == ".git":
+            return common_dir.parent.name
+    return repo.name
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    repo = resolve_repo()
+    state_root = Path(os.environ.get("SPINE_STATE") or repo.parent / ".runtime" / "spine" / "state").resolve()
+    tmp_root = Path(os.environ.get("SPINE_TMP") or repo.parent / ".runtime" / "spine" / "tmp").resolve()
+    worktree_root = Path(os.environ.get("SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT") or tmp_root / "worktrees").resolve()
+    temp_clone_root = Path(os.environ.get("SPINE_WORKTREE_LIFECYCLE_TEMP_CLONE_ROOT") or tmp_root / "clones").resolve()
+    main_ref = os.environ.get("SPINE_WORKTREE_LIFECYCLE_MAIN_REF", "main")
+
+    repo_name = common_repo_name(repo)
+    rows: list[dict[str, Any]] = []
+    for wt in parse_worktree_list(repo):
+        path = Path(str(wt.get("path") or "")).resolve()
+        if not path.exists() or path == repo:
+            continue
+        branch_ref = wt.get("branch_ref")
+        branch = wt.get("branch")
+        lease = load_lease(path)
+        owner_id = lease.get("loop_or_wave_id") or branch
+        owner_type, owner_state = classify_owner(state_root, str(owner_id) if owner_id else None)
+        rows.append(
+            {
+                "path": str(path),
+                "branch": branch or "<detached>",
+                "branch_ref": branch_ref,
+                "head": wt.get("head"),
+                "managed_worktree": False,
+                "canonical_root_ok": str(path).startswith(str(worktree_root / repo_name) + os.sep),
+                "lease": lease,
+                "owner_type": owner_type,
+                "owner_state": owner_state,
+                "merged_into_main": merged_into(repo, branch_ref, main_ref),
+                "dirty": is_dirty(path),
+            }
+        )
+
+    root_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    root_dirty = is_dirty(repo)
+    root_checkout = {
+        "checked": True,
+        "path": str(repo),
+        "branch": root_branch,
+        "main_branch": main_ref,
+        "normalizable": (root_branch != main_ref and not root_dirty),
+        "issues": ([] if root_branch == main_ref and not root_dirty else ["root_not_clean_or_not_main"]),
+    }
+
+    report = {
+        "schema_version": "1.0",
+        "snapshot": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "repo": str(repo),
+        "main_ref": main_ref,
+        "worktree_root": str(worktree_root),
+        "temp_clone_root": str(temp_clone_root),
+        "root_checkout": root_checkout,
+        "worktrees": rows,
+        "temp_clones": temp_clone_rows(temp_clone_root),
+        "stashes": stash_rows(repo),
+    }
+
+    if args.json:
+        json.dump(report, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(json.dumps(report, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
