@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+PROBE_REGISTRY_PATH = ROOT / "ops" / "bindings" / "probe.registry.yaml"
+SERVICES_HEALTH_PATH = ROOT / "ops" / "bindings" / "services.health.yaml"
+
+
+def fail(message: str) -> None:
+    print(f"probe.registry.reconcile FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def dump_yaml(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="probe-registry-reconcile")
+    parser.add_argument("--bootstrap-from-services-health", action="store_true", help="Create/refresh probe.registry.yaml from the current services.health.yaml projection.")
+    parser.add_argument("--apply", action="store_true", help="Write probe.registry.yaml. Without --apply, only verifies/render-previews.")
+    parser.add_argument("--check", action="store_true", help="Fail if probe.registry.yaml would change.")
+    parser.add_argument("--verify", action="store_true", help="Verify the current or rendered registry shape.")
+    return parser.parse_args()
+
+
+def endpoint_to_probe(endpoint: dict[str, Any]) -> dict[str, Any]:
+    probe_id = str(endpoint.get("id") or "").strip()
+    host = str(endpoint.get("host") or "").strip()
+    if not probe_id:
+        fail("services.health endpoint missing id")
+    if not host:
+        fail(f"services.health endpoint {probe_id} missing host")
+    lifecycle_state = "active" if endpoint.get("enabled", True) else "disabled"
+    description = str(endpoint.get("description") or "").strip()
+    probe: dict[str, Any] = {
+        "id": probe_id,
+        "lifecycle_state": lifecycle_state,
+        "subject": {
+            "subject_id": host,
+            "subject_kind": "service_or_probe_subject",
+            "domain_id": "infra",
+            "node_or_appliance_id": host,
+        },
+        "endpoint": {
+            "url": str(endpoint.get("url") or "").strip(),
+            "expect": endpoint.get("expect", 200),
+            "enabled": bool(endpoint.get("enabled", True)),
+        },
+        "heartbeat": {
+            "liveness_timestamp": "last_successful_probe_at",
+            "proof_channel": {
+                "type": "cap_receipt",
+                "ref": "services.health.status",
+            },
+            "staleness_threshold": "15m",
+        },
+        "provenance": {
+            "source_event_id": "legacy_bootstrap_from_services.health.yaml",
+            "admitted_by": "probe.registry.reconcile",
+            "migration_note": "Migrated from surviving services.health projection after deleted SERVICE_REGISTRY source was subtracted.",
+        },
+        "projection": {
+            "emit_services_health": True,
+        },
+    }
+    if description:
+        probe["description"] = description
+        probe["endpoint"]["description"] = description
+    return probe
+
+
+def bootstrap_registry() -> dict[str, Any]:
+    services_health = load_yaml(SERVICES_HEALTH_PATH)
+    probes = [endpoint_to_probe(ensure_dict(row)) for row in ensure_list(services_health.get("endpoints"))]
+    probes.sort(key=lambda row: str(row.get("id") or ""))
+    return {
+        "version": 1,
+        "status": "authoritative",
+        "authority_state": "authoritative",
+        "authority_concern": "l1_probe_registry_surfaces",
+        "updated_at_utc": utc_now(),
+        "owner": "@ronny",
+        "write_policy": {
+            "manual_edits_forbidden": True,
+            "write_capability": "probe.registry.reconcile",
+            "required_event_receipt": True,
+            "projection_capability": "probe.registry.projection.build",
+        },
+        "defaults": services_health.get("defaults") or {
+            "connect_timeout_sec": 5,
+            "max_time_sec": 10,
+        },
+        "event_classes": [
+            "probe.requested",
+            "probe.promoted",
+            "probe.proposed",
+            "probe.verified",
+            "probe.disabled",
+            "probe.retired",
+        ],
+        "candidate_policy": {
+            "discovery_may_create_candidates": True,
+            "discovery_may_activate": False,
+            "activation_requires_operator_or_governed_packet": True,
+        },
+        "probes": probes,
+        "lifecycle_bindings": ensure_list(services_health.get("lifecycle_bindings")),
+    }
+
+
+def validate_registry(registry: dict[str, Any]) -> None:
+    errors: list[str] = []
+    if registry.get("authority_state") != "authoritative":
+        errors.append("authority_state must be authoritative")
+    policy = ensure_dict(registry.get("write_policy"))
+    if policy.get("manual_edits_forbidden") is not True:
+        errors.append("write_policy.manual_edits_forbidden must be true")
+    if policy.get("write_capability") != "probe.registry.reconcile":
+        errors.append("write_policy.write_capability must be probe.registry.reconcile")
+    seen: set[str] = set()
+    for raw_probe in ensure_list(registry.get("probes")):
+        probe = ensure_dict(raw_probe)
+        probe_id = str(probe.get("id") or "").strip()
+        if not probe_id:
+            errors.append("probe missing id")
+            continue
+        if probe_id in seen:
+            errors.append(f"duplicate probe id: {probe_id}")
+        seen.add(probe_id)
+        endpoint = ensure_dict(probe.get("endpoint"))
+        if not str(endpoint.get("url") or "").strip():
+            errors.append(f"{probe_id}: endpoint.url required")
+        heartbeat = ensure_dict(probe.get("heartbeat"))
+        if not ensure_dict(heartbeat.get("proof_channel")).get("ref"):
+            errors.append(f"{probe_id}: heartbeat.proof_channel.ref required")
+    if errors:
+        for error in errors:
+            print(f"probe.registry.reconcile VERIFY FAIL: {error}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def main() -> None:
+    args = parse_args()
+    if args.bootstrap_from_services_health:
+        registry = bootstrap_registry()
+    else:
+        registry = load_yaml(PROBE_REGISTRY_PATH)
+    if args.verify or args.check or args.apply:
+        validate_registry(registry)
+    rendered = dump_yaml(registry)
+    if args.check:
+        if not PROBE_REGISTRY_PATH.is_file():
+            fail("probe.registry.yaml missing")
+        if PROBE_REGISTRY_PATH.read_text(encoding="utf-8") != rendered:
+            fail("probe.registry.yaml drift (run probe.registry.reconcile --apply)")
+    if args.apply:
+        PROBE_REGISTRY_PATH.write_text(rendered, encoding="utf-8")
+    print("probe.registry.reconcile")
+    print("status: OK")
+    print(f"authority: ops/bindings/probe.registry.yaml")
+    print(f"probes: {len(ensure_list(registry.get('probes')))}")
+
+
+if __name__ == "__main__":
+    main()

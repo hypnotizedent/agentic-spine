@@ -20,7 +20,7 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 > For VM lifecycle state -> CHECK `ops/bindings/vm.lifecycle.yaml`.
 > For hardware inventory -> CHECK `ops/bindings/hardware.inventory.yaml`.
 > For operator-owned machine identity -> CHECK `ops/bindings/operator.hardware.inventory.yaml`.
-> For service endpoints/ports/health routes -> CHECK `docs/governance/SERVICE_REGISTRY.yaml`.
+> For service endpoints/ports/health routes -> CHECK `ops/bindings/probe.registry.yaml`.
 
 ---
 
@@ -82,7 +82,7 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 | VM lifecycle | `ops/bindings/vm.lifecycle.yaml` | What VMs exist, status, workloads, IPs |
 | Hardware inventory | `ops/bindings/hardware.inventory.yaml` | Physical machines, storage controllers, recovery |
 | Operator hardware | `ops/bindings/operator.hardware.inventory.yaml` | Operator-owned machine candidacy |
-| Service endpoints | `docs/governance/SERVICE_REGISTRY.yaml` | Service-level health, ports, URLs |
+| Service endpoints | `ops/bindings/probe.registry.yaml` | Service-level health, ports, URLs |
 | Stack registry | `docs/governance/STACK_REGISTRY.yaml` | Stack-to-host inventory |
 | Minilab read model | `./bin/ops cap run infra.minilab.readmodel.generate` | Home site generated summary |
 | Shop read model | `./bin/ops cap run infra.shop.readmodel.generate` | Shop site generated summary |
@@ -102,7 +102,7 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 ### Updating an IP
 
 1. Update the authority binding (`ssh.targets.yaml` and/or `vm.lifecycle.yaml`)
-2. Update `docs/governance/SERVICE_REGISTRY.yaml` if service-level mapping changes
+2. Update `ops/bindings/probe.registry.yaml` if service-level mapping changes
 3. Run readmodel generator to verify
 
 ### Removing a Device

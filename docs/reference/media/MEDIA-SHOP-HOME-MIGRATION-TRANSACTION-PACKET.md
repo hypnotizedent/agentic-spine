@@ -108,7 +108,7 @@ At any phase, rollback by:
 ## SSOT Updates Required
 
 Per infra.relocation.plan.yaml convention:
-- `docs/governance/SERVICE_REGISTRY.yaml`
+- `ops/bindings/probe.registry.yaml`
 - `docs/governance/STACK_REGISTRY.yaml`
 - `docs/governance/DEVICE_IDENTITY_SSOT.md`
 - `ops/bindings/services.health.yaml`

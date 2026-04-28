@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+from pathlib import Path
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+PROBE_REGISTRY_PATH = ROOT / "ops" / "bindings" / "probe.registry.yaml"
+SERVICES_HEALTH_PATH = ROOT / "ops" / "bindings" / "services.health.yaml"
+
+
+def fail(message: str) -> None:
+    print(f"probe.registry.projection.build FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def dump_yaml(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+
+
+def rel(path: Path) -> str:
+    return str(path.resolve().relative_to(ROOT))
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def source_sha(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(rel(path).encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="probe-registry-projection-build")
+    parser.add_argument("--check", action="store_true", help="Fail if services.health.yaml drifts from probe.registry.yaml.")
+    parser.add_argument("--verify", action="store_true", help="Verify probe registry shape before writing/checking.")
+    return parser.parse_args()
+
+
+def validate_registry(registry: dict[str, Any]) -> None:
+    errors: list[str] = []
+    if registry.get("authority_state") != "authoritative":
+        errors.append("probe.registry.yaml must declare authority_state: authoritative")
+    if registry.get("authority_concern") != "l1_probe_registry_surfaces":
+        errors.append("probe.registry.yaml must declare authority_concern: l1_probe_registry_surfaces")
+
+    seen: set[str] = set()
+    for raw_probe in ensure_list(registry.get("probes")):
+        probe = ensure_dict(raw_probe)
+        probe_id = str(probe.get("id") or "").strip()
+        if not probe_id:
+            errors.append("probe row missing id")
+            continue
+        if probe_id in seen:
+            errors.append(f"duplicate probe id: {probe_id}")
+        seen.add(probe_id)
+        endpoint = ensure_dict(probe.get("endpoint"))
+        url = str(endpoint.get("url") or "").strip()
+        if not url:
+            errors.append(f"{probe_id}: endpoint.url is required for services.health projection")
+        if "expect" not in endpoint:
+            errors.append(f"{probe_id}: endpoint.expect is required")
+        subject = ensure_dict(probe.get("subject"))
+        if not str(subject.get("subject_id") or "").strip():
+            errors.append(f"{probe_id}: subject.subject_id is required")
+        lifecycle_state = str(probe.get("lifecycle_state") or "").strip()
+        if not lifecycle_state:
+            errors.append(f"{probe_id}: lifecycle_state is required")
+
+    if errors:
+        for error in errors:
+            print(f"probe.registry.projection.build VERIFY FAIL: {error}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def build_services_health(registry: dict[str, Any], sha: str) -> str:
+    defaults = ensure_dict(registry.get("defaults")) or {
+        "connect_timeout_sec": 5,
+        "max_time_sec": 10,
+    }
+    endpoints: list[dict[str, Any]] = []
+    for raw_probe in ensure_list(registry.get("probes")):
+        probe = ensure_dict(raw_probe)
+        projection = ensure_dict(probe.get("projection"))
+        if projection.get("emit_services_health", True) is False:
+            continue
+        lifecycle_state = str(probe.get("lifecycle_state") or "active").strip()
+        endpoint = ensure_dict(probe.get("endpoint"))
+        subject = ensure_dict(probe.get("subject"))
+        row: dict[str, Any] = {
+            "id": str(probe.get("id") or "").strip(),
+            "host": str(subject.get("subject_id") or endpoint.get("host") or "").strip(),
+            "url": str(endpoint.get("url") or "").strip(),
+            "expect": endpoint.get("expect", 200),
+            "enabled": bool(endpoint.get("enabled", lifecycle_state == "active")),
+        }
+        description = str(endpoint.get("description") or probe.get("description") or "").strip()
+        if description:
+            row["description"] = description
+        endpoints.append(row)
+
+    lifecycle_bindings = ensure_list(registry.get("lifecycle_bindings"))
+    payload: dict[str, Any] = {
+        "version": 1,
+        "status": "projection",
+        "authority_state": "projection",
+        "authority_concern": "l1_probe_registry_surfaces",
+        "projection_of": "ops/bindings/probe.registry.yaml",
+        "source_capability": "probe.registry.projection.build",
+        "source_sha256": sha,
+        "defaults": defaults,
+        "endpoints": endpoints,
+    }
+    if lifecycle_bindings:
+        payload["lifecycle_bindings"] = lifecycle_bindings
+
+    header = "\n".join(
+        [
+            "# Services Health Binding",
+            "# Non-secret. Spine-native. Read-only HTTP probes.",
+            "# Status: projection",
+            "# authority_state: projection",
+            "# authority_concern: l1_probe_registry_surfaces",
+            "# projection_of: ops/bindings/probe.registry.yaml",
+            "# generated_by: probe.registry.projection.build",
+            f"# source_sha256: {sha}",
+            "# Do NOT edit manually. Rebuild with: ./bin/ops cap run probe.registry.projection.build",
+            "",
+        ]
+    )
+    return header + dump_yaml(payload)
+
+
+def check_matches(path: Path, expected: str) -> None:
+    if not path.is_file():
+        fail(f"missing projection: {rel(path)}")
+    actual = path.read_text(encoding="utf-8")
+    if actual != expected:
+        fail(f"projection drift: {rel(path)} (run probe.registry.projection.build)")
+
+
+def main() -> None:
+    args = parse_args()
+    registry = load_yaml(PROBE_REGISTRY_PATH)
+    if args.verify:
+        validate_registry(registry)
+    sha = source_sha(PROBE_REGISTRY_PATH)
+    rendered = build_services_health(registry, sha)
+    if args.check:
+        check_matches(SERVICES_HEALTH_PATH, rendered)
+    else:
+        SERVICES_HEALTH_PATH.write_text(rendered, encoding="utf-8")
+    print("probe.registry.projection.build")
+    print("status: OK")
+    print(f"authority: {rel(PROBE_REGISTRY_PATH)}")
+    print(f"projected: {rel(SERVICES_HEALTH_PATH)}")
+
+
+if __name__ == "__main__":
+    main()

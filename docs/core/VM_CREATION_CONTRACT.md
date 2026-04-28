@@ -66,12 +66,11 @@ The following files WILL need updates by the end of REGISTER phase:
 | File | Update Required |
 |------|----------------|
 | `ops/bindings/vm.lifecycle.yaml` | New entry (this phase) |
-| `docs/governance/SERVICE_REGISTRY.yaml` | Service entries for hosted services |
 | `docs/governance/STACK_REGISTRY.yaml` | Stack entry |
 | `ops/bindings/ssh.targets.yaml` | SSH target entry |
 | `./bin/ops cap run device.identity.readmodel.generate` | Regenerate device identity read model from bindings |
-| `docs/governance/SERVICE_REGISTRY.yaml` | Host `compose_target` metadata that generates compose targets |
-| `docs/governance/SERVICE_REGISTRY.yaml` | Service `health` / `healthcheck` metadata that generates health probes |
+| `ops/bindings/probe.registry.yaml` | Health probe entries, written by `probe.registry.reconcile` |
+| `ops/bindings/docker.compose.targets.yaml` | Legacy compose target readback; do not mutate until deploy/compose registry is promoted |
 | `ops/bindings/backup.inventory.yaml` | Backup target entry |
 | `ops/bindings/infra.storage.placement.policy.yaml` | Storage tier declaration for this VM |
 | `ops/bindings/secrets.namespace.policy.yaml` | Secret paths (if services need secrets) |
@@ -150,8 +149,10 @@ Update `vm.lifecycle.yaml` status back to `planning` or `abandoned`.
 
 ### Required Authority Updates
 
-Each update MUST be committed. Do not hand-edit `ops/bindings/docker.compose.targets.yaml`
-or `ops/bindings/services.health.yaml`; rebuild them from `SERVICE_REGISTRY.yaml`.
+Each update MUST be committed. Do not hand-edit `ops/bindings/services.health.yaml`;
+rebuild it from `ops/bindings/probe.registry.yaml` with `probe.registry.projection.build`.
+Do not hand-edit `ops/bindings/docker.compose.targets.yaml`; it is a legacy
+bootstrap readback until a separate deploy/compose registry is promoted.
 Do not add host/IP facts to `DEVICE_IDENTITY_SSOT.md`; regenerate the device
 identity read model from bindings instead.
 The order below minimizes drift window:
@@ -160,11 +161,11 @@ The order below minimizes drift window:
 |---|------|-------------|--------------|
 | 1 | `ops/bindings/vm.lifecycle.yaml` | Update status to `registered`, add Tailscale IP | lifecycle |
 | 2 | `ops/bindings/ssh.targets.yaml` | SSH target entry (id, host, user, tags) | connectivity |
-| 3 | `docs/governance/SERVICE_REGISTRY.yaml` | Host `compose_target` metadata with stack paths | stack discovery authority |
+| 3 | deploy/compose registry TBD | Host compose target metadata with stack paths; do not revive the deleted service registry | stack discovery authority |
 | 4 | `./bin/ops cap run device.identity.readmodel.generate` | Confirm generated host/IP/VM readback includes the VM | identity read model |
-| 5 | `docs/governance/SERVICE_REGISTRY.yaml` | Service entries (host, port, health, container) | service truth |
+| 5 | `ops/bindings/probe.registry.yaml` via `probe.registry.reconcile` | Health probe entries (host, URL, expect, lifecycle) | probe truth |
 | 6 | `docs/governance/STACK_REGISTRY.yaml` | Stack entry (stack_id, path, deploy_method) | stack truth |
-| 7 | `./bin/ops cap run service.registry.projection.build` | Rebuild `docker.compose.targets.yaml` + `services.health.yaml` from SERVICE_REGISTRY | generated projections |
+| 7 | `./bin/ops cap run probe.registry.projection.build` | Rebuild `services.health.yaml` from `probe.registry.yaml` | generated health projection |
 | 8 | `ops/bindings/backup.inventory.yaml` | Backup target entry for vzdump artifacts | backup coverage |
 | 9 | `ops/bindings/secrets.namespace.policy.yaml` | Secret key paths (if services need Infisical) | secrets |
 
@@ -172,7 +173,7 @@ The order below minimizes drift window:
 
 After all updates:
 ```
-./bin/ops cap run service.registry.projection.build
+./bin/ops cap run probe.registry.projection.build -- --check --verify
 ./bin/ops cap run spine.verify
 ```
 All relevant spine/object-truth drift gates (D34, D35, D37, D54, D59) must pass. If they don't, the registration is incomplete. Estate/workload health is validated in Phase 4.
@@ -230,8 +231,8 @@ Update `vm.lifecycle.yaml` status to `active`.
 
 ### Change Management During Operate
 
-- **Adding services:** Update `SERVICE_REGISTRY.yaml`, rebuild `service.registry.projection.build`, then run `spine.verify` and `verify.infra.run`
-- **Removing services:** Update `SERVICE_REGISTRY.yaml`, rebuild projections, then run `spine.verify` and `verify.infra.run`
+- **Adding health probes:** Submit governed probe intent/promotion, reconcile `probe.registry.yaml`, rebuild `probe.registry.projection.build`, then run `spine.verify` and `verify.infra.run`
+- **Removing health probes:** Use governed probe retirement/subtraction, rebuild projections, then run `spine.verify` and `verify.infra.run`
 - **Resizing VM:** Update `vm.lifecycle.yaml` resources, then regenerate shop/device read models
 - **Relocating services:** Follow INFRA_RELOCATION_PROTOCOL.md
 
@@ -320,5 +321,5 @@ Every rollback must produce:
 | `ops/bindings/infra.storage.placement.policy.yaml` | What storage tier each VM should use |
 | `docs/governance/INFRA_RELOCATION_PROTOCOL.md` | Protocol for moving services between VMs |
 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Naming/topology conventions; generated device read model entrypoint |
-| `docs/governance/SERVICE_REGISTRY.yaml` | Service-to-host mapping |
+| `ops/bindings/probe.registry.yaml` | Automatic health-probe source |
 | `docs/core/STACK_LIFECYCLE.md` | Stack-level operations within a VM |

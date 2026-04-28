@@ -18,26 +18,44 @@ optional_authorities_not_present:
   - ops/bindings/hardware.master.yaml
 
 rows:
-  - id: authority.service.registry
+  - id: authority.probe.registry
     domain_id: infra
     authority:
-      path: ops/bindings/services.health.yaml
-      expected_authority_state: projection
-      note: Original authority docs/governance/SERVICE_REGISTRY.yaml deleted in 113da10b (spine-lite pass 2). Surviving truth lives in projections.
+      path: ops/bindings/probe.registry.yaml
+      expected_authority_state: authoritative
+      note: Automatic L1 probe-registry authority. Humans and agents submit governed events; probe.registry.reconcile owns normal writes. services.health.yaml is generated projection only.
       source_capabilities:
-        - service.registry.projection.build
+        - probe.registry.reconcile
+        - probe.registry.projection.build
     intake_lineage:
       envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
       accepted_intake_refs:
-        - mailroom/outbox/intake/ITK-*-service-registry-*.yaml
-        - evidence/sessions/CAP-*__service.registry.projection.build__R*/receipt.md
+        - mailroom/outbox/intake/ITK-*-probe-registry-*.yaml
+        - evidence/sessions/CAP-*__probe.registry.reconcile__R*/receipt.md
+        - evidence/sessions/CAP-*__probe.registry.projection.build__R*/receipt.md
       evidence_required: true
     evidence_refs:
+      - ops/bindings/probe.registry.yaml
       - ops/bindings/services.health.yaml
-      - ops/bindings/docker.compose.targets.yaml
       - ops/bindings/ssh.targets.yaml
     projection_refs:
       - projection.services.health
+
+  - id: authority.compose.targets
+    domain_id: infra
+    authority:
+      path: ops/bindings/docker.compose.targets.yaml
+      expected_authority_state: projection
+      note: Legacy bootstrap projection retained as executable read surface. Its deleted SERVICE_REGISTRY source has been subtracted from hot probe authority; a separate deploy/compose registry is required before further compose-target mutation.
+      source_capabilities: []
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs: []
+      evidence_required: true
+    evidence_refs:
+      - ops/bindings/docker.compose.targets.yaml
+      - ops/bindings/ssh.targets.yaml
+    projection_refs:
       - projection.docker.compose.targets
 
   - id: authority.backup.inventory

@@ -14,7 +14,7 @@
 #   topology.sites.yaml   → site definitions (LAN CIDR, vmid_range)
 #   vm.lifecycle.yaml      → VM identity, status, IP assignments
 #   ssh.targets.yaml       → SSH resolution + access_policy
-#   SERVICE_REGISTRY.yaml  → service→host→port→health mappings
+#   probe.registry.yaml  → service→host→port→health mappings
 #   This file              → closure graph edges + resolution contract
 #
 # This file does NOT duplicate data from its sources. It defines:
@@ -47,7 +47,7 @@ graph_model:
       key_field: hostname
       description: "Proxmox VM or LXC with lifecycle status"
     service:
-      authority: docs/governance/SERVICE_REGISTRY.yaml
+      authority: ops/bindings/probe.registry.yaml
       key_field: service_id
       description: "Docker container or native service with port/health"
     ssh_target:
@@ -63,7 +63,7 @@ graph_model:
     vm_runs_service:
       from: vm
       to: service
-      resolved_by: "SERVICE_REGISTRY.yaml host field matches vm.hostname"
+      resolved_by: "probe.registry.yaml host field matches vm.hostname"
     vm_has_ssh_target:
       from: vm
       to: ssh_target
@@ -90,7 +90,7 @@ graph_model:
 #
 # These define HOW to reach a service once the HOST is resolved via
 # ssh-resolve.sh. `host_ref` is stored here as the canonical closure
-# binding and must stay aligned with SERVICE_REGISTRY.yaml host.
+# binding and must stay aligned with probe.registry.yaml host.
 #
 # Fields:
 #   host_ref:      SSH target ID (matches ssh.targets.yaml .id)
@@ -669,8 +669,8 @@ closure_surfaces:
     description: "Service health probes"
     authority: ops/bindings/services.health.yaml
     contains_hardcoded_ips: true
-    resolution_contract: "PROJECTION — must be regenerated from SERVICE_REGISTRY.yaml"
-    generator: service.registry.projection.build
+    resolution_contract: "PROJECTION — must be regenerated from probe.registry.yaml"
+    generator: probe.registry.projection.build
 
   agents:
     description: "Agent endpoint bindings"
@@ -723,4 +723,4 @@ resolution_contract:
     - "Hardcoding LAN IPs (192.168.x.x) in binding files"
     - "Hardcoding Tailscale IPs (100.x.x.x) in binding files"
     - "Resolving endpoints without consulting access_policy"
-    - "Duplicating port/path info outside SERVICE_REGISTRY.yaml"
+    - "Duplicating port/path info outside probe.registry.yaml"

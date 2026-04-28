@@ -20,7 +20,7 @@ This is the spine-facing summary for the shop rack and shop-managed endpoints.
 | Network | `ops/bindings/ssh.targets.yaml` + `docs/governance/DEVICE_IDENTITY_SSOT.md` naming/topology conventions |
 | Ingress | `ops/bindings/shop.ingress.map.yaml` + `ops/bindings/domain.routing.registry.yaml` |
 | Backup | `ops/bindings/domains/backup/backup.inventory.yaml` |
-| Monitoring | `docs/governance/SERVICE_REGISTRY.yaml` + `ops/bindings/services.health.yaml` |
+| Monitoring | `ops/bindings/probe.registry.yaml` + `ops/bindings/services.health.yaml` |
 | Tombstones | `ops/bindings/vm.lifecycle.yaml` (status: decommissioned) |
 
 ## Generated Read Model
