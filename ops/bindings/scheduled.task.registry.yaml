@@ -68,7 +68,7 @@ source_imports:
     source_path: appliance:nas:dsm
     source_selector: read_only_discovered
     imported_count_at_birth: 0
-    discovered_count: 4
+    discovered_count: 3
     governance_level: read_only_discovered_evidence
     final_disposition: read_only_discovery_evidence_then_classify
     notes:
@@ -102,15 +102,22 @@ dsm_read_only_discovery:
   appliance_id: nas
   hostname: synology918
   discovered_at_utc: "2026-04-29T04:11:37Z"
+  refreshed_at_utc: "2026-04-29T04:22:36Z"
   mutation_boundary: read_only_inventory
   evidence_command: ssh_read_only_scheduler_inventory
+  cleanup_applied:
+    - task_id: dsm-root-3
+      action: deleted
+      command: /usr/syno/bin/synoschedtask --del id=3
+      reason: one_time_ssh_bootstrap_residue_after_identity_fix
+      deleted_at_utc: "2026-04-29T04:21:22Z"
+      proof: /usr/syno/etc/synoschedule.d/root/3.task absent after DSM-native delete
   evidence_summary:
     dsm_version: "7.1.1-42962 Update 9"
     synoschedtask_cli: absent_from_shell
     scheduler_files:
       - /usr/syno/etc/synoschedule.d/root/1.task
       - /usr/syno/etc/synoschedule.d/root/2.task
-      - /usr/syno/etc/synoschedule.d/root/3.task
       - /etc/cron.d/synosched.spacereclaim.task.task
   discovered_tasks:
     - task_id: dsm-root-1
@@ -129,18 +136,6 @@ dsm_read_only_discovery:
       schedule_caption: "Sat 16:10"
       classification: dsm_platform_maintenance
       live_runtime_change: none
-    - task_id: dsm-root-3
-      source: /usr/syno/etc/synoschedule.d/root/3.task
-      name: Task 3
-      type: once
-      state: enabled
-      schedule_caption: "2026-04-27 00:00"
-      classification: access_bootstrap_residue_review_required
-      live_runtime_change: none
-      note: >
-        One-time ronadmin SSH authorized_keys bootstrap script remains enabled
-        in DSM scheduler evidence. Classification only; no disable/delete action
-        was taken in this packet.
     - task_id: dsm-cron-spacereclaim
       source: /etc/cron.d/synosched.spacereclaim.task.task
       name: spacereclaim task
@@ -149,8 +144,7 @@ dsm_read_only_discovery:
       classification: dsm_platform_storage_maintenance
       live_runtime_change: none
   next_actions:
-    - classify Task 3 disposition before any DSM mutation
-    - decide whether DSM platform maintenance rows should be declared specimens or hidden as appliance-owned internals
+    - keep DSM platform maintenance rows hidden as DSM-owned appliance internals unless they create operator-visible drift
     - keep DSM mutation forbidden until explicit operator approval
 
 placement_authority_boundary:
@@ -237,8 +231,8 @@ subtraction_checklist:
     surface: appliance:nas:dsm
     current_state: read_only_discovered_evidence
     target_state: read_only_discovered_evidence_then_declared_entries
-    status: classification_pending_no_live_mutation
-    live_runtime_change: none
+    status: bootstrap_residue_deleted_platform_tasks_internal
+    live_runtime_change: deleted_one_time_ssh_bootstrap_task_3
 
 subtraction_targets_after_parity:
   - surface: ops/bindings/launchd.runtime.contract.yaml#required_labels
