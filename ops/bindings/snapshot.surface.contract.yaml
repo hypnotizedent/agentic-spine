@@ -2,11 +2,242 @@ status: authoritative
 owner: "@ronny"
 last_verified: 2026-04-16
 scope: governed-snapshot-surface-contract
-version: 2
+version: 3
 policy:
   runtime_root: runtime/domain-state/snapshots
   description_prefix: "Read-only by default:"
   promotion_suffix: "tracked promotion requires --apply."
+data_heartbeat:
+  status: authoritative
+  primitive_ref: kernel.HEARTBEAT
+  realization: data_surface
+  status_capability: data.heartbeat.status
+  operator_rule: "Status surfaces that display registered data as current truth must show the heartbeat caption."
+  model:
+    invariant_fields:
+      - liveness_timestamp
+      - proof_channel
+      - staleness_threshold
+    domain_specific_fields:
+      - surface_id
+      - surface_kind
+      - truth_owner
+      - surface_path
+      - refresh_binding
+      - consumer_policy
+      - subtraction_disposition
+  states:
+    fresh: "Structured proof is present and within threshold."
+    stale: "Structured proof is present but older than threshold."
+    missing: "Registered surface path is absent."
+    unknown: "Surface exists, but no structured proof can be read."
+    retired: "Surface is intentionally not current truth."
+  surfaces:
+    - surface_id: nas.synology918.storage_manifest
+      surface_kind: manifest
+      truth_owner: appliance.storage
+      appliance_id: nas
+      surface_path: ops/bindings/synology918.storage.manifest.yaml
+      authority_layer: appliance_projection
+      refresh_binding: appliance.health.status
+      refresh_mode: external_appliance_readback
+      consumer_policy: current_truth_only_when_fresh_else_stale_caption
+      subtraction_disposition: keep_as_specimen_then_project_from_appliance_data_surface
+      heartbeat:
+        liveness_timestamp: null
+        proof_channel:
+          type: none
+          ref: structured_timestamp_missing
+        staleness_threshold: 24h
+        severity_when_stale: fail
+        caption: "NAS storage manifest has no structured timestamp yet."
+    - surface_id: backup.posture.snapshot
+      surface_kind: snapshot
+      truth_owner: backup
+      surface_path: ops/bindings/domains/backup/backup.posture.snapshot.yaml
+      authority_layer: L2_projection
+      refresh_binding: backup.posture.snapshot.build
+      refresh_mode: scheduled
+      consumer_policy: current_truth_only_when_fresh
+      subtraction_disposition: keep_as_specimen_projection
+      heartbeat:
+        liveness_timestamp: generated_at_utc
+        proof_channel:
+          type: embedded_timestamp
+          ref: generated_at_utc
+        staleness_threshold: 1h
+        severity_when_stale: warn
+        caption: "Backup posture snapshot refreshed by generated_at_utc."
+    - surface_id: home.hardware.inventory
+      surface_kind: inventory
+      truth_owner: infra.home
+      surface_path: ops/bindings/home.hardware.inventory.yaml
+      authority_layer: L2_authority
+      refresh_binding: home.hardware.inventory.reconcile
+      refresh_mode: manual_until_refresh_owner_exists
+      consumer_policy: current_truth_only_when_fresh_else_historical_caption
+      subtraction_disposition: register_then_assign_refresh_owner
+      heartbeat:
+        liveness_timestamp: updated
+        proof_channel:
+          type: embedded_timestamp
+          ref: updated
+        staleness_threshold: 168h
+        severity_when_stale: warn
+        caption: "Home hardware inventory updated field."
+    - surface_id: hardware.inventory
+      surface_kind: inventory
+      truth_owner: infra.hardware
+      surface_path: ops/bindings/hardware.inventory.yaml
+      authority_layer: L2_authority
+      refresh_binding: hardware.inventory.audit
+      refresh_mode: manual_until_refresh_owner_exists
+      consumer_policy: current_truth_only_when_fresh_else_historical_caption
+      subtraction_disposition: register_then_assign_refresh_owner
+      heartbeat:
+        liveness_timestamp: updated_at
+        proof_channel:
+          type: embedded_timestamp
+          ref: updated_at
+        staleness_threshold: 720h
+        severity_when_stale: warn
+        caption: "Hardware inventory updated_at field."
+    - surface_id: services.health
+      surface_kind: probe_projection
+      truth_owner: L1_probe_registry
+      surface_path: ops/bindings/services.health.yaml
+      authority_layer: L1_projection
+      refresh_binding: services.health.status
+      refresh_mode: probe_readback
+      consumer_policy: current_health_truth_from_probe_results_not_file_age
+      subtraction_disposition: project_from_probe_registry_only
+      heartbeat:
+        liveness_timestamp: null
+        proof_channel:
+          type: cap_receipt
+          ref: services.health.status
+        staleness_threshold: 15m
+        severity_when_stale: warn
+        caption: "Probe freshness must come from services.health.status receipts."
+    - surface_id: home.device.registry
+      surface_kind: registry
+      truth_owner: network.home
+      surface_path: ops/bindings/home.device.registry.yaml
+      authority_layer: L2_authority
+      refresh_binding: network.home.device.registry.reconcile
+      refresh_mode: manual_until_observed_feed_reconcile_exists
+      consumer_policy: current_truth_only_when_fresh_else_historical_caption
+      subtraction_disposition: derive_from_observed_feed_after_reconcile_design
+      heartbeat:
+        liveness_timestamp: null
+        proof_channel:
+          type: none
+          ref: structured_timestamp_missing
+        staleness_threshold: 168h
+        severity_when_stale: warn
+        caption: "Home device registry has no structured timestamp yet."
+    - surface_id: network.unifi.home.clients.observed
+      surface_kind: observed_snapshot
+      truth_owner: network.home
+      surface_path: ops/bindings/network.unifi.home.clients.observed.yaml
+      authority_layer: L2_projection
+      refresh_binding: network.home.unifi.clients.snapshot
+      refresh_mode: scheduled_or_manual
+      consumer_policy: current_truth_only_when_fresh
+      subtraction_disposition: keep_and_wire_refresh_owner
+      heartbeat:
+        liveness_timestamp: generated_at
+        proof_channel:
+          type: embedded_timestamp
+          ref: generated_at
+        staleness_threshold: 24h
+        severity_when_stale: fail
+        caption: "Home UniFi observed clients generated_at field."
+    - surface_id: network.unifi.shop.clients.observed
+      surface_kind: observed_snapshot
+      truth_owner: network.shop
+      surface_path: ops/bindings/network.unifi.shop.clients.observed.yaml
+      authority_layer: L2_projection
+      refresh_binding: network.unifi.clients.snapshot
+      refresh_mode: scheduled_or_manual
+      consumer_policy: current_truth_only_when_fresh
+      subtraction_disposition: keep_and_wire_refresh_owner
+      heartbeat:
+        liveness_timestamp: generated_at
+        proof_channel:
+          type: embedded_timestamp
+          ref: generated_at
+        staleness_threshold: 24h
+        severity_when_stale: fail
+        caption: "Shop UniFi observed clients generated_at field."
+    - surface_id: media.capacity.snapshot
+      surface_kind: capacity_snapshot
+      truth_owner: media
+      surface_path: ops/bindings/domains/media/media.capacity.snapshot.yaml
+      authority_layer: L3_projection
+      refresh_binding: media.capacity.snapshot.build
+      refresh_mode: compatibility_projection
+      consumer_policy: stale_allowed_only_as_historical_readback
+      subtraction_disposition: resolve_dual_home_refresh_owner_before_mutation
+      heartbeat:
+        liveness_timestamp: generated_at_utc
+        proof_channel:
+          type: embedded_timestamp
+          ref: generated_at_utc
+        staleness_threshold: 24h
+        severity_when_stale: warn
+        caption: "Media capacity snapshot generated_at_utc field."
+    - surface_id: media.content.snapshot
+      surface_kind: content_snapshot
+      truth_owner: media
+      surface_path: ops/bindings/domains/media/media.content.snapshot.yaml
+      authority_layer: L3_projection
+      refresh_binding: media.content.snapshot.refresh
+      refresh_mode: retired_refresh_owner
+      consumer_policy: historical_readback_only
+      subtraction_disposition: retire_or_replace_after_media_authority_review
+      heartbeat:
+        liveness_timestamp: generated_at
+        proof_channel:
+          type: embedded_timestamp
+          ref: generated_at
+        staleness_threshold: 24h
+        severity_when_stale: warn
+        caption: "Media content snapshot generated_at field; refresh owner is retired."
+    - surface_id: internet.asset.registry
+      surface_kind: registry
+      truth_owner: infra.assets
+      surface_path: ops/bindings/internet.asset.registry.yaml
+      authority_layer: L2_authority
+      refresh_binding: internet.asset.registry.build
+      refresh_mode: manual_or_projection_build
+      consumer_policy: current_truth_only_when_fresh_else_historical_caption
+      subtraction_disposition: keep_and_wire_refresh_owner
+      heartbeat:
+        liveness_timestamp: updated_at
+        proof_channel:
+          type: embedded_timestamp
+          ref: updated_at
+        staleness_threshold: 168h
+        severity_when_stale: warn
+        caption: "Internet asset registry updated_at field."
+    - surface_id: shop.storage.map
+      surface_kind: storage_projection
+      truth_owner: infra.storage
+      surface_path: ops/bindings/shop.storage.map.yaml
+      authority_layer: L2_projection
+      refresh_binding: infra.shop.storage.authority.build
+      refresh_mode: manual_or_projection_build
+      consumer_policy: current_truth_only_when_fresh_else_historical_caption
+      subtraction_disposition: keep_as_shop_storage_projection
+      heartbeat:
+        liveness_timestamp: generated_at_utc
+        proof_channel:
+          type: embedded_timestamp
+          ref: generated_at_utc
+        staleness_threshold: 24h
+        severity_when_stale: warn
+        caption: "Shop storage map generated_at_utc field."
 governed_surfaces:
   - capability: backup.posture.snapshot.build
     tracked_binding: ops/bindings/domains/backup/backup.posture.snapshot.yaml

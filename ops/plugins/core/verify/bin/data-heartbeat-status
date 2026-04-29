@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+DEFAULT_ROOT = SCRIPT_PATH.parents[5]
+DEFAULT_CONTRACT = Path("ops/bindings/snapshot.surface.contract.yaml")
+
+
+def load_yaml(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def canonicalize_repoish(raw: str) -> Path:
+    expanded = Path(raw).expanduser()
+    if expanded.exists():
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(expanded), "rev-parse", "--show-toplevel"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return Path(result.stdout.strip()).resolve()
+        except subprocess.CalledProcessError:
+            return expanded.resolve()
+    return expanded
+
+
+def resolve_root(explicit_root: str | None) -> Path:
+    if explicit_root:
+        return canonicalize_repoish(explicit_root)
+    explicit_target = os.environ.get("SPINE_TARGET_REPO")
+    if explicit_target:
+        return canonicalize_repoish(explicit_target)
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path.cwd()), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return Path(result.stdout.strip()).resolve()
+    except subprocess.CalledProcessError:
+        return DEFAULT_ROOT
+
+
+def parse_duration(raw: Any) -> timedelta | None:
+    if raw is None:
+        return None
+    value = str(raw).strip().lower()
+    if not value:
+        return None
+    units = (
+        ("hours", 1),
+        ("hour", 1),
+        ("hrs", 1),
+        ("hr", 1),
+        ("h", 1),
+        ("days", 24),
+        ("day", 24),
+        ("d", 24),
+        ("minutes", 1 / 60),
+        ("minute", 1 / 60),
+        ("mins", 1 / 60),
+        ("min", 1 / 60),
+        ("m", 1 / 60),
+    )
+    for suffix, hour_multiplier in units:
+        if value.endswith(suffix):
+            number = value[: -len(suffix)].strip()
+            try:
+                return timedelta(hours=float(number) * hour_multiplier)
+            except ValueError:
+                return None
+    try:
+        return timedelta(hours=float(value))
+    except ValueError:
+        return None
+
+
+def coerce_datetime(raw: Any) -> datetime | None:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            return raw.replace(tzinfo=UTC)
+        return raw.astimezone(UTC)
+    if isinstance(raw, date):
+        return datetime(raw.year, raw.month, raw.day, tzinfo=UTC)
+
+    value = str(raw).strip()
+    if not value:
+        return None
+    if value.endswith("Z"):
+        value = f"{value[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            parsed_date = date.fromisoformat(value)
+        except ValueError:
+            return None
+        return datetime(parsed_date.year, parsed_date.month, parsed_date.day, tzinfo=UTC)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def get_path_value(doc: Any, dotted_ref: str | None) -> Any:
+    if not dotted_ref:
+        return None
+    cursor = doc
+    for part in dotted_ref.split("."):
+        if not isinstance(cursor, dict):
+            return None
+        cursor = cursor.get(part)
+    return cursor
+
+
+def age_caption(age: timedelta | None) -> str:
+    if age is None:
+        return "age unknown"
+    seconds = max(0, int(age.total_seconds()))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    if days:
+        return f"{days}d {hours}h old"
+    if hours:
+        return f"{hours}h {minutes}m old"
+    return f"{minutes}m old"
+
+
+def evaluate_surface(root: Path, surface: dict[str, Any], now: datetime) -> dict[str, Any]:
+    heartbeat = surface.get("heartbeat") if isinstance(surface.get("heartbeat"), dict) else {}
+    proof_channel = heartbeat.get("proof_channel") if isinstance(heartbeat.get("proof_channel"), dict) else {}
+    surface_path = str(surface.get("surface_path") or "").strip()
+    path = root / surface_path if surface_path else None
+    threshold = parse_duration(heartbeat.get("staleness_threshold"))
+    result: dict[str, Any] = {
+        "surface_id": surface.get("surface_id"),
+        "surface_kind": surface.get("surface_kind"),
+        "truth_owner": surface.get("truth_owner"),
+        "appliance_id": surface.get("appliance_id"),
+        "surface_path": surface_path,
+        "authority_layer": surface.get("authority_layer"),
+        "refresh_binding": surface.get("refresh_binding"),
+        "refresh_mode": surface.get("refresh_mode"),
+        "consumer_policy": surface.get("consumer_policy"),
+        "subtraction_disposition": surface.get("subtraction_disposition"),
+        "proof_channel": proof_channel,
+        "staleness_threshold": heartbeat.get("staleness_threshold"),
+        "severity_when_stale": heartbeat.get("severity_when_stale"),
+        "liveness_timestamp_ref": heartbeat.get("liveness_timestamp"),
+        "liveness_timestamp": None,
+        "age_seconds": None,
+        "state": "unknown",
+        "operator_caption": heartbeat.get("caption") or "",
+    }
+
+    if surface.get("refresh_mode") == "retired" or surface.get("consumer_policy") == "retired":
+        result["state"] = "retired"
+        result["operator_caption"] = f"{surface.get('surface_id')}: retired data surface."
+        return result
+
+    if not path or not path.exists():
+        result["state"] = "missing"
+        result["operator_caption"] = f"{surface.get('surface_id')}: missing surface at {surface_path}."
+        return result
+
+    proof_type = str(proof_channel.get("type") or "").strip()
+    ref = str(proof_channel.get("ref") or heartbeat.get("liveness_timestamp") or "").strip()
+    timestamp: datetime | None = None
+    timestamp_basis = ""
+
+    if proof_type == "embedded_timestamp":
+        doc = load_yaml(path)
+        timestamp = coerce_datetime(get_path_value(doc, ref))
+        timestamp_basis = ref
+    elif proof_type == "file_mtime":
+        timestamp = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+        timestamp_basis = "file_mtime"
+    else:
+        result["state"] = "unknown"
+        result["operator_caption"] = (
+            f"{surface.get('surface_id')}: proof channel {proof_type or 'none'} "
+            "is registered but not structurally readable by data.heartbeat.status yet."
+        )
+        return result
+
+    if timestamp is None:
+        result["state"] = "unknown"
+        result["operator_caption"] = (
+            f"{surface.get('surface_id')}: no readable timestamp at {timestamp_basis or ref or 'unknown ref'}."
+        )
+        return result
+
+    age = now - timestamp
+    result["liveness_timestamp"] = timestamp.isoformat().replace("+00:00", "Z")
+    result["age_seconds"] = int(age.total_seconds())
+
+    if threshold is None:
+        result["state"] = "unknown"
+        result["operator_caption"] = f"{surface.get('surface_id')}: {age_caption(age)}, threshold unknown."
+    elif age <= threshold:
+        result["state"] = "fresh"
+        result["operator_caption"] = f"{surface.get('surface_id')}: fresh, {age_caption(age)}."
+    else:
+        result["state"] = "stale"
+        result["operator_caption"] = f"{surface.get('surface_id')}: stale, {age_caption(age)}."
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Read canonical data-heartbeat status for registered data surfaces.")
+    parser.add_argument("--root", help="Override target repo root.")
+    parser.add_argument("--contract", default=str(DEFAULT_CONTRACT), help="Contract path relative to root.")
+    parser.add_argument("--id", dest="surface_id", help="Surface id to read.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON.")
+    parser.add_argument("--brief", action="store_true", help="Emit a one-line summary.")
+    parser.add_argument("--list", action="store_true", help="List registered surface ids.")
+    args = parser.parse_args()
+
+    root = resolve_root(args.root)
+    contract_path = root / args.contract
+    if not contract_path.exists():
+        print(f"data.heartbeat.status FAIL missing contract: {contract_path}", file=sys.stderr)
+        return 2
+
+    contract = load_yaml(contract_path)
+    data_heartbeat = contract.get("data_heartbeat") if isinstance(contract, dict) else {}
+    surfaces = data_heartbeat.get("surfaces") if isinstance(data_heartbeat, dict) else []
+    surfaces = [row for row in surfaces if isinstance(row, dict)]
+
+    if args.list:
+        for surface in surfaces:
+            print(surface.get("surface_id"))
+        return 0
+
+    if args.surface_id:
+        surfaces = [row for row in surfaces if row.get("surface_id") == args.surface_id]
+        if not surfaces:
+            print(f"data.heartbeat.status UNKNOWN surface_id={args.surface_id}")
+            return 1
+
+    now = datetime.now(UTC)
+    rows = [evaluate_surface(root, surface, now) for surface in surfaces]
+    counts: dict[str, int] = {}
+    for row in rows:
+        state = str(row.get("state") or "unknown")
+        counts[state] = counts.get(state, 0) + 1
+    payload = {
+        "status": "OK",
+        "root": str(root),
+        "contract": str(contract_path),
+        "primitive_ref": data_heartbeat.get("primitive_ref") if isinstance(data_heartbeat, dict) else None,
+        "realization": data_heartbeat.get("realization") if isinstance(data_heartbeat, dict) else None,
+        "generated_at_utc": now.isoformat().replace("+00:00", "Z"),
+        "counts": counts,
+        "surfaces": rows,
+    }
+
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    elif args.brief:
+        print(
+            "data.heartbeat.status "
+            f"surfaces={len(rows)} "
+            f"fresh={counts.get('fresh', 0)} "
+            f"stale={counts.get('stale', 0)} "
+            f"unknown={counts.get('unknown', 0)} "
+            f"missing={counts.get('missing', 0)} "
+            f"retired={counts.get('retired', 0)}"
+        )
+    else:
+        print("data.heartbeat.status")
+        print(f"root: {root}")
+        print(f"primitive_ref: {payload['primitive_ref']}")
+        print(f"realization: {payload['realization']}")
+        print(
+            "summary: "
+            f"{len(rows)} surfaces | "
+            f"{counts.get('fresh', 0)} fresh | "
+            f"{counts.get('stale', 0)} stale | "
+            f"{counts.get('unknown', 0)} unknown | "
+            f"{counts.get('missing', 0)} missing | "
+            f"{counts.get('retired', 0)} retired"
+        )
+        for row in rows:
+            print(f"- {row['surface_id']}: {row['state']} - {row['operator_caption']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
