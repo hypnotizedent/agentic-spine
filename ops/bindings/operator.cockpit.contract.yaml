@@ -14,10 +14,28 @@ authority:
   root_payload_capability: surface.operator.overview.payload
   canonical_generator: ops/plugins/core/surface/bin/operator-surface-regenerate
   canonical_server: ops/plugins/core/surface/bin/operator-surface-server
-  canonical_local_url: http://127.0.0.1:8900/
+  canonical_service_materializer: ops/plugins/core/surface/bin/operator-surface-systemd-materialize
+  canonical_service_sync: ops/plugins/core/surface/bin/operator-surface-systemd-sync
+  canonical_service_status: ops/plugins/core/surface/bin/operator-surface-status
+  canonical_operator_url: http://100.71.17.29:8900/
+  canonical_operator_url_env: OPERATOR_COCKPIT_URL
+  local_compatibility_url: http://127.0.0.1:8900/
   served_snapshot: $SPINE_STATE/operator-surface/index.html
   legacy_static_snapshot: $SPINE_STATE/domain-state/SPINE_COCKPIT.html
   legacy_static_status: compatibility_derivative
+  runtime_placement:
+    node_role: execution_host
+    candidate_host: ai-consolidation
+    service_manager: systemd_user
+    service_unit: com.ronny.operator-surface-server.service
+    regenerate_unit: com.ronny.operator-surface-regenerate.service
+    watchdog_unit: com.ronny.operator-surface-watchdog.service
+    watchdog_timer: com.ronny.operator-surface-watchdog.timer
+    proof_channel:
+      type: systemd_journal
+      host: ai-consolidation
+      unit: com.ronny.operator-surface-server.service
+      stale_threshold_seconds: 300
 
 surface_family:
   board:
@@ -68,6 +86,10 @@ rules:
     statement: Static file snapshots may exist for compatibility, but the canonical local operator URL is server-backed.
   - id: submit_readback_required
     statement: Submit must create operator-ingress readback that agents can see through existing OI/HI surfaces.
+  - id: operator_console_is_client
+    statement: The MacBook/operator_console opens the cockpit; it does not own a durable cockpit daemon or LaunchAgent.
+  - id: runtime_host_is_execution_host
+    statement: Durable cockpit server runtime belongs on execution_host unless a later steward decision records an explicit temporary exception.
 
 verification:
   routes:
@@ -79,5 +101,8 @@ verification:
   capabilities:
     - surface.operator.overview.payload
     - surface.mobile.dashboard.status
+    - surface.operator.status
+    - surface.operator.systemd.materialize
+    - surface.operator.systemd.sync
     - cockpit.generate
     - cockpit.open
