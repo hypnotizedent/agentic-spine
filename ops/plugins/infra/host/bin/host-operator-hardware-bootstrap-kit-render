@@ -28,6 +28,7 @@ Options:
   --tailscale-enrollment-mode <mode>   manual | auth_key (default: manual)
   --enrollment-policy <policy>         ssh_first_tailscale_later | tailscale_installed_login_manual | tailscale_auto_enroll_authkey
   --tailscale-authkey <key>            Tailscale auth key (required for tailscale_auto_enroll_authkey policy)
+  --tailscale-authkey-env <name>       Environment variable containing Tailscale auth key (receipt-safe)
   --bootstrap-method <method>          usb_autoinstall | pxe | iventoy | manual_console_install
   --boot-medium <medium>               usb | external_ssd | pxe | iventoy
   --console-path <path>                built_in_screen_keyboard | external_console
@@ -60,6 +61,7 @@ SSH_PUBLIC_KEY_REF="${HOME}/.ssh/id_ed25519.pub"
 TAILSCALE_MODE="manual"
 ENROLLMENT_POLICY=""
 TAILSCALE_AUTHKEY=""
+TAILSCALE_AUTHKEY_ENV=""
 BOOTSTRAP_METHOD=""
 BOOT_MEDIUM=""
 CONSOLE_PATH=""
@@ -87,6 +89,7 @@ while [[ $# -gt 0 ]]; do
         --tailscale-enrollment-mode) TAILSCALE_MODE="${2:-}"; shift 2 ;;
         --enrollment-policy) ENROLLMENT_POLICY="${2:-}"; shift 2 ;;
         --tailscale-authkey) TAILSCALE_AUTHKEY="${2:-}"; shift 2 ;;
+        --tailscale-authkey-env) TAILSCALE_AUTHKEY_ENV="${2:-}"; shift 2 ;;
         --bootstrap-method) BOOTSTRAP_METHOD="${2:-}"; shift 2 ;;
         --boot-medium) BOOT_MEDIUM="${2:-}"; shift 2 ;;
         --console-path) CONSOLE_PATH="${2:-}"; shift 2 ;;
@@ -145,7 +148,13 @@ if [[ -n "$ENROLLMENT_POLICY" ]]; then
 fi
 
 if [[ "$ENROLLMENT_POLICY" == "tailscale_auto_enroll_authkey" && -z "$TAILSCALE_AUTHKEY" ]]; then
-    fail "enrollment policy tailscale_auto_enroll_authkey requires --tailscale-authkey"
+    if [[ -n "$TAILSCALE_AUTHKEY_ENV" ]]; then
+        TAILSCALE_AUTHKEY="${!TAILSCALE_AUTHKEY_ENV:-}"
+    fi
+fi
+
+if [[ "$ENROLLMENT_POLICY" == "tailscale_auto_enroll_authkey" && -z "$TAILSCALE_AUTHKEY" ]]; then
+    fail "enrollment policy tailscale_auto_enroll_authkey requires --tailscale-authkey or --tailscale-authkey-env"
 fi
 
 if [[ -z "$BOOTSTRAP_METHOD" ]]; then

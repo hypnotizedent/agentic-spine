@@ -20,6 +20,7 @@ Options:
   --method <method>          Override method: usb_autoinstall | pxe | iventoy | manual_console_install
   --enrollment-policy <p>   Override enrollment policy from kit manifest
   --tailscale-authkey <key>  Tailscale auth key (for tailscale_auto_enroll_authkey policy)
+  --tailscale-authkey-env <name>  Environment variable containing Tailscale auth key (receipt-safe)
   --output-dir <dir>         Output directory for generated installer artifacts
   --json                     Machine-readable JSON output
 
@@ -34,6 +35,7 @@ KIT_PATH=""
 METHOD_OVERRIDE=""
 ENROLLMENT_POLICY_OVERRIDE=""
 TAILSCALE_AUTHKEY=""
+TAILSCALE_AUTHKEY_ENV=""
 OUTPUT_DIR=""
 JSON_MODE=false
 
@@ -43,6 +45,7 @@ while [[ $# -gt 0 ]]; do
         --method) METHOD_OVERRIDE="${2:-}"; shift 2 ;;
         --enrollment-policy) ENROLLMENT_POLICY_OVERRIDE="${2:-}"; shift 2 ;;
         --tailscale-authkey) TAILSCALE_AUTHKEY="${2:-}"; shift 2 ;;
+        --tailscale-authkey-env) TAILSCALE_AUTHKEY_ENV="${2:-}"; shift 2 ;;
         --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
         --json) JSON_MODE=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -86,7 +89,13 @@ esac
 # Checking kit_authkey_present alone is not sufficient — the renderer must have
 # the secret value to produce a payload that actually auto-enrolls.
 if [[ "$enrollment_policy" == "tailscale_auto_enroll_authkey" && -z "$TAILSCALE_AUTHKEY" ]]; then
-    fail "enrollment policy tailscale_auto_enroll_authkey requires --tailscale-authkey with the actual secret value at render time"
+    if [[ -n "$TAILSCALE_AUTHKEY_ENV" ]]; then
+        TAILSCALE_AUTHKEY="${!TAILSCALE_AUTHKEY_ENV:-}"
+    fi
+fi
+
+if [[ "$enrollment_policy" == "tailscale_auto_enroll_authkey" && -z "$TAILSCALE_AUTHKEY" ]]; then
+    fail "enrollment policy tailscale_auto_enroll_authkey requires --tailscale-authkey or --tailscale-authkey-env with the actual secret value at render time"
 fi
 
 # Adjust package baseline based on enrollment policy

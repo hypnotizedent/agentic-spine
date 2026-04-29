@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""Admit an operator-owned Linux host from a firstboot claim.
+
+This is the narrow write path between Stage 0 bootstrap evidence and canonical
+node admission readback. It updates only the three authority surfaces needed for
+node.admission.status to compose truth:
+
+- operator.hardware.inventory.yaml as ownership/candidate evidence
+- ssh.targets.yaml as access evidence
+- fleet.admission.classification.yaml as admission classification
+
+It does not assign a node role, materialize runtime, or promote workload duty.
+Dry-run by default.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap, CommentedSeq
+
+
+yaml = YAML()
+yaml.preserve_quotes = True
+yaml.width = 4096
+yaml.indent(mapping=2, sequence=4, offset=2)
+
+
+def represent_null(representer: Any, data: Any) -> Any:
+    return representer.represent_scalar("tag:yaml.org,2002:null", "null")
+
+
+yaml.representer.add_representer(type(None), represent_null)
+
+
+def spine_state() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_STATE",
+            str(Path.home() / "code" / ".runtime" / "spine" / "state"),
+        )
+    )
+
+
+def spine_code() -> Path:
+    return Path(
+        os.environ.get(
+            "SPINE_CODE",
+            str(Path.home() / "code" / "agentic-spine"),
+        )
+    )
+
+
+def load_yaml(path: Path) -> Any:
+    with path.open(encoding="utf-8") as f:
+        return yaml.load(f)
+
+
+def write_yaml(path: Path, data: Any) -> None:
+    yaml.explicit_start = path.read_text(encoding="utf-8").startswith("---")
+    with path.open("w", encoding="utf-8") as f:
+        yaml.dump(data, f)
+
+
+def now_day() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def now_ts() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def cseq(items: list[Any]) -> CommentedSeq:
+    seq = CommentedSeq(items)
+    seq.fa.set_flow_style()
+    return seq
+
+
+def cmap(items: dict[str, Any]) -> CommentedMap:
+    out = CommentedMap()
+    for key, value in items.items():
+        out[key] = value
+    return out
+
+
+def read_claim(path: Path) -> dict[str, Any]:
+    try:
+        with path.open(encoding="utf-8") as f:
+            claim = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"ERROR: invalid claim JSON {path}: {exc}") from exc
+    required = [
+        "device_id",
+        "target_platform_truth",
+        "hostname",
+        "realized_operator_user",
+        "ssh_proof_status",
+        "tailscale_ip",
+        "tailscale_identity",
+        "bootstrap_method",
+    ]
+    missing = [field for field in required if not claim.get(field)]
+    if missing:
+        raise SystemExit(f"ERROR: firstboot claim missing required field(s): {', '.join(missing)}")
+    if claim.get("target_platform_truth") != "linux":
+        raise SystemExit("ERROR: claim target_platform_truth must be linux")
+    if claim.get("ssh_proof_status") not in {"key_verified", "password_verified", "verified"}:
+        raise SystemExit("ERROR: claim ssh_proof_status is not verified")
+    if claim.get("tailscale_status") and claim.get("tailscale_status") != "enrolled":
+        raise SystemExit("ERROR: claim tailscale_status is not enrolled")
+    return claim
+
+
+def find_by(rows: list[Any], key: str, value: str) -> CommentedMap | None:
+    for row in rows:
+        if isinstance(row, dict) and row.get(key) == value:
+            return row
+    return None
+
+
+def set_if_changed(row: CommentedMap, key: str, value: Any, changes: list[dict[str, Any]], surface: str) -> None:
+    before = row.get(key)
+    if before != value:
+        row[key] = value
+        changes.append({"surface": surface, "field": key, "before": before, "after": value})
+
+
+def append_unique(seq: list[Any], value: Any, changes: list[dict[str, Any]], surface: str, field: str) -> None:
+    if value not in seq:
+        seq.append(value)
+        changes.append({"surface": surface, "field": field, "action": "append", "entry": value})
+
+
+def reconcile_inventory(data: CommentedMap, claim: dict[str, Any], args: argparse.Namespace, changes: list[dict[str, Any]]) -> None:
+    machines = data.setdefault("machines", CommentedSeq())
+    device_id = claim["device_id"]
+    machine = find_by(machines, "device_id", device_id)
+    if machine is None:
+        if not args.create_inventory:
+            raise SystemExit(
+                f"ERROR: {device_id} is missing from operator.hardware.inventory.yaml "
+                "(pass --create-inventory with --model and --site for first admission)"
+            )
+        if not args.model or not args.site:
+            raise SystemExit("ERROR: --create-inventory requires --model and --site")
+        machine = cmap(
+            {
+                "device_id": device_id,
+                "owner": "@ronny",
+                "platform": "linux",
+                "model": args.model,
+                "year": args.year,
+                "site": args.site,
+                "tailscale_identity": claim["tailscale_identity"],
+                "tailscale_ip": claim["tailscale_ip"],
+                "eligibility_state": "candidate",
+                "role_candidacy": cseq(["none"]),
+                "promotion_stage": "taxonomy",
+                "known_constraints": CommentedSeq(),
+                "evidence": CommentedSeq(),
+                "last_assessed": now_day(),
+                "notes": (
+                    f"Reprovisioned to {claim.get('target_distro', 'Ubuntu')} "
+                    f"{claim.get('target_distro_version', '')} and admitted from firstboot claim. "
+                    "Not role-promoted; node admission/readback decides current node truth."
+                ).replace("  ", " ").strip(),
+            }
+        )
+        machines.append(machine)
+        changes.append({"surface": "operator.hardware.inventory.yaml", "action": "create", "device_id": device_id})
+    else:
+        set_if_changed(machine, "platform", "linux", changes, "operator.hardware.inventory.yaml")
+        if args.model:
+            set_if_changed(machine, "model", args.model, changes, "operator.hardware.inventory.yaml")
+        if args.year is not None:
+            set_if_changed(machine, "year", args.year, changes, "operator.hardware.inventory.yaml")
+        if args.site:
+            set_if_changed(machine, "site", args.site, changes, "operator.hardware.inventory.yaml")
+        set_if_changed(machine, "tailscale_identity", claim["tailscale_identity"], changes, "operator.hardware.inventory.yaml")
+        set_if_changed(machine, "tailscale_ip", claim["tailscale_ip"], changes, "operator.hardware.inventory.yaml")
+        set_if_changed(machine, "eligibility_state", "candidate", changes, "operator.hardware.inventory.yaml")
+        if "role_candidacy" not in machine or not machine["role_candidacy"]:
+            set_if_changed(machine, "role_candidacy", cseq(["none"]), changes, "operator.hardware.inventory.yaml")
+        set_if_changed(machine, "last_assessed", now_day(), changes, "operator.hardware.inventory.yaml")
+
+    evidence = machine.setdefault("evidence", CommentedSeq())
+    append_unique(evidence, f"{now_day()}: admitted from firstboot claim {args.claim_file}", changes, "operator.hardware.inventory.yaml", "evidence")
+
+
+def reconcile_ssh(data: CommentedMap, claim: dict[str, Any], args: argparse.Namespace, changes: list[dict[str, Any]]) -> None:
+    targets = data.setdefault("ssh", CommentedMap()).setdefault("targets", CommentedSeq())
+    device_id = claim["device_id"]
+    target = find_by(targets, "id", device_id)
+    if target is None:
+        if not args.host:
+            raise SystemExit("ERROR: --host is required when ssh target does not exist")
+        tags = [tag.strip() for tag in args.tags.split(",") if tag.strip()]
+        if not tags:
+            tags = ["operator-hardware", "dell", "optiplex", "linux", "candidate"]
+        target = cmap(
+            {
+                "id": device_id,
+                "host": args.host,
+                "tailscale_ip": claim["tailscale_ip"],
+                "user": claim["realized_operator_user"],
+                "access_policy": args.access_policy,
+                "description": args.description
+                or (
+                    f"Operator-owned {args.model or device_id}. Firstboot claim proved "
+                    f"{now_day()}. Tailscale {claim['tailscale_ip']}. Not role-promoted."
+                ),
+                "tags": cseq(tags),
+            }
+        )
+        if args.site:
+            target["site"] = args.site
+        targets.append(target)
+        changes.append({"surface": "ssh.targets.yaml", "action": "create", "target_id": device_id})
+    else:
+        set_if_changed(target, "tailscale_ip", claim["tailscale_ip"], changes, "ssh.targets.yaml")
+        set_if_changed(target, "user", claim["realized_operator_user"], changes, "ssh.targets.yaml")
+        set_if_changed(target, "access_policy", args.access_policy, changes, "ssh.targets.yaml")
+        if args.host:
+            set_if_changed(target, "host", args.host, changes, "ssh.targets.yaml")
+        if args.site:
+            set_if_changed(target, "site", args.site, changes, "ssh.targets.yaml")
+
+
+def reconcile_admission(data: CommentedMap, claim: dict[str, Any], args: argparse.Namespace, changes: list[dict[str, Any]]) -> None:
+    fleet = data.setdefault("fleet", CommentedMap())
+    device_id = claim["device_id"]
+    record = fleet.get(device_id)
+    note = (
+        f"{claim.get('target_distro', 'Ubuntu')} {claim.get('target_distro_version', '')} "
+        f"Stage 0 claim proved on {now_day()} with SSH proof and Tailscale identity "
+        f"{claim['tailscale_identity']} at {claim['tailscale_ip']}. "
+        f"Bootstrap method: {claim['bootstrap_method']}. "
+        "Admitted as a claimed host only. No role promotion, runtime duty, or execution fleet membership is implied."
+    ).replace("  ", " ").strip()
+    proof = cmap(
+        {
+            "ssh_access_proved": True,
+            "bootstrap_completed": claim.get("package_baseline_status") or "partial",
+            "identity_enrolled": True,
+            "runtime_posture_verified": "partial",
+            "first_boot_claim": "proved",
+            "proof_ref": str(args.claim_file),
+        }
+    )
+    desired = cmap(
+        {
+            "machine_id": device_id,
+            "model": args.model or device_id,
+            "site": args.site or "unknown",
+            "first_touch_state": "FT-SSH",
+            "admission_status": "admitted",
+            "proof": proof,
+            "notes": note,
+        }
+    )
+    if record is None:
+        fleet[device_id] = desired
+        changes.append({"surface": "fleet.admission.classification.yaml", "action": "create", "machine_id": device_id})
+        return
+    for key, value in desired.items():
+        if record.get(key) != value:
+            record[key] = value
+            changes.append({"surface": "fleet.admission.classification.yaml", "field": key, "action": "set"})
+
+
+def resolve_workbench_ssh_projection_artifacts(spine_root: Path) -> tuple[Path, Path]:
+    contract_path = spine_root / "ops" / "bindings" / "workbench.ssh.attach.contract.yaml"
+    contract = load_yaml(contract_path) or {}
+    generator_rel = str(contract.get("generator_script") or "bin/generators/gen-workbench-ssh-config.sh").strip()
+    workbench_root_raw = str(contract.get("workbench_root") or "").strip()
+    if not workbench_root_raw:
+        raise RuntimeError(f"missing workbench_root in {contract_path}")
+    projection_rel = str(contract.get("workbench_ssh_config") or "dotfiles/ssh/config.d/tailscale.conf").strip()
+    return spine_root / generator_rel, Path(os.path.expanduser(workbench_root_raw)) / projection_rel
+
+
+def regenerate_workbench_ssh_projection(spine_root: Path) -> None:
+    generator_path, _projection_path = resolve_workbench_ssh_projection_artifacts(spine_root)
+    if not generator_path.is_file():
+        raise RuntimeError(f"missing generator script: {generator_path}")
+    proc = subprocess.run([str(generator_path), "--write"], cwd=str(spine_root), text=True, capture_output=True)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip() or f"exit={proc.returncode}"
+        raise RuntimeError(f"workbench ssh projection regenerate failed: {detail}")
+
+
+def write_receipt(args: argparse.Namespace, changes: list[dict[str, Any]], claim: dict[str, Any]) -> Path:
+    receipt_dir = spine_state() / "provision-receipts"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    ts = now_ts()
+    path = receipt_dir / f"operator-hardware-claim-admit-{claim['device_id']}-{ts}.yaml"
+    receipt = {
+        "capability": "provision.operator-hardware.claim.admit",
+        "device_id": claim["device_id"],
+        "timestamp": ts,
+        "mode": "execute",
+        "claim_file": str(args.claim_file),
+        "changes": changes,
+        "role_promotion": "none",
+    }
+    with path.open("w", encoding="utf-8") as f:
+        yaml.dump(receipt, f)
+    return path
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Admit operator hardware from a firstboot claim")
+    parser.add_argument("--claim-file", required=True, type=Path)
+    parser.add_argument("--host", help="LAN IP/hostname for ssh.targets.yaml when creating/updating access evidence")
+    parser.add_argument("--site", help="Site, such as shop or home")
+    parser.add_argument("--model", help="Hardware model for inventory/admission evidence")
+    parser.add_argument("--year", type=int, help="Hardware year for inventory evidence")
+    parser.add_argument("--description", help="SSH target description")
+    parser.add_argument("--tags", default="operator-hardware,dell,optiplex,linux,candidate")
+    parser.add_argument("--access-policy", default="tailscale_required")
+    parser.add_argument("--create-inventory", action="store_true", help="Create missing inventory evidence row")
+    parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    claim = read_claim(args.claim_file)
+    root = spine_code()
+    paths = {
+        "inventory": root / "ops/bindings/operator.hardware.inventory.yaml",
+        "ssh": root / "ops/bindings/ssh.targets.yaml",
+        "admission": root / "ops/bindings/fleet.admission.classification.yaml",
+    }
+    original = {name: path.read_text(encoding="utf-8") for name, path in paths.items()}
+    inventory = load_yaml(paths["inventory"])
+    ssh_targets = load_yaml(paths["ssh"])
+    admission = load_yaml(paths["admission"])
+    changes: list[dict[str, Any]] = []
+
+    reconcile_inventory(inventory, claim, args, changes)
+    reconcile_ssh(ssh_targets, claim, args, changes)
+    reconcile_admission(admission, claim, args, changes)
+
+    result = {
+        "capability": "provision.operator-hardware.claim.admit",
+        "device_id": claim["device_id"],
+        "mode": "execute" if args.execute else "dry-run",
+        "status": "no_changes" if not changes else ("planned" if not args.execute else "applied"),
+        "changes": changes,
+    }
+    if not args.execute:
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
+    try:
+        write_yaml(paths["inventory"], inventory)
+        write_yaml(paths["ssh"], ssh_targets)
+        write_yaml(paths["admission"], admission)
+        regenerate_workbench_ssh_projection(root)
+        receipt = write_receipt(args, changes, claim)
+    except Exception as exc:
+        for name, content in original.items():
+            paths[name].write_text(content, encoding="utf-8")
+        print(f"ERROR: admission transaction rolled back: {exc}", file=sys.stderr)
+        return 1
+
+    result["receipt"] = str(receipt)
+    result["projection_reconciled"] = True
+    print(json.dumps(result, indent=2, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

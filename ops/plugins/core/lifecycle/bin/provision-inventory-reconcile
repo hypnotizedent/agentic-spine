@@ -26,7 +26,20 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
+from ruamel.yaml import YAML
+
+
+yaml = YAML()
+yaml.preserve_quotes = True
+yaml.width = 4096
+yaml.indent(mapping=2, sequence=4, offset=2)
+
+
+def represent_null(representer, data):
+    return representer.represent_scalar("tag:yaml.org,2002:null", "null")
+
+
+yaml.representer.add_representer(type(None), represent_null)
 
 
 def spine_state() -> Path:
@@ -53,7 +66,7 @@ IMMUTABLE_FIELDS = {"device_id", "owner", "platform", "model", "year", "site", "
 
 def load_inventory(path: Path) -> dict:
     with open(path) as f:
-        return yaml.safe_load(f)
+        return yaml.load(f)
 
 
 def find_device(data: dict, device_id: str) -> dict | None:
@@ -155,15 +168,15 @@ def write_receipt(args, changes: list[dict], receipt_dir: Path) -> Path:
         "changes": changes,
     }
     with open(receipt_path, "w") as f:
-        yaml.dump(receipt, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(receipt, f)
     return receipt_path
 
 
 def dump_yaml_preserving(data: dict, path: Path) -> None:
-    """Write YAML back, preserving comments is not feasible with pyyaml,
-    but we keep the structure clean."""
+    """Write YAML back while preserving comments, ordering, and quote style."""
+    yaml.explicit_start = path.read_text(encoding="utf-8").startswith("---")
     with open(path, "w") as f:
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        yaml.dump(data, f)
 
 
 def main() -> int:

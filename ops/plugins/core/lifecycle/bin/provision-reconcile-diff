@@ -6,6 +6,7 @@ Usage:
   ./bin/ops cap run provision.reconcile.diff
   ./bin/ops cap run provision.reconcile.diff -- --json
   ./bin/ops cap run provision.reconcile.diff -- --device macbook-2016-pro
+  ./bin/ops cap run provision.reconcile.diff -- --device-id optiplex-9020-001
 """
 from __future__ import annotations
 
@@ -83,6 +84,24 @@ def find_golden_provisioning(state_dir: Path) -> dict[str, Path]:
     return golden
 
 
+def find_firstboot_claims(state_dir: Path) -> dict[str, Path]:
+    """Find governed firstboot claim artifacts by device_id."""
+    claims: dict[str, Path] = {}
+    root = state_dir / "domain-state" / "generated" / "operator_hardware" / "bootstrap"
+    if not root.is_dir():
+        return claims
+    for path in root.glob("*/firstboot-claim.*.json"):
+        try:
+            with path.open() as f:
+                payload = json.load(f)
+        except Exception:
+            continue
+        device_id = str(payload.get("device_id") or "").strip()
+        if device_id:
+            claims[device_id] = path
+    return claims
+
+
 def extract_assessment_frontmatter(path: Path) -> dict:
     """Extract YAML frontmatter from assessment markdown."""
     try:
@@ -115,6 +134,60 @@ def match_device_to_ssh(device_id: str, targets: list[dict]) -> dict | None:
         if t.get("id") == device_id:
             return t
     return None
+
+
+def match_device_to_admission(device_id: str, admission_data: dict | None) -> dict | None:
+    fleet = (admission_data or {}).get("fleet", {})
+    record = fleet.get(device_id)
+    return record if isinstance(record, dict) else None
+
+
+def compute_claim_delta(device_id: str, machine: dict, ssh_target: dict | None, admission: dict | None, claim_path: Path) -> list[dict]:
+    deltas = []
+    if machine.get("eligibility_state") != "candidate":
+        deltas.append({
+            "field": "eligibility_state",
+            "current": machine.get("eligibility_state"),
+            "issue": "Firstboot claim exists but inventory is not candidate",
+        })
+    if not machine.get("tailscale_identity") or not machine.get("tailscale_ip"):
+        deltas.append({
+            "field": "tailscale",
+            "current": "missing",
+            "issue": "Firstboot claim exists but inventory lacks Tailscale identity/IP",
+        })
+    evidence_text = "\n".join(str(item) for item in machine.get("evidence") or [])
+    if str(claim_path) not in evidence_text:
+        deltas.append({
+            "field": "evidence",
+            "current": "claim not referenced",
+            "issue": "Inventory does not reference the firstboot claim path",
+        })
+    if ssh_target is None:
+        deltas.append({
+            "field": "ssh_target",
+            "current": "MISSING",
+            "issue": f"Firstboot claim exists but no SSH target entry exists for {device_id}",
+        })
+    if not admission:
+        deltas.append({
+            "field": "admission",
+            "current": "MISSING",
+            "issue": f"Firstboot claim exists but no fleet admission row exists for {device_id}",
+        })
+    elif admission.get("admission_status") != "admitted":
+        deltas.append({
+            "field": "admission_status",
+            "current": admission.get("admission_status"),
+            "issue": "Fleet admission row exists but is not admitted",
+        })
+    elif ((admission.get("proof") or {}).get("proof_ref") != str(claim_path)):
+        deltas.append({
+            "field": "proof_ref",
+            "current": (admission.get("proof") or {}).get("proof_ref"),
+            "issue": "Fleet admission proof_ref does not point at firstboot claim",
+        })
+    return deltas
 
 
 def compute_inventory_delta(machine: dict, assessment_path: Path) -> list[dict]:
@@ -246,6 +319,7 @@ def main():
     parser = argparse.ArgumentParser(description="Read-only reconcile diff")
     parser.add_argument("--json", action="store_true", help="JSON output")
     parser.add_argument("--device", type=str, help="Filter to one device_id")
+    parser.add_argument("--device-id", type=str, help="Filter to one device_id")
     args, _ = parser.parse_known_args()
 
     code = spine_code()
@@ -254,9 +328,11 @@ def main():
     # Load authority surfaces
     inv_path = code / "ops" / "bindings" / "operator.hardware.inventory.yaml"
     ssh_path = code / "ops" / "bindings" / "ssh.targets.yaml"
+    admission_path = code / "ops" / "bindings" / "fleet.admission.classification.yaml"
 
     inv_data = load_yaml(inv_path)
     ssh_data = load_yaml(ssh_path)
+    admission_data = load_yaml(admission_path)
 
     if not inv_data:
         print("ERROR: cannot read operator.hardware.inventory.yaml", file=sys.stderr)
@@ -264,10 +340,12 @@ def main():
 
     machines = inv_data.get("machines", [])
     ssh_targets = (ssh_data or {}).get("ssh", {}).get("targets", [])
+    device_filter = args.device_id or args.device
 
     # Find assessment artifacts
     assessments = find_assessments(state)
     golden = find_golden_provisioning(state)
+    firstboot_claims = find_firstboot_claims(state)
 
     results = []
 
@@ -286,7 +364,7 @@ def main():
 
         device_id = machine["device_id"]
 
-        if args.device and args.device != device_id:
+        if device_filter and device_filter != device_id:
             continue
 
         ssh_target = match_device_to_ssh(device_id, ssh_targets)
@@ -321,10 +399,29 @@ def main():
         did = m.get("device_id", "")
         if did in assessed_device_ids:
             continue
-        if args.device and args.device != did:
+        if device_filter and device_filter != did:
             continue
         # Skip obvious placeholders
         if m.get("model") is None and m.get("tailscale_identity") is None:
+            continue
+        claim_path = firstboot_claims.get(did)
+        if claim_path:
+            ssh_target = match_device_to_ssh(did, ssh_targets)
+            admission = match_device_to_admission(did, admission_data)
+            claim_deltas = compute_claim_delta(did, m, ssh_target, admission, claim_path)
+            results.append({
+                "device_id": did,
+                "assessment": None,
+                "firstboot_claim": str(claim_path.name),
+                "firstboot_claim_path": str(claim_path),
+                "status": "clean" if not claim_deltas else "stale",
+                "eligibility_state": m.get("eligibility_state"),
+                "last_assessed": m.get("last_assessed"),
+                "has_ssh_target": ssh_target is not None,
+                "has_admission_record": admission is not None,
+                "claim_delta_count": len(claim_deltas),
+                "claim_deltas": claim_deltas,
+            })
             continue
         results.append({
             "device_id": did,
