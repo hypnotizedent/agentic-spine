@@ -130,6 +130,35 @@ def get_path_value(doc: Any, dotted_ref: str | None) -> Any:
     return cursor
 
 
+def latest_capability_receipt(root: Path, capability: str) -> tuple[datetime | None, str | None]:
+    evidence_root = root.parent / ".evidence/spine/sessions"
+    if not evidence_root.exists():
+        return None, "evidence_root_missing"
+    candidates = sorted(
+        evidence_root.glob(f"RCAP-*__{capability}__*/receipt.md"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return None, "capability_receipt_missing"
+
+    receipt = candidates[0]
+    text = receipt.read_text(encoding="utf-8", errors="replace")
+    if "| Exit Code | 0 |" not in text:
+        return None, f"latest_capability_receipt_not_successful:{receipt.parent.name}"
+
+    timestamp: datetime | None = None
+    for prefix in ("| End |", "| Generated |"):
+        for line in text.splitlines():
+            if line.startswith(prefix):
+                parts = [part.strip() for part in line.strip("|").split("|")]
+                if len(parts) >= 2:
+                    timestamp = coerce_datetime(parts[1])
+                    if timestamp is not None:
+                        return timestamp, str(receipt)
+    return None, f"capability_receipt_timestamp_missing:{receipt.parent.name}"
+
+
 def age_caption(age: timedelta | None) -> str:
     if age is None:
         return "age unknown"
@@ -193,6 +222,9 @@ def evaluate_surface(root: Path, surface: dict[str, Any], now: datetime) -> dict
     elif proof_type == "file_mtime":
         timestamp = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
         timestamp_basis = "file_mtime"
+    elif proof_type == "cap_receipt":
+        timestamp, receipt_ref = latest_capability_receipt(root, ref)
+        timestamp_basis = receipt_ref or ref
     else:
         result["state"] = "unknown"
         result["operator_caption"] = (
