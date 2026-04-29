@@ -25,7 +25,7 @@ migration_stage:
   phase: projection_parity_and_residue_demoting
   mutation_boundary: repo_control_plane_only
   live_scheduler_mutation_allowed: false
-  dsm_discovery_allowed: false
+  dsm_discovery_allowed: read_only_completed
   subtraction_allowed_in_this_slice: authority_metadata_only
   next_slice: generated_projection_or_domain_schedule_ref_demotions
 
@@ -66,12 +66,13 @@ source_imports:
   - import_id: dsm_scheduled_tasks
     plane: dsm_native
     source_path: appliance:nas:dsm
-    source_selector: discovery_pending
+    source_selector: read_only_discovered
     imported_count_at_birth: 0
-    governance_level: discovery_pending
+    discovered_count: 4
+    governance_level: read_only_discovered_evidence
     final_disposition: read_only_discovery_evidence_then_classify
     notes:
-      - DSM task list is not authored here because discovery has not been explicitly run in this packet.
+      - DSM read-only discovery was run after birth; discovered rows are evidence, not live mutation authority.
       - No DSM mutation is permitted by this registry.
 
 projection_plan:
@@ -94,8 +95,63 @@ projection_plan:
     current_state: mixed_policy_and_scheduler_declaration
     target_state: backup_policy_with_scheduled_task_refs
   dsm_tasks:
-    current_state: unknown
-    target_state: read_only_discovered_evidence_then_declared_entries
+    current_state: read_only_discovered_evidence
+    target_state: classified_declared_entries_without_live_mutation
+
+dsm_read_only_discovery:
+  appliance_id: nas
+  hostname: synology918
+  discovered_at_utc: "2026-04-29T04:11:37Z"
+  mutation_boundary: read_only_inventory
+  evidence_command: ssh_read_only_scheduler_inventory
+  evidence_summary:
+    dsm_version: "7.1.1-42962 Update 9"
+    synoschedtask_cli: absent_from_shell
+    scheduler_files:
+      - /usr/syno/etc/synoschedule.d/root/1.task
+      - /usr/syno/etc/synoschedule.d/root/2.task
+      - /usr/syno/etc/synoschedule.d/root/3.task
+      - /etc/cron.d/synosched.spacereclaim.task.task
+  discovered_tasks:
+    - task_id: dsm-root-1
+      source: /usr/syno/etc/synoschedule.d/root/1.task
+      name: DSM Auto Update
+      type: weekly
+      state: enabled
+      schedule_caption: "Mon 01:15"
+      classification: dsm_platform_maintenance
+      live_runtime_change: none
+    - task_id: dsm-root-2
+      source: /usr/syno/etc/synoschedule.d/root/2.task
+      name: Run security advisor
+      type: weekly
+      state: enabled
+      schedule_caption: "Sat 16:10"
+      classification: dsm_platform_maintenance
+      live_runtime_change: none
+    - task_id: dsm-root-3
+      source: /usr/syno/etc/synoschedule.d/root/3.task
+      name: Task 3
+      type: once
+      state: enabled
+      schedule_caption: "2026-04-27 00:00"
+      classification: access_bootstrap_residue_review_required
+      live_runtime_change: none
+      note: >
+        One-time ronadmin SSH authorized_keys bootstrap script remains enabled
+        in DSM scheduler evidence. Classification only; no disable/delete action
+        was taken in this packet.
+    - task_id: dsm-cron-spacereclaim
+      source: /etc/cron.d/synosched.spacereclaim.task.task
+      name: spacereclaim task
+      type: weeklygrid
+      state: dsm_managed
+      classification: dsm_platform_storage_maintenance
+      live_runtime_change: none
+  next_actions:
+    - classify Task 3 disposition before any DSM mutation
+    - decide whether DSM platform maintenance rows should be declared specimens or hidden as appliance-owned internals
+    - keep DSM mutation forbidden until explicit operator approval
 
 placement_authority_boundary:
   rule: Old L3 scheduled jobs are symptom evidence only; they cannot choose node placement.
@@ -179,9 +235,9 @@ subtraction_checklist:
     live_runtime_change: none
   - id: dsm_scheduled_tasks
     surface: appliance:nas:dsm
-    current_state: unknown
+    current_state: read_only_discovered_evidence
     target_state: read_only_discovered_evidence_then_declared_entries
-    status: pending_explicit_DSM_discovery_approval
+    status: classification_pending_no_live_mutation
     live_runtime_change: none
 
 subtraction_targets_after_parity:
@@ -199,6 +255,6 @@ subtraction_targets_after_parity:
 stop_conditions:
   - Do not add verify gates in the projection/residue demotion slice.
   - Do not mutate live launchd, systemd, cron, Proxmox, sanoid, or DSM runtime state.
-  - Do not run DSM discovery from this packet.
+  - Do not mutate DSM scheduled tasks from this packet.
   - Do not delete old schedule surfaces until generated projection parity is proven.
   - Do not use old L3 jobs as node placement drivers.

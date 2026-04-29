@@ -20,10 +20,14 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def count_source(import_row: dict[str, Any]) -> tuple[int, str]:
+def count_source(import_row: dict[str, Any], registry: dict[str, Any]) -> tuple[int, str]:
     source = str(import_row.get("source_path") or "")
     selector = str(import_row.get("source_selector") or "")
     if source.startswith("appliance:"):
+        if selector == "read_only_discovered":
+            discovery = registry.get("dsm_read_only_discovery") if isinstance(registry.get("dsm_read_only_discovery"), dict) else {}
+            rows = discovery.get("discovered_tasks") if isinstance(discovery.get("discovered_tasks"), list) else []
+            return len(rows), "read_only_discovered"
         return 0, "discovery_pending"
     path = ROOT / source
     if not path.exists():
@@ -144,9 +148,14 @@ def build_status() -> dict[str, Any]:
     for row in imports:
         if not isinstance(row, dict):
             continue
-        actual, state = count_source(row)
-        expected = int(row.get("imported_count_at_birth") or 0)
-        ok = actual == expected and state in {"ok", "discovery_pending"}
+        actual, state = count_source(row, registry)
+        expected_raw = (
+            row.get("discovered_count")
+            if row.get("discovered_count") is not None
+            else row.get("imported_count_at_birth")
+        )
+        expected = int(expected_raw or 0)
+        ok = actual == expected and state in {"ok", "discovery_pending", "read_only_discovered"}
         if not ok:
             failures.append(f"{row.get('import_id')}: expected={expected} actual={actual} state={state}")
         rows.append(
