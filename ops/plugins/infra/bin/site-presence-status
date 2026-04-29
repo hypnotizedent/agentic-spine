@@ -70,6 +70,17 @@ def key_set(*values: Any) -> set[str]:
     return keys
 
 
+def ip_like(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        ipaddress.ip_address(text)
+    except ValueError:
+        return ""
+    return text
+
+
 def freshness_from_surface(surface: dict[str, Any], field: str = "generated_at") -> dict[str, Any]:
     value = surface.get(field) or surface.get("updated_at") or surface.get("last_verified")
     return {
@@ -149,7 +160,10 @@ def make_row(
     subject_id = (admission or {}).get("node_id") or declared_id or observed_id or "unknown"
     declared_ip = (declared or {}).get("ip")
     observed_ip = (observed or {}).get("ip")
-    ip = observed_ip or declared_ip or ((admission or {}).get("access_path") or {}).get("lan_ip")
+    admission_access = (admission or {}).get("access_path") or {}
+    admission_identifiers = (admission or {}).get("durable_identifiers") or {}
+    admission_host_ip = ip_like(admission_access.get("host"))
+    ip = observed_ip or declared_ip or admission_access.get("lan_ip") or admission_host_ip
     if site == "unknown":
         site = ip_site(str(ip or ""), sites)
     site_row = next((row for row in sites if row.get("id") == site), {})
@@ -211,12 +225,16 @@ def make_row(
         "identity": {
             "declared_id": declared_id,
             "observed_id": observed_id,
-            "hostname": (observed or {}).get("hostname") or (declared or {}).get("name"),
-            "aliases": ((admission or {}).get("durable_identifiers") or {}).get("aliases", []),
+            "hostname": (observed or {}).get("hostname")
+            or (declared or {}).get("name")
+            or admission_identifiers.get("hostname")
+            or subject_id,
+            "aliases": admission_identifiers.get("aliases", []),
             "mac": (observed or {}).get("mac") or (declared or {}).get("mac"),
             "ip": ip,
             "tailscale_ip": (declared or {}).get("tailscale_ip")
-            or ((admission or {}).get("access_path") or {}).get("tailscale_ip"),
+            or admission_access.get("tailscale_ip")
+            or admission_identifiers.get("tailscale_ip"),
         },
         "presence_state": presence_state,
         "match_state": match_state,
