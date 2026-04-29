@@ -27,29 +27,60 @@ def load_yaml(path):
         return yaml.safe_load(f) or {}
 
 
-def cf_get(path):
+def cf_request(path, mode):
     base = os.environ.get("CLOUDFLARE_API_BASE", "https://api.cloudflare.com/client/v4").rstrip("/")
-    token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
-    account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
-    if not token:
-        return None, {"status": "blocked", "reason": "missing_CLOUDFLARE_API_TOKEN"}
     url = path
     if path.startswith("/"):
         url = base + path
+    headers = {"Content-Type": "application/json"}
+    if mode == "token":
+        token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+        if not token:
+            return None, {"status": "blocked", "reason": "missing_CLOUDFLARE_API_TOKEN", "mode": mode}
+        headers["Authorization"] = f"Bearer {token}"
+    elif mode == "read_all_token":
+        token = os.environ.get("CLOUDFLARE_TOKEN_READ_ALL_RESOURCES", "")
+        if not token:
+            return None, {"status": "blocked", "reason": "missing_CLOUDFLARE_TOKEN_READ_ALL_RESOURCES", "mode": mode}
+        headers["Authorization"] = f"Bearer {token}"
+    elif mode == "global":
+        email = os.environ.get("CLOUDFLARE_AUTH_EMAIL", "")
+        key = os.environ.get("CLOUDFLARE_GLOBAL_API_KEY", "")
+        if not email or not key:
+            return None, {"status": "blocked", "reason": "missing_global_key_auth", "mode": mode}
+        headers["X-Auth-Email"] = email
+        headers["X-Auth-Key"] = key
+    else:
+        return None, {"status": "blocked", "reason": "unknown_auth_mode", "mode": mode}
     req = urllib.request.Request(
         url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=25) as resp:
             return json.load(resp), None
     except urllib.error.HTTPError as exc:
-        return None, {"status": "blocked", "http_status": exc.code}
+        return None, {"status": "blocked", "http_status": exc.code, "mode": mode}
     except Exception as exc:
-        return None, {"status": "blocked", "reason": type(exc).__name__}
+        return None, {"status": "blocked", "reason": type(exc).__name__, "mode": mode}
+
+
+def cf_get(path, allow_global_fallback=True):
+    errors = []
+    data, err = cf_request(path, "token")
+    if not err:
+        return data, None, "token"
+    errors.append(err)
+    if allow_global_fallback and err.get("http_status") in (401, 403):
+        data, read_all_err = cf_request(path, "read_all_token")
+        if not read_all_err:
+            return data, None, "read_all_token"
+        errors.append(read_all_err)
+        data, global_err = cf_request(path, "global")
+        if not global_err:
+            return data, None, "global"
+        errors.append(global_err)
+    return None, {"status": "blocked", "attempts": errors}, ""
 
 
 def tunnel_ingress(binding):
@@ -63,7 +94,7 @@ def tunnel_ingress(binding):
     if not account or not tunnel_id:
         return {}, {"status": "blocked", "reason": "missing_account_or_tunnel_id"}
 
-    data, err = cf_get(f"/accounts/{account}/cfd_tunnel/{tunnel_id}/configurations")
+    data, err, auth_mode = cf_get(f"/accounts/{account}/cfd_tunnel/{tunnel_id}/configurations")
     if err:
         return {}, err
     if not data or not data.get("success"):
@@ -84,19 +115,20 @@ def tunnel_ingress(binding):
             host = host.strip()
             if host:
                 rows[host] = service
-    return rows, None
+    return rows, {"status": "ok", "auth_mode": auth_mode}
 
 
 def access_apps(binding):
     account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
     by_domain = {}
     api_status = {"status": "not_checked"}
+    policies_by_domain = {}
     if account:
-        data, err = cf_get(f"/accounts/{account}/access/apps")
+        data, err, auth_mode = cf_get(f"/accounts/{account}/access/apps")
         if err:
             api_status = err
         elif data and data.get("success"):
-            api_status = {"status": "ok"}
+            api_status = {"status": "ok", "auth_mode": auth_mode}
             for app in data.get("result") or []:
                 domain = app.get("domain")
                 domains = domain if isinstance(domain, list) else [domain]
@@ -107,6 +139,11 @@ def access_apps(binding):
                             "id": app.get("id", ""),
                             "source": "cloudflare_api",
                         }
+                        policies, policy_err, policy_auth = cf_get(f"/accounts/{account}/access/apps/{app.get('id')}/policies")
+                        if policies and policies.get("success"):
+                            policies_by_domain[item] = summarize_policies(policies.get("result") or [], policy_auth)
+                        elif policy_err:
+                            policies_by_domain[item] = {"status": "blocked", "error": policy_err}
         else:
             api_status = {"status": "blocked", "reason": "cloudflare_success_false"}
 
@@ -123,7 +160,34 @@ def access_apps(binding):
             "live_policy_proof": app.get("live_policy_proof", ""),
             "source": "cloudflare.inventory.yaml",
         })
-    return by_domain, api_status
+    return by_domain, policies_by_domain, api_status
+
+
+def summarize_rule(rule):
+    if not isinstance(rule, dict):
+        return "unknown"
+    parts = []
+    for key, value in sorted(rule.items()):
+        if isinstance(value, dict):
+            parts.append(f"{key}:{','.join(sorted(value.keys()))}")
+        elif isinstance(value, list):
+            parts.append(f"{key}:list[{len(value)}]")
+        else:
+            parts.append(key)
+    return "+".join(parts) if parts else "unknown"
+
+
+def summarize_policies(policies, auth_mode):
+    rows = []
+    for policy in policies:
+        rows.append({
+            "name": policy.get("name", ""),
+            "decision": policy.get("decision", ""),
+            "include": [summarize_rule(rule) for rule in (policy.get("include") or [])],
+            "require": [summarize_rule(rule) for rule in (policy.get("require") or [])],
+            "exclude": [summarize_rule(rule) for rule in (policy.get("exclude") or [])],
+        })
+    return {"status": "ok", "auth_mode": auth_mode, "policies": rows}
 
 
 def ingress_metadata():
@@ -165,8 +229,8 @@ def build_rows():
     cockpit = load_yaml(COCKPIT_CONTRACT)
     bridge = load_yaml(BRIDGE_ENDPOINTS)
     ingress = ingress_metadata()
-    tunnel, tunnel_err = tunnel_ingress(binding)
-    access, access_api_status = access_apps(binding)
+    tunnel, tunnel_status = tunnel_ingress(binding)
+    access, access_policies, access_api_status = access_apps(binding)
 
     hosts = set(tunnel) | set(ingress) | set(access)
     public_cockpit = ((cockpit.get("authority") or {}).get("public_operator_url") or "").replace("https://", "").replace("http://", "").strip("/")
@@ -211,8 +275,9 @@ def build_rows():
         if not auth_mode:
             auth_mode = "unknown_or_service_local"
 
-        if access_api_status.get("status") == "ok" and app.get("source") == "cloudflare_api":
-            auth_policy_proof = "app_present_policy_detail_not_expanded"
+        policy_summary = access_policies.get(host, {})
+        if policy_summary.get("status") == "ok":
+            auth_policy_proof = f"policy_proved_{policy_summary.get('auth_mode', 'unknown')}"
         elif app.get("live_policy_proof"):
             auth_policy_proof = app["live_policy_proof"]
         elif app:
@@ -241,6 +306,7 @@ def build_rows():
             "actor_class": actor_class,
             "auth_mode": auth_mode,
             "auth_policy_proof": auth_policy_proof,
+            "access_policy_summary": policy_summary,
             "owner": owner,
             "lifecycle": lifecycle,
             "notes": "; ".join(notes),
@@ -253,7 +319,7 @@ def build_rows():
         "boundary": "publication/access adapter; not L1 kernel",
         "cloudflare_access_fit": "Cloudflare Access is the edge identity/auth policy layer for public URLs and machine service-token access. It belongs in L2 because L3 services depend on it, but it must not define the spine kernel.",
         "access_policy_api": access_api_status,
-        "tunnel_api": tunnel_err or {"status": "ok"},
+        "tunnel_api": tunnel_status or {"status": "blocked"},
         "rows": rows,
     }
 
