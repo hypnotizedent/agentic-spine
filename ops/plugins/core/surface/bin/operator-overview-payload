@@ -1148,6 +1148,49 @@ def collect_proposals() -> dict:
 
 
 def _collect_backup_posture_snapshot() -> dict:
+    estate = _run_json([
+        str(REPO / "ops" / "plugins" / "core" / "bin" / "backup-estate-readback-status"),
+        "--json",
+    ])
+    if estate.get("capability") == "backup.estate.readback.status" and estate.get("status") in {"ok", "partial", "degraded"}:
+        counts = estate.get("counts", {}) if isinstance(estate.get("counts"), dict) else {}
+        degraded_rows = []
+        subjects = estate.get("subjects", []) if isinstance(estate.get("subjects"), list) else []
+        for subject in subjects:
+            if not isinstance(subject, dict):
+                continue
+            status = str(subject.get("status", "") or "")
+            if status in {"ok", "residue"}:
+                continue
+            degraded_rows.append(
+                f"{subject.get('vmid', '')} {subject.get('name', '')} "
+                f"{subject.get('host', '')} {status} {subject.get('reason', '')}"
+            )
+        return {
+            "available": True,
+            "source": "backup.estate.readback.status",
+            "generated_at_utc": "",
+            "file_mtime_utc": "",
+            "backup_status_run_state": str(estate.get("status", "unknown") or "unknown"),
+            "enabled_targets_total": int(counts.get("subjects_total", 0) or 0),
+            "ok_total": int(counts.get("ok_total", 0) or 0),
+            "degraded_total": int(counts.get("degraded_total", 0) or 0),
+            "context_blocked_total": int(counts.get("gap_total", 0) or 0),
+            "restore_coverage_missing_total": int(counts.get("gap_total", 0) or 0),
+            "lane_over_budget_total": 0,
+            "lane_collect_errors_total": 0,
+            "residue_total": int(counts.get("residue_total", 0) or 0),
+            "summary_line": (
+                f"subjects={counts.get('subjects_total', 0)} "
+                f"running={counts.get('running_total', 0)} "
+                f"ok={counts.get('ok_total', 0)} "
+                f"degraded={counts.get('degraded_total', 0)} "
+                f"gaps={counts.get('gap_total', 0)} "
+                f"residue={counts.get('residue_total', 0)}"
+            ),
+            "degraded_rows": degraded_rows[:8],
+        }
+
     candidates = [
         STATE_ROOT / "domain-state" / "snapshots" / "backup.posture.snapshot.yaml",
         REPO / "ops" / "bindings" / "domains" / "backup" / "backup.posture.snapshot.yaml",
