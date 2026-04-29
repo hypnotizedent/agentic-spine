@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[4]
+NODE_RECOVERY_STATUS = ROOT / "ops/plugins/infra/bin/node-recovery-status"
+
+
+def fail(message: str, code: int = 1) -> None:
+    print(f"FAIL: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def run_json(args: list[str]) -> Any:
+    proc = subprocess.run(args, text=True, capture_output=True)
+    if proc.returncode != 0:
+        fail(proc.stderr.strip() or proc.stdout.strip() or f"command failed: {' '.join(args)}")
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        fail(f"invalid JSON from {' '.join(args)}: {exc}")
+
+
+def run_lines(args: list[str]) -> list[str]:
+    proc = subprocess.run(args, text=True, capture_output=True)
+    if proc.returncode != 0:
+        fail(proc.stderr.strip() or proc.stdout.strip() or f"command failed: {' '.join(args)}")
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def first_present(*values: Any, default: Any = None) -> Any:
+    for value in values:
+        if value not in (None, "", [], {}):
+            return value
+    return default
+
+
+def as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def source_ref(path: str, role: str) -> dict[str, str]:
+    return {"path": path, "role": role}
+
+
+def compact_dict(data: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in data.items() if value not in (None, "", [], {})}
+
+
+def durable_identifiers(recovery: dict[str, Any]) -> dict[str, Any]:
+    sources = recovery.get("source_surfaces") or {}
+    hardware = sources.get("hardware_machine") or {}
+    operator = sources.get("operator_hardware") or {}
+    appliance = sources.get("appliance_identity") or {}
+    ssh = sources.get("ssh_target") or {}
+
+    return compact_dict(
+        {
+            "machine_id": first_present(hardware.get("machine_id"), operator.get("device_id")),
+            "device_id": operator.get("device_id"),
+            "appliance_id": appliance.get("appliance_id"),
+            "hostname": first_present(hardware.get("hostname"), appliance.get("hostname"), ssh.get("id")),
+            "model": first_present(hardware.get("model"), operator.get("model"), appliance.get("model")),
+            "service_tag": hardware.get("service_tag"),
+            "platform": operator.get("platform"),
+            "os": first_present(hardware.get("os"), appliance.get("appliance_os")),
+            "lan_ip": first_present(hardware.get("lan_ip"), ssh.get("lan_ip")),
+            "tailscale_ip": first_present(
+                hardware.get("tailscale_ip"),
+                operator.get("tailscale_ip"),
+                (appliance.get("network_identities") or {}).get("tailscale_ip"),
+                ssh.get("tailscale_ip"),
+            ),
+            "ssh_target_id": ssh.get("id"),
+        }
+    )
+
+
+def source_surfaces_for_row(recovery: dict[str, Any]) -> list[dict[str, str]]:
+    sources = recovery.get("source_surfaces") or {}
+    refs: list[dict[str, str]] = []
+    if sources.get("admission_record"):
+        refs.append(source_ref("ops/bindings/fleet.admission.classification.yaml", "admission_state"))
+    if sources.get("hardware_machine"):
+        refs.append(source_ref("ops/bindings/hardware.inventory.yaml", "infra_identity_evidence"))
+    if sources.get("operator_hardware"):
+        refs.append(source_ref("ops/bindings/operator.hardware.inventory.yaml", "operator_hardware_candidacy_evidence"))
+    if sources.get("appliance_identity"):
+        refs.append(source_ref("ops/bindings/appliance.identity.contract.yaml", "appliance_identity_evidence"))
+    if sources.get("ssh_target"):
+        refs.append(source_ref("ops/bindings/ssh.targets.yaml", "access_path_evidence"))
+    if sources.get("placement_host") or sources.get("required_vm_targets"):
+        refs.append(source_ref("ops/bindings/infra.placement.policy.yaml", "placement_truth"))
+    refs.append(source_ref("node.recovery.status", "recovery_evidence_not_promotion_authority"))
+    return refs
+
+
+def subtraction_caption(recovery: dict[str, Any]) -> str:
+    kind = recovery.get("node_kind")
+    sources = recovery.get("source_surfaces") or {}
+    if sources.get("operator_hardware"):
+        return (
+            "operator.hardware.inventory identifies/candidates the subject; "
+            "node admission readback decides current node truth."
+        )
+    if sources.get("hardware_machine"):
+        return (
+            "hardware.inventory identifies infrastructure hardware; "
+            "home.hardware.inventory and internet.asset.registry are not node admission authority."
+        )
+    if sources.get("appliance_identity"):
+        return (
+            "appliance identity supplies read-only appliance evidence; "
+            "appliance presence is not a general node promotion."
+        )
+    if kind == "ssh_target_only":
+        return "ssh.targets supplies access evidence only; reachability is not node admission."
+    return "legacy inventory evidence is subordinate to canonical node admission readback."
+
+
+def lifecycle_state(recovery: dict[str, Any]) -> str:
+    object_truth = recovery.get("object_truth") or {}
+    estate_truth = recovery.get("estate_truth") or {}
+    admission_state = object_truth.get("admission_state")
+    placement_status = estate_truth.get("placement_status")
+    if admission_state == "admitted" and placement_status in {"runtime_present", "admitted_runtime_host"}:
+        return "admitted_runtime_present"
+    if admission_state == "admitted":
+        return "admitted_not_activated"
+    if admission_state and admission_state != "unclassified":
+        return str(admission_state)
+    return "candidate_or_access_evidence_only"
+
+
+def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
+    sources = recovery.get("source_surfaces") or {}
+    operator = sources.get("operator_hardware") or {}
+    appliance = sources.get("appliance_identity") or {}
+    admission = sources.get("admission_record") or {}
+    object_truth = recovery.get("object_truth") or {}
+    estate_truth = recovery.get("estate_truth") or {}
+    control = recovery.get("control_plane_truth") or {}
+    primary_access = recovery.get("primary_access") or {}
+
+    role_candidacy = as_list(operator.get("role_candidacy"))
+    if not role_candidacy:
+        role_candidacy = as_list(appliance.get("class"))
+    if not role_candidacy:
+        role_candidacy = ["none"]
+
+    promotion_stage = first_present(
+        operator.get("promotion_stage"),
+        appliance.get("promotion_stage"),
+        admission.get("promotion_stage"),
+        default="taxonomy",
+    )
+
+    proof_channels = []
+    for primitive in recovery.get("status_primitives") or []:
+        if isinstance(primitive, dict):
+            proof_channels.append(compact_dict({"capability": primitive.get("capability"), "mode": primitive.get("mode")}))
+    proof_channels.append({"capability": "node.recovery.status", "mode": "recovery_evidence"})
+
+    freshness_state = "fresh"
+    if control.get("reachable") in {"unknown", None, ""}:
+        freshness_state = "unknown"
+    elif control.get("reachable") == "declared_path_only":
+        freshness_state = "declared"
+
+    return {
+        "node_id": recovery.get("node_id"),
+        "object_kind": recovery.get("node_kind"),
+        "site": recovery.get("node_site"),
+        "lifecycle_state": lifecycle_state(recovery),
+        "durable_identifiers": durable_identifiers(recovery),
+        "role_candidacy": role_candidacy,
+        "promotion_stage": promotion_stage,
+        "eligibility_state": first_present(operator.get("eligibility_state"), default="not_applicable"),
+        "admission_state": object_truth.get("admission_state"),
+        "first_touch_state": object_truth.get("first_touch_state"),
+        "access_path": compact_dict(
+            {
+                "host": primary_access.get("host"),
+                "access_method": primary_access.get("access_method"),
+                "access_policy": primary_access.get("access_policy"),
+                "lan_ip": primary_access.get("lan_ip"),
+                "tailscale_ip": primary_access.get("tailscale_ip"),
+            }
+        ),
+        "placement_truth": estate_truth,
+        "runtime_obligations": {
+            "assignment_required": estate_truth.get("assignment_required"),
+            "required_vm_targets": estate_truth.get("required_vm_targets") or [],
+            "note": estate_truth.get("note"),
+        },
+        "recovery_planes": recovery.get("recovery_planes") or {},
+        "proof_channels": proof_channels,
+        "freshness": {
+            "state": freshness_state,
+            "basis": "read_only_composition_from_governed_surfaces",
+        },
+        "source_surfaces": source_surfaces_for_row(recovery),
+        "subtraction_caption": subtraction_caption(recovery),
+    }
+
+
+def all_node_ids() -> list[str]:
+    return run_lines([str(NODE_RECOVERY_STATUS), "--list"])
+
+
+def recovery_for(node_id: str) -> dict[str, Any]:
+    return run_json([str(NODE_RECOVERY_STATUS), "--node", node_id, "--json"])
+
+
+def build_rows(node_id: str | None) -> list[dict[str, Any]]:
+    ids = [node_id] if node_id else all_node_ids()
+    rows: list[dict[str, Any]] = []
+    for item in ids:
+        rows.append(row_from_recovery(recovery_for(item)))
+    return rows
+
+
+def emit_human(rows: list[dict[str, Any]]) -> None:
+    print("============================================================")
+    print("  node.admission.status")
+    print("============================================================")
+    print("")
+    print("Canonical node admission readback. Inventory identifies subjects;")
+    print("admission/promotion proof decides node truth.")
+    print("")
+    for row in rows:
+        print(f"- {row['node_id']}")
+        print(f"  kind:       {row['object_kind']}")
+        print(f"  site:       {row['site']}")
+        print(f"  lifecycle:  {row['lifecycle_state']}")
+        print(f"  admission:  {row['admission_state']} / {row['first_touch_state']}")
+        print(f"  candidacy:  {', '.join(str(v) for v in row['role_candidacy'])}")
+        print(f"  promotion:  {row['promotion_stage']}")
+        print(f"  access:     {(row.get('access_path') or {}).get('host', 'none')}")
+        print(f"  recovery:   {json.dumps(row.get('recovery_planes') or {}, sort_keys=True)}")
+        print(f"  subtracts:  {row['subtraction_caption']}")
+        print("")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Canonical node admission readback. Read-only; does not promote nodes."
+    )
+    parser.add_argument("--node", help="Limit readback to one governed subject")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    parser.add_argument("--list", action="store_true", help="List governed subject IDs")
+    args = parser.parse_args()
+
+    if args.list:
+        for node_id in all_node_ids():
+            print(node_id)
+        return
+
+    rows = build_rows(args.node)
+    payload = {
+        "capability": "node.admission.status",
+        "status": "ok",
+        "canonical_authority": "node.admission.status",
+        "recovery_evidence": "node.recovery.status",
+        "subtracted_peer_authority": [
+            "ops/bindings/home.hardware.inventory.yaml",
+            "ops/bindings/internet.asset.registry.yaml",
+        ],
+        "rows": rows,
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        emit_human(rows)
+
+
+if __name__ == "__main__":
+    main()

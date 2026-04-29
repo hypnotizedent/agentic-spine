@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+NODE_ADMISSION = ROOT / "ops/plugins/infra/bin/node-admission-status"
+
+PATHS = {
+    "topology_sites": ROOT / "ops/bindings/topology.sites.yaml",
+    "ssh_targets": ROOT / "ops/bindings/ssh.targets.yaml",
+    "home_device": ROOT / "ops/bindings/home.device.registry.yaml",
+    "unifi_home": ROOT / "ops/bindings/network.unifi.home.clients.observed.yaml",
+    "unifi_shop": ROOT / "ops/bindings/network.unifi.shop.clients.observed.yaml",
+}
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def run_node_admission() -> dict[str, Any]:
+    proc = subprocess.run([str(NODE_ADMISSION), "--json"], text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise SystemExit(proc.stderr.strip() or proc.stdout.strip() or "node.admission.status failed")
+    return json.loads(proc.stdout)
+
+
+def norm(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def ip_site(ip: str, sites: list[dict[str, Any]]) -> str:
+    if not ip:
+        return "unknown"
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return "unknown"
+    for site in sites:
+        cidr = site.get("lan_cidr")
+        if not cidr:
+            continue
+        try:
+            if addr in ipaddress.ip_network(str(cidr), strict=False):
+                return str(site.get("id") or "unknown")
+        except ValueError:
+            continue
+    return "unknown"
+
+
+def key_set(*values: Any) -> set[str]:
+    keys: set[str] = set()
+    for value in values:
+        if isinstance(value, list):
+            keys.update(norm(item) for item in value if norm(item))
+        elif norm(value):
+            keys.add(norm(value))
+    return keys
+
+
+def freshness_from_surface(surface: dict[str, Any], field: str = "generated_at") -> dict[str, Any]:
+    value = surface.get(field) or surface.get("updated_at") or surface.get("last_verified")
+    return {
+        "state": "stale",
+        "basis": "legacy_surface_timestamp",
+        "max_age": str((surface.get("freshness_policy") or {}).get("max_age_hours", "")) + "h"
+        if (surface.get("freshness_policy") or {}).get("max_age_hours")
+        else None,
+        "last_observed_at": value,
+    }
+
+
+def subject_kind(admission: dict[str, Any] | None, declared: dict[str, Any] | None, observed: dict[str, Any] | None) -> str:
+    if admission:
+        return "admitted_node" if admission.get("admission_state") == "admitted" else "candidate_node"
+    if declared:
+        category = declared.get("category")
+        if category == "infrastructure":
+            return "declared_device"
+        if category:
+            return f"{category}_device"
+        return "declared_device"
+    if observed:
+        return "observed_device"
+    return "unknown"
+
+
+def build_indexes(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        identifiers = row.get("durable_identifiers") or {}
+        access = row.get("access_path") or {}
+        keys = key_set(
+            row.get("node_id"),
+            identifiers.get("machine_id"),
+            identifiers.get("device_id"),
+            identifiers.get("appliance_id"),
+            identifiers.get("hostname"),
+            identifiers.get("ssh_target_id"),
+            identifiers.get("lan_ip"),
+            identifiers.get("tailscale_ip"),
+            access.get("host"),
+            access.get("lan_ip"),
+            access.get("tailscale_ip"),
+        )
+        for key in keys:
+            index.setdefault(key, row)
+    return index
+
+
+def find_match(item: dict[str, Any], index: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    keys = key_set(
+        item.get("id"),
+        item.get("name"),
+        item.get("hostname"),
+        item.get("ip"),
+        item.get("tailscale_ip"),
+        item.get("mac"),
+    )
+    for key in keys:
+        if key in index:
+            return index[key]
+    return None
+
+
+def make_row(
+    site: str,
+    sites: list[dict[str, Any]],
+    admission: dict[str, Any] | None,
+    declared: dict[str, Any] | None,
+    observed: dict[str, Any] | None,
+    source_roles: list[dict[str, str]],
+    freshness: dict[str, Any],
+) -> dict[str, Any]:
+    declared_id = (declared or {}).get("id")
+    observed_id = (observed or {}).get("id")
+    subject_id = (admission or {}).get("node_id") or declared_id or observed_id or "unknown"
+    declared_ip = (declared or {}).get("ip")
+    observed_ip = (observed or {}).get("ip")
+    ip = observed_ip or declared_ip or ((admission or {}).get("access_path") or {}).get("lan_ip")
+    if site == "unknown":
+        site = ip_site(str(ip or ""), sites)
+    site_row = next((row for row in sites if row.get("id") == site), {})
+    declared_present = declared is not None or admission is not None
+    observed_present = observed is not None
+    if admission and observed_present:
+        presence_state = "present"
+        match_state = "admitted_node_matched"
+    elif declared_present and observed_present:
+        presence_state = "present"
+        match_state = "declared_and_observed"
+    elif declared_present:
+        presence_state = "declared_only"
+        match_state = "declared_only"
+    elif observed_present:
+        presence_state = "observed_only"
+        match_state = "observed_only"
+    else:
+        presence_state = "unknown"
+        match_state = "unknown"
+
+    lifecycle = "active"
+    if (declared or {}).get("status") in {"decommissioned", "retired"}:
+        lifecycle = str((declared or {}).get("status"))
+        presence_state = lifecycle
+    elif not observed_present and declared_present:
+        lifecycle = "declared"
+    elif observed_present and not declared_present:
+        lifecycle = "observed_only"
+
+    proof_channels = []
+    for role in source_roles:
+        channel = role.get("role", "evidence")
+        proof_channels.append(
+            {
+                "channel": channel,
+                "capability": role.get("capability"),
+                "surface": role.get("path"),
+                "proof_ref": role.get("proof_ref"),
+                "observed_at": role.get("observed_at"),
+                "freshness_state": freshness.get("state", "unknown"),
+            }
+        )
+
+    return {
+        "presence_id": f"site:{site}:{subject_id}",
+        "site": site,
+        "network_scope": {
+            "scope_id": f"{site}-lan" if site != "unknown" else "unknown",
+            "cidr": site_row.get("lan_cidr"),
+            "attachment_kind": "lan" if ip_site(str(ip or ""), sites) == site else "declared",
+        },
+        "subject": {
+            "subject_id": subject_id,
+            "subject_kind": subject_kind(admission, declared, observed),
+            "node_admission_state": (admission or {}).get("admission_state", "not_node"),
+            "lifecycle_state": lifecycle,
+        },
+        "identity": {
+            "declared_id": declared_id,
+            "observed_id": observed_id,
+            "hostname": (observed or {}).get("hostname") or (declared or {}).get("name"),
+            "aliases": ((admission or {}).get("durable_identifiers") or {}).get("aliases", []),
+            "mac": (observed or {}).get("mac") or (declared or {}).get("mac"),
+            "ip": ip,
+            "tailscale_ip": (declared or {}).get("tailscale_ip")
+            or ((admission or {}).get("access_path") or {}).get("tailscale_ip"),
+        },
+        "presence_state": presence_state,
+        "match_state": match_state,
+        "proof_channels": proof_channels,
+        "freshness": freshness,
+        "source_surfaces": [{"path": role.get("path"), "role": role.get("role")} for role in source_roles],
+        "actions_allowed": {
+            "may_inform_operator": True,
+            "may_create_node": False,
+            "may_mutate_network": False,
+            "may_refresh_legacy_snapshot": False,
+        },
+        "subtraction_caption": (
+            "network.unifi.*.clients.observed and home.device.registry are evidence/projections only; "
+            "current site presence truth comes from site.presence.status."
+        ),
+    }
+
+
+def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
+    topology = load_yaml(PATHS["topology_sites"])
+    sites = [row for row in topology.get("sites", []) if isinstance(row, dict)]
+    home_device = load_yaml(PATHS["home_device"])
+    unifi_home = load_yaml(PATHS["unifi_home"])
+    unifi_shop = load_yaml(PATHS["unifi_shop"])
+    node_admission = run_node_admission()
+    admission_rows = [row for row in node_admission.get("rows", []) if isinstance(row, dict)]
+    admission_index = build_indexes(admission_rows)
+
+    declared_rows = [row for row in home_device.get("devices", []) if isinstance(row, dict)]
+    observed_sources = [
+        (unifi_home, PATHS["unifi_home"], "network.home.unifi.clients.snapshot"),
+        (unifi_shop, PATHS["unifi_shop"], "network.unifi.clients.snapshot"),
+    ]
+    rows: list[dict[str, Any]] = []
+    used_observed: set[tuple[str, str]] = set()
+
+    for declared in declared_rows:
+        observed_match = None
+        observed_path = None
+        observed_cap = None
+        for surface, path, capability in observed_sources:
+            for observed in surface.get("devices", []) or []:
+                if not isinstance(observed, dict):
+                    continue
+                if key_set(declared.get("id"), declared.get("ip"), declared.get("mac")) & key_set(
+                    observed.get("id"), observed.get("ip"), observed.get("mac")
+                ):
+                    observed_match = observed
+                    observed_path = path
+                    observed_cap = capability
+                    used_observed.add((str(path), str(observed.get("id"))))
+                    break
+            if observed_match:
+                break
+        admission = find_match(declared, admission_index)
+        site = str(declared.get("site") or (admission or {}).get("site") or "home")
+        if site_filter and site != site_filter:
+            continue
+        source_roles = [
+            {"path": str(PATHS["home_device"].relative_to(ROOT)), "role": "declared_device_intent", "proof_ref": "updated_at"},
+        ]
+        freshness = {
+            "state": "declared_only",
+            "basis": "declared_surface",
+            "max_age": "168h",
+            "last_observed_at": home_device.get("updated_at"),
+        }
+        if observed_match and observed_path:
+            surface = unifi_home if observed_path == PATHS["unifi_home"] else unifi_shop
+            source_roles.append(
+                {
+                    "path": str(observed_path.relative_to(ROOT)),
+                    "role": "unifi_observed_snapshot",
+                    "capability": observed_cap,
+                    "proof_ref": "generated_at",
+                    "observed_at": surface.get("generated_at"),
+                }
+            )
+            freshness = freshness_from_surface(surface)
+        if admission:
+            source_roles.append({"path": "node.admission.status", "role": "node_admission", "proof_ref": "capability"})
+        rows.append(make_row(site, sites, admission, declared, observed_match, source_roles, freshness))
+
+    for surface, path, capability in observed_sources:
+        for observed in surface.get("devices", []) or []:
+            if not isinstance(observed, dict):
+                continue
+            marker = (str(path), str(observed.get("id")))
+            if marker in used_observed:
+                continue
+            admission = find_match(observed, admission_index)
+            site = str(observed.get("site") or (admission or {}).get("site") or "unknown")
+            if site_filter and site != site_filter:
+                continue
+            rows.append(
+                make_row(
+                    site,
+                    sites,
+                    admission,
+                    None,
+                    observed,
+                    [
+                        {
+                            "path": str(path.relative_to(ROOT)),
+                            "role": "unifi_observed_snapshot",
+                            "capability": capability,
+                            "proof_ref": "generated_at",
+                            "observed_at": surface.get("generated_at"),
+                        }
+                    ],
+                    freshness_from_surface(surface),
+                )
+            )
+
+    for admission in admission_rows:
+        subject_id = admission.get("node_id")
+        if any(row["subject"]["subject_id"] == subject_id for row in rows):
+            continue
+        site = str(admission.get("site") or "unknown")
+        if site_filter and site != site_filter:
+            continue
+        rows.append(
+            make_row(
+                site,
+                sites,
+                admission,
+                None,
+                None,
+                [{"path": "node.admission.status", "role": "node_admission", "proof_ref": "capability"}],
+                {"state": "declared_only", "basis": "node_admission", "max_age": None, "last_observed_at": None},
+            )
+        )
+
+    return rows
+
+
+def summarize(rows: list[dict[str, Any]]) -> dict[str, int]:
+    states = ["present", "declared_only", "observed_only", "missing", "stale", "conflict"]
+    summary = {"sites": len({row.get("site") for row in rows}), **{state: 0 for state in states}}
+    for row in rows:
+        state = row.get("presence_state")
+        if state in summary:
+            summary[state] += 1
+    return summary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Canonical site presence readback")
+    parser.add_argument("--site", help="Limit to a site id")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args()
+
+    rows = build_rows(args.site)
+    payload = {
+        "canonical_authority": "site.presence.status",
+        "capability": "site.presence.status",
+        "status": "ok",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "rows": rows,
+        "summary": summarize(rows),
+        "subtracted_peer_authority": [
+            "ops/bindings/network.unifi.home.clients.observed.yaml",
+            "ops/bindings/network.unifi.shop.clients.observed.yaml",
+            "ops/bindings/home.device.registry.yaml",
+        ],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print("site.presence.status")
+    print(f"rows: {len(rows)}")
+    print(f"summary: {json.dumps(payload['summary'], sort_keys=True)}")
+    for row in rows:
+        print(
+            f"- {row['presence_id']} {row['presence_state']} "
+            f"{row['subject']['subject_kind']} {row['identity'].get('ip') or ''}"
+        )
+
+
+if __name__ == "__main__":
+    main()

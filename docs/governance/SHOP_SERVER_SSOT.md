@@ -15,7 +15,7 @@ This is the spine-facing summary for the shop rack and shop-managed endpoints.
 | Plane | Canonical Surface |
 |-------|-------------------|
 | Substrate | `ops/bindings/hardware.inventory.yaml` |
-| Storage | `ops/bindings/shop.storage.map.yaml` + `ops/bindings/shop.media.pressure.authority.yaml` |
+| Storage/Payload Custody | `payload.custody.status` |
 | Runtime | `ops/bindings/vm.lifecycle.yaml` + `docs/governance/STACK_REGISTRY.yaml` |
 | Network | `ops/bindings/ssh.targets.yaml` + `docs/governance/DEVICE_IDENTITY_SSOT.md` naming/topology conventions |
 | Ingress | `ops/bindings/shop.ingress.map.yaml` + `ops/bindings/domain.routing.registry.yaml` |
@@ -36,8 +36,9 @@ Output: `$SPINE_STATE/domain-state/infra.shop.readmodel.md` (runtime only, not c
 
 ## Generated Projections
 
-- Storage authority projection: `ops/bindings/shop.storage.map.yaml`
-- Warm-lane pressure authority: `ops/bindings/shop.media.pressure.authority.yaml`
+- Payload/storage custody readback: `payload.custody.status`
+- Storage compatibility projection: `ops/bindings/shop.storage.map.yaml`
+- Warm-lane pressure compatibility evidence: `ops/bindings/shop.media.pressure.authority.yaml`
 - Ingress authority projection: `ops/bindings/shop.ingress.map.yaml`
 - Rack scorecard: `docs/reference/generated/SHOP_RACK_SCORECARD.md`
 - Estate closure scorecard: `docs/reference/generated/ESTATE_BORINGNESS_SCORECARD.md`

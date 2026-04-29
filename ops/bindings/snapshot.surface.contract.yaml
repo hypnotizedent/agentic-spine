@@ -72,11 +72,11 @@ data_heartbeat:
       surface_kind: inventory
       truth_owner: infra.home
       surface_path: ops/bindings/home.hardware.inventory.yaml
-      authority_layer: L2_authority
+      authority_layer: compatibility_evidence
       refresh_binding: home.hardware.inventory.reconcile
-      refresh_mode: manual_until_refresh_owner_exists
-      consumer_policy: current_truth_only_when_fresh_else_historical_caption
-      subtraction_disposition: register_then_assign_refresh_owner
+      refresh_mode: retired_as_node_admission_authority
+      consumer_policy: evidence_only; current node admission truth comes from node.admission.status
+      subtraction_disposition: demoted_by_node_admission_readback
       heartbeat:
         liveness_timestamp: updated
         proof_channel:
@@ -84,7 +84,24 @@ data_heartbeat:
           ref: updated
         staleness_threshold: 168h
         severity_when_stale: warn
-        caption: "Home hardware inventory updated field."
+        caption: "Home hardware inventory is compatibility evidence only; node admission truth comes from node.admission.status."
+    - surface_id: node.admission.readback
+      surface_kind: estate_readback
+      truth_owner: node_admission
+      surface_path: ""
+      authority_layer: L2_readmodel
+      refresh_binding: node.admission.status
+      refresh_mode: readback_capability
+      consumer_policy: current_node_admission_truth_from_first_class_readback
+      subtraction_disposition: replaces_home_hardware_inventory_and_internet_asset_registry_as_node_authority
+      heartbeat:
+        liveness_timestamp: null
+        proof_channel:
+          type: cap_receipt
+          ref: node.admission.status
+        staleness_threshold: 30m
+        severity_when_stale: warn
+        caption: "Node admission readback uses the latest successful governed capability receipt."
     - surface_id: hardware.inventory
       surface_kind: inventory
       truth_owner: infra.hardware
@@ -123,11 +140,11 @@ data_heartbeat:
       surface_kind: registry
       truth_owner: network.home
       surface_path: ops/bindings/home.device.registry.yaml
-      authority_layer: L2_authority
+      authority_layer: compatibility_evidence
       refresh_binding: network.home.device.registry.reconcile
-      refresh_mode: manual_until_observed_feed_reconcile_exists
-      consumer_policy: current_truth_only_when_fresh_else_historical_caption
-      subtraction_disposition: derive_from_observed_feed_after_reconcile_design
+      refresh_mode: retired_as_site_presence_authority
+      consumer_policy: evidence_only; current site presence truth comes from site.presence.status
+      subtraction_disposition: demoted_by_site_presence_readback
       heartbeat:
         liveness_timestamp: updated_at
         proof_channel:
@@ -135,16 +152,33 @@ data_heartbeat:
           ref: updated_at
         staleness_threshold: 168h
         severity_when_stale: warn
-        caption: "Home device registry updated_at field."
+        caption: "Home device registry is compatibility evidence only; site presence truth comes from site.presence.status."
+    - surface_id: site.presence.readback
+      surface_kind: estate_readback
+      truth_owner: site_presence
+      surface_path: ""
+      authority_layer: L2_readmodel
+      refresh_binding: site.presence.status
+      refresh_mode: readback_capability
+      consumer_policy: current_site_presence_truth_from_first_class_readback
+      subtraction_disposition: replaces_unifi_observed_snapshots_and_home_device_registry_as_presence_authority
+      heartbeat:
+        liveness_timestamp: null
+        proof_channel:
+          type: cap_receipt
+          ref: site.presence.status
+        staleness_threshold: 30m
+        severity_when_stale: warn
+        caption: "Site presence readback uses the latest successful governed capability receipt."
     - surface_id: network.unifi.home.clients.observed
       surface_kind: observed_snapshot
       truth_owner: network.home
       surface_path: ops/bindings/network.unifi.home.clients.observed.yaml
-      authority_layer: L2_projection
+      authority_layer: compatibility_projection
       refresh_binding: network.home.unifi.clients.snapshot
-      refresh_mode: scheduled_or_manual
-      consumer_policy: current_truth_only_when_fresh
-      subtraction_disposition: keep_and_wire_refresh_owner
+      refresh_mode: evidence_projection_only
+      consumer_policy: evidence_only; current site presence truth comes from site.presence.status
+      subtraction_disposition: demoted_by_site_presence_readback
       heartbeat:
         liveness_timestamp: generated_at
         proof_channel:
@@ -152,16 +186,16 @@ data_heartbeat:
           ref: generated_at
         staleness_threshold: 24h
         severity_when_stale: fail
-        caption: "Home UniFi observed clients generated_at field."
+        caption: "Home UniFi observed clients are compatibility evidence only; site presence truth comes from site.presence.status."
     - surface_id: network.unifi.shop.clients.observed
       surface_kind: observed_snapshot
       truth_owner: network.shop
       surface_path: ops/bindings/network.unifi.shop.clients.observed.yaml
-      authority_layer: L2_projection
+      authority_layer: compatibility_projection
       refresh_binding: network.unifi.clients.snapshot
-      refresh_mode: scheduled_or_manual
-      consumer_policy: current_truth_only_when_fresh
-      subtraction_disposition: keep_and_wire_refresh_owner
+      refresh_mode: evidence_projection_only
+      consumer_policy: evidence_only; current site presence truth comes from site.presence.status
+      subtraction_disposition: demoted_by_site_presence_readback
       heartbeat:
         liveness_timestamp: generated_at
         proof_channel:
@@ -169,16 +203,16 @@ data_heartbeat:
           ref: generated_at
         staleness_threshold: 24h
         severity_when_stale: fail
-        caption: "Shop UniFi observed clients generated_at field."
+        caption: "Shop UniFi observed clients are compatibility evidence only; site presence truth comes from site.presence.status."
     - surface_id: media.capacity.snapshot
       surface_kind: capacity_snapshot
       truth_owner: media
       surface_path: ops/bindings/domains/media/media.capacity.snapshot.yaml
-      authority_layer: L3_projection
+      authority_layer: compatibility_projection
       refresh_binding: media.capacity.snapshot.build
-      refresh_mode: compatibility_projection
-      consumer_policy: stale_allowed_only_as_historical_readback
-      subtraction_disposition: resolve_dual_home_refresh_owner_before_mutation
+      refresh_mode: advisory_evidence_only
+      consumer_policy: evidence_only; capacity may inform payload.custody.status but cannot decide custody, placement, recovery, or deletion
+      subtraction_disposition: demoted_by_payload.custody.status
       heartbeat:
         liveness_timestamp: generated_at_utc
         proof_channel:
@@ -186,16 +220,16 @@ data_heartbeat:
           ref: generated_at_utc
         staleness_threshold: 24h
         severity_when_stale: warn
-        caption: "Media capacity snapshot generated_at_utc field."
+        caption: "Media capacity snapshot is advisory evidence only; payload/storage custody truth comes from payload.custody.status."
     - surface_id: media.content.snapshot
       surface_kind: content_snapshot
       truth_owner: media
       surface_path: ops/bindings/domains/media/media.content.snapshot.yaml
-      authority_layer: L3_projection
+      authority_layer: compatibility_projection
       refresh_binding: media.content.snapshot.refresh
-      refresh_mode: retired_refresh_owner
-      consumer_policy: historical_readback_only
-      subtraction_disposition: retire_or_replace_after_media_authority_review
+      refresh_mode: advisory_evidence_only
+      consumer_policy: evidence_only; content may inform payload.custody.status but cannot decide custody, placement, recovery, or deletion
+      subtraction_disposition: demoted_by_payload.custody.status
       heartbeat:
         liveness_timestamp: generated_at
         proof_channel:
@@ -203,16 +237,16 @@ data_heartbeat:
           ref: generated_at
         staleness_threshold: 24h
         severity_when_stale: warn
-        caption: "Media content snapshot generated_at field; refresh owner is retired."
+        caption: "Media content snapshot is advisory evidence only; payload/storage custody truth comes from payload.custody.status."
     - surface_id: internet.asset.registry
       surface_kind: registry
       truth_owner: infra.assets
       surface_path: ops/bindings/internet.asset.registry.yaml
-      authority_layer: L2_authority
+      authority_layer: compatibility_evidence
       refresh_binding: internet.asset.registry.build
-      refresh_mode: manual_or_projection_build
-      consumer_policy: current_truth_only_when_fresh_else_historical_caption
-      subtraction_disposition: keep_and_wire_refresh_owner
+      refresh_mode: projection_or_procurement_evidence_only
+      consumer_policy: evidence_only; current node admission truth comes from node.admission.status
+      subtraction_disposition: demoted_by_node_admission_readback
       heartbeat:
         liveness_timestamp: updated_at
         proof_channel:
@@ -220,16 +254,16 @@ data_heartbeat:
           ref: updated_at
         staleness_threshold: 168h
         severity_when_stale: warn
-        caption: "Internet asset registry updated_at field."
+        caption: "Internet asset registry is compatibility/procurement evidence only; node admission truth comes from node.admission.status."
     - surface_id: shop.storage.map
       surface_kind: storage_projection
       truth_owner: infra.storage
       surface_path: ops/bindings/shop.storage.map.yaml
-      authority_layer: L2_projection
+      authority_layer: compatibility_projection
       refresh_binding: infra.shop.storage.authority.build
-      refresh_mode: manual_or_projection_build
-      consumer_policy: current_truth_only_when_fresh_else_historical_caption
-      subtraction_disposition: keep_as_shop_storage_projection
+      refresh_mode: generated_compatibility_projection
+      consumer_policy: evidence_only; current payload/storage custody truth comes from payload.custody.status
+      subtraction_disposition: demoted_by_payload.custody.status
       heartbeat:
         liveness_timestamp: generated_at_utc
         proof_channel:
@@ -237,7 +271,41 @@ data_heartbeat:
           ref: generated_at_utc
         staleness_threshold: 24h
         severity_when_stale: warn
-        caption: "Shop storage map generated_at_utc field."
+        caption: "Shop storage map is compatibility evidence only; payload/storage custody truth comes from payload.custody.status."
+    - surface_id: home.storage.map
+      surface_kind: storage_projection
+      truth_owner: infra.storage
+      surface_path: ops/bindings/home.storage.map.yaml
+      authority_layer: compatibility_projection
+      refresh_binding: infra.estate.boringness.build
+      refresh_mode: generated_compatibility_projection
+      consumer_policy: evidence_only; current payload/storage custody truth comes from payload.custody.status
+      subtraction_disposition: demoted_by_payload.custody.status
+      heartbeat:
+        liveness_timestamp: generated_at_utc
+        proof_channel:
+          type: embedded_timestamp
+          ref: generated_at_utc
+        staleness_threshold: 24h
+        severity_when_stale: warn
+        caption: "Home storage map is compatibility evidence only; payload/storage custody truth comes from payload.custody.status."
+    - surface_id: payload.custody.readback
+      surface_kind: estate_readback
+      truth_owner: payload_custody
+      surface_path: ""
+      authority_layer: L2_readmodel
+      refresh_binding: payload.custody.status
+      refresh_mode: readback_capability
+      consumer_policy: current_payload_storage_custody_truth_from_first_class_readback
+      subtraction_disposition: replaces_storage_maps_and_media_snapshots_as_custody_authority
+      heartbeat:
+        liveness_timestamp: null
+        proof_channel:
+          type: cap_receipt
+          ref: payload.custody.status
+        staleness_threshold: 30m
+        severity_when_stale: warn
+        caption: "Payload custody readback uses the latest successful governed capability receipt."
 governed_surfaces:
   - capability: backup.posture.snapshot.build
     tracked_binding: ops/bindings/domains/backup/backup.posture.snapshot.yaml

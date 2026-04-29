@@ -104,6 +104,30 @@ rows:
       - projection.home.storage.map
       - projection.backup.posture.snapshot
 
+  - id: authority.payload.custody.readback
+    domain_id: infra
+    authority:
+      path: ops/plugins/infra/bin/payload-custody-status
+      expected_authority_state: executable_readback
+      note: Canonical payload/storage custody readback. Storage maps and media snapshots are evidence/projections only; custody, recovery promise, and deletion guard come from payload.custody.status.
+      source_capabilities:
+        - payload.custody.status
+        - site.presence.status
+        - node.admission.status
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs:
+        - evidence/sessions/CAP-*__payload.custody.status__R*/receipt.md
+      evidence_required: true
+    evidence_refs:
+      - ops/bindings/storage.scaffold.authority.yaml
+      - ops/bindings/shop.storage.map.yaml
+      - ops/bindings/home.storage.map.yaml
+      - ops/bindings/synology918.storage.manifest.yaml
+      - ops/bindings/domains/media/media.capacity.snapshot.yaml
+      - ops/bindings/domains/media/media.content.snapshot.yaml
+    projection_refs: []
+
   - id: authority.scheduled.task.registry
     domain_id: infra
     authority:
@@ -124,6 +148,29 @@ rows:
       - ops/bindings/appliance.identity.contract.yaml
     projection_refs:
       - projection.launchd.scheduler.registry.pending
+
+  - id: authority.node.admission.readback
+    domain_id: infra
+    authority:
+      path: ops/plugins/infra/bin/node-admission-status
+      expected_authority_state: executable_readback
+      note: Canonical node admission readback. Inventory and asset files identify subjects as evidence only; this readback composes admission, promotion, site, placement, access, and recovery evidence into current node truth.
+      source_capabilities:
+        - node.admission.status
+        - node.recovery.status
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs:
+        - evidence/sessions/CAP-*__node.admission.status__R*/receipt.md
+      evidence_required: true
+    evidence_refs:
+      - ops/bindings/fleet.admission.classification.yaml
+      - ops/bindings/hardware.inventory.yaml
+      - ops/bindings/operator.hardware.inventory.yaml
+      - ops/bindings/appliance.identity.contract.yaml
+      - ops/bindings/ssh.targets.yaml
+      - ops/bindings/infra.placement.policy.yaml
+    projection_refs: []
 
   - id: authority.content.family.placement.policy
     domain_id: infra
@@ -161,7 +208,8 @@ rows:
     domain_id: infra
     authority:
       path: ops/bindings/internet.asset.registry.yaml
-      expected_authority_state: authoritative
+      expected_authority_state: compatibility_evidence
+      note: Demoted by Packet 117 / node.admission.status. This registry may support procurement and compatibility evidence, but it is not current node admission or control-plane truth.
       source_capabilities:
         - internet.asset.registry.build
         - internet.asset.intake.diff
@@ -176,6 +224,7 @@ rows:
       - ops/bindings/home.device.registry.yaml
       - evidence/sessions/CAP-*__internet.asset.registry.build__R*/receipt.md
     projection_refs:
+      - node.admission.status
       - projection.internet_asset.registry.projected
 
   - id: authority.hardware.inventory
@@ -222,12 +271,36 @@ rows:
       - projection.network.unifi.home.clients.observed
       - projection.network.unifi.shop.clients.observed
 
+  - id: authority.site.presence.readback
+    domain_id: infra
+    authority:
+      path: ops/plugins/infra/bin/site-presence-status
+      expected_authority_state: executable_readback
+      note: Canonical site presence readback. UniFi snapshots and home.device.registry are evidence/projections only; visibility does not imply node admission.
+      source_capabilities:
+        - site.presence.status
+        - node.admission.status
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs:
+        - evidence/sessions/CAP-*__site.presence.status__R*/receipt.md
+      evidence_required: true
+    evidence_refs:
+      - ops/bindings/topology.sites.yaml
+      - ops/bindings/topology.closure.graph.yaml
+      - ops/bindings/ssh.targets.yaml
+      - ops/bindings/home.device.registry.yaml
+      - ops/bindings/network.unifi.home.clients.observed.yaml
+      - ops/bindings/network.unifi.shop.clients.observed.yaml
+    projection_refs: []
+
   - id: authority.home.device.registry
     domain_id: home
     projection_class: terminal
     authority:
       path: ops/bindings/home.device.registry.yaml
-      expected_authority_state: authoritative
+      expected_authority_state: compatibility_evidence
+      note: Demoted by site.presence.status. Retained as declared device intent evidence only, not current site presence authority.
       source_capabilities:
         - network.home.unifi.clients.snapshot
     intake_lineage:
@@ -246,7 +319,8 @@ rows:
     projection_class: terminal
     authority:
       path: ops/bindings/network.unifi.home.clients.observed.yaml
-      expected_authority_state: authoritative
+      expected_authority_state: compatibility_projection
+      note: Demoted by site.presence.status. Retained as UniFi observation evidence only, not current site presence authority.
       source_capabilities:
         - network.home.unifi.clients.snapshot
     intake_lineage:
@@ -264,7 +338,8 @@ rows:
     projection_class: terminal
     authority:
       path: ops/bindings/network.unifi.shop.clients.observed.yaml
-      expected_authority_state: authoritative
+      expected_authority_state: compatibility_projection
+      note: Demoted by site.presence.status. Retained as UniFi observation evidence only, not current site presence authority.
       source_capabilities:
         - network.unifi.clients.snapshot
     intake_lineage:

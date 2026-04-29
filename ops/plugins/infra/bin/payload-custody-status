@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+PATHS = {
+    "scaffold": ROOT / "ops/bindings/storage.scaffold.authority.yaml",
+    "home_map": ROOT / "ops/bindings/home.storage.map.yaml",
+    "shop_map": ROOT / "ops/bindings/shop.storage.map.yaml",
+    "media_capacity": ROOT / "ops/bindings/domains/media/media.capacity.snapshot.yaml",
+    "media_content": ROOT / "ops/bindings/domains/media/media.content.snapshot.yaml",
+    "snapshot_contract": ROOT / "ops/bindings/snapshot.surface.contract.yaml",
+    "synology_manifest": ROOT / "ops/bindings/synology918.storage.manifest.yaml",
+}
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def iso_now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def path_ref(path: Path) -> str:
+    return str(path.relative_to(ROOT))
+
+
+def payload_class(surface: dict[str, Any]) -> str:
+    text = " ".join(str(surface.get(key) or "") for key in ("path", "detail", "scaffold_class")).lower()
+    if "backup" in text or surface.get("scaffold_class") in {"backup_primary", "backup_secondary"}:
+        return "restore_artifacts"
+    if "media" in text:
+        return "media_payload"
+    if "document" in text or "paperless" in text:
+        return "business_data"
+    if "surveillance" in text:
+        return "surveillance_video"
+    if "game" in text:
+        return "game_archive"
+    if "stage" in text:
+        return "mixed_payload"
+    if "tombstone" in text:
+        return "tombstone"
+    return "mixed_payload" if "archive" in text else "unknown"
+
+
+def recovery_promise(surface: dict[str, Any]) -> dict[str, Any]:
+    scaffold = surface.get("scaffold_class")
+    state = surface.get("authority_state")
+    path = surface.get("path")
+    if scaffold == "backup_primary":
+        cls = "primary_restore"
+    elif scaffold == "backup_secondary":
+        cls = "secondary_copy"
+    elif scaffold == "archive_cold":
+        cls = "archive_only"
+    elif scaffold == "intake_stage":
+        cls = "stage_drain"
+    elif scaffold in {"review_hold", "review_pending"}:
+        cls = "review_hold"
+    elif scaffold == "drained_retired" or state == "drained_no_live_authority":
+        cls = "drained"
+    elif scaffold in {"tombstone_retained", "defect_cruft"}:
+        cls = "no_recovery_promise"
+    else:
+        cls = "unknown"
+    return {
+        "class": cls,
+        "backup_target_refs": [],
+        "restore_proof_expectation": f"recovery proof must target {surface.get('device')}:{path}" if cls in {"primary_restore", "secondary_copy"} else None,
+    }
+
+
+def deletion_guard(surface: dict[str, Any]) -> dict[str, Any]:
+    scaffold = surface.get("scaffold_class")
+    state = surface.get("authority_state")
+    blockers = str(surface.get("blockers") or "").strip()
+    if state in {"canonical_live", "declared_secondary_copy", "controlled_stage", "workbench_backup_plane", "parent_contains_live_canonical_subpath"}:
+        return {
+            "state": "not_delete_candidate",
+            "reason": "canonical or controlled custody row",
+            "replacement_proof_ref": None,
+        }
+    if blockers:
+        return {
+            "state": "delete_blocked",
+            "reason": blockers,
+            "replacement_proof_ref": "payload.custody.status",
+        }
+    if scaffold in {"defect_cruft", "drained_retired"}:
+        return {
+            "state": "operator_review_required",
+            "reason": "old residue is classified, but destructive deletion still requires explicit cleanup execution",
+            "replacement_proof_ref": "payload.custody.status",
+        }
+    if scaffold in {"review_pending", "tombstone_retained"}:
+        return {
+            "state": "delete_blocked",
+            "reason": "retained for review or tombstone extraction",
+            "replacement_proof_ref": "payload.custody.status",
+        }
+    return {
+        "state": "operator_review_required",
+        "reason": "custody class does not authorize deletion",
+        "replacement_proof_ref": "payload.custody.status",
+    }
+
+
+def capacity_signal(surface: dict[str, Any], capacity: dict[str, Any]) -> dict[str, Any]:
+    if surface.get("device") == "synology918" and surface.get("path") == "/volume1/media-staging":
+        pool = capacity.get("pool") or {}
+        return {
+            "status": capacity.get("runway_status") or "unknown",
+            "used_bytes": pool.get("bytes_used"),
+            "total_bytes": pool.get("bytes_total"),
+            "runway_days": (capacity.get("projection") or {}).get("days_to_warn"),
+            "source_ref": path_ref(PATHS["media_capacity"]),
+        }
+    return {
+        "status": "not_applicable",
+        "used_bytes": None,
+        "total_bytes": None,
+        "runway_days": None,
+        "source_ref": None,
+    }
+
+
+def freshness(surface: dict[str, Any], generated: dict[str, str]) -> dict[str, Any]:
+    refs = surface.get("source_refs") or []
+    observed = None
+    for ref in refs:
+        if "home.storage.map" in str(ref):
+            observed = generated.get("home_map")
+        if "shop.storage.map" in str(ref):
+            observed = generated.get("shop_map")
+        if "media.capacity.snapshot" in str(ref):
+            observed = generated.get("media_capacity")
+    return {
+        "status": "unknown" if observed is None else "stale",
+        "observed_at_utc": observed,
+        "ttl_hours": 24 if observed else None,
+    }
+
+
+def source_surfaces(surface: dict[str, Any]) -> list[dict[str, str]]:
+    rows = [{"path": path_ref(PATHS["scaffold"]), "role": "storage_scaffold_authority"}]
+    for ref in surface.get("source_refs") or []:
+        rows.append({"path": str(ref), "role": "source_evidence"})
+    return rows
+
+
+def manifest_index(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    readback = manifest.get("current_path_readback") or {}
+    storage = manifest.get("storage") or {}
+    paths = readback.get("paths") or storage.get("paths") or manifest.get("paths") or []
+    index = {}
+    for row in paths:
+        if isinstance(row, dict) and row.get("path"):
+            index[str(row["path"]).rstrip("/")] = row
+    return index
+
+
+def build_row(
+    surface: dict[str, Any],
+    capacity: dict[str, Any],
+    generated: dict[str, str],
+    synology_paths: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    device = str(surface.get("device") or "unknown")
+    path = str(surface.get("path") or "unknown")
+    site = "shop" if device == "pve" else "home" if device == "synology918" else "unknown"
+    state = str(surface.get("authority_state") or "unknown")
+    canonicality = str(surface.get("canonicality") or "unknown")
+    manifest_row = synology_paths.get(path.rstrip("/")) if device == "synology918" else None
+    present = True
+    if manifest_row is not None:
+        present = bool(manifest_row.get("exists"))
+    proof_channels = ["declared_policy", "storage_audit"]
+    if "backup" in path:
+        proof_channels.append("backup_readback")
+    if path == "/volume1/media-staging":
+        proof_channels.extend(["media_capacity_projection", "content_projection"])
+    if state in {"deprecated_compatibility_surface", "generated_residue"}:
+        proof_channels.append("compatibility_evidence")
+    return {
+        "custody_id": f"{device}:{path}",
+        "subject_kind": "storage_plane" if path.count("/") <= 2 else "path_family",
+        "site": site,
+        "owner_node_id": device,
+        "owning_appliance_role": "hypervisor" if device == "pve" else "nas" if device == "synology918" else "unknown",
+        "presence_state": "present" if present and device in {"pve", "synology918"} else "missing" if device == "synology918" else "unknown",
+        "presence_proof_ref": f"site.presence.status:{device}" if device in {"pve", "synology918"} else None,
+        "surface_ref": {
+            "device": device,
+            "path": path,
+            "mount_or_export": "local" if device == "pve" else "smb",
+        },
+        "scaffold_class": surface.get("scaffold_class") or "unknown",
+        "custody_state": state,
+        "canonicality": canonicality,
+        "payload_class": payload_class(surface),
+        "payload_subject_refs": [],
+        "recovery_promise": recovery_promise(surface),
+        "capacity_signal": capacity_signal(surface, capacity),
+        "freshness": freshness(surface, generated),
+        "proof_channels": proof_channels,
+        "deletion_guard": deletion_guard(surface),
+        "drift_flags": (
+            (["missing_declared_storage_path"] if not present else [])
+            + ([state] if state in {"deprecated_compatibility_surface", "generated_residue", "mixed_old_weight", "stale_durable_weight"} else [])
+        ),
+        "source_surfaces": source_surfaces(surface),
+        "subtraction_caption": "Current payload/storage custody truth comes from payload.custody.status; old storage maps and media snapshots are evidence/projections only.",
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Canonical payload custody readback")
+    parser.add_argument("--site", choices=["home", "shop"], help="filter by site")
+    parser.add_argument("--json", action="store_true", help="emit JSON")
+    args = parser.parse_args()
+
+    scaffold = load_yaml(PATHS["scaffold"])
+    capacity = load_yaml(PATHS["media_capacity"])
+    synology_paths = manifest_index(load_yaml(PATHS["synology_manifest"]))
+    generated = {
+        "home_map": load_yaml(PATHS["home_map"]).get("generated_at_utc"),
+        "shop_map": load_yaml(PATHS["shop_map"]).get("generated_at_utc"),
+        "media_capacity": capacity.get("generated_at_utc"),
+        "media_content": load_yaml(PATHS["media_content"]).get("generated_at"),
+    }
+    rows = [build_row(row, capacity, generated, synology_paths) for row in scaffold.get("surfaces", []) if isinstance(row, dict)]
+    if args.site:
+        rows = [row for row in rows if row.get("site") == args.site]
+    rows.sort(key=lambda row: row["custody_id"])
+    summary = {
+        "rows": len(rows),
+        "canonical_planes": sum(1 for row in rows if row.get("canonicality") == "canonical"),
+        "compatibility_planes": sum(1 for row in rows if row.get("canonicality") in {"noncanonical", "mixed", "drained", "unknown"}),
+        "deletion_blocked": sum(1 for row in rows if row.get("deletion_guard", {}).get("state") == "delete_blocked"),
+        "stale_or_unproved": sum(1 for row in rows if row.get("freshness", {}).get("status") in {"stale", "unknown"}),
+        "subtracted_peer_authority": [
+            path_ref(PATHS["shop_map"]),
+            path_ref(PATHS["home_map"]),
+            path_ref(PATHS["media_capacity"]),
+            path_ref(PATHS["media_content"]),
+            "pve:/media as long-term shop payload truth",
+        ],
+    }
+    payload = {
+        "status": "ok",
+        "canonical_authority": "payload.custody.status",
+        "generated_at_utc": iso_now(),
+        "rows": rows,
+        "summary": summary,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"payload.custody.status status={payload['status']} rows={summary['rows']}")
+        for row in rows:
+            print(f"- {row['custody_id']} {row['scaffold_class']} {row['canonicality']} {row['deletion_guard']['state']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
