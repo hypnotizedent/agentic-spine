@@ -185,6 +185,7 @@ from plans_sql_authority import (  # type: ignore
     upsert_plan,
     utc_now_text,
 )
+import intent_use_receipts as iur  # type: ignore
 
 if not re.fullmatch(r"PLAN-[A-Z0-9-]+", plan_id):
     raise SystemExit(f"FAIL: plan_id must match PLAN-[A-Z0-9-]+ (got '{plan_id}')")
@@ -255,6 +256,7 @@ if source_ref:
     plan["source_ref"] = source_ref
 if human_intent_id:
     plan["human_intent_id"] = human_intent_id
+    plan["driven_by_intents"] = [human_intent_id]
 if materialization_status:
     plan["materialization_status"] = materialization_status
 if materialization_ref:
@@ -278,6 +280,20 @@ insert_event(
         "materialization_ref": materialization_ref,
     },
 )
+if human_intent_id:
+    iur.ensure_schema(conn)
+    iur.write_receipt(
+        conn,
+        human_intent_ref=human_intent_id,
+        used_as="birth_input",
+        destination_type="plan",
+        destination_ref=plan_id,
+        reason="Deferred plan was created from human intent carried into planning.plans.create.",
+        proof_ref=str(plans_dir / f"{plan_id}.md"),
+        capture_mode="automatic",
+        source_ref=source_ref,
+        created_by="planning.plans.create",
+    )
 project_to_surfaces(
     conn,
     index_path=index_path,

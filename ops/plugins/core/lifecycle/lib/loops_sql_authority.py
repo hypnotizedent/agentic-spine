@@ -426,7 +426,7 @@ def _extract_next_action(metadata: dict[str, str], sections: dict[str, str]) -> 
 
 def _render_preserved_body_scope(loop: dict[str, Any], body: str) -> str:
     fm = loop_to_frontmatter(loop)
-    for extra_key in ("closed_at", "disposition", "completion_level", "exclusions", "supersedes"):
+    for extra_key in ("closed_at", "disposition", "completion_level", "exclusions", "supersedes", "source_ref", "human_intent_id", "driven_by_intents"):
         if extra_key in loop and loop[extra_key] is not None:
             fm[extra_key] = loop[extra_key]
     fm_text = yaml.safe_dump(fm, sort_keys=False, allow_unicode=False).rstrip("\n")
@@ -1457,7 +1457,7 @@ def project_to_scope_files(
                     if end_idx is not None:
                         body_lines = lines[end_idx + 1:]
                         new_fm = loop_to_frontmatter(loop)
-                        for extra_key in ("closed_at", "disposition", "completion_level", "exclusions", "supersedes"):
+                        for extra_key in ("closed_at", "disposition", "completion_level", "exclusions", "supersedes", "source_ref", "human_intent_id", "driven_by_intents"):
                             if extra_key in loop and loop[extra_key] is not None:
                                 new_fm[extra_key] = loop[extra_key]
                         fm_text = yaml.safe_dump(new_fm, sort_keys=False, allow_unicode=False).rstrip("\n")

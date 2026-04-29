@@ -256,6 +256,10 @@ if [[ -n "$SOURCE_REF" ]]; then
 fi
 if [[ -n "$HUMAN_INTENT_ID" ]]; then
   insert_frontmatter_field_after_execution_mode "human_intent_id" "$HUMAN_INTENT_ID"
+  sed -i '' "/^human_intent_id:/a\\
+driven_by_intents:\\
+  - ${HUMAN_INTENT_ID}
+" "$SCOPE_FILE_TMP"
 fi
 if [[ -n "$MATERIALIZATION_STATUS" ]]; then
   insert_frontmatter_field_after_execution_mode "materialization_status" "$MATERIALIZATION_STATUS"
@@ -327,6 +331,7 @@ print(json.dumps({
     'objective': sys.argv[9],
     'source_ref': sys.argv[10],
     'human_intent_id': sys.argv[11],
+    'driven_by_intents': [sys.argv[11]] if sys.argv[11] else [],
     'materialization_status': sys.argv[12],
     'materialization_ref': sys.argv[13],
 }))
@@ -438,4 +443,17 @@ if [[ "$JSON_OUTPUT" -eq 1 ]]; then
 else
   echo "CREATED: $LOOP_ID"
   echo "File: $SCOPE_FILE"
+fi
+
+if [[ -n "$HUMAN_INTENT_ID" ]]; then
+  python3 "$ROOT/ops/plugins/core/lifecycle/bin/intent-use-receipt-write" \
+    --human-intent-ref "$HUMAN_INTENT_ID" \
+    --used-as birth_input \
+    --destination-type loop \
+    --destination-ref "$LOOP_ID" \
+    --reason "Loop was created from human intent carried into loops.create." \
+    --proof-ref "$SCOPE_FILE" \
+    --source-ref "$SOURCE_REF" \
+    --capture-mode automatic \
+    --created-by loops.create >/dev/null
 fi

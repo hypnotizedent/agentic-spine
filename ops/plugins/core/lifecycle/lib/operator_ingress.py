@@ -34,6 +34,11 @@ from typing import Any
 
 import yaml
 
+try:
+    import intent_use_receipts as iur
+except Exception:  # readback must degrade if receipt authority is unavailable
+    iur = None  # type: ignore
+
 
 ALLOWED_CONTENT_TYPES = {
     "note",
@@ -782,6 +787,7 @@ def build_intent_chain_readback(
     lifecycle_state = str(doc.get("lifecycle_state", "submitted")).strip()
     disposition = str(doc.get("disposition", "awaiting_classification")).strip()
     human_intent = doc.get("human_intent") if isinstance(doc.get("human_intent"), dict) else {}
+    human_intent_id = str(human_intent.get("intent_id", "")).strip()
 
     downstream_ref = str(doc.get("next_stage", "")).strip()
     if not downstream_ref:
@@ -809,6 +815,27 @@ def build_intent_chain_readback(
     proof_kind = "explicit_ref" if proof_ref else ""
     if not proof_ref and materialization_kind == "loop":
         proof_ref, proof_kind = _resolve_loop_proof_ref(materialization_ref, state_root)
+    intent_use_receipts: list[dict[str, Any]] = []
+    strongest_intent_use: dict[str, Any] | None = None
+    if human_intent_id and iur is not None:
+        try:
+            conn = iur.connect(iur.db_path(state_root))
+            iur.ensure_schema(conn)
+            intent_use_receipts = iur.query_receipts(conn, human_intent_ref=human_intent_id, limit=20)
+            strongest_intent_use = iur.strongest_receipt_for_intent(conn, human_intent_id)
+            conn.close()
+        except Exception:
+            intent_use_receipts = []
+            strongest_intent_use = None
+    if not materialization_ref and strongest_intent_use:
+        materialization_ref = str(strongest_intent_use.get("destination_ref") or "").strip()
+        materialization_kind = str(strongest_intent_use.get("destination_type") or "").strip()
+        materialization_state = "receipt_bound"
+    if not downstream_ref and strongest_intent_use:
+        downstream_ref = str(strongest_intent_use.get("destination_ref") or "").strip()
+    if not proof_ref and strongest_intent_use:
+        proof_ref = str(strongest_intent_use.get("proof_ref") or "").strip()
+        proof_kind = "intent_use_receipt" if proof_ref else ""
     review = _operator_review_readback(
         doc=doc,
         path=path,
@@ -827,7 +854,7 @@ def build_intent_chain_readback(
         next_missing_seam = "downstream_carrier"
     elif not materialization_ref:
         next_missing_seam = "adoption_materialization_ref"
-    elif not proof_ref:
+    elif not proof_ref and not intent_use_receipts:
         next_missing_seam = "proof_receipt_ref"
     elif review.get("operator_review") == "required":
         next_missing_seam = "operator_review_required"
@@ -835,7 +862,7 @@ def build_intent_chain_readback(
     return {
         "source": {
             "ingress_id": ingress_id,
-            "human_intent_id": str(human_intent.get("intent_id", "")).strip(),
+            "human_intent_id": human_intent_id,
             "human_intent_statement": str(human_intent.get("statement", "")).strip(),
             "source_ref": str(human_intent.get("source_ref", "")).strip(),
             "submitted_at": str(doc.get("submitted_at", "")).strip(),
@@ -871,6 +898,11 @@ def build_intent_chain_readback(
         "proof_receipt": {
             "ref": proof_ref,
             "kind": proof_kind,
+        },
+        "intent_use": {
+            "count": len(intent_use_receipts),
+            "strongest": strongest_intent_use or {},
+            "receipts": intent_use_receipts,
         },
         "operator_review": {
             "state": review["operator_review"],

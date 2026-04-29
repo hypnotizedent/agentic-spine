@@ -26,6 +26,8 @@ from typing import Any
 
 import yaml
 
+import intent_use_receipts as iur
+
 
 # ── packet_id format: PACKET-{NN}-{SLUG} ─────────────────────────
 # NN = one or more digits, SLUG = uppercase alpha and hyphens
@@ -189,6 +191,8 @@ def _compose_frontmatter(
         fm["source_ref"] = source_ref
     if human_intent_id:
         fm["human_intent_id"] = human_intent_id
+        fm["source_human_intent_id"] = human_intent_id
+        fm["driven_by_intents"] = [human_intent_id]
     if materialization_status:
         fm["materialization_status"] = materialization_status
     if materialization_ref:
@@ -322,6 +326,33 @@ def create_packet(
 
     # ── Atomic write ──────────────────────────────────────────────
     _atomic_write(packet_path, content)
+
+    if human_intent_id:
+        try:
+            conn = iur.connect(iur.db_path(state_root))
+            iur.ensure_schema(conn)
+            iur.write_receipt(
+                conn,
+                human_intent_ref=human_intent_id,
+                used_as="birth_input",
+                destination_type="packet",
+                destination_ref=packet_id,
+                reason="Controller packet was created from human intent carried into controller_prompt.create.",
+                proof_ref=packet_path,
+                capture_mode="automatic",
+                source_ref=source_ref,
+                created_by="controller_prompt.create",
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            try:
+                os.remove(packet_path)
+            except OSError:
+                pass
+            raise ControllerPromptCreateError(
+                f"intent-use receipt write failed after packet birth; packet removed: {exc}"
+            ) from exc
 
     return {
         "status": "created",
