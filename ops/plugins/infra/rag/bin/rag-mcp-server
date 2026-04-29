@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Spine RAG MCP Server — wraps rag.anythingllm.ask for Claude Code tool calls.
+Spine RAG MCP Server — direct Qdrant + Ollama retrieval for agent tools.
 
 MCP stdio transport: JSON-RPC 2.0 over stdin/stdout.
-No external dependencies (stdlib only). Secrets injected via secrets-exec at runtime.
+No external dependencies (stdlib only). No AnythingLLM API key required.
 
-Authority: docs/governance/RAG_QUERY_PATTERNS.md
+Authority: Packet 64 RAG subtraction-first replacement.
 Location: ops/plugins/infra/rag/bin/rag-mcp-server
 """
 
@@ -21,18 +21,16 @@ SPINE_ROOT = os.environ.get(
     ))))
 )
 
-SECRETS_EXEC = os.path.join(SPINE_ROOT, "ops/plugins/infra/secrets/bin/secrets-exec")
-RAG_CLI = os.path.join(SPINE_ROOT, "ops/plugins/infra/rag/bin/rag")
+RAG_DIRECT = os.path.join(SPINE_ROOT, "ops/plugins/infra/rag/bin/rag-direct")
 
 TOOLS = [
     {
         "name": "rag_query",
-        "description": (
-            "Query the spine governance RAG system (AnythingLLM + Qdrant). "
-            "Returns an answer with source citations from indexed governance docs, "
-            "operational bindings, and workflow recipes. Use for questions about "
-            "spine workflows, gap lifecycle, capability usage, drift gates, and "
-            "operational procedures."
+            "description": (
+            "Ask the first-class spine/runtime retrieval index for a synthesized "
+            "answer with source paths. RAG is retrieval assistance only, not "
+            "authority; read cited loop scopes, packets, contracts, receipts, or "
+            "capability readbacks directly before deciding or mutating."
         ),
         "inputSchema": {
             "type": "object",
@@ -47,10 +45,10 @@ TOOLS = [
     },
     {
         "name": "rag_retrieve",
-        "description": (
-            "Retrieve relevant document chunks from the spine RAG system without "
-            "generating an answer. Returns raw source text for manual analysis. "
-            "Use when you need exact document content rather than a synthesized answer."
+            "description": (
+            "Retrieve raw chunks from the direct Qdrant spine/runtime retrieval "
+            "index. Returns source paths, authority class, freshness, and text. "
+            "Use for semantic discovery; use rg/direct file reads for exact known paths."
         ),
         "inputSchema": {
             "type": "object",
@@ -70,9 +68,9 @@ TOOLS = [
     },
     {
         "name": "rag_health",
-        "description": (
-            "Check health of the RAG infrastructure: AnythingLLM ping, "
-            "Qdrant healthz, Ollama tags. Use before querying to verify availability."
+            "description": (
+            "Check direct RAG health: Qdrant collection and Ollama embedding path. "
+            "Does not use AnythingLLM."
         ),
         "inputSchema": {
             "type": "object",
@@ -100,8 +98,8 @@ def write_message(msg):
 
 
 def run_rag(subcommand, *args):
-    """Run the RAG CLI via secrets-exec and return stdout."""
-    cmd = [SECRETS_EXEC, "--", RAG_CLI, subcommand, *args]
+    """Run the direct RAG CLI and return stdout."""
+    cmd = [RAG_DIRECT, subcommand, *args]
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -121,18 +119,8 @@ def run_rag(subcommand, *args):
             and "INF" not in l
         ]
         err_clean = "\n".join(err_lines).strip()
-        raise RuntimeError(
-            f"rag {subcommand} failed (rc={result.returncode}): {err_clean}"
-        )
-    # Strip infisical injection noise from stdout
-    lines = output.splitlines()
-    filtered = [
-        l for l in lines
-        if "Injecting" not in l
-        and "new release of infisical" not in l.lower()
-        and "brew update" not in l.lower()
-    ]
-    return "\n".join(filtered).strip()
+        raise RuntimeError(f"rag-direct {subcommand} failed (rc={result.returncode}): {err_clean}")
+    return output.strip()
 
 
 def handle_initialize(msg):
@@ -164,7 +152,7 @@ def handle_tools_call(msg):
 
     try:
         if name == "rag_query":
-            text = run_rag("ask", args["question"])
+            text = run_rag("query", args["question"])
         elif name == "rag_retrieve":
             cmd_args = [args["query"]]
             if args.get("limit"):

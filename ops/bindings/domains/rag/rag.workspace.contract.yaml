@@ -1,68 +1,137 @@
 # RAG Workspace Contract
 # Canonical binding for RAG workspace configuration.
-# Authority: docs/governance/RAG_INDEXING_RULES.md, docs/governance/RAG_QUERY_PATTERNS.md
-# Consumed by: ops/plugins/infra/rag/bin/rag, surfaces/verify/d87-rag-workspace-contract-lock.sh
+# Authority: Packet 64 RAG subtraction-first replacement.
+# Consumed by: ops/plugins/infra/rag/bin/rag-direct, ops/plugins/infra/rag/bin/rag-mcp-server
 
-schema_version: '1.0'
-updated_at: '2026-02-13'
+schema_version: '2.0'
+updated_at: '2026-04-29'
+status: authoritative
+owner: '@ronny'
 
 workspace:
-  slug: "agentic-spine"
-  description: "Spine-native RAG workspace for governed agent knowledge"
-  provider: "anythingllm"
-  provider_version: ">=1.0.0"
+  slug: "spine-runtime-authority"
+  description: "First-class agent retrieval over governed spine/runtime authority surfaces"
+  provider: "direct-qdrant-ollama"
+  authority: none
+  operator_boundary: "RAG helps agents find governed source refs; it does not decide authority, closure, or mutation."
 
 embedding:
   model: "mxbai-embed-large:latest"
   provider: "ollama"
   vector_store: "qdrant"
+  expected_dimensions: 1024
+  ollama_url: "http://100.98.70.70:11434"
+  qdrant_url: "http://100.71.17.29:6333"
 
 index_policy:
-  eligible_roots:
-    - "docs/"
-    - "ops/"
-    - "surfaces/"
+  mode: allowlist
+  source_scope: "$SPINE_STATE Packet 63 allowlist only"
+  collection: "spine-runtime-authority"
+  eligible_roots: []
+  runtime_allowlist:
+    - id: controller-prompts
+      path: "$SPINE_STATE/controller-prompts"
+      authority_class: controller_prompt
+      lifecycle: create_amend_checkpoint_close
+      include_globs: ["MAILROOM-CONTROLLER-PACKET-*.md"]
+    - id: loop-scopes
+      path: "$SPINE_STATE/loop-scopes"
+      authority_class: loop_scope
+      lifecycle: create_update_closeout
+      include_globs: ["LOOP-*.scope.md"]
+    - id: orchestration
+      path: "$SPINE_STATE/orchestration"
+      authority_class: orchestration_state
+      lifecycle: wave_state
+      include_globs: ["**/*.yaml", "**/*.md"]
+    - id: handoffs
+      path: "$SPINE_STATE/handoffs"
+      authority_class: handoff
+      lifecycle: immutable
+      include_globs: ["HO-*.yaml"]
+    - id: plans
+      path: "$SPINE_STATE/plans"
+      authority_class: derived_projection
+      lifecycle: reconcile_projection
+      include_globs: ["PLAN-*.md", "*.yaml"]
+    - id: delegations
+      path: "$SPINE_STATE/delegations"
+      authority_class: delegation_contract
+      lifecycle: immutable
+      include_globs: ["DEL-*.yaml"]
+    - id: operator-ingress
+      path: "$SPINE_STATE/inputs/operator-ingress"
+      authority_class: operator_ingress_capture
+      lifecycle: submit_classify_route
+      include_globs: ["OI-*.yaml", "HI-*.yaml", "*.md"]
+    - id: domain-state-spine
+      path: "$SPINE_STATE/domain-state/spine"
+      authority_class: spine_domain_state
+      lifecycle: mixed
+      include_globs: ["*.md", "*.yaml", "*.json"]
+    - id: exec-receipts
+      path: "$SPINE_STATE/domain-state"
+      authority_class: execution_receipt
+      lifecycle: immutable
+      include_globs: ["EXEC_RECEIPT-*.yaml"]
+      max_files: 50
+      selection: newest_by_mtime
+    - id: root-readbacks
+      path: "$SPINE_STATE"
+      authority_class: runtime_readback
+      lifecycle: projection
+      include_globs: ["CURRENT-WORK-READBACK*", "SPINE-BEHAVIORAL-BOUNDARY*", "*.readback.md"]
   exclusion_prefixes:
-    - "docs/reference/legacy/"
-    - "docs/reference/audits/"
-    - "docs/governance/_archived/"
-    - "docs/governance/_imported/"
-    - "evidence/"
-    - "$SPINE_STATE/"
-    - "fixtures/"
+    - "$SPINE_STATE/sessions/"
+    - "$SPINE_STATE/archive/"
+    - "$SPINE_STATE/terminals/"
+    - "$SPINE_STATE/terminal-heartbeats/"
+    - "$SPINE_STATE/ingress-sanitized/"
+    - "$SPINE_STATE/entry-packets/"
+    - "$SPINE_STATE/execution-lanes/"
+    - "$SPINE_STATE/loop-heartbeats/"
+    - "$SPINE_STATE/quarantine/"
+    - "$SPINE_STATE/mailroom-quarantine/"
     - ".git/"
-    - "node_modules/"
-  frontmatter_required:
-    - "status:"
-    - "owner:"
-    - "last_verified:"
+  frontmatter_required: []
   secrets_filter: true
+  metadata_required:
+    - source_path
+    - content_hash
+    - indexed_at
+    - source_updated_at
+    - authority_class
+    - staleness_state
 
 sync_policy:
-  upload_timeout_sec: 180
+  upload_timeout_sec: 600
   retry_count: 1
   retry_delay_sec: 5
-  checkpoint_dir: "$SPINE_STATE/rag-sync"
+  checkpoint_dir: "$SPINE_STATE/rag-direct"
   dry_run_first: recommended
-  # Load-shaping knobs — govern sync pacing to prevent embedding overload
   load_shaping:
-    # Inter-document pause between uploads (seconds). 0 = no pause.
     inter_doc_pace_sec: 1
-    # Per-request timeout for individual embedding/upload (seconds)
     per_request_timeout_sec: 600
-    # Maximum retry attempts per failed upload
     max_retries: 2
-    # Backoff strategy: "fixed" or "exponential"
     backoff_strategy: "exponential"
-    # Base delay between retries (seconds). Exponential: delay * 2^attempt
     retry_base_delay_sec: 5
-    # Maximum backoff cap (seconds) to prevent runaway delays
     retry_max_delay_sec: 60
 
 cutover_policy:
-  verify_workspace_exists: true
+  verify_workspace_exists: false
   verify_parity_after_sync: true
   smoke_test_queries:
-    - "What is the canonical session entry protocol file?"
-    - "How do I file a gap?"
-  acceptance_criteria: "docs_indexed >= docs_eligible AND smoke queries return sources"
+    - "Which packet approved the RAG subtraction-first replacement?"
+    - "What is the current appliance loop next action?"
+  acceptance_criteria: "full reindex succeeds and smoke retrieval returns governed source refs from the new collection"
+
+compatibility_subtraction:
+  old_provider: "anythingllm"
+  old_collection: "agentic-spine"
+  old_workspace: "agentic-spine"
+  old_status: "stale_untrusted_pending_retirement"
+  retire_after:
+    - "direct collection full reindex succeeds"
+    - "rag.direct.retrieve returns useful governed source refs"
+    - "rag.direct.query or MCP rag_query works without AnythingLLM"
+  no_migration_reason: "Old vectors lack content_hash, source_updated_at, ttl, and trusted provenance."

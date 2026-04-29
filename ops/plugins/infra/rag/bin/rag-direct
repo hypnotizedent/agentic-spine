@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from urllib import error, request
+
+import yaml
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+SPINE_ROOT = SCRIPT_PATH.parents[5]
+DEFAULT_STATE = Path("/Users/ronnyworks/code/.runtime/spine/state")
+CONTRACT_PATH = SPINE_ROOT / "ops/bindings/domains/rag/rag.workspace.contract.yaml"
+NAMESPACE = uuid.UUID("fe8207a1-8703-4fa5-939d-8f47a6aa8d12")
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def state_root() -> Path:
+    raw = os.environ.get("SPINE_STATE")
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return DEFAULT_STATE
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def expand_path(raw: str) -> Path:
+    return Path(raw.replace("$SPINE_STATE", str(state_root()))).expanduser().resolve()
+
+
+def contract() -> dict[str, Any]:
+    return load_yaml(CONTRACT_PATH)
+
+
+def embedding_config(doc: dict[str, Any]) -> dict[str, Any]:
+    embedding = doc.get("embedding") if isinstance(doc.get("embedding"), dict) else {}
+    policy = doc.get("index_policy") if isinstance(doc.get("index_policy"), dict) else {}
+    return {
+        "model": os.environ.get("RAG_EMBED_MODEL") or embedding.get("model") or "mxbai-embed-large:latest",
+        "dimensions": int(embedding.get("expected_dimensions") or 1024),
+        "ollama_url": os.environ.get("OLLAMA_URL") or embedding.get("ollama_url") or "http://100.98.70.70:11434",
+        "qdrant_url": os.environ.get("QDRANT_URL") or embedding.get("qdrant_url") or "http://100.71.17.29:6333",
+        "collection": os.environ.get("RAG_QDRANT_COLLECTION") or policy.get("collection") or "spine-runtime-authority",
+    }
+
+
+def http_json(method: str, url: str, payload: Any | None = None, timeout: int = 120) -> Any:
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"{method} {url} failed HTTP {exc.code}: {detail}") from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"{method} {url} failed: {exc}") from exc
+    if not body:
+        return {}
+    return json.loads(body)
+
+
+def ensure_collection(cfg: dict[str, Any]) -> None:
+    url = f"{cfg['qdrant_url'].rstrip('/')}/collections/{cfg['collection']}"
+    try:
+        http_json("GET", url, timeout=30)
+        return
+    except RuntimeError:
+        pass
+    payload = {
+        "vectors": {
+            "size": cfg["dimensions"],
+            "distance": "Cosine",
+        }
+    }
+    http_json("PUT", url, payload, timeout=60)
+
+
+def reset_collection(cfg: dict[str, Any]) -> None:
+    url = f"{cfg['qdrant_url'].rstrip('/')}/collections/{cfg['collection']}"
+    try:
+        http_json("DELETE", url, timeout=60)
+    except RuntimeError:
+        pass
+    ensure_collection(cfg)
+
+
+def ollama_embed(cfg: dict[str, Any], text: str) -> list[float]:
+    payload = {"model": cfg["model"], "prompt": text}
+    data = http_json("POST", f"{cfg['ollama_url'].rstrip('/')}/api/embeddings", payload, timeout=120)
+    vector = data.get("embedding")
+    if not isinstance(vector, list) or not vector:
+        raise RuntimeError("Ollama embedding response did not include an embedding vector")
+    if len(vector) != cfg["dimensions"]:
+        raise RuntimeError(f"Embedding dimension mismatch: got {len(vector)}, expected {cfg['dimensions']}")
+    return [float(item) for item in vector]
+
+
+def ollama_generate(cfg: dict[str, Any], prompt: str) -> str:
+    model = os.environ.get("RAG_QUERY_MODEL", "phi3:mini")
+    payload = {"model": model, "prompt": prompt, "stream": False}
+    data = http_json("POST", f"{cfg['ollama_url'].rstrip('/')}/api/generate", payload, timeout=60)
+    return str(data.get("response") or "").strip()
+
+
+def has_secret_material(text: str) -> bool:
+    deny = [
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        r"\bAKIA[0-9A-Z]{16}\b",
+        r"\bASIA[0-9A-Z]{16}\b",
+        r"\bghp_[A-Za-z0-9]{20,}\b",
+        r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+        r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+        r"\bsk-[A-Za-z0-9]{20,}\b",
+    ]
+    joined = text
+    for pattern in deny:
+        if re.search(pattern, joined):
+            return True
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if not re.search(r"(KEY|TOKEN|SECRET|PASS|PASSWORD)", key, re.IGNORECASE):
+            continue
+        value = value.strip().strip('"').strip("'")
+        if len(value) >= 12 and value.lower() not in {"redacted", "changeme", "example"}:
+            return True
+    return False
+
+
+def iter_manifest(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    policy = doc.get("index_policy") if isinstance(doc.get("index_policy"), dict) else {}
+    rows = policy.get("runtime_allowlist") if isinstance(policy.get("runtime_allowlist"), list) else []
+    files: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        base = expand_path(str(row.get("path") or ""))
+        if not base.exists():
+            continue
+        globs = row.get("include_globs") if isinstance(row.get("include_globs"), list) else []
+        if not globs:
+            continue
+        candidates = [base] if base.is_file() else [p for p in base.rglob("*") if p.is_file()]
+        matched: list[Path] = []
+        for path in candidates:
+            rel_to_base = path.relative_to(base).as_posix() if base.is_dir() else path.name
+            if not any(fnmatch.fnmatch(rel_to_base, str(pattern)) or fnmatch.fnmatch(path.name, str(pattern)) for pattern in globs):
+                continue
+            if path.suffix.lower() not in {".md", ".yaml", ".yml", ".json", ".txt"}:
+                continue
+            matched.append(path)
+        if str(row.get("selection") or "") == "newest_by_mtime":
+            matched = sorted(matched, key=lambda p: p.stat().st_mtime, reverse=True)
+        max_files = int(row.get("max_files") or 0)
+        if max_files > 0:
+            matched = matched[:max_files]
+        for path in matched:
+            key = str(path.resolve())
+            files[key] = {
+                "path": path.resolve(),
+                "allowlist_id": row.get("id"),
+                "authority_class": row.get("authority_class"),
+                "lifecycle": row.get("lifecycle"),
+            }
+    return [files[key] for key in sorted(files)]
+
+
+def read_source(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def source_updated_at(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def chunk_text(text: str, max_chars: int = 800, overlap: int = 80) -> list[str]:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    parts: list[str] = []
+    if normalized.lstrip().startswith("#"):
+        sections = re.split(r"(?m)(?=^#{1,6}\s+)", normalized)
+    else:
+        sections = re.split(r"\n\s*\n", normalized)
+    current = ""
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        if len(section) > max_chars:
+            if current:
+                parts.append(current.strip())
+                current = ""
+            start = 0
+            while start < len(section):
+                parts.append(section[start : start + max_chars].strip())
+                start += max_chars - overlap
+            continue
+        if len(current) + len(section) + 2 > max_chars:
+            if current:
+                parts.append(current.strip())
+            current = section
+        else:
+            current = f"{current}\n\n{section}".strip()
+    if current:
+        parts.append(current.strip())
+    return [part for part in parts if part]
+
+
+def point_id(source_hash: str, chunk_index: int) -> str:
+    return str(uuid.uuid5(NAMESPACE, f"{source_hash}:{chunk_index}"))
+
+
+def upsert_points(cfg: dict[str, Any], points: list[dict[str, Any]]) -> None:
+    if not points:
+        return
+    url = f"{cfg['qdrant_url'].rstrip('/')}/collections/{cfg['collection']}/points?wait=true"
+    http_json("PUT", url, {"points": points}, timeout=180)
+
+
+def ledger_path() -> Path:
+    path = state_root() / "rag-direct" / "index-ledger.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def load_ledger() -> dict[str, Any]:
+    path = ledger_path()
+    if not path.exists():
+        return {"sources": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"sources": {}}
+    return data if isinstance(data, dict) else {"sources": {}}
+
+
+def write_ledger(data: dict[str, Any]) -> None:
+    path = ledger_path()
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def index_sources(args: argparse.Namespace) -> int:
+    doc = contract()
+    cfg = embedding_config(doc)
+    if args.reset:
+        reset_collection(cfg)
+    else:
+        ensure_collection(cfg)
+    manifest = iter_manifest(doc)
+    if args.limit:
+        manifest = manifest[: args.limit]
+    if args.dry_run:
+        print(json.dumps({"status": "dry_run", "files": len(manifest), "collection": cfg["collection"]}, sort_keys=True))
+        return 0
+
+    indexed_files = 0
+    indexed_chunks = 0
+    chunk_budget = int(args.max_chunks or 0)
+    skipped_unchanged = 0
+    skipped_secret = 0
+    failed: list[dict[str, str]] = []
+    batch: list[dict[str, Any]] = []
+    ledger = load_ledger()
+    sources = ledger.setdefault("sources", {})
+    for item in manifest:
+        path = item["path"]
+        try:
+            text = read_source(path)
+            if has_secret_material(text):
+                skipped_secret += 1
+                continue
+            source_hash = content_hash(text)
+            rel_path = str(path)
+            chunks = chunk_text(text)
+            previous = sources.get(rel_path) if isinstance(sources.get(rel_path), dict) else {}
+            if args.changed_only and previous.get("content_hash") == source_hash and previous.get("chunk_count") == len(chunks):
+                skipped_unchanged += 1
+                continue
+            for idx, chunk in enumerate(chunks):
+                if chunk_budget and indexed_chunks >= chunk_budget:
+                    break
+                decorated = f"SOURCE: {rel_path}\nAUTHORITY_CLASS: {item.get('authority_class')}\n\n{chunk}"
+                vector = ollama_embed(cfg, decorated)
+                payload = {
+                    "source_path": rel_path,
+                    "source_name": path.name,
+                    "allowlist_id": item.get("allowlist_id"),
+                    "authority_class": item.get("authority_class"),
+                    "lifecycle": item.get("lifecycle"),
+                    "content_hash": source_hash,
+                    "chunk_index": idx,
+                    "chunk_count": len(chunks),
+                    "indexed_at": utc_now(),
+                    "source_updated_at": source_updated_at(path),
+                    "staleness_state": "fresh",
+                    "disposition": "active",
+                    "text": chunk,
+                }
+                batch.append({"id": point_id(source_hash, idx), "vector": vector, "payload": payload})
+                indexed_chunks += 1
+                if len(batch) >= 16:
+                    upsert_points(cfg, batch)
+                    batch = []
+            indexed_files += 1
+            sources[rel_path] = {
+                "content_hash": source_hash,
+                "chunk_count": len(chunks),
+                "indexed_at": utc_now(),
+                "source_updated_at": source_updated_at(path),
+                "authority_class": item.get("authority_class"),
+                "allowlist_id": item.get("allowlist_id"),
+            }
+            if args.pace_sec:
+                time.sleep(args.pace_sec)
+            if chunk_budget and indexed_chunks >= chunk_budget:
+                break
+        except Exception as exc:  # keep one bad file from poisoning the full reindex
+            failed.append({"path": str(path), "error": str(exc)})
+    upsert_points(cfg, batch)
+    result = {
+        "status": "indexed",
+        "collection": cfg["collection"],
+        "files_seen": len(manifest),
+        "files_indexed": indexed_files,
+        "chunks_indexed": indexed_chunks,
+        "skipped_unchanged": skipped_unchanged,
+        "skipped_secret": skipped_secret,
+        "failed_count": len(failed),
+        "failed": failed[:10],
+        "ledger": str(ledger_path()),
+    }
+    ledger["updated_at"] = utc_now()
+    ledger["collection"] = cfg["collection"]
+    write_ledger(ledger)
+    print(json.dumps(result, sort_keys=True))
+    return 0 if not failed else 1
+
+
+def qdrant_search(cfg: dict[str, Any], query: str, limit: int) -> list[dict[str, Any]]:
+    vector = ollama_embed(cfg, query)
+    url = f"{cfg['qdrant_url'].rstrip('/')}/collections/{cfg['collection']}/points/search"
+    payload = {
+        "vector": vector,
+        "limit": limit,
+        "with_payload": True,
+        "with_vectors": False,
+        "filter": {"must": [{"key": "disposition", "match": {"value": "active"}}]},
+    }
+    data = http_json("POST", url, payload, timeout=120)
+    rows = data.get("result")
+    return rows if isinstance(rows, list) else []
+
+
+def retrieve(args: argparse.Namespace) -> int:
+    cfg = embedding_config(contract())
+    rows = qdrant_search(cfg, args.query, args.limit)
+    if args.json:
+        print(json.dumps({"query": args.query, "collection": cfg["collection"], "results": rows}, sort_keys=True))
+        return 0
+    print(f"rag.direct.retrieve collection={cfg['collection']} query={args.query!r}")
+    for i, row in enumerate(rows, start=1):
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        text = str(payload.get("text") or "")
+        excerpt = re.sub(r"\s+", " ", text).strip()[:700]
+        print(f"\n[{i}] score={row.get('score')} source={payload.get('source_path')}")
+        print(f"authority_class={payload.get('authority_class')} staleness={payload.get('staleness_state')} indexed_at={payload.get('indexed_at')}")
+        print(excerpt)
+    return 0
+
+
+def query(args: argparse.Namespace) -> int:
+    cfg = embedding_config(contract())
+    rows = qdrant_search(cfg, args.question, args.limit)
+    context_lines: list[str] = []
+    for i, row in enumerate(rows, start=1):
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        text = str(payload.get("text") or "")
+        context_lines.append(
+            f"[{i}] source={payload.get('source_path')} authority={payload.get('authority_class')} "
+            f"freshness={payload.get('staleness_state')}\n{text[:900]}"
+        )
+    prompt = (
+        "You are a retrieval assistant for agents. Answer only from the provided context. "
+        "Do not claim authority; cite source paths and say when the source should be read directly.\n\n"
+        f"QUESTION:\n{args.question}\n\nCONTEXT:\n" + "\n\n".join(context_lines)
+    )
+    try:
+        answer = ollama_generate(cfg, prompt)
+    except Exception as exc:
+        answer = (
+            "Synthesis unavailable from Ollama within the bounded query timeout. "
+            "Use these retrieved source refs directly; RAG is not authority.\n"
+            f"error: {exc}"
+        )
+    print(answer)
+    print("\nSources:")
+    for i, row in enumerate(rows, start=1):
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        print(f"- [{i}] {payload.get('source_path')} ({payload.get('authority_class')}, {payload.get('staleness_state')})")
+    return 0
+
+
+def health(args: argparse.Namespace) -> int:
+    cfg = embedding_config(contract())
+    status: dict[str, Any] = {"collection": cfg["collection"], "qdrant": "unknown", "ollama": "unknown"}
+    try:
+        qdrant = http_json("GET", f"{cfg['qdrant_url'].rstrip('/')}/collections/{cfg['collection']}", timeout=30)
+        status["qdrant"] = "ok"
+        status["qdrant_collection"] = qdrant.get("result", {})
+    except Exception as exc:
+        status["qdrant"] = f"error: {exc}"
+    try:
+        vector = ollama_embed(cfg, "RAG health probe")
+        status["ollama"] = "ok"
+        status["embedding_dimensions"] = len(vector)
+    except Exception as exc:
+        status["ollama"] = f"error: {exc}"
+    print(json.dumps(status, sort_keys=True) if args.json else "\n".join(f"{k}={v}" for k, v in status.items()))
+    return 0 if status["qdrant"] == "ok" and status["ollama"] == "ok" else 1
+
+
+def manifest(args: argparse.Namespace) -> int:
+    rows = iter_manifest(contract())
+    payload = [{"path": str(row["path"]), "allowlist_id": row.get("allowlist_id"), "authority_class": row.get("authority_class")} for row in rows]
+    if args.json:
+        print(json.dumps({"files": len(payload), "manifest": payload}, sort_keys=True))
+    else:
+        print(f"rag.direct.manifest files={len(payload)}")
+        for row in payload[: args.limit or len(payload)]:
+            print(f"{row['authority_class']}\t{row['allowlist_id']}\t{row['path']}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Direct Qdrant + Ollama RAG for governed spine/runtime authority retrieval.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("health")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=health)
+    p = sub.add_parser("manifest")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--limit", type=int, default=0)
+    p.set_defaults(func=manifest)
+    p = sub.add_parser("index")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--changed-only", action="store_true")
+    p.add_argument("--reset", action="store_true", help="Delete and recreate only the new direct RAG collection before indexing.")
+    p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--max-chunks", type=int, default=0, help="Test guard: stop after this many chunks.")
+    p.add_argument("--pace-sec", type=float, default=0.0)
+    p.set_defaults(func=index_sources)
+    p = sub.add_parser("retrieve")
+    p.add_argument("query")
+    p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=retrieve)
+    p = sub.add_parser("query")
+    p.add_argument("question")
+    p.add_argument("--limit", type=int, default=5)
+    p.set_defaults(func=query)
+    args = parser.parse_args()
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

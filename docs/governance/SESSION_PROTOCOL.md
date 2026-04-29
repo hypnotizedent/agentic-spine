@@ -47,6 +47,22 @@ cd ~/code/agentic-spine
 
 5. Work through `./bin/ops cap run <capability> -- ...`
 
+## Retrieval Assistance
+
+RAG is first-class retrieval tooling for agents, not memory and not authority.
+Use it when you need to find the likely packet, loop scope, receipt, handoff, or
+runtime authority surface for a semantic question and you do not already know the
+exact path.
+
+- Raw retrieval: `./bin/ops cap run rag.direct.retrieve -- "<question>"`
+- Synthesized answer: `./bin/ops cap run rag.direct.query -- "<question>"`
+- Health: `./bin/ops cap run rag.direct.health`
+
+RAG answers must be treated as pointers. Before deciding, closing, deleting, or
+mutating anything, read the cited source path or run the cited capability. If you
+already know an exact symbol, path, packet id, or capability name, prefer `rg` or
+direct file reads.
+
 ## Workflow Objects
 
 Everything an agent does lives inside these five objects. If you do not know

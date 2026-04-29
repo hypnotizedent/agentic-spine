@@ -117,6 +117,12 @@ Governed session start: `ops terminal launch --tool <tool> --terminal <name>`
 Orientation (read-only, not admission): `./bin/ops cap run session.v3.attach`
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
+RAG retrieval is allowed as a discovery aid, not as authority. Use
+`rag.direct.retrieve` or `rag.direct.query` to find likely governed source refs,
+then read the cited packet, loop scope, contract, receipt, or capability
+readback directly before deciding or mutating.
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
+
 Verify hierarchy for all agent sessions:
 - `verify.engine.run` — foundational engine smoke (is the engine alive?)
 - `spine.verify` — canonical local spine truth (is control-plane coherent?)
