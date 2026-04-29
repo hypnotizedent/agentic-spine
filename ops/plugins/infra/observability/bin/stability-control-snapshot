@@ -386,8 +386,13 @@ EOF
     ssh_err="$(cat "$err_file" 2>/dev/null || true)"
     local reason
     reason="$(classify_ssh_error "$ssh_err")"
-    VM_PROBE_STATUS="incident"
-    VM_PROBE_DETAIL="vm_predictive_probe_ssh_failure(reason=$reason,target=$ssh_target,host=$ssh_host)"
+    if [[ "${VM_PREDICTIVE_SSH_FAILURE_TREATMENT:-incident}" == "warn" ]]; then
+      VM_PROBE_STATUS="warn"
+      VM_PROBE_DETAIL="vm_predictive_probe_ssh_failure(reason=$reason,target=$ssh_target,host=$ssh_host,treatment=warn)"
+    else
+      VM_PROBE_STATUS="incident"
+      VM_PROBE_DETAIL="vm_predictive_probe_ssh_failure(reason=$reason,target=$ssh_target,host=$ssh_host,treatment=incident)"
+    fi
     rm -f "$out_file" "$err_file"
     return
   fi
@@ -515,6 +520,11 @@ DISK_MIN_GB="$(yq -r '.predictive_thresholds.vm_disk_headroom_min_gb // 20' "$CO
 DISK_MIN_PCT="$(yq -r '.predictive_thresholds.vm_disk_headroom_min_percent // 15' "$CONTRACT")"
 MEM_MIN_PCT="$(yq -r '.predictive_thresholds.vm_memory_headroom_min_percent // 20' "$CONTRACT")"
 LOAD_PER_CORE_WARN="$(yq -r '.predictive_thresholds.vm_load_per_core_warn // ""' "$CONTRACT")"
+VM_PREDICTIVE_SSH_FAILURE_TREATMENT="$(yq -r '.predictive_thresholds.vm_predictive_ssh_failure_treatment // "incident"' "$CONTRACT")"
+if [[ "$VM_PREDICTIVE_SSH_FAILURE_TREATMENT" != "warn" && "$VM_PREDICTIVE_SSH_FAILURE_TREATMENT" != "incident" ]]; then
+  echo "STOP: predictive_thresholds.vm_predictive_ssh_failure_treatment must be warn or incident" >&2
+  exit 2
+fi
 API_LAT_WARN_MS="$(yq -r '.predictive_thresholds.api_latency_warn_ms // 2000' "$CONTRACT")"
 API_LAT_INCIDENT_MS="$(yq -r '.predictive_thresholds.api_latency_incident_ms // 5000' "$CONTRACT")"
 HEARTBEAT_WARN_MINUTES="$(yq -r '.predictive_thresholds.heartbeat_stale_warn_minutes // 10' "$CONTRACT")"
@@ -799,6 +809,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       --argjson vm_disk_headroom_min_percent "$DISK_MIN_PCT" \
       --argjson vm_memory_headroom_min_percent "$MEM_MIN_PCT" \
       --arg vm_load_per_core_warn "$LOAD_PER_CORE_WARN" \
+      --arg vm_predictive_ssh_failure_treatment "$VM_PREDICTIVE_SSH_FAILURE_TREATMENT" \
       --argjson api_latency_warn_ms "$API_LAT_WARN_MS" \
       --argjson api_latency_incident_ms "$API_LAT_INCIDENT_MS" \
       --argjson heartbeat_stale_warn_minutes "$HEARTBEAT_WARN_MINUTES" \
@@ -809,6 +820,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
         vm_disk_headroom_min_percent: $vm_disk_headroom_min_percent,
         vm_memory_headroom_min_percent: $vm_memory_headroom_min_percent,
         vm_load_per_core_warn: (if $vm_load_per_core_warn == "" then null else ($vm_load_per_core_warn | tonumber?) end),
+        vm_predictive_ssh_failure_treatment: $vm_predictive_ssh_failure_treatment,
         api_latency_warn_ms: $api_latency_warn_ms,
         api_latency_incident_ms: $api_latency_incident_ms,
         heartbeat_stale_warn_minutes: $heartbeat_stale_warn_minutes,
@@ -848,6 +860,7 @@ else
   if [[ -n "$LOAD_PER_CORE_WARN" ]]; then
     echo "predictive_thresholds.vm_load_per_core_warn: $LOAD_PER_CORE_WARN"
   fi
+  echo "predictive_thresholds.vm_predictive_ssh_failure_treatment: $VM_PREDICTIVE_SSH_FAILURE_TREATMENT"
   echo "predictive_thresholds.api_latency_warn_ms: $API_LAT_WARN_MS"
   echo "predictive_thresholds.api_latency_incident_ms: $API_LAT_INCIDENT_MS"
   echo "predictive_thresholds.heartbeat_stale_warn_minutes: $HEARTBEAT_WARN_MINUTES"
