@@ -25,9 +25,10 @@ host-operator-hardware-welcome-plan - Welcome planning for reprovisioned hardwar
 
 Usage:
   host-operator-hardware-welcome-plan --device <device_id> [--ssh-proof <ip_or_hostname>] [--claim-file <path>] [--json]
+  host-operator-hardware-welcome-plan --claim-file <path> [--ssh-proof <ip_or_hostname>] [--json]
 
 Options:
-  --device <device_id>             Device ID from operator.hardware.inventory.yaml
+  --device <device_id>             Device ID from operator.hardware.inventory.yaml; inferred from --claim-file when omitted
   --ssh-proof <ip_or_hostname>     SSH endpoint to verify reachability (Tailscale IP or hostname)
   --claim-file <path>              Stage 0 bootstrap handoff object from host.operator-hardware.firstboot.claim
   --json                           Machine-readable JSON output
@@ -56,8 +57,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -n "$DEVICE" ]] || fail "--device is required"
-
 need yq
 need jq
 
@@ -66,8 +65,8 @@ SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
 [[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
 [[ -f "$PROFILES" ]] || fail "profiles not found: $PROFILES"
 
-# Auto-discover claim file from default runtime path if not explicitly provided
-if [[ -z "$CLAIM_FILE" ]]; then
+# Auto-discover claim file from default runtime path if not explicitly provided.
+if [[ -z "$CLAIM_FILE" && -n "$DEVICE" ]]; then
     auto_claim_path="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}/firstboot-claim.${DEVICE}.json"
     if [[ -f "$auto_claim_path" ]]; then
         CLAIM_FILE="$auto_claim_path"
@@ -76,7 +75,16 @@ fi
 
 if [[ -n "$CLAIM_FILE" ]]; then
     [[ -f "$CLAIM_FILE" ]] || fail "claim file not found: $CLAIM_FILE"
+    claim_device_for_selector=$(jq -r '.device_id // empty' "$CLAIM_FILE")
+    [[ -n "$claim_device_for_selector" ]] || fail "claim file missing device_id: $CLAIM_FILE"
+    if [[ -z "$DEVICE" ]]; then
+        DEVICE="$claim_device_for_selector"
+    elif [[ "$DEVICE" != "$claim_device_for_selector" ]]; then
+        fail "claim file device_id '$claim_device_for_selector' does not match --device '$DEVICE'"
+    fi
 fi
+
+[[ -n "$DEVICE" ]] || fail "--device is required unless --claim-file contains device_id"
 
 # Look up device in inventory
 device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null)
