@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# infra-proxmox-guest-control — Start/shutdown/stop a single PVE guest
+# infra-proxmox-guest-control — Start/shutdown/stop/destroy a single PVE guest
 # Mutating. Supports KVM VMs and LXC containers.
 #
 # Usage:
 #   infra-proxmox-guest-control <action> <vmid> [--host-id pve] [--timeout 120]
 #
-# Actions: start, shutdown, stop
+# Actions: start, shutdown, stop, destroy
 
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
@@ -20,11 +20,13 @@ Usage:
   infra-proxmox-guest-control start <vmid> [--host-id pve]
   infra-proxmox-guest-control shutdown <vmid> [--host-id pve] [--timeout 120]
   infra-proxmox-guest-control stop <vmid> [--host-id pve]
+  infra-proxmox-guest-control destroy <vmid> [--host-id pve] [--execute]
 
 Actions:
   start       Start a stopped guest
   shutdown    Graceful shutdown (ACPI)
   stop        Force stop (immediate)
+  destroy     Destroy a stopped decommissioned guest. Dry-run unless --execute.
 EOF
 }
 
@@ -32,12 +34,14 @@ ACTION="${1:-}"
 VMID="${2:-}"
 HOST_ID="pve"
 TIMEOUT=120
+EXECUTE=0
 
 shift 2 2>/dev/null || true
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --host-id) HOST_ID="${2:-pve}"; shift 2 ;;
         --timeout) TIMEOUT="${2:-120}"; shift 2 ;;
+        --execute) EXECUTE=1; shift ;;
         --) shift; break ;;
         -h|--help) usage; exit 0 ;;
         *) shift ;;
@@ -48,8 +52,8 @@ done
 [[ "$VMID" =~ ^[0-9]+$ ]] || { echo "FAIL: vmid must be numeric (got '$VMID')" >&2; exit 2; }
 
 case "$ACTION" in
-    start|shutdown|stop) ;;
-    *) echo "FAIL: unknown action '$ACTION' (expected start|shutdown|stop)" >&2; exit 2 ;;
+    start|shutdown|stop|destroy) ;;
+    *) echo "FAIL: unknown action '$ACTION' (expected start|shutdown|stop|destroy)" >&2; exit 2 ;;
 esac
 
 SSH_HOST="$(ssh_resolve_ssh_host_with_fallback "$HOST_ID" 2>/dev/null | awk '{print $1}')"
@@ -79,6 +83,27 @@ fi
 
 echo "Guest: $VMID (type=$GUEST_TYPE, host=$HOST_ID)"
 
+guest_status() {
+    case "$GUEST_TYPE" in
+        qm) remote "qm status $VMID" | awk '{print $2}' ;;
+        pct) remote "pct status $VMID" | awk '{print $2}' ;;
+    esac
+}
+
+vm_lifecycle_status() {
+    python3 - "$SPINE_ROOT/ops/bindings/vm.lifecycle.yaml" "$VMID" <<'PY'
+import sys, yaml
+path, vmid = sys.argv[1], int(sys.argv[2])
+with open(path) as f:
+    data = yaml.safe_load(f)
+for row in data.get("vms", []):
+    if row.get("id") == vmid:
+        print(row.get("status", ""))
+        raise SystemExit(0)
+print("")
+PY
+}
+
 case "$ACTION" in
     start)
         echo "Starting $VMID..."
@@ -94,5 +119,37 @@ case "$ACTION" in
         echo "Force stopping $VMID..."
         remote "$GUEST_TYPE stop $VMID"
         echo "OK: $VMID stopped"
+        ;;
+    destroy)
+        lifecycle_status="$(vm_lifecycle_status)"
+        current_status="$(guest_status)"
+        if [[ "$lifecycle_status" != "decommissioned" ]]; then
+            echo "FAIL: destroy requires vm.lifecycle status=decommissioned (got '${lifecycle_status:-missing}')" >&2
+            exit 1
+        fi
+        if [[ "$current_status" != "stopped" ]]; then
+            echo "FAIL: destroy requires stopped guest (got '$current_status')" >&2
+            exit 1
+        fi
+
+        echo "Lifecycle: $lifecycle_status"
+        echo "Runtime status: $current_status"
+        echo "-- config before destroy --"
+        case "$GUEST_TYPE" in
+            qm) remote "qm config $VMID" ;;
+            pct) remote "pct config $VMID" ;;
+        esac
+
+        if [[ "$EXECUTE" != "1" ]]; then
+            echo "DRY_RUN: would destroy $GUEST_TYPE guest $VMID on $HOST_ID. Re-run with --execute to mutate."
+            exit 0
+        fi
+
+        echo "Destroying $VMID..."
+        case "$GUEST_TYPE" in
+            qm) remote "qm destroy $VMID --purge 1" ;;
+            pct) remote "pct destroy $VMID --purge 1" ;;
+        esac
+        echo "OK: $VMID destroyed"
         ;;
 esac
