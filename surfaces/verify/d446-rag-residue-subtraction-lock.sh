@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+fail() {
+  echo "D446 FAIL: $*" >&2
+  exit 1
+}
+
+retired_files=(
+  "ops/plugins/infra/rag/bin/anythingllm-tune"
+  "ops/plugins/infra/rag/bin/rag"
+  "ops/plugins/infra/rag/bin/rag-budget-status"
+  "ops/plugins/infra/rag/bin/rag-embedding-probe"
+  "ops/plugins/infra/rag/bin/rag-index-audit"
+  "ops/plugins/infra/rag/bin/rag-index-audit-report.py"
+  "ops/plugins/infra/rag/bin/rag-observability-activate"
+  "ops/plugins/infra/rag/bin/rag-reindex-metrics-export"
+  "ops/plugins/infra/rag/bin/rag-reindex-remote-start"
+  "ops/plugins/infra/rag/bin/rag-reindex-remote-status"
+  "ops/plugins/infra/rag/bin/rag-reindex-remote-stop"
+  "ops/plugins/infra/rag/bin/rag-reindex-remote-verify"
+  "ops/plugins/infra/rag/bin/rag-reindex-smoke"
+  "ops/plugins/infra/rag/bin/rag-remote-dependency-probe"
+  "ops/bindings/domains/rag/rag.metrics.normalization.yaml"
+  "ops/bindings/domains/rag/rag.observability.contract.yaml"
+  "ops/bindings/domains/rag/rag.reindex.quality.yaml"
+  "ops/bindings/domains/rag/rag.remote.runner.yaml"
+  "ops/bindings/domains/rag/rag.workload.budget.yaml"
+)
+
+for rel in "${retired_files[@]}"; do
+  [[ ! -e "$ROOT/$rel" ]] || fail "retired RAG residue still exists: $rel"
+done
+
+current_surfaces=(
+  "AGENTS.md"
+  "docs/governance/SESSION_PROTOCOL.md"
+  "docs/governance/SPINE.md"
+  "docs/governance/domains/rag.md"
+  "ops/capabilities.yaml"
+  "ops/plugins/MANIFEST.yaml"
+  "ops/plugins/infra/rag/capabilities.yaml"
+  "ops/bindings/domains/rag.bundle.yaml"
+  "ops/bindings/domains/rag/rag.workspace.contract.yaml"
+  "ops/bindings/surface.readonly.contract.yaml"
+)
+
+retired_tokens='rag\.anythingllm|rag\.budget\.status|rag\.reindex\.remote|rag\.reindex\.metrics\.export|rag\.observability\.activate|rag\.health\b|rag\.sync\b'
+if rg -n "$retired_tokens" "${current_surfaces[@]/#/$ROOT/}" >/tmp/d446-rag-residue.txt 2>/dev/null; then
+  cat /tmp/d446-rag-residue.txt >&2
+  rm -f /tmp/d446-rag-residue.txt
+  fail "retired RAG capability grammar found in current surfaces"
+fi
+rm -f /tmp/d446-rag-residue.txt
+
+for cap in rag.direct.health rag.direct.quality rag.direct.retrieve rag.direct.query rag.direct.progress; do
+  rg -q "^[[:space:]]*$cap:" "$ROOT/ops/capabilities.yaml" || fail "missing direct RAG capability: $cap"
+done
+
+echo "D446 PASS: retired AnythingLLM/remote-reindex RAG residue is absent from current agent grammar and direct RAG remains canonical"

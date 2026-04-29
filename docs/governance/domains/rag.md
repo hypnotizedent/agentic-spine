@@ -31,6 +31,4 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 - `rag.direct.retrieve` — source-ref retrieval.
 - `rag.direct.query` — cited answer synthesis from retrieved refs.
 - `rag.direct.retry_failed` — retry lane for indexed source-card failures.
-- `rag.observability.activate` — metrics collector activation.
-- `rag.reindex.metrics.export` — Prometheus metrics export.
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->

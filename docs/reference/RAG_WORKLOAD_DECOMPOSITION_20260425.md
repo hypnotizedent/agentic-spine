@@ -1,5 +1,5 @@
 ---
-status: authoritative
+status: historical
 owner: "@ronny"
 type: derived-conclusion-note
 loop: LOOP-RAG-WORKLOAD-DECOMPOSITION-20260425
@@ -7,9 +7,14 @@ wave: WAVE-20260425-11
 origin: OI-20260425-125601-4859
 scope: design-only
 last_verified: "2026-04-25"
+superseded_by: "ops/bindings/domains/rag/rag.workspace.contract.yaml"
 ---
 
 # RAG Workload Decomposition — Design Note
+
+This is historical design evidence from the AnythingLLM era. Current RAG
+authority is direct Qdrant/Ollama through `rag.direct.*`; do not use this note
+as current implementation authority.
 
 ## Origin
 
