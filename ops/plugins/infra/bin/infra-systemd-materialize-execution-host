@@ -252,8 +252,29 @@ for label in "${LABELS[@]}"; do
   plist_file="$LAUNCHD_DIR/${label}.plist"
 
   if [[ ! -f "$plist_file" ]]; then
-    GAPS+=("${label}:plist_not_found")
-    RESULTS+=("{\"label\":\"$label\",\"unit\":\"$unit_name\",\"status\":\"blocked\",\"reason\":\"plist template not found\"}")
+    systemd_unit_path="$(LABEL="$label" yq -r '.labels[] | select(.label == strenv(LABEL)) | .systemd_unit_path // ""' "$REGISTRY")"
+    systemd_timer_path="$(LABEL="$label" yq -r '.labels[] | select(.label == strenv(LABEL)) | .systemd_timer_path // ""' "$REGISTRY")"
+    copied_units=()
+
+    if [[ -n "$systemd_unit_path" && -f "$ROOT/$systemd_unit_path" ]]; then
+      cp "$ROOT/$systemd_unit_path" "$OUTPUT_DIR/$(basename "$systemd_unit_path")"
+      SERVICES_GENERATED=$((SERVICES_GENERATED + 1))
+      copied_units+=("$(basename "$systemd_unit_path")")
+    fi
+
+    if [[ -n "$systemd_timer_path" && -f "$ROOT/$systemd_timer_path" ]]; then
+      cp "$ROOT/$systemd_timer_path" "$OUTPUT_DIR/$(basename "$systemd_timer_path")"
+      TIMERS_GENERATED=$((TIMERS_GENERATED + 1))
+      copied_units+=("timer: $(basename "$systemd_timer_path")")
+    fi
+
+    if [[ ${#copied_units[@]} -gt 0 ]]; then
+      unit_summary="$(IFS=', '; echo "${copied_units[*]}")"
+      RESULTS+=("{\"label\":\"$label\",\"unit\":\"${unit_summary}\",\"status\":\"copied_systemd_template\",\"schedule_type\":\"declared_systemd\",\"notes\":\"plist absent; used registry systemd_unit_path/systemd_timer_path\"}")
+    else
+      GAPS+=("${label}:plist_not_found")
+      RESULTS+=("{\"label\":\"$label\",\"unit\":\"$unit_name\",\"status\":\"blocked\",\"reason\":\"plist template not found and no readable systemd template declared\"}")
+    fi
     continue
   fi
 
