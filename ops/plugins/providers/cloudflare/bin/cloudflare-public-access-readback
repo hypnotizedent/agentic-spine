@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+SECRETS_EXEC = ROOT / "ops/plugins/infra/secrets/bin/secrets-exec"
+CF_BINDING = ROOT / "ops/bindings/cloudflare.inventory.yaml"
+HOME_INGRESS = ROOT / "ops/bindings/home.ingress.map.yaml"
+SHOP_INGRESS = ROOT / "ops/bindings/shop.ingress.map.yaml"
+COCKPIT_CONTRACT = ROOT / "ops/bindings/operator.cockpit.contract.yaml"
+BRIDGE_ENDPOINTS = ROOT / "ops/bindings/mailroom.bridge.endpoints.yaml"
+
+
+def load_yaml(path):
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def cf_get(path):
+    base = os.environ.get("CLOUDFLARE_API_BASE", "https://api.cloudflare.com/client/v4").rstrip("/")
+    token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+    account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+    if not token:
+        return None, {"status": "blocked", "reason": "missing_CLOUDFLARE_API_TOKEN"}
+    url = path
+    if path.startswith("/"):
+        url = base + path
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            return json.load(resp), None
+    except urllib.error.HTTPError as exc:
+        return None, {"status": "blocked", "http_status": exc.code}
+    except Exception as exc:
+        return None, {"status": "blocked", "reason": type(exc).__name__}
+
+
+def tunnel_ingress(binding):
+    account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+    tunnel_id = os.environ.get("CLOUDFLARE_TUNNEL_ID", "")
+    if not tunnel_id:
+        for tunnel in binding.get("tunnels", []) or []:
+            if tunnel.get("name") == "homelab-tunnel":
+                tunnel_id = tunnel.get("id") or ""
+                break
+    if not account or not tunnel_id:
+        return {}, {"status": "blocked", "reason": "missing_account_or_tunnel_id"}
+
+    data, err = cf_get(f"/accounts/{account}/cfd_tunnel/{tunnel_id}/configurations")
+    if err:
+        return {}, err
+    if not data or not data.get("success"):
+        return {}, {"status": "blocked", "reason": "cloudflare_success_false"}
+    result = data.get("result") or {}
+    cfg = result.get("config") or result.get("configuration") or result
+    rows = {}
+    for rule in cfg.get("ingress") or []:
+        if not isinstance(rule, dict):
+            continue
+        service = (rule.get("service") or "").strip()
+        hosts = []
+        if isinstance(rule.get("hostname"), str):
+            hosts.append(rule["hostname"])
+        if isinstance(rule.get("hostnames"), list):
+            hosts.extend([h for h in rule["hostnames"] if isinstance(h, str)])
+        for host in hosts:
+            host = host.strip()
+            if host:
+                rows[host] = service
+    return rows, None
+
+
+def access_apps(binding):
+    account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+    by_domain = {}
+    api_status = {"status": "not_checked"}
+    if account:
+        data, err = cf_get(f"/accounts/{account}/access/apps")
+        if err:
+            api_status = err
+        elif data and data.get("success"):
+            api_status = {"status": "ok"}
+            for app in data.get("result") or []:
+                domain = app.get("domain")
+                domains = domain if isinstance(domain, list) else [domain]
+                for item in domains:
+                    if isinstance(item, str) and item:
+                        by_domain[item] = {
+                            "name": app.get("name", ""),
+                            "id": app.get("id", ""),
+                            "source": "cloudflare_api",
+                        }
+        else:
+            api_status = {"status": "blocked", "reason": "cloudflare_success_false"}
+
+    for app in binding.get("access_apps", []) or []:
+        domain = app.get("domain")
+        if not domain:
+            continue
+        by_domain.setdefault(domain, {
+            "name": app.get("name", ""),
+            "legacy_name": app.get("legacy_name", ""),
+            "purpose": app.get("purpose", ""),
+            "actor_class": app.get("actor_class", ""),
+            "auth_method": app.get("auth_method", ""),
+            "live_policy_proof": app.get("live_policy_proof", ""),
+            "source": "cloudflare.inventory.yaml",
+        })
+    return by_domain, api_status
+
+
+def ingress_metadata():
+    meta = {}
+    for path in (HOME_INGRESS, SHOP_INGRESS):
+        data = load_yaml(path)
+        for route in data.get("public_routes", []) or []:
+            host = route.get("hostname")
+            if not host:
+                continue
+            meta[host] = {
+                "purpose": route.get("service", ""),
+                "site": data.get("site", ""),
+                "stack": route.get("stack", ""),
+                "routing_layer": route.get("routing_layer", ""),
+                "authority_source": route.get("authority_source", ""),
+                "target_hint": route.get("target_hint", ""),
+                "lifecycle_class": route.get("lifecycle_class", ""),
+                "source": str(path.relative_to(ROOT)),
+            }
+    return meta
+
+
+def static_purpose(host):
+    names = {
+        "auth.ronny.works": ("identity/auth surface", "human_operator/admin"),
+        "secrets.ronny.works": ("secrets manager", "human_operator/admin"),
+        "vault.ronny.works": ("password vault", "human_operator/admin"),
+        "git.ronny.works": ("canonical git", "human_operator/agent_actor"),
+        "grafana.ronny.works": ("observability", "human_operator/admin"),
+        "dash.ronny.works": ("dashboard", "human_operator"),
+        "pihole.ronny.works": ("dns admin", "human_operator/admin"),
+    }
+    return names.get(host, ("", "unknown"))
+
+
+def build_rows():
+    binding = load_yaml(CF_BINDING)
+    cockpit = load_yaml(COCKPIT_CONTRACT)
+    bridge = load_yaml(BRIDGE_ENDPOINTS)
+    ingress = ingress_metadata()
+    tunnel, tunnel_err = tunnel_ingress(binding)
+    access, access_api_status = access_apps(binding)
+
+    hosts = set(tunnel) | set(ingress) | set(access)
+    public_cockpit = ((cockpit.get("authority") or {}).get("public_operator_url") or "").replace("https://", "").replace("http://", "").strip("/")
+    if public_cockpit:
+        hosts.add(public_cockpit)
+
+    bridge_public = ((bridge.get("endpoints") or {}).get("public_https") or {})
+    bridge_former = (bridge_public.get("former_url") or bridge_public.get("url") or "").replace("https://", "").replace("http://", "").strip("/")
+    if bridge_former:
+        hosts.add(bridge_former)
+
+    rows = []
+    for host in sorted(hosts):
+        meta = ingress.get(host, {})
+        purpose = meta.get("purpose", "")
+        actor_class = "unknown"
+        owner = meta.get("site", "") or "unknown"
+        lifecycle = meta.get("lifecycle_class", "") or "live_if_routed"
+        notes = []
+
+        static, static_actor = static_purpose(host)
+        if static and not purpose:
+            purpose = static
+            actor_class = static_actor
+
+        if host == public_cockpit:
+            purpose = "human operator cockpit"
+            actor_class = "human_operator"
+            owner = "spine"
+            lifecycle = "canonical"
+            notes.append("canonical_public_operator_url")
+
+        if host == bridge_former:
+            notes.append(f"mailroom_bridge_public_claim={bridge_public.get('lifecycle_state', 'unknown')}")
+
+        app = access.get(host, {})
+        if app.get("actor_class"):
+            actor_class = app["actor_class"]
+        auth_mode = app.get("auth_method", "")
+        if not auth_mode and app:
+            auth_mode = "cloudflare_access"
+        if not auth_mode:
+            auth_mode = "unknown_or_service_local"
+
+        if access_api_status.get("status") == "ok" and app.get("source") == "cloudflare_api":
+            auth_policy_proof = "app_present_policy_detail_not_expanded"
+        elif app.get("live_policy_proof"):
+            auth_policy_proof = app["live_policy_proof"]
+        elif app:
+            auth_policy_proof = "inventory_only_live_policy_unproved"
+        elif access_api_status.get("status") == "blocked":
+            auth_policy_proof = f"unproved_access_api_{access_api_status.get('http_status') or access_api_status.get('reason')}"
+        else:
+            auth_policy_proof = "no_access_app_known"
+
+        route_target = tunnel.get(host, "")
+        if not route_target:
+            route_target = meta.get("target_hint", "")
+        route_state = "live_tunnel" if host in tunnel else "declared_only"
+
+        if not purpose:
+            purpose = "unclassified public route"
+        if app.get("legacy_name"):
+            notes.append(f"legacy_access_app_name={app['legacy_name']}")
+
+        rows.append({
+            "hostname": host,
+            "purpose": purpose,
+            "route_target": route_target,
+            "route_state": route_state,
+            "routing_layer": meta.get("routing_layer", "cloudflare_tunnel" if host in tunnel else ""),
+            "actor_class": actor_class,
+            "auth_mode": auth_mode,
+            "auth_policy_proof": auth_policy_proof,
+            "owner": owner,
+            "lifecycle": lifecycle,
+            "notes": "; ".join(notes),
+            "source": meta.get("source", ""),
+        })
+    return {
+        "capability": "cloudflare.public_access.readback",
+        "status": "ok",
+        "layer": "L2_shared_infrastructure",
+        "boundary": "publication/access adapter; not L1 kernel",
+        "cloudflare_access_fit": "Cloudflare Access is the edge identity/auth policy layer for public URLs and machine service-token access. It belongs in L2 because L3 services depend on it, but it must not define the spine kernel.",
+        "access_policy_api": access_api_status,
+        "tunnel_api": tunnel_err or {"status": "ok"},
+        "rows": rows,
+    }
+
+
+def print_table(payload):
+    print("cloudflare.public_access.readback")
+    print(f"layer: {payload['layer']}")
+    print(f"boundary: {payload['boundary']}")
+    print(f"access_policy_api: {payload['access_policy_api']}")
+    print(f"tunnel_api: {payload['tunnel_api']}")
+    print("")
+    print("| hostname | purpose | route | actor | auth | proof | notes |")
+    print("|---|---|---|---|---|---|---|")
+    for row in payload["rows"]:
+        route = row["route_target"] or row["route_state"]
+        print(
+            f"| {row['hostname']} | {row['purpose']} | {route} | "
+            f"{row['actor_class']} | {row['auth_mode']} | {row['auth_policy_proof']} | {row['notes']} |"
+        )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    if not os.environ.get("SPINE_SECRETS_INJECTED"):
+        env = os.environ.copy()
+        env["SPINE_SECRETS_INJECTED"] = "1"
+        cmd = [str(SECRETS_EXEC), "--", sys.executable, __file__] + sys.argv[1:]
+        raise SystemExit(subprocess.call(cmd, env=env))
+
+    payload = build_rows()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print_table(payload)
+
+
+if __name__ == "__main__":
+    main()
