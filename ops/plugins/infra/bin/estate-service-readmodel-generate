@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+
+
+def fail(message: str) -> None:
+    print(f"estate.service.readmodel.generate FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing binding: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def ensure_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="estate-service-readmodel-generate")
+    parser.add_argument("--json", action="store_true", help="Print JSON summary after generation.")
+    parser.add_argument("--no-live-health", action="store_true", help="Do not invoke services-health-status.")
+    return parser.parse_args()
+
+
+def run_services_health() -> dict[str, dict[str, str]]:
+    script = ROOT / "ops/plugins/infra/services/bin/services-health-status"
+    if not script.is_file():
+        return {}
+    proc = subprocess.run(
+        [str(script)],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    rows: dict[str, dict[str, str]] = {}
+    for raw in proc.stdout.splitlines():
+        line = raw.rstrip()
+        if not line or line.startswith(("services.health.status", "binding:", "ssh_binding:", "endpoints:", "ID ", "status:", "-")):
+            continue
+        parts = re.split(r"\s+", line.strip(), maxsplit=5)
+        if len(parts) < 5:
+            continue
+        service_id, host, status, elapsed, path_used = parts[:5]
+        if status not in {"OK", "SKIP", "FAIL", "REFUSED", "TIMEOUT", "ERROR", "UNKNOWN"}:
+            continue
+        rows[service_id] = {
+            "status": status.lower(),
+            "host": host,
+            "elapsed": elapsed,
+            "path": path_used,
+            "note": parts[5] if len(parts) > 5 else "",
+        }
+    return rows
+
+
+def active_site_by_proxmox(sites: list[dict[str, Any]]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for site in sites:
+        if str(site.get("status") or "").strip() != "active":
+            continue
+        prox = str(site.get("proxmox_alias") or "").strip()
+        if prox:
+            out[prox] = str(site.get("id") or "")
+    return out
+
+
+def active_site_by_host_ref(sites: list[dict[str, Any]]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for site in sites:
+        if str(site.get("status") or "").strip() != "active":
+            continue
+        sid = str(site.get("id") or "")
+        for field in ("host_refs", "compose_targets"):
+            for host in ensure_list(site.get(field)):
+                if host:
+                    out[str(host)] = sid
+    return out
+
+
+def lifecycle_index(vms: list[dict[str, Any]], site_by_proxmox: dict[str, str]) -> dict[str, dict[str, Any]]:
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for vm in vms:
+        host = str(vm.get("hostname") or "").strip()
+        if not host:
+            continue
+        rows.setdefault(host, []).append(vm)
+
+    priority = {
+        "active": 0,
+        "running": 0,
+        "template": 4,
+        "decommissioned": 8,
+        "tombstone": 9,
+    }
+    indexed: dict[str, dict[str, Any]] = {}
+    for host, matches in rows.items():
+        matches.sort(key=lambda vm: priority.get(str(vm.get("status") or "").strip(), 5))
+        active = matches[0]
+        indexed[host] = {
+            "active": active,
+            "all": matches,
+            "site": site_by_proxmox.get(str(active.get("proxmox_host") or "").strip()),
+            "has_retired_duplicate": any(str(vm.get("status") or "") in {"decommissioned", "tombstone"} for vm in matches[1:]),
+        }
+    return indexed
+
+
+def lifecycle_families(registry: dict[str, Any]) -> list[dict[str, Any]]:
+    out = []
+    for family_id, raw in ensure_dict(registry.get("services")).items():
+        row = ensure_dict(raw)
+        refs = ensure_dict(row.get("binding_refs"))
+        out.append({
+            "family_id": str(family_id),
+            "display_name": row.get("display_name") or str(family_id),
+            "criticality": row.get("criticality"),
+            "hosts": {str(h) for h in ensure_list(refs.get("services_health_hosts")) if h},
+        })
+    return out
+
+
+def match_family(service_id: str, host: str, families: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for family in families:
+        if host in family["hosts"]:
+            return family
+    lowered = service_id.lower()
+    for family in families:
+        fid = family["family_id"].lower()
+        if fid and fid in lowered:
+            return family
+    return None
+
+
+def endpoint_from_probe(probe_by_id: dict[str, dict[str, Any]], service_id: str) -> dict[str, Any]:
+    probe = ensure_dict(probe_by_id.get(service_id))
+    return ensure_dict(probe.get("endpoint"))
+
+
+def build_row(
+    endpoint: dict[str, Any],
+    probe: dict[str, Any],
+    live: dict[str, str] | None,
+    ssh_by_id: dict[str, dict[str, Any]],
+    lifecycle_by_host: dict[str, dict[str, Any]],
+    site_by_host: dict[str, str],
+    families: list[dict[str, Any]],
+) -> dict[str, Any]:
+    service_id = str(endpoint.get("id") or probe.get("id") or "").strip()
+    host = str(endpoint.get("host") or ensure_dict(probe.get("subject")).get("subject_id") or "").strip()
+    enabled = bool(endpoint.get("enabled", True))
+    probe_state = str(probe.get("lifecycle_state") or ("active if enabled else disabled")).strip()
+    lifecycle = lifecycle_by_host.get(host)
+    vm = ensure_dict(lifecycle.get("active") if lifecycle else {})
+    ssh_target = ssh_by_id.get(host)
+    family = match_family(service_id, host, families)
+
+    vm_status = str(vm.get("status") or "") if vm else ""
+    site = (
+        lifecycle.get("site") if lifecycle else None
+    ) or site_by_host.get(host) or str(ensure_dict(ssh_target).get("site") or "") or None
+
+    classification = "canonical_active"
+    residue_reason = ""
+    join_gaps: list[str] = []
+    if probe_state in {"retired", "deprecated"}:
+        classification = "retired_residue"
+        residue_reason = f"probe lifecycle_state={probe_state}"
+    elif not enabled:
+        classification = "disabled_residue"
+        residue_reason = "endpoint.enabled=false"
+    elif not ssh_target:
+        classification = "missing_join"
+        residue_reason = "missing ssh.targets row"
+    elif not lifecycle and host not in site_by_host:
+        join_gaps.append("no vm.lifecycle or active site host mapping")
+
+    row = {
+        "service_id": service_id,
+        "host": host,
+        "site": site or "unknown",
+        "node_role": vm.get("role") or ",".join(ensure_list(ensure_dict(ssh_target).get("tags"))) or "unknown",
+        "lifecycle_state": probe_state,
+        "enabled": enabled,
+        "health_url": endpoint.get("url"),
+        "expected_status": endpoint.get("expect", 200),
+        "current_health": ensure_dict(live).get("status", "not_checked"),
+        "health_path": ensure_dict(live).get("path", "not_checked"),
+        "ssh_target": host if ssh_target else None,
+        "vm_id": vm.get("id"),
+        "vm_status": vm_status or "not_modeled",
+        "vm_role": vm.get("role"),
+        "backup_target": vm.get("backup_target"),
+        "data_lifecycle_family": ensure_dict(family).get("family_id", "not_modeled_yet") if family else "not_modeled_yet",
+        "criticality": ensure_dict(family).get("criticality", "not_modeled_yet") if family else "not_modeled_yet",
+        "classification": classification,
+        "residue_reason": residue_reason,
+        "join_gaps": join_gaps,
+        "source_refs": [
+            "ops/bindings/probe.registry.yaml",
+            "ops/bindings/services.health.yaml",
+            "ops/bindings/ssh.targets.yaml",
+            "ops/bindings/vm.lifecycle.yaml",
+            "ops/bindings/topology.sites.yaml",
+            "ops/bindings/service.data.lifecycle.registry.yaml",
+        ],
+    }
+    if lifecycle and lifecycle.get("has_retired_duplicate"):
+        row["retired_duplicate_ignored"] = True
+    return row
+
+
+def markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Estate Service Readmodel (Generated)",
+        "",
+        f"Generated: {payload['generated_at_utc']}",
+        "Authority state: generated_projection",
+        "Regenerate: `./bin/ops cap run estate.service.readmodel.generate`",
+        "",
+        "## Summary",
+        "",
+        f"- active_services: {payload['summary']['active_services']}",
+        f"- residue_to_subtract: {payload['summary']['residue_to_subtract']}",
+        f"- missing_join: {payload['summary']['missing_join']}",
+        f"- unhealthy_active: {payload['summary']['unhealthy_active']}",
+        "",
+        "## Active Services",
+        "",
+        "| Service | Host | Site | Health | Role | VM | Backup | Data Family | Criticality |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for row in payload["active_services"]:
+        lines.append(
+            "| `{service_id}` | `{host}` | {site} | {current_health} | {node_role} | {vm_id} / {vm_status} | {backup_target} | {data_lifecycle_family} | {criticality} |".format(
+                **{k: ("" if v is None else v) for k, v in row.items()}
+            )
+        )
+    lines.extend([
+        "",
+        "## Residue To Subtract",
+        "",
+        "| Service | Host | Classification | Reason | Health |",
+        "|---|---|---|---|---|",
+    ])
+    for row in payload["residue_to_subtract"]:
+        lines.append(
+            f"| `{row['service_id']}` | `{row['host']}` | {row['classification']} | {row['residue_reason']} | {row['current_health']} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def main() -> None:
+    args = parse_args()
+
+    paths = {
+        "probe_registry": ROOT / "ops/bindings/probe.registry.yaml",
+        "services_health": ROOT / "ops/bindings/services.health.yaml",
+        "ssh_targets": ROOT / "ops/bindings/ssh.targets.yaml",
+        "vm_lifecycle": ROOT / "ops/bindings/vm.lifecycle.yaml",
+        "topology_sites": ROOT / "ops/bindings/topology.sites.yaml",
+        "node_role_contract": ROOT / "ops/bindings/node.role.contract.yaml",
+        "service_data_lifecycle": ROOT / "ops/bindings/service.data.lifecycle.registry.yaml",
+        "topology_closure_graph": ROOT / "ops/bindings/topology.closure.graph.yaml",
+    }
+
+    probe_registry = load_yaml(paths["probe_registry"])
+    services_health = load_yaml(paths["services_health"])
+    ssh_targets = load_yaml(paths["ssh_targets"])
+    vm_lifecycle = load_yaml(paths["vm_lifecycle"])
+    topology_sites = load_yaml(paths["topology_sites"])
+    service_lifecycle = load_yaml(paths["service_data_lifecycle"])
+
+    probe_by_id = {str(p.get("id")): p for p in ensure_list(probe_registry.get("probes")) if isinstance(p, dict) and p.get("id")}
+    ssh_rows = ensure_dict(ssh_targets.get("ssh")).get("targets") or ssh_targets.get("targets") or []
+    ssh_by_id = {str(t.get("id")): t for t in ensure_list(ssh_rows) if isinstance(t, dict) and t.get("id")}
+    sites = ensure_list(topology_sites.get("sites"))
+    site_by_proxmox = active_site_by_proxmox(sites)
+    site_by_host = active_site_by_host_ref(sites)
+    lifecycle_by_host = lifecycle_index(ensure_list(vm_lifecycle.get("vms")), site_by_proxmox)
+    families = lifecycle_families(service_lifecycle)
+    live_health = {} if args.no_live_health else run_services_health()
+
+    rows = []
+    for endpoint in ensure_list(services_health.get("endpoints")):
+        if not isinstance(endpoint, dict):
+            continue
+        service_id = str(endpoint.get("id") or "").strip()
+        rows.append(
+            build_row(
+                endpoint,
+                probe_by_id.get(service_id, {}),
+                live_health.get(service_id),
+                ssh_by_id,
+                lifecycle_by_host,
+                site_by_host,
+                families,
+            )
+        )
+
+    active = [row for row in rows if row["classification"] == "canonical_active"]
+    residue = [row for row in rows if row["classification"] != "canonical_active"]
+
+    # Include retired probes that no longer emit into services.health as kill-list residue.
+    emitted_ids = {row["service_id"] for row in rows}
+    for service_id, probe in sorted(probe_by_id.items()):
+        state = str(probe.get("lifecycle_state") or "")
+        if service_id in emitted_ids or state not in {"retired", "deprecated"}:
+            continue
+        endpoint = endpoint_from_probe(probe_by_id, service_id)
+        subject = ensure_dict(probe.get("subject"))
+        residue.append({
+            "service_id": service_id,
+            "host": str(subject.get("subject_id") or endpoint.get("host") or "unknown"),
+            "site": "not_in_active_rollup",
+            "node_role": "unknown",
+            "lifecycle_state": state,
+            "enabled": bool(endpoint.get("enabled", False)),
+            "health_url": endpoint.get("url"),
+            "expected_status": endpoint.get("expect", 200),
+            "current_health": "excluded_from_rollup",
+            "health_path": "excluded_from_rollup",
+            "ssh_target": None,
+            "vm_id": None,
+            "vm_status": "not_joined",
+            "vm_role": None,
+            "backup_target": None,
+            "data_lifecycle_family": "not_modeled_yet",
+            "criticality": "not_modeled_yet",
+            "classification": "retired_residue",
+            "residue_reason": "retired probe excluded from services.health projection",
+            "join_gaps": [],
+            "source_refs": ["ops/bindings/probe.registry.yaml"],
+        })
+
+    unhealthy_active = [row for row in active if row["current_health"] not in {"ok", "not_checked"}]
+    missing_join = [
+        row for row in rows
+        if row["classification"] in {"missing_join", "unmodeled_host"} or row.get("join_gaps")
+    ]
+
+    payload = {
+        "version": 1,
+        "status": "generated_projection",
+        "authority_state": "generated_projection",
+        "generated_at_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "source_capability": "estate.service.readmodel.generate",
+        "source_authorities": {key: rel(path) for key, path in paths.items()},
+        "summary": {
+            "services_health_endpoints": len(rows),
+            "active_services": len(active),
+            "residue_to_subtract": len(residue),
+            "missing_join": len(missing_join),
+            "unhealthy_active": len(unhealthy_active),
+        },
+        "active_services": active,
+        "residue_to_subtract": residue,
+        "missing_join": missing_join,
+    }
+
+    state_root = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtime/spine/state")))
+    out_dir = state_root / "domain-state"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    yaml_path = out_dir / "estate.service.readmodel.yaml"
+    md_path = out_dir / "estate.service.readmodel.md"
+    yaml_path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=False), encoding="utf-8")
+    md_path.write_text(markdown(payload), encoding="utf-8")
+
+    print("estate.service.readmodel.generate")
+    print("status: OK")
+    print(f"yaml: {yaml_path}")
+    print(f"markdown: {md_path}")
+    print(f"active_services: {len(active)}")
+    print(f"residue_to_subtract: {len(residue)}")
+    print(f"missing_join: {len(missing_join)}")
+    print(f"unhealthy_active: {len(unhealthy_active)}")
+    if args.json:
+        print(json.dumps(payload["summary"], indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
