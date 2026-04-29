@@ -53,12 +53,20 @@ def contract() -> dict[str, Any]:
 def embedding_config(doc: dict[str, Any]) -> dict[str, Any]:
     embedding = doc.get("embedding") if isinstance(doc.get("embedding"), dict) else {}
     policy = doc.get("index_policy") if isinstance(doc.get("index_policy"), dict) else {}
+    sync_policy = doc.get("sync_policy") if isinstance(doc.get("sync_policy"), dict) else {}
+    load_shaping = sync_policy.get("load_shaping") if isinstance(sync_policy.get("load_shaping"), dict) else {}
     return {
         "model": os.environ.get("RAG_EMBED_MODEL") or embedding.get("model") or "mxbai-embed-large:latest",
         "dimensions": int(embedding.get("expected_dimensions") or 1024),
         "ollama_url": os.environ.get("OLLAMA_URL") or embedding.get("ollama_url") or "http://100.98.70.70:11434",
         "qdrant_url": os.environ.get("QDRANT_URL") or embedding.get("qdrant_url") or "http://100.71.17.29:6333",
         "collection": os.environ.get("RAG_QDRANT_COLLECTION") or policy.get("collection") or "spine-runtime-authority",
+        "embed_timeout_sec": int(
+            os.environ.get("RAG_EMBED_TIMEOUT_SEC")
+            or embedding.get("timeout_sec")
+            or load_shaping.get("embedding_timeout_sec")
+            or 30
+        ),
     }
 
 
@@ -109,7 +117,7 @@ def reset_collection(cfg: dict[str, Any]) -> None:
 
 def ollama_embed(cfg: dict[str, Any], text: str) -> list[float]:
     payload = {"model": cfg["model"], "prompt": text}
-    data = http_json("POST", f"{cfg['ollama_url'].rstrip('/')}/api/embeddings", payload, timeout=120)
+    data = http_json("POST", f"{cfg['ollama_url'].rstrip('/')}/api/embeddings", payload, timeout=int(cfg.get("embed_timeout_sec") or 30))
     vector = data.get("embedding")
     if not isinstance(vector, list) or not vector:
         raise RuntimeError("Ollama embedding response did not include an embedding vector")
@@ -371,9 +379,7 @@ def index_source_cards(
     failed: list[dict[str, str]] = []
     ledger = {"sources": {}} if args.reset else load_ledger()
     sources = ledger.setdefault("sources", {})
-    embed_batch_size = max(1, int(args.embed_batch_size or 8))
-    qdrant_batch_size = max(1, int(args.batch_size or 4))
-    progress_every = max(1, int(args.progress_every or 10))
+    progress_every = max(1, int(args.progress_every or 1))
     progress: dict[str, Any] = {
         "status": "running",
         "mode": "source_card",
@@ -387,31 +393,6 @@ def index_source_cards(
         "ledger": str(ledger_path()),
     }
     emit_progress(progress, f"start mode=source_card files={len(manifest)} collection={cfg['collection']}")
-
-    pending: list[dict[str, Any]] = []
-    qdrant_batch: list[dict[str, Any]] = []
-
-    def flush_pending() -> None:
-        nonlocal indexed_chunks, qdrant_batch
-        if not pending:
-            return
-        vectors = ollama_embed_many(cfg, [str(row["decorated"]) for row in pending])
-        for row, vector in zip(pending, vectors, strict=True):
-            payload = row["payload"]
-            qdrant_batch.append({"id": row["point_id"], "vector": vector, "payload": payload})
-            indexed_chunks += 1
-            progress["chunks_indexed"] = indexed_chunks
-            if len(qdrant_batch) >= qdrant_batch_size:
-                upsert_points(cfg, qdrant_batch)
-                qdrant_batch = []
-        pending.clear()
-        if qdrant_batch:
-            upsert_points(cfg, qdrant_batch)
-            qdrant_batch = []
-        if indexed_chunks % progress_every < embed_batch_size or chunk_budget:
-            emit_progress(progress, f"chunks={indexed_chunks} files={indexed_files}")
-        if args.pace_sec:
-            time.sleep(args.pace_sec)
 
     for item in manifest:
         path = item["path"]
@@ -429,7 +410,7 @@ def index_source_cards(
                 skipped_unchanged += 1
                 progress["skipped_unchanged"] = skipped_unchanged
                 continue
-            if chunk_budget and indexed_chunks + len(pending) >= chunk_budget:
+            if chunk_budget and indexed_chunks >= chunk_budget:
                 break
             card = source_card(path, item, text, source_card_max_chars)
             payload = {
@@ -447,8 +428,10 @@ def index_source_cards(
                 "disposition": "active",
                 "text": card,
             }
-            pending.append({"decorated": card, "payload": payload, "point_id": point_id(source_hash, 0)})
+            vector = ollama_embed(cfg, card)
+            upsert_points(cfg, [{"id": point_id(source_hash, 0), "vector": vector, "payload": payload}])
             indexed_files += 1
+            indexed_chunks += 1
             sources[rel_path] = {
                 "content_hash": source_hash,
                 "chunk_count": 1,
@@ -457,19 +440,21 @@ def index_source_cards(
                 "authority_class": item.get("authority_class"),
                 "allowlist_id": item.get("allowlist_id"),
             }
+            ledger["updated_at"] = utc_now()
+            ledger["collection"] = cfg["collection"]
+            write_ledger(ledger)
             progress["files_indexed"] = indexed_files
-            if len(pending) >= embed_batch_size:
-                flush_pending()
-                ledger["updated_at"] = utc_now()
-                ledger["collection"] = cfg["collection"]
-                write_ledger(ledger)
-            if chunk_budget and indexed_chunks + len(pending) >= chunk_budget:
+            progress["chunks_indexed"] = indexed_chunks
+            if indexed_files % progress_every == 0 or chunk_budget:
+                emit_progress(progress, f"files={indexed_files}/{len(manifest)} chunks={indexed_chunks} current={path}")
+            if args.pace_sec:
+                time.sleep(args.pace_sec)
+            if chunk_budget and indexed_chunks >= chunk_budget:
                 break
         except Exception as exc:
             failed.append({"path": str(path), "error": str(exc)})
             progress["failed_count"] = len(failed)
             emit_progress(progress, f"failed file={path} error={exc}")
-    flush_pending()
     ledger["updated_at"] = utc_now()
     ledger["collection"] = cfg["collection"]
     write_ledger(ledger)
@@ -654,6 +639,15 @@ def qdrant_search(cfg: dict[str, Any], query: str, limit: int) -> list[dict[str,
     return rows if isinstance(rows, list) else []
 
 
+def qdrant_count(cfg: dict[str, Any]) -> int:
+    try:
+        data = http_json("GET", f"{cfg['qdrant_url'].rstrip('/')}/collections/{cfg['collection']}", timeout=30)
+    except Exception:
+        return 0
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    return int(result.get("points_count") or 0)
+
+
 def normalize_for_match(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
@@ -743,7 +737,10 @@ def retrieve(args: argparse.Namespace) -> int:
     lexical_rows = lexical_manifest_hits(doc, args.query, args.limit)
     vector_rows = []
     if len(lexical_rows) < args.limit:
-        vector_rows = qdrant_search(cfg, args.query, max(args.limit * 3, args.limit))
+        try:
+            vector_rows = qdrant_search(cfg, args.query, max(args.limit * 3, args.limit))
+        except Exception as exc:
+            print(f"rag.direct.retrieve vector_fallback_unavailable reason={exc}", file=sys.stderr, flush=True)
     rows = merge_results(vector_rows, lexical_rows, args.limit)
     if args.json:
         print(json.dumps({"query": args.query, "collection": cfg["collection"], "results": rows}, sort_keys=True))
@@ -766,7 +763,10 @@ def query(args: argparse.Namespace) -> int:
     lexical_rows = lexical_manifest_hits(doc, args.question, args.limit)
     vector_rows = []
     if len(lexical_rows) < args.limit:
-        vector_rows = qdrant_search(cfg, args.question, max(args.limit * 3, args.limit))
+        try:
+            vector_rows = qdrant_search(cfg, args.question, max(args.limit * 3, args.limit))
+        except Exception as exc:
+            print(f"rag.direct.query vector_fallback_unavailable reason={exc}", file=sys.stderr, flush=True)
     rows = merge_results(vector_rows, lexical_rows, args.limit)
     context_lines: list[str] = []
     for i, row in enumerate(rows, start=1):
@@ -835,6 +835,89 @@ def manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+def progress(args: argparse.Namespace) -> int:
+    path = progress_path()
+    data: dict[str, Any] = {"status": "missing", "path": str(path)}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            data = loaded if isinstance(loaded, dict) else data
+        except Exception as exc:
+            data = {"status": "unreadable", "path": str(path), "error": str(exc)}
+    cfg = embedding_config(contract())
+    data.setdefault("collection", cfg["collection"])
+    data["points_count"] = qdrant_count(cfg)
+    data["path"] = str(path)
+    if args.json:
+        print(json.dumps(data, sort_keys=True))
+        return 0
+    for key in ["status", "message", "files_seen", "files_indexed", "chunks_indexed", "failed_count", "skipped_unchanged", "skipped_secret", "points_count", "updated_at", "path"]:
+        if key in data:
+            print(f"{key}={data[key]}")
+    return 0
+
+
+def quality(args: argparse.Namespace) -> int:
+    doc = contract()
+    cfg = embedding_config(doc)
+    policy = doc.get("quality_policy") if isinstance(doc.get("quality_policy"), dict) else {}
+    smoke_queries = policy.get("smoke_queries") if isinstance(policy.get("smoke_queries"), list) else []
+    if not smoke_queries:
+        smoke_queries = [
+            {"question": "Packet 64 RAG subtraction first replacement", "expected_source_pattern": "PACKET-64-RAG-SUBTRACTION-FIRST-REPLACEMENT"},
+            {"question": "human intent Rag.md retrieval workload planes", "expected_source_pattern": "OI-20260429-023749-71e6"},
+            {"question": "what is RAG not allowed to decide", "expected_source_pattern": "RAG"},
+            {"question": "current RAG loop", "expected_source_pattern": "LOOP-RAG-DIRECT-RETRIEVAL-RECOVERY"},
+            {"question": "Packet 63 allowlist only", "expected_source_pattern": "PACKET-64-RAG-SUBTRACTION-FIRST-REPLACEMENT"},
+        ]
+    checks: list[dict[str, Any]] = []
+    for row in smoke_queries:
+        if not isinstance(row, dict):
+            continue
+        question = str(row.get("question") or "")
+        expected = str(row.get("expected_source_pattern") or "")
+        lexical_rows = lexical_manifest_hits(doc, question, int(args.limit or 5))
+        vector_rows: list[dict[str, Any]] = []
+        if len(lexical_rows) < int(args.limit or 5):
+            try:
+                vector_rows = qdrant_search(cfg, question, max(int(args.limit or 5) * 3, int(args.limit or 5)))
+            except Exception as exc:
+                vector_rows = [{"score": 0, "payload": {"source_path": "", "retrieval_error": str(exc)}}]
+        results = merge_results(vector_rows, lexical_rows, int(args.limit or 5))
+        source_paths = [
+            str((item.get("payload") if isinstance(item.get("payload"), dict) else {}).get("source_path") or "")
+            for item in results
+        ]
+        source_cards = [
+            str((item.get("payload") if isinstance(item.get("payload"), dict) else {}).get("text") or "")
+            for item in results
+        ]
+        haystack = "\n".join(source_paths + source_cards)
+        passed = bool(expected and re.search(re.escape(expected), haystack, flags=re.IGNORECASE))
+        checks.append({
+            "question": question,
+            "expected_source_pattern": expected,
+            "status": "pass" if passed else "fail",
+            "sources": source_paths,
+        })
+    failed = [row for row in checks if row.get("status") != "pass"]
+    payload = {
+        "status": "pass" if not failed else "fail",
+        "collection": cfg["collection"],
+        "points_count": qdrant_count(cfg),
+        "checks": checks,
+    }
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print(f"rag.direct.quality status={payload['status']} collection={cfg['collection']} points_count={payload['points_count']}")
+        for row in checks:
+            print(f"{row['status']}\t{row['question']}\texpected={row['expected_source_pattern']}")
+            for source in row["sources"][:3]:
+                print(f"  source={source}")
+    return 0 if not failed else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Direct Qdrant + Ollama RAG for governed spine/runtime authority retrieval.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -846,6 +929,13 @@ def main() -> int:
     p.add_argument("--summary", action="store_true")
     p.add_argument("--limit", type=int, default=0)
     p.set_defaults(func=manifest)
+    p = sub.add_parser("progress")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=progress)
+    p = sub.add_parser("quality")
+    p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=quality)
     p = sub.add_parser("index")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--changed-only", action="store_true")
@@ -853,9 +943,9 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--max-chunks", type=int, default=0, help="Test guard: stop after this many chunks.")
     p.add_argument("--pace-sec", type=float, default=0.0)
-    p.add_argument("--batch-size", type=int, default=4)
-    p.add_argument("--embed-batch-size", type=int, default=8)
-    p.add_argument("--progress-every", type=int, default=10)
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--embed-batch-size", type=int, default=1)
+    p.add_argument("--progress-every", type=int, default=1)
     p.add_argument("--chunk-mode", choices=["contract", "source_card", "content_chunks"], default="contract")
     p.set_defaults(func=index_sources)
     p = sub.add_parser("retrieve")

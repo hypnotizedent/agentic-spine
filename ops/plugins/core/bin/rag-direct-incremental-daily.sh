@@ -15,6 +15,6 @@ echo "[rag-direct-incremental-daily] worktree_identity=${OPS_WORKTREE_IDENTITY:-
 
 spine_job_run \
   "rag-direct-incremental-daily:rag.direct.index" \
-  "${RUNTIME_ROOT}/bin/ops" cap run rag.direct.index -- --changed-only --pace-sec 1
+  "${RUNTIME_ROOT}/bin/ops" cap run rag.direct.index -- --changed-only --chunk-mode source_card --batch-size 1 --embed-batch-size 1 --progress-every 1 --pace-sec 1
 
 echo "[rag-direct-incremental-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
