@@ -45,7 +45,7 @@ _yaml_query_mtime() {
     echo "0"
     return 0
   fi
-  stat -f '%m' "$path" 2>/dev/null || stat -c '%Y' "$path" 2>/dev/null || echo "0"
+  stat -c '%Y' "$path" 2>/dev/null || stat -f '%m' "$path" 2>/dev/null || echo "0"
 }
 
 _yaml_query_cache_path() {
