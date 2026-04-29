@@ -1,0 +1,112 @@
+# Status: authoritative_birth
+# Packet: PACKET-72-SCHEDULED-TASK-REGISTRY-DESIGN
+# Scope: cross-plane scheduled task registry parent source
+
+schema_version: "0.1"
+updated_at: "2026-04-29"
+owner: "@ronny"
+status: authoritative_birth
+scope: scheduled-task-registry
+timezone: America/New_York
+
+authority_model:
+  current_hot_gates_remain_on: ops/bindings/launchd.scheduler.registry.yaml
+  parent_registry_intent: >
+    Own cross-plane scheduled-task truth without mutating live schedulers in the
+    birth slice. Existing scheduler surfaces remain compatibility inputs until
+    projection parity and subtraction are proven.
+  not_authority_for:
+    - backup policy semantics
+    - data lifecycle policy semantics
+    - live DSM task mutation
+    - verify gate design
+
+migration_stage:
+  phase: registry_birth
+  mutation_boundary: repo_control_plane_only
+  live_scheduler_mutation_allowed: false
+  dsm_discovery_allowed: false
+  subtraction_allowed_in_this_slice: false
+  next_slice: parity_projection_then_subtraction
+
+source_imports:
+  - import_id: launchd_scheduler_registry
+    plane: launchd_systemd_standing_programs
+    source_path: ops/bindings/launchd.scheduler.registry.yaml
+    source_selector: labels[*]
+    imported_count_at_birth: 21
+    governance_level: compatibility_authority_until_projection_parity
+    final_disposition: project_from_scheduled_task_registry_after_parity
+    notes:
+      - D430/D431/D435 continue reading launchd.scheduler.registry.yaml until parity is proven.
+      - Includes launchd-origin labels and systemd-transferred standing programs.
+
+  - import_id: backup_schedule
+    plane: backup_and_restore_jobs
+    source_path: ops/bindings/domains/backup/backup.schedule.yaml
+    source_selector: jobs[*]
+    imported_count_at_birth: 18
+    governance_level: declared_only
+    final_disposition: keep_backup_policy_here_demote_scheduler_runtime_truth_to_registry_refs
+    notes:
+      - Backup schedule rows remain backup policy inputs until the subtraction packet rewrites references.
+      - No backup runtime behavior changes in registry birth.
+
+  - import_id: sanoid_snapshot_timer
+    plane: sanoid_native
+    source_path: ops/bindings/infra.zfs.snapshot.policy.yaml
+    source_selector: scheduler
+    imported_count_at_birth: 1
+    governance_level: declared_only
+    final_disposition: keep_zfs_snapshot_policy_here_registry_owns_timer_readback
+    notes:
+      - Snapshot retention policy stays in infra.zfs.snapshot.policy.yaml.
+      - The scheduled execution fact becomes cross-plane registry truth after parity.
+
+  - import_id: dsm_scheduled_tasks
+    plane: dsm_native
+    source_path: appliance:nas:dsm
+    source_selector: discovery_pending
+    imported_count_at_birth: 0
+    governance_level: discovery_pending
+    final_disposition: read_only_discovery_evidence_then_classify
+    notes:
+      - DSM task list is not authored here because discovery has not been explicitly run in this packet.
+      - No DSM mutation is permitted by this registry.
+
+projection_plan:
+  launchd_scheduler_registry:
+    current_state: compatibility_authority
+    target_state: generated_projection
+    parity_requirement: >
+      Every label currently in launchd.scheduler.registry.yaml must round-trip
+      from this parent registry or its imported source without changing D430,
+      D431, D435, ops status, or launchd materialization behavior.
+  launchd_runtime_contract_required_labels:
+    current_state: secondary_list
+    target_state: projected_selector
+    parity_requirement: Required labels must remain active labels and must not include parked or suspended labels.
+  backup_schedule:
+    current_state: mixed_policy_and_scheduler_declaration
+    target_state: backup_policy_with_scheduled_task_refs
+  dsm_tasks:
+    current_state: unknown
+    target_state: read_only_discovered_evidence_then_declared_entries
+
+subtraction_targets_after_parity:
+  - surface: ops/bindings/launchd.runtime.contract.yaml#required_labels
+    disposition: project_from_registry_selector
+  - surface: ops/bindings/launchd.runtime.contract.yaml#scheduler_execution.labels
+    disposition: project_from_registry_selector
+  - surface: ops/bindings/domains/backup/backup.schedule.yaml#jobs[*].schedule_cron
+    disposition: demote_to_policy_or_replace_with_scheduled_task_ref_after_runtime_parity
+  - surface: ops/bindings/service.data.lifecycle.registry.yaml
+    disposition: keep_lifecycle_policy_replace_scheduler_decisions_with_scheduled_task_ref
+  - surface: ops/bindings/infra.zfs.snapshot.policy.yaml#scheduler
+    disposition: keep_policy_registry_owns_scheduled_execution_readback
+
+stop_conditions:
+  - Do not add verify gates in the registry birth slice.
+  - Do not mutate live launchd, systemd, cron, Proxmox, sanoid, or DSM runtime state.
+  - Do not run DSM discovery from this packet.
+  - Do not demote or delete old schedule surfaces until projection parity is proven.
