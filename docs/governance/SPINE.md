@@ -49,6 +49,28 @@ If the entry surface causes human-steward guidance to be parked, renamed, or
 reprocessed instead of carried forward by the engine, the entry surface is wrong
 and must be reconciled before more workflow ceremony is added.
 
+## First-Class Change Closure
+
+The spine must not solve ambiguity by adding a new canonical surface while the
+old surfaces continue to read back as peer truth.
+
+For any change that promotes a new L1/L2 authority, adapter, readback, operator
+entry path, or human-intent flow, construction is not completion. The change is
+complete only when the closure questions in
+[`first.class.change.closure.contract.yaml`](../../ops/bindings/first.class.change.closure.contract.yaml)
+are answered:
+
+- What is the one canonical authority after the change?
+- What old surface, field, wrapper, vocabulary, or readback did it replace?
+- What remains compatibility-only, projection-only, or expert drilldown?
+- What was deleted, retired, hidden from operator grammar, or demoted?
+- Which normal readback now teaches the canonical model?
+- Which verify lock prevents both old and new paths from acting canonical?
+
+If the answer is "nothing was replaced," the change must say why. If the
+answer is "old work needs catchup," the catchup must use the new canonical
+authority rather than create a second migration plane.
+
 ## Layer Framing
 
 Persist this distinction or the shell will grow back:

@@ -155,6 +155,13 @@ approval removes the only review gate and close eligibility passes, the agent
 should close the eligible object and report the receipt instead of asking the
 human steward to rediscover ceremony.
 
+When the work promotes a new first-class L1/L2 authority or readback, the
+workflow also has a subtraction tail: answer the first-class closure contract,
+demote or retire the old surface vocabulary, and make the normal readback teach
+the new canonical model. Do not leave "future cleanup/backfill" as a separate
+system unless the human steward explicitly promotes that system and names what
+it retires. Use the new canonical authority to reconcile old items.
+
 ### Interactive Control-Surface Handoff
 
 `delegate.to.execution` remains available for interactive control-surface
