@@ -22,12 +22,12 @@ authority_model:
     - verify gate design
 
 migration_stage:
-  phase: registry_birth
+  phase: projection_parity_and_residue_demoting
   mutation_boundary: repo_control_plane_only
   live_scheduler_mutation_allowed: false
   dsm_discovery_allowed: false
-  subtraction_allowed_in_this_slice: false
-  next_slice: parity_projection_then_subtraction
+  subtraction_allowed_in_this_slice: authority_metadata_only
+  next_slice: generated_projection_or_domain_schedule_ref_demotions
 
 source_imports:
   - import_id: launchd_scheduler_registry
@@ -78,6 +78,10 @@ projection_plan:
   launchd_scheduler_registry:
     current_state: compatibility_authority
     target_state: generated_projection
+    parity_status: proven
+    parity_receipt: /Users/ronnyworks/code/.evidence/spine/sessions/RCAP-20260428-234508__scheduled.task.registry.status__R0fsn25457/receipt.md
+    projected_hash: e42685cd86a661d80a80fb3d22d64da9ec533d027371667b6155780e46622ca4
+    actual_hash: e42685cd86a661d80a80fb3d22d64da9ec533d027371667b6155780e46622ca4
     parity_requirement: >
       Every label currently in launchd.scheduler.registry.yaml must round-trip
       from this parent registry or its imported source without changing D430,
@@ -93,11 +97,98 @@ projection_plan:
     current_state: unknown
     target_state: read_only_discovered_evidence_then_declared_entries
 
+placement_authority_boundary:
+  rule: Old L3 scheduled jobs are symptom evidence only; they cannot choose node placement.
+  node_loop_source: /Users/ronnyworks/code/.runtime/spine/state/domain-state/spine/PACKET-78-FIRST-CLASS-BACKUP-HEARTBEAT-SCHEDULE-CUSTODY-MAP-20260429.md
+  applies_to:
+    - com.ronny.infra-core-smoke
+    - com.ronny.finance-backup-weekly
+    - com.ronny.simplefin-daily-sync
+  allowed_use:
+    - scheduled_task_registry_row
+    - specimen_for_first_class_system_design
+    - proof_source_for_heartbeat_backup_schedule_or_custody
+  forbidden_use:
+    - node_placement_driver
+    - hardware_selection_driver
+    - R620_migration_justification
+
+residue_demotions:
+  - ref: com.ronny.infra-core-smoke
+    source_surface: ops/bindings/launchd.scheduler.registry.yaml
+    current_runtime_state: active_standing_program
+    demoted_from: placement_candidate
+    demoted_to: scheduled_task_registry_row_and_heartbeat_specimen
+    reason: Infra smoke proves heartbeat/service-readback need; it does not decide which real node should house a duty.
+    live_runtime_change: none
+    next_subtraction: reconcile with heartbeat/readback registry before any host move
+
+  - ref: com.ronny.finance-backup-weekly
+    source_surface: ops/bindings/launchd.scheduler.registry.yaml
+    current_runtime_state: active_standing_program
+    demoted_from: placement_candidate
+    demoted_to: scheduled_task_registry_row_and_backup_specimen
+    reason: Finance backup proves first-class backup/schedule/custody needs; it does not decide node placement by itself.
+    live_runtime_change: none
+    next_subtraction: reconcile with first-class backup authority before any host move
+
+  - ref: com.ronny.simplefin-daily-sync
+    source_surface: ops/bindings/launchd.scheduler.registry.yaml
+    current_runtime_state: active_standing_program
+    demoted_from: placement_candidate
+    demoted_to: scheduled_task_registry_row_and_L3_residue_specimen
+    reason: SimpleFIN is domain work with schedule/readback implications, not node placement authority.
+    live_runtime_change: none
+    next_subtraction: classify under first-class schedule/custody before any host move
+
+readback_collapse:
+  canonical_readback: scheduled.task.registry.status --launchd-roundtrip
+  compatibility_readbacks:
+    - ops/bindings/launchd.scheduler.registry.yaml
+    - ops/bindings/launchd.runtime.contract.yaml#required_labels
+    - ops/bindings/launchd.runtime.contract.yaml#scheduler_execution.labels
+  collapse_rule: >
+    Use scheduled.task.registry.status for the operator-level scheduled-task readback.
+    Use launchd.runtime.contract lists only as compatibility/check inputs while
+    D430/D431/D435 still consume launchd.scheduler.registry.yaml.
+
+subtraction_checklist:
+  - id: launchd_runtime_required_labels
+    surface: ops/bindings/launchd.runtime.contract.yaml#required_labels
+    current_state: duplicate_check_input
+    target_state: projected_selector_from_scheduled_task_registry
+    status: demoted_in_language_only
+    live_runtime_change: none
+  - id: launchd_scheduler_execution_labels
+    surface: ops/bindings/launchd.runtime.contract.yaml#scheduler_execution.labels
+    current_state: duplicate_check_input
+    target_state: projected_selector_from_scheduled_task_registry
+    status: demoted_in_language_only
+    live_runtime_change: none
+  - id: backup_schedule_cron_fields
+    surface: ops/bindings/domains/backup/backup.schedule.yaml#jobs[*].schedule_cron
+    current_state: mixed_policy_and_scheduler_declaration
+    target_state: backup_policy_with_scheduled_task_refs
+    status: pending_first_class_backup_authority
+    live_runtime_change: none
+  - id: service_data_lifecycle_scheduler_hints
+    surface: ops/bindings/service.data.lifecycle.registry.yaml
+    current_state: lifecycle_policy_with_scheduler_hints
+    target_state: lifecycle_policy_with_scheduled_task_refs
+    status: pending_lifecycle_reconcile
+    live_runtime_change: none
+  - id: dsm_scheduled_tasks
+    surface: appliance:nas:dsm
+    current_state: unknown
+    target_state: read_only_discovered_evidence_then_declared_entries
+    status: pending_explicit_DSM_discovery_approval
+    live_runtime_change: none
+
 subtraction_targets_after_parity:
   - surface: ops/bindings/launchd.runtime.contract.yaml#required_labels
-    disposition: project_from_registry_selector
+    disposition: demote_to_compatibility_check_input_then_project_from_registry_selector
   - surface: ops/bindings/launchd.runtime.contract.yaml#scheduler_execution.labels
-    disposition: project_from_registry_selector
+    disposition: demote_to_compatibility_check_input_then_project_from_registry_selector
   - surface: ops/bindings/domains/backup/backup.schedule.yaml#jobs[*].schedule_cron
     disposition: demote_to_policy_or_replace_with_scheduled_task_ref_after_runtime_parity
   - surface: ops/bindings/service.data.lifecycle.registry.yaml
@@ -106,7 +197,8 @@ subtraction_targets_after_parity:
     disposition: keep_policy_registry_owns_scheduled_execution_readback
 
 stop_conditions:
-  - Do not add verify gates in the registry birth slice.
+  - Do not add verify gates in the projection/residue demotion slice.
   - Do not mutate live launchd, systemd, cron, Proxmox, sanoid, or DSM runtime state.
   - Do not run DSM discovery from this packet.
-  - Do not demote or delete old schedule surfaces until projection parity is proven.
+  - Do not delete old schedule surfaces until generated projection parity is proven.
+  - Do not use old L3 jobs as node placement drivers.

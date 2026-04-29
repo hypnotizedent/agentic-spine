@@ -168,6 +168,9 @@ def build_status() -> dict[str, Any]:
         "registry_status": registry.get("status"),
         "phase": (registry.get("migration_stage") or {}).get("phase") if isinstance(registry.get("migration_stage"), dict) else None,
         "imports": rows,
+        "placement_authority_boundary": registry.get("placement_authority_boundary") or {},
+        "residue_demotions": registry.get("residue_demotions") or [],
+        "subtraction_checklist": registry.get("subtraction_checklist") or [],
         "failure_count": len(failures),
         "failures": failures,
         "live_scheduler_mutation_allowed": (registry.get("migration_stage") or {}).get("live_scheduler_mutation_allowed")
@@ -209,6 +212,18 @@ def main() -> int:
                 f"- {row['import_id']}: parity={row['parity']} plane={row['plane']} "
                 f"count={row['actual_count']}/{row['expected_count']} state={row['state']}"
             )
+        demotions = status.get("residue_demotions") if isinstance(status.get("residue_demotions"), list) else []
+        if demotions:
+            print("residue_demotions:")
+            for row in demotions:
+                if isinstance(row, dict):
+                    print(f"- {row.get('ref')}: {row.get('demoted_from')} -> {row.get('demoted_to')}; runtime_change={row.get('live_runtime_change')}")
+        checklist = status.get("subtraction_checklist") if isinstance(status.get("subtraction_checklist"), list) else []
+        if checklist:
+            print("subtraction_checklist:")
+            for row in checklist:
+                if isinstance(row, dict):
+                    print(f"- {row.get('id')}: {row.get('status')} -> {row.get('target_state')}")
         if args.launchd_roundtrip:
             rt = status.get("launchd_roundtrip") if isinstance(status.get("launchd_roundtrip"), dict) else {}
             print(
