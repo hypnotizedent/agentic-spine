@@ -134,7 +134,7 @@ if [[ "$device_class" == "salvage_laptop" || "$device_class" == "old_intel_macbo
     [[ "$connectivity_preflight_result" == "ready_for_reprovision" ]] || fail "salvage-laptop medium render requires connectivity preflight result ready_for_reprovision"
 fi
 
-boot_ritual='["Insert reusable medium","Select the installer medium in firmware/boot picker","Let Linux installer start","After first boot, run Stage 0 claim"]'
+boot_ritual='["Insert reusable medium","Select the installer medium in firmware/boot picker","When using stock Ubuntu ISO plus CIDATA, confirm the installer boots with autoinstall/NoCloud semantics; CIDATA presence alone is not proof the installer consumed it","Let Linux installer start","After first boot, run Stage 0 claim"]'
 if [[ "$device_class" == "old_intel_macbook" ]]; then
     case "$chosen_network_method" in
         rtl8153_ethernet|known_good_usb_nic)
@@ -231,15 +231,23 @@ jq -n \
                 + (if ($autoinstall_meta_data_path | length) > 0 then ["meta-data"] else [] end)
             ),
             payload_embedded: true,
-            note: "Embedding is planned. Actual success depends on medium write — if CIDATA partition creation fails, the write will fail hard."
+            boot_trigger_required: "ubuntu_autoinstall_nocloud",
+            boot_trigger_status: "operator_must_confirm_at_boot",
+            note: "Embedding is planned. Actual success depends on medium write and booting the Ubuntu installer in autoinstall/NoCloud mode; CIDATA presence alone does not prove the installer consumed it."
         } else {
             mechanism: "stock ISO only — autoinstall payload is a sidecar artifact (user-data or meta-data missing)",
             payload_embedded: false
         } end),
         current_limitations: [
           "Old MacBooks still require local boot selection via Apple boot picker.",
-          "CIDATA partition creation requires free space beyond the ISO on the medium."
+          "CIDATA partition creation requires free space beyond the ISO on the medium.",
+          "Stock Ubuntu ISO plus CIDATA may still require an explicit autoinstall/NoCloud boot trigger from the installer boot menu."
         ],
+        proof_boundary: {
+          payload_embedded: ($write_strategy == "iso_plus_cidata_partition"),
+          autoinstall_consumed: "unproven_until_firstboot_claim_or_installer_log",
+          claim_required: "firstboot claim remains the acceptance gate"
+        },
         rendered_at: $rendered_at
     }' >"$plan_path"
 
@@ -248,6 +256,8 @@ device_id: $DEVICE
 medium_type: $MEDIUM_TYPE
 write_strategy: $write_strategy
 enrollment_policy: $enrollment_policy
+autoinstall_boot_trigger: $(if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then echo "ubuntu_autoinstall_nocloud_required_or_confirmed"; else echo "not_applicable"; fi)
+claim_acceptance_gate: firstboot claim remains required
 device_class: $device_class
 network_method: ${chosen_network_method:-not declared}
 iso_source: ${ISO_PATH:-$iso_library_ref}
