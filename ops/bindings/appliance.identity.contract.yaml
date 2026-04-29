@@ -1,0 +1,76 @@
+# Appliance Identity Contract
+# Status: authoritative
+# Owner: @ronny
+#
+# First-class readback for appliance-class subjects. This extends the node
+# promotion model without turning appliances into execution hosts or granting
+# mutation authority.
+
+version: 1
+updated_at: "2026-04-28"
+status: authoritative
+owner: "@ronny"
+scope: appliance-identity-readback
+
+rules:
+  mutation_default: false
+  spine_mode: readback_first
+  canonical_home: ops/bindings/appliance.identity.contract.yaml
+  closure_test: >
+    Appliance objects have machine-readable identity, promotion stage,
+    proof channels, mutation boundary, and status primitive readback.
+
+appliances:
+  - appliance_id: nas
+    hostname: synology918
+    class: storage_appliance
+    model: "Synology DS918+"
+    site: home
+    appliance_os: dsm
+    promotion_stage: bootstrap-joined
+    admission_status: admitted
+    first_touch_state: appliance-readback
+    recovery_status: readback_only
+    mutation_owner: dsm
+    spine_mutation_allowed: false
+    criticality: critical_storage
+    network_identities:
+      ssh_target_id: nas
+      tailscale_ip: "100.102.199.111"
+      aliases:
+        - synology918
+    access_methods:
+      - method: ssh
+        target_id: nas
+        user: ronadmin
+        mode: read_only_probe
+    proof_channels:
+      - capability: ssh.target.status
+        mode: reachability
+      - capability: node.recovery.status
+        mode: recovery_readback
+      - capability: appliance.health.status
+        mode: appliance_health
+    health_probe_ref:
+      capability: appliance.health.status
+      target_id: nas
+      backing_script: ops/plugins/infra/observability/bin/nas-health-status
+    storage_surfaces:
+      - ops/bindings/home.storage.map.yaml
+      - ops/bindings/synology918.storage.manifest.yaml
+      - ops/bindings/storage.scaffold.authority.yaml
+    scheduled_task_surfaces:
+      status: unknown
+      note: DSM scheduled task inventory is not discovered yet; keep readback gap visible.
+    account_surfaces:
+      status: unknown
+      note: DSM account posture is not discovered yet; mutation remains forbidden.
+    listener_surfaces:
+      status: partial
+      note: SSH and NAS health probe are visible; services.health has no host=nas endpoint.
+    backup_surfaces:
+      - ops/bindings/domains/backup/backup.inventory.yaml
+      - ops/bindings/domains/backup/backup.posture.snapshot.yaml
+    evidence_refs:
+      - /Users/ronnyworks/code/.runtime/spine/state/domain-state/spine/PACKET-69-NAS-SPECIMEN-READONLY-DISCOVERY-20260428.md
+

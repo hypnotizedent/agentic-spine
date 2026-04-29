@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+BINDING="$SPINE_ROOT/ops/bindings/appliance.identity.contract.yaml"
+
+usage() {
+  cat <<'EOF'
+appliance-health-status - Read-only appliance health readback
+
+Usage:
+  appliance-health-status --id <appliance_id>
+  appliance-health-status <appliance_id>
+  appliance-health-status --list
+
+This capability is READ-ONLY. It dispatches to declared backing probes only.
+EOF
+}
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+need(){ command -v "$1" >/dev/null 2>&1 || stop "missing dependency: $1"; }
+
+APPLIANCE_ID=""
+LIST_MODE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id) APPLIANCE_ID="${2:-}"; shift 2 ;;
+    --list) LIST_MODE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *) APPLIANCE_ID="$1"; shift ;;
+  esac
+done
+
+need yq
+[[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+
+if $LIST_MODE; then
+  yq -r '.appliances[].appliance_id' "$BINDING"
+  exit 0
+fi
+
+[[ -n "$APPLIANCE_ID" ]] || stop "--id is required"
+
+appliance_json="$(yq e -o=json ".appliances[] | select(.appliance_id == \"$APPLIANCE_ID\")" "$BINDING" 2>/dev/null || true)"
+[[ -n "$appliance_json" && "$appliance_json" != "null" ]] || stop "unknown appliance: $APPLIANCE_ID"
+
+backing_script="$(yq -r ".appliances[] | select(.appliance_id == \"$APPLIANCE_ID\") | .health_probe_ref.backing_script // \"\"" "$BINDING")"
+[[ -n "$backing_script" ]] || stop "appliance has no backing health script: $APPLIANCE_ID"
+
+script_path="$SPINE_ROOT/$backing_script"
+[[ -x "$script_path" ]] || stop "backing health script is not executable: $backing_script"
+
+echo "appliance.health.status"
+echo "appliance_id: $APPLIANCE_ID"
+echo "contract: $BINDING"
+echo "backing_script: $backing_script"
+echo
+
+"$script_path"
