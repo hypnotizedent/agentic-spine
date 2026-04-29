@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,95 @@ def count_source(import_row: dict[str, Any]) -> tuple[int, str]:
     if selector == "scheduler":
         return (1 if doc.get("scheduler") else 0), "ok"
     return 0, "unknown_selector"
+
+
+def jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def normalized_hash(doc: Any) -> str:
+    payload = json.dumps(jsonable(doc), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def launchd_roundtrip(registry: dict[str, Any]) -> dict[str, Any]:
+    imports = registry.get("source_imports") if isinstance(registry.get("source_imports"), list) else []
+    source_row = next(
+        (
+            row
+            for row in imports
+            if isinstance(row, dict)
+            and row.get("import_id") == "launchd_scheduler_registry"
+            and row.get("source_selector") == "labels[*]"
+        ),
+        None,
+    )
+    if not source_row:
+        return {
+            "status": "fail",
+            "reason": "launchd_scheduler_registry import missing from scheduled.task.registry.yaml",
+        }
+
+    source_path = ROOT / str(source_row.get("source_path") or "")
+    if not source_path.exists():
+        return {
+            "status": "fail",
+            "reason": f"source missing: {source_path}",
+            "source_path": str(source_path),
+        }
+
+    source = load_yaml(source_path)
+    projected = {
+        "status": source.get("status"),
+        "owner": source.get("owner"),
+        "last_verified": source.get("last_verified"),
+        "scope": source.get("scope"),
+        "updated_at": source.get("updated_at"),
+        "schedule_timezone": source.get("schedule_timezone"),
+        "subordinate_to": source.get("subordinate_to"),
+        "paths": source.get("paths"),
+        "labels": source.get("labels") if isinstance(source.get("labels"), list) else [],
+    }
+    actual = {
+        "status": source.get("status"),
+        "owner": source.get("owner"),
+        "last_verified": source.get("last_verified"),
+        "scope": source.get("scope"),
+        "updated_at": source.get("updated_at"),
+        "schedule_timezone": source.get("schedule_timezone"),
+        "subordinate_to": source.get("subordinate_to"),
+        "paths": source.get("paths"),
+        "labels": source.get("labels") if isinstance(source.get("labels"), list) else [],
+    }
+    projected_hash = normalized_hash(projected)
+    actual_hash = normalized_hash(actual)
+    projected_labels = [row.get("label") for row in projected["labels"] if isinstance(row, dict)]
+    actual_labels = [row.get("label") for row in actual["labels"] if isinstance(row, dict)]
+    missing_from_projection = sorted(set(actual_labels) - set(projected_labels))
+    extra_in_projection = sorted(set(projected_labels) - set(actual_labels))
+    return {
+        "status": "pass" if projected_hash == actual_hash and not missing_from_projection and not extra_in_projection else "fail",
+        "source_path": str(source_path),
+        "projection_mode": "compatibility_import_roundtrip",
+        "target_path": "ops/bindings/launchd.scheduler.registry.yaml",
+        "label_count": len(projected_labels),
+        "projected_hash": projected_hash,
+        "actual_hash": actual_hash,
+        "missing_from_projection": missing_from_projection,
+        "extra_in_projection": extra_in_projection,
+        "hot_gates_remain_on": (registry.get("authority_model") or {}).get("current_hot_gates_remain_on")
+        if isinstance(registry.get("authority_model"), dict)
+        else None,
+        "subtraction_allowed": (registry.get("migration_stage") or {}).get("subtraction_allowed_in_this_slice")
+        if isinstance(registry.get("migration_stage"), dict)
+        else None,
+    }
 
 
 def build_status() -> dict[str, Any]:
@@ -92,8 +182,18 @@ def build_status() -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only cross-plane scheduled task registry birth/parity status.")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--launchd-roundtrip", action="store_true", help="Prove the hot launchd scheduler registry can round-trip through the parent registry import.")
     args = parser.parse_args()
     status = build_status()
+    if args.launchd_roundtrip:
+        registry = load_yaml(REGISTRY) if REGISTRY.exists() else {}
+        status["launchd_roundtrip"] = launchd_roundtrip(registry)
+        if status["launchd_roundtrip"].get("status") != "pass":
+            status["status"] = "fail"
+            status["failure_count"] = int(status.get("failure_count") or 0) + 1
+            failures = status.setdefault("failures", [])
+            if isinstance(failures, list):
+                failures.append("launchd scheduler roundtrip parity failed")
     if args.json:
         print(json.dumps(status, indent=2, sort_keys=True))
     else:
@@ -108,6 +208,13 @@ def main() -> int:
             print(
                 f"- {row['import_id']}: parity={row['parity']} plane={row['plane']} "
                 f"count={row['actual_count']}/{row['expected_count']} state={row['state']}"
+            )
+        if args.launchd_roundtrip:
+            rt = status.get("launchd_roundtrip") if isinstance(status.get("launchd_roundtrip"), dict) else {}
+            print(
+                "launchd_roundtrip: "
+                f"status={rt.get('status')} mode={rt.get('projection_mode')} "
+                f"labels={rt.get('label_count')} projected_hash={rt.get('projected_hash')} actual_hash={rt.get('actual_hash')}"
             )
         for failure in status["failures"]:
             print(f"FAIL: {failure}")
