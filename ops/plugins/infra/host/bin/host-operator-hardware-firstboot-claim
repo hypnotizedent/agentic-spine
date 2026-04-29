@@ -110,7 +110,12 @@ need ssh
 [[ -f "$CONTRACT" ]] || fail "handoff contract not found: $CONTRACT"
 
 device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null)
-[[ -n "$device_json" && "$device_json" != "null" ]] || fail "device not found in inventory: $DEVICE"
+if [[ -z "$device_json" || "$device_json" == "null" ]]; then
+    if [[ -z "$SOURCE_PLATFORM" ]]; then
+        fail "device not found in inventory: $DEVICE (pass --source-platform for firstboot claim before inventory admission)"
+    fi
+    device_json='{}'
+fi
 
 if [[ -z "$SOURCE_PLATFORM" ]]; then
     SOURCE_PLATFORM=$(echo "$device_json" | jq -r '.platform')
