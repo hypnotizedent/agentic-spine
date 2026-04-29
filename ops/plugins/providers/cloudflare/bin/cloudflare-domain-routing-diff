@@ -9,6 +9,7 @@ SECRETS_EXEC="$ROOT/ops/plugins/infra/secrets/bin/secrets-exec"
 BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
 SHOP_INGRESS_FILE="$ROOT/ops/bindings/shop.ingress.map.yaml"
 HOME_INGRESS_FILE="$ROOT/ops/bindings/home.ingress.map.yaml"
+COCKPIT_CONTRACT_FILE="$ROOT/ops/bindings/operator.cockpit.contract.yaml"
 CF_LIB="$ROOT/ops/plugins/providers/cloudflare/lib/cloudflare-api.sh"
 
 TUNNEL_NAME_DEFAULT="homelab-tunnel"
@@ -125,8 +126,13 @@ for h in sorted(hostnames):
     print(h)
 ' >"$TMP_CF"
 
-yq -r '.public_routes[]? | select(.routing_layer == "cloudflare_tunnel") | .hostname' "$SHOP_INGRESS_FILE" "$HOME_INGRESS_FILE" \
-  | sort -u >"$TMP_REG"
+{
+  yq -r '.public_routes[]? | select(.routing_layer == "cloudflare_tunnel") | .hostname' "$SHOP_INGRESS_FILE" "$HOME_INGRESS_FILE"
+  if [[ -f "$COCKPIT_CONTRACT_FILE" ]]; then
+    yq -r '.authority.public_operator_url // ""' "$COCKPIT_CONTRACT_FILE" \
+      | sed -E 's#^https?://##; s#/$##'
+  fi
+} | awk 'NF && $0 != "---"' | sort -u >"$TMP_REG"
 sort -u -o "$TMP_CF" "$TMP_CF"
 
 missing_in_tunnel="$(comm -23 "$TMP_REG" "$TMP_CF" || true)"

@@ -19,6 +19,26 @@ SHOP_INGRESS = ROOT / "ops/bindings/shop.ingress.map.yaml"
 COCKPIT_CONTRACT = ROOT / "ops/bindings/operator.cockpit.contract.yaml"
 BRIDGE_ENDPOINTS = ROOT / "ops/bindings/mailroom.bridge.endpoints.yaml"
 
+LIFECYCLE_VOCABULARY = [
+    "canonical",
+    "live",
+    "compatibility_hold",
+    "declared_only",
+    "unowned_live_route",
+    "ghost",
+    "parked",
+    "retired",
+    "unknown",
+]
+
+PROOF_MODEL = {
+    "declaration": "Repo-side declared owner/source for the hostname.",
+    "dns_record": "Cloudflare DNS record presence for the hostname.",
+    "tunnel_route": "Cloudflare Tunnel ingress route presence when the surface is tunnel-backed.",
+    "access_policy": "Cloudflare Access app/policy proof when the surface is Access-protected.",
+    "service_reachability": "Target service reachability. Currently modeled but not probed by this readback.",
+}
+
 
 def load_yaml(path):
     if not path.exists():
@@ -118,6 +138,50 @@ def tunnel_ingress(binding):
     return rows, {"status": "ok", "auth_mode": auth_mode}
 
 
+def zone_for_host(binding, host):
+    zones = [z for z in binding.get("zones", []) or [] if z.get("name") and z.get("id")]
+    matches = [z for z in zones if host == z["name"] or host.endswith(f".{z['name']}")]
+    if not matches:
+        return {}
+    return sorted(matches, key=lambda z: len(z["name"]), reverse=True)[0]
+
+
+def dns_records(binding):
+    records = {}
+    api_status = {"status": "not_checked"}
+    auth_modes = set()
+    for zone in binding.get("zones", []) or []:
+        zone_id = zone.get("id")
+        zone_name = zone.get("name")
+        if not zone_id or not zone_name:
+            continue
+        data, err, auth_mode = cf_get(f"/zones/{zone_id}/dns_records?per_page=1000")
+        if err:
+            api_status = err
+            continue
+        if not data or not data.get("success"):
+            api_status = {"status": "blocked", "reason": "cloudflare_success_false"}
+            continue
+        auth_modes.add(auth_mode)
+        for record in data.get("result") or []:
+            name = record.get("name")
+            if not name:
+                continue
+            entry = records.setdefault(name, {"zone": zone_name, "types": [], "proxied": [], "auth_modes": set()})
+            if record.get("type"):
+                entry["types"].append(record["type"])
+            if "proxied" in record:
+                entry["proxied"].append(bool(record.get("proxied")))
+            entry["auth_modes"].add(auth_mode)
+    if api_status.get("status") == "not_checked":
+        api_status = {"status": "ok", "auth_mode": ",".join(sorted(auth_modes)) or "unknown"}
+    for entry in records.values():
+        entry["types"] = sorted(set(entry["types"]))
+        entry["proxied"] = sorted(set(entry["proxied"]))
+        entry["auth_modes"] = sorted(entry["auth_modes"])
+    return records, api_status
+
+
 def access_apps(binding):
     account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
     by_domain = {}
@@ -190,7 +254,7 @@ def summarize_policies(policies, auth_mode):
     return {"status": "ok", "auth_mode": auth_mode, "policies": rows}
 
 
-def ingress_metadata():
+def ingress_metadata(cockpit=None, bridge=None):
     meta = {}
     for path in (HOME_INGRESS, SHOP_INGRESS):
         data = load_yaml(path)
@@ -208,7 +272,118 @@ def ingress_metadata():
                 "lifecycle_class": route.get("lifecycle_class", ""),
                 "source": str(path.relative_to(ROOT)),
             }
+    cockpit = cockpit or {}
+    public_cockpit = ((cockpit.get("authority") or {}).get("public_operator_url") or "").replace("https://", "").replace("http://", "").strip("/")
+    if public_cockpit:
+        meta.setdefault(public_cockpit, {
+            "purpose": "human operator cockpit",
+            "site": "spine",
+            "stack": "operator-surface",
+            "routing_layer": "cloudflare_tunnel",
+            "authority_source": str(COCKPIT_CONTRACT.relative_to(ROOT)),
+            "target_hint": ((cockpit.get("authority") or {}).get("canonical_operator_url") or "").rstrip("/"),
+            "lifecycle_class": "canonical",
+            "source": str(COCKPIT_CONTRACT.relative_to(ROOT)),
+        })
+    bridge = bridge or {}
+    bridge_public = ((bridge.get("endpoints") or {}).get("public_https") or {})
+    bridge_former = (bridge_public.get("former_url") or bridge_public.get("url") or "").replace("https://", "").replace("http://", "").strip("/")
+    if bridge_former and bridge_public.get("lifecycle_state") == "retired" and bridge_former not in meta:
+        meta[bridge_former] = {
+            "purpose": "retired mailroom bridge public endpoint",
+            "site": "spine",
+            "stack": "mailroom-bridge",
+            "routing_layer": "cloudflare_tunnel",
+            "authority_source": str(BRIDGE_ENDPOINTS.relative_to(ROOT)),
+            "target_hint": "",
+            "lifecycle_class": "retired",
+            "source": str(BRIDGE_ENDPOINTS.relative_to(ROOT)),
+        }
     return meta
+
+
+def normalize_lifecycle(raw, host, declared, routed, public_cockpit):
+    raw = (raw or "").strip()
+    if host == public_cockpit:
+        return "canonical"
+    if raw in LIFECYCLE_VOCABULARY:
+        return raw
+    if raw == "live_if_routed":
+        return "live" if routed else "declared_only"
+    if declared and routed:
+        return "live"
+    if declared and not routed:
+        return "declared_only"
+    if routed and not declared:
+        return "unowned_live_route"
+    return "unknown"
+
+
+def access_policy_proof(app, policy_summary, access_api_status):
+    if policy_summary.get("status") == "ok":
+        return f"policy_proved_{policy_summary.get('auth_mode', 'unknown')}"
+    if app.get("live_policy_proof"):
+        return app["live_policy_proof"]
+    if app:
+        return "inventory_only_live_policy_unproved"
+    if access_api_status.get("status") == "blocked":
+        return f"unproved_access_api_{access_api_status.get('http_status') or access_api_status.get('reason')}"
+    return "no_access_app_known"
+
+
+def build_proofs(host, meta, dns, dns_status, tunnel, tunnel_status, app, policy_summary, auth_policy):
+    declared = bool(meta)
+    dns_entry = dns.get(host)
+    routing_layer = meta.get("routing_layer") or ("cloudflare_tunnel" if host in tunnel else "")
+    tunnel_expected = routing_layer == "cloudflare_tunnel" or host in tunnel
+    access_expected = bool(app)
+
+    dns_proof = {
+        "status": "proved" if dns_entry else ("unproved" if dns_status.get("status") == "blocked" else "missing"),
+        "zone": (dns_entry or {}).get("zone", ""),
+        "record_types": (dns_entry or {}).get("types", []),
+        "proxied": (dns_entry or {}).get("proxied", []),
+        "auth_mode": ",".join((dns_entry or {}).get("auth_modes", [])) or dns_status.get("auth_mode", ""),
+    }
+    tunnel_proof = {
+        "status": "proved" if host in tunnel else ("missing" if tunnel_expected else "not_applicable"),
+        "target": tunnel.get(host, ""),
+        "auth_mode": tunnel_status.get("auth_mode", ""),
+    }
+    access_proof = {
+        "status": "proved" if policy_summary.get("status") == "ok" else ("unproved" if access_expected else "not_applicable"),
+        "app_known": bool(app),
+        "auth_mode": policy_summary.get("auth_mode", ""),
+        "summary": policy_summary,
+        "legacy_proof_value": auth_policy,
+    }
+    return {
+        "declaration": {
+            "status": "proved" if declared else "missing",
+            "source": meta.get("source", ""),
+            "authority_source": meta.get("authority_source", ""),
+        },
+        "dns_record": dns_proof,
+        "tunnel_route": tunnel_proof,
+        "access_policy": access_proof,
+        "service_reachability": {
+            "status": "not_checked",
+            "reason": "outside_cloudflare_public_access_readback_scope",
+        },
+    }
+
+
+def summarize_proof_status(lifecycle, proofs):
+    gaps = []
+    if proofs["declaration"]["status"] != "proved" and lifecycle not in {"retired", "ghost"}:
+        gaps.append("missing_declaration")
+    if proofs["dns_record"]["status"] != "proved" and lifecycle not in {"retired", "ghost"}:
+        gaps.append("missing_dns_record")
+    if proofs["tunnel_route"]["status"] == "missing" and lifecycle in {"canonical", "live", "compatibility_hold"}:
+        gaps.append("missing_tunnel_route")
+    if proofs["access_policy"]["app_known"] and proofs["access_policy"]["status"] != "proved":
+        gaps.append("access_policy_unproved")
+    return "proved" if not gaps else "gapped:" + ",".join(gaps)
 
 
 def static_purpose(host):
@@ -228,9 +403,10 @@ def build_rows():
     binding = load_yaml(CF_BINDING)
     cockpit = load_yaml(COCKPIT_CONTRACT)
     bridge = load_yaml(BRIDGE_ENDPOINTS)
-    ingress = ingress_metadata()
+    ingress = ingress_metadata(cockpit, bridge)
     tunnel, tunnel_status = tunnel_ingress(binding)
     access, access_policies, access_api_status = access_apps(binding)
+    dns, dns_status = dns_records(binding)
 
     hosts = set(tunnel) | set(ingress) | set(access)
     public_cockpit = ((cockpit.get("authority") or {}).get("public_operator_url") or "").replace("https://", "").replace("http://", "").strip("/")
@@ -248,8 +424,10 @@ def build_rows():
         purpose = meta.get("purpose", "")
         actor_class = "unknown"
         owner = meta.get("site", "") or "unknown"
-        lifecycle = meta.get("lifecycle_class", "") or "live_if_routed"
         notes = []
+        zone = meta.get("zone", "")
+        if not zone:
+            zone = (zone_for_host(binding, host) or {}).get("name", "")
 
         static, static_actor = static_purpose(host)
         if static and not purpose:
@@ -260,7 +438,6 @@ def build_rows():
             purpose = "human operator cockpit"
             actor_class = "human_operator"
             owner = "spine"
-            lifecycle = "canonical"
             notes.append("canonical_public_operator_url")
 
         if host == bridge_former:
@@ -276,21 +453,15 @@ def build_rows():
             auth_mode = "unknown_or_service_local"
 
         policy_summary = access_policies.get(host, {})
-        if policy_summary.get("status") == "ok":
-            auth_policy_proof = f"policy_proved_{policy_summary.get('auth_mode', 'unknown')}"
-        elif app.get("live_policy_proof"):
-            auth_policy_proof = app["live_policy_proof"]
-        elif app:
-            auth_policy_proof = "inventory_only_live_policy_unproved"
-        elif access_api_status.get("status") == "blocked":
-            auth_policy_proof = f"unproved_access_api_{access_api_status.get('http_status') or access_api_status.get('reason')}"
-        else:
-            auth_policy_proof = "no_access_app_known"
+        auth_policy_proof = access_policy_proof(app, policy_summary, access_api_status)
 
         route_target = tunnel.get(host, "")
         if not route_target:
             route_target = meta.get("target_hint", "")
         route_state = "live_tunnel" if host in tunnel else "declared_only"
+        lifecycle = normalize_lifecycle(meta.get("lifecycle_class", ""), host, bool(meta), host in tunnel, public_cockpit)
+        proofs = build_proofs(host, meta, dns, dns_status, tunnel, tunnel_status or {}, app, policy_summary, auth_policy_proof)
+        proof_status = summarize_proof_status(lifecycle, proofs)
 
         if not purpose:
             purpose = "unclassified public route"
@@ -299,6 +470,7 @@ def build_rows():
 
         rows.append({
             "hostname": host,
+            "zone": zone,
             "purpose": purpose,
             "route_target": route_target,
             "route_state": route_state,
@@ -309,6 +481,9 @@ def build_rows():
             "access_policy_summary": policy_summary,
             "owner": owner,
             "lifecycle": lifecycle,
+            "lifecycle_status": lifecycle,
+            "proof_status": proof_status,
+            "proofs": proofs,
             "notes": "; ".join(notes),
             "source": meta.get("source", ""),
         })
@@ -318,8 +493,11 @@ def build_rows():
         "layer": "L2_shared_infrastructure",
         "boundary": "publication/access adapter; not L1 kernel",
         "cloudflare_access_fit": "Cloudflare Access is the edge identity/auth policy layer for public URLs and machine service-token access. It belongs in L2 because L3 services depend on it, but it must not define the spine kernel.",
+        "lifecycle_vocabulary": LIFECYCLE_VOCABULARY,
+        "proof_model": PROOF_MODEL,
         "access_policy_api": access_api_status,
         "tunnel_api": tunnel_status or {"status": "blocked"},
+        "dns_api": dns_status,
         "rows": rows,
     }
 
@@ -330,13 +508,15 @@ def print_table(payload):
     print(f"boundary: {payload['boundary']}")
     print(f"access_policy_api: {payload['access_policy_api']}")
     print(f"tunnel_api: {payload['tunnel_api']}")
+    print(f"dns_api: {payload['dns_api']}")
+    print(f"lifecycle_vocabulary: {', '.join(payload['lifecycle_vocabulary'])}")
     print("")
-    print("| hostname | purpose | route | actor | auth | proof | notes |")
-    print("|---|---|---|---|---|---|---|")
+    print("| hostname | lifecycle | proof_status | purpose | route | actor | auth | proof | notes |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for row in payload["rows"]:
         route = row["route_target"] or row["route_state"]
         print(
-            f"| {row['hostname']} | {row['purpose']} | {route} | "
+            f"| {row['hostname']} | {row['lifecycle_status']} | {row['proof_status']} | {row['purpose']} | {route} | "
             f"{row['actor_class']} | {row['auth_mode']} | {row['auth_policy_proof']} | {row['notes']} |"
         )
 
