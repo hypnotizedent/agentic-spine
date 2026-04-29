@@ -266,13 +266,16 @@ def chunk_text(text: str, max_chars: int = 800, overlap: int = 80) -> list[str]:
     return [part for part in parts if part]
 
 
-def source_card(path: Path, item: dict[str, Any], text: str, max_chars: int) -> str:
-    headings = re.findall(r"(?m)^#{1,6}\s+(.+)$", text)
+def source_card(path: Path, item: dict[str, Any], text: str, max_chars: int, compact: bool = False) -> str:
+    scan_text = text
+    if compact and len(text) > 12000:
+        scan_text = f"{text[:8000]}\n\n...[compact source-card scan boundary]...\n\n{text[-2000:]}"
+    headings = re.findall(r"(?m)^#{1,6}\s+(.+)$", scan_text)
     heading_text = "; ".join(heading.strip()[:56] for heading in headings[:3])
-    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    first_line = next((line.strip() for line in scan_text.splitlines() if line.strip()), "")
     frontmatter: dict[str, Any] = {}
-    if text.startswith("---"):
-        match = re.match(r"(?s)^---\n(.*?)\n---", text)
+    if scan_text.startswith("---"):
+        match = re.match(r"(?s)^---\n(.*?)\n---", scan_text)
         if match:
             try:
                 parsed = yaml.safe_load(match.group(1)) or {}
@@ -294,15 +297,18 @@ def source_card(path: Path, item: dict[str, Any], text: str, max_chars: int) -> 
         value = frontmatter.get(key)
         if value:
             identifiers.append(f"{key}={value}")
-    explicit_ids = re.findall(r"\b(?:PACKET|LOOP|OI|HI|IUR|CAP|RCAP)-[A-Z0-9][A-Z0-9_.:-]*", text)
+    explicit_ids = re.findall(r"\b(?:PACKET|LOOP|OI|HI|IUR|CAP|RCAP)-[A-Z0-9][A-Z0-9_.:-]*", scan_text)
     if explicit_ids:
         identifiers.append("explicit_ids=" + ",".join(dict.fromkeys(explicit_ids[:12])))
+    variant = "compact" if compact else "standard"
     card = (
         f"SOURCE_NAME: {path.name}\n"
         f"SOURCE_PATH: {path}\n"
         f"ALLOWLIST_ID: {item.get('allowlist_id')}\n"
         f"AUTHORITY_CLASS: {item.get('authority_class')}\n"
         f"LIFECYCLE: {item.get('lifecycle')}\n"
+        f"SOURCE_CARD_VARIANT: {variant}\n"
+        f"SOURCE_BYTES: {len(text.encode('utf-8', errors='replace'))}\n"
         f"IDENTIFIERS: {'; '.join(identifiers) if identifiers else 'none'}\n"
         f"HEADINGS: {heading_text or 'none'}\n"
         f"HINT: {first_line[:240]}"
@@ -417,6 +423,8 @@ def index_source_cards(
     ledger = {"sources": {}} if args.reset else load_ledger()
     sources = ledger.setdefault("sources", {})
     progress_every = max(1, int(args.progress_every or 1))
+    compact_source_min_chars = int(getattr(args, "compact_source_min_chars", 0) or 12000)
+    compact_card_max_chars = int(getattr(args, "compact_card_max_chars", 0) or min(source_card_max_chars, 900))
     progress: dict[str, Any] = {
         "status": "running",
         "mode": "source_card",
@@ -449,7 +457,9 @@ def index_source_cards(
                 continue
             if chunk_budget and indexed_chunks >= chunk_budget:
                 break
-            card = source_card(path, item, text, source_card_max_chars)
+            compact = len(text) >= compact_source_min_chars
+            card_max_chars = compact_card_max_chars if compact else source_card_max_chars
+            card = source_card(path, item, text, card_max_chars, compact=compact)
             payload = {
                 "source_path": rel_path,
                 "source_name": path.name,
@@ -463,6 +473,8 @@ def index_source_cards(
                 "source_updated_at": source_updated_at(path),
                 "staleness_state": "fresh",
                 "disposition": "active",
+                "source_card_variant": "compact" if compact else "standard",
+                "source_bytes": len(text.encode("utf-8", errors="replace")),
                 "text": card,
             }
             vector = ollama_embed(cfg, card)
@@ -476,6 +488,7 @@ def index_source_cards(
                 "source_updated_at": source_updated_at(path),
                 "authority_class": item.get("authority_class"),
                 "allowlist_id": item.get("allowlist_id"),
+                "source_card_variant": "compact" if compact else "standard",
             }
             ledger["updated_at"] = utc_now()
             ledger["collection"] = cfg["collection"]
@@ -1008,6 +1021,8 @@ def main() -> int:
     p.add_argument("--progress-every", type=int, default=1)
     p.add_argument("--chunk-mode", choices=["contract", "source_card", "content_chunks"], default="contract")
     p.add_argument("--retry-failed", action="store_true", help="Index only sources recorded in the last failure manifest.")
+    p.add_argument("--compact-source-min-chars", type=int, default=12000, help="Use compact source cards when source text is at least this many characters.")
+    p.add_argument("--compact-card-max-chars", type=int, default=900, help="Maximum compact source-card characters.")
     p.set_defaults(func=index_sources)
     p = sub.add_parser("retrieve")
     p.add_argument("query")
