@@ -118,6 +118,31 @@ def ollama_embed(cfg: dict[str, Any], text: str) -> list[float]:
     return [float(item) for item in vector]
 
 
+def ollama_embed_many(cfg: dict[str, Any], texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+    if len(texts) == 1:
+        return [ollama_embed(cfg, texts[0])]
+    payload = {"model": cfg["model"], "input": texts}
+    try:
+        batch_timeout = int(os.environ.get("RAG_EMBED_BATCH_TIMEOUT_SEC") or 20)
+        data = http_json("POST", f"{cfg['ollama_url'].rstrip('/')}/api/embed", payload, timeout=batch_timeout)
+        vectors = data.get("embeddings")
+        if not isinstance(vectors, list) or len(vectors) != len(texts):
+            raise RuntimeError("Ollama batch embedding response did not include one vector per input")
+        normalized: list[list[float]] = []
+        for vector in vectors:
+            if not isinstance(vector, list) or not vector:
+                raise RuntimeError("Ollama batch embedding response included an empty vector")
+            if len(vector) != cfg["dimensions"]:
+                raise RuntimeError(f"Embedding dimension mismatch: got {len(vector)}, expected {cfg['dimensions']}")
+            normalized.append([float(item) for item in vector])
+        return normalized
+    except Exception as exc:
+        print(f"rag.direct.index batch_embed_fallback reason={exc}", file=sys.stderr, flush=True)
+        return [ollama_embed(cfg, text) for text in texts]
+
+
 def ollama_generate(cfg: dict[str, Any], prompt: str) -> str:
     model = os.environ.get("RAG_QUERY_MODEL", "phi3:mini")
     payload = {"model": model, "prompt": prompt, "stream": False}
@@ -233,6 +258,50 @@ def chunk_text(text: str, max_chars: int = 800, overlap: int = 80) -> list[str]:
     return [part for part in parts if part]
 
 
+def source_card(path: Path, item: dict[str, Any], text: str, max_chars: int) -> str:
+    headings = re.findall(r"(?m)^#{1,6}\s+(.+)$", text)
+    heading_text = "; ".join(heading.strip()[:56] for heading in headings[:3])
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    frontmatter: dict[str, Any] = {}
+    if text.startswith("---"):
+        match = re.match(r"(?s)^---\n(.*?)\n---", text)
+        if match:
+            try:
+                parsed = yaml.safe_load(match.group(1)) or {}
+                frontmatter = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                frontmatter = {}
+    identifier_keys = [
+        "packet_id",
+        "loop_id",
+        "human_intent_id",
+        "source_human_intent_id",
+        "source_ref",
+        "origin_packet",
+        "concern",
+        "operator_hint",
+    ]
+    identifiers = []
+    for key in identifier_keys:
+        value = frontmatter.get(key)
+        if value:
+            identifiers.append(f"{key}={value}")
+    explicit_ids = re.findall(r"\b(?:PACKET|LOOP|OI|HI|IUR|CAP|RCAP)-[A-Z0-9][A-Z0-9_.:-]*", text)
+    if explicit_ids:
+        identifiers.append("explicit_ids=" + ",".join(dict.fromkeys(explicit_ids[:12])))
+    card = (
+        f"SOURCE_NAME: {path.name}\n"
+        f"SOURCE_PATH: {path}\n"
+        f"ALLOWLIST_ID: {item.get('allowlist_id')}\n"
+        f"AUTHORITY_CLASS: {item.get('authority_class')}\n"
+        f"LIFECYCLE: {item.get('lifecycle')}\n"
+        f"IDENTIFIERS: {'; '.join(identifiers) if identifiers else 'none'}\n"
+        f"HEADINGS: {heading_text or 'none'}\n"
+        f"HINT: {first_line[:240]}"
+    )
+    return card[:max_chars]
+
+
 def point_id(source_hash: str, chunk_index: int) -> str:
     return str(uuid.uuid5(NAMESPACE, f"{source_hash}:{chunk_index}"))
 
@@ -268,9 +337,168 @@ def write_ledger(data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def progress_path() -> Path:
+    path = state_root() / "rag-direct" / "index-progress.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def write_progress(data: dict[str, Any]) -> None:
+    path = progress_path()
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def emit_progress(progress: dict[str, Any], message: str) -> None:
+    progress["updated_at"] = utc_now()
+    progress["message"] = message
+    write_progress(progress)
+    print(f"rag.direct.index {message}", file=sys.stderr, flush=True)
+
+
+def index_source_cards(
+    args: argparse.Namespace,
+    cfg: dict[str, Any],
+    manifest: list[dict[str, Any]],
+    source_card_max_chars: int,
+) -> int:
+    indexed_files = 0
+    indexed_chunks = 0
+    chunk_budget = int(args.max_chunks or 0)
+    skipped_unchanged = 0
+    skipped_secret = 0
+    failed: list[dict[str, str]] = []
+    ledger = {"sources": {}} if args.reset else load_ledger()
+    sources = ledger.setdefault("sources", {})
+    embed_batch_size = max(1, int(args.embed_batch_size or 8))
+    qdrant_batch_size = max(1, int(args.batch_size or 4))
+    progress_every = max(1, int(args.progress_every or 10))
+    progress: dict[str, Any] = {
+        "status": "running",
+        "mode": "source_card",
+        "collection": cfg["collection"],
+        "files_seen": len(manifest),
+        "files_indexed": 0,
+        "chunks_indexed": 0,
+        "skipped_unchanged": 0,
+        "skipped_secret": 0,
+        "failed_count": 0,
+        "ledger": str(ledger_path()),
+    }
+    emit_progress(progress, f"start mode=source_card files={len(manifest)} collection={cfg['collection']}")
+
+    pending: list[dict[str, Any]] = []
+    qdrant_batch: list[dict[str, Any]] = []
+
+    def flush_pending() -> None:
+        nonlocal indexed_chunks, qdrant_batch
+        if not pending:
+            return
+        vectors = ollama_embed_many(cfg, [str(row["decorated"]) for row in pending])
+        for row, vector in zip(pending, vectors, strict=True):
+            payload = row["payload"]
+            qdrant_batch.append({"id": row["point_id"], "vector": vector, "payload": payload})
+            indexed_chunks += 1
+            progress["chunks_indexed"] = indexed_chunks
+            if len(qdrant_batch) >= qdrant_batch_size:
+                upsert_points(cfg, qdrant_batch)
+                qdrant_batch = []
+        pending.clear()
+        if qdrant_batch:
+            upsert_points(cfg, qdrant_batch)
+            qdrant_batch = []
+        if indexed_chunks % progress_every < embed_batch_size or chunk_budget:
+            emit_progress(progress, f"chunks={indexed_chunks} files={indexed_files}")
+        if args.pace_sec:
+            time.sleep(args.pace_sec)
+
+    for item in manifest:
+        path = item["path"]
+        try:
+            text = read_source(path)
+            if has_secret_material(text):
+                skipped_secret += 1
+                progress["skipped_secret"] = skipped_secret
+                emit_progress(progress, f"skip_secret file={path}")
+                continue
+            source_hash = content_hash(text)
+            rel_path = str(path)
+            previous = sources.get(rel_path) if isinstance(sources.get(rel_path), dict) else {}
+            if args.changed_only and previous.get("content_hash") == source_hash and previous.get("chunk_count") == 1:
+                skipped_unchanged += 1
+                progress["skipped_unchanged"] = skipped_unchanged
+                continue
+            if chunk_budget and indexed_chunks + len(pending) >= chunk_budget:
+                break
+            card = source_card(path, item, text, source_card_max_chars)
+            payload = {
+                "source_path": rel_path,
+                "source_name": path.name,
+                "allowlist_id": item.get("allowlist_id"),
+                "authority_class": item.get("authority_class"),
+                "lifecycle": item.get("lifecycle"),
+                "content_hash": source_hash,
+                "chunk_index": 0,
+                "chunk_count": 1,
+                "indexed_at": utc_now(),
+                "source_updated_at": source_updated_at(path),
+                "staleness_state": "fresh",
+                "disposition": "active",
+                "text": card,
+            }
+            pending.append({"decorated": card, "payload": payload, "point_id": point_id(source_hash, 0)})
+            indexed_files += 1
+            sources[rel_path] = {
+                "content_hash": source_hash,
+                "chunk_count": 1,
+                "indexed_at": utc_now(),
+                "source_updated_at": source_updated_at(path),
+                "authority_class": item.get("authority_class"),
+                "allowlist_id": item.get("allowlist_id"),
+            }
+            progress["files_indexed"] = indexed_files
+            if len(pending) >= embed_batch_size:
+                flush_pending()
+                ledger["updated_at"] = utc_now()
+                ledger["collection"] = cfg["collection"]
+                write_ledger(ledger)
+            if chunk_budget and indexed_chunks + len(pending) >= chunk_budget:
+                break
+        except Exception as exc:
+            failed.append({"path": str(path), "error": str(exc)})
+            progress["failed_count"] = len(failed)
+            emit_progress(progress, f"failed file={path} error={exc}")
+    flush_pending()
+    ledger["updated_at"] = utc_now()
+    ledger["collection"] = cfg["collection"]
+    write_ledger(ledger)
+    result = {
+        "status": "indexed",
+        "mode": "source_card",
+        "collection": cfg["collection"],
+        "files_seen": len(manifest),
+        "files_indexed": indexed_files,
+        "chunks_indexed": indexed_chunks,
+        "skipped_unchanged": skipped_unchanged,
+        "skipped_secret": skipped_secret,
+        "failed_count": len(failed),
+        "failed": failed[:10],
+        "ledger": str(ledger_path()),
+    }
+    progress.update(result)
+    progress["status"] = "indexed" if not failed else "indexed_with_failures"
+    write_progress(progress)
+    print(json.dumps(result, sort_keys=True))
+    return 0 if not failed else 1
+
+
 def index_sources(args: argparse.Namespace) -> int:
     doc = contract()
     cfg = embedding_config(doc)
+    policy = doc.get("index_policy") if isinstance(doc.get("index_policy"), dict) else {}
+    chunk_mode = args.chunk_mode if args.chunk_mode != "contract" else str(policy.get("granularity") or "source_card")
+    source_card_max_chars = int(policy.get("source_card_max_chars") or 1800)
     if args.reset:
         reset_collection(cfg)
     else:
@@ -281,6 +509,8 @@ def index_sources(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(json.dumps({"status": "dry_run", "files": len(manifest), "collection": cfg["collection"]}, sort_keys=True))
         return 0
+    if chunk_mode == "source_card":
+        return index_source_cards(args, cfg, manifest, source_card_max_chars)
 
     indexed_files = 0
     indexed_chunks = 0
@@ -289,47 +519,80 @@ def index_sources(args: argparse.Namespace) -> int:
     skipped_secret = 0
     failed: list[dict[str, str]] = []
     batch: list[dict[str, Any]] = []
-    ledger = load_ledger()
+    ledger = {"sources": {}} if args.reset else load_ledger()
     sources = ledger.setdefault("sources", {})
+    batch_size = max(1, int(args.batch_size or 4))
+    embed_batch_size = max(1, int(args.embed_batch_size or 8))
+    progress_every = max(1, int(args.progress_every or 10))
+    progress: dict[str, Any] = {
+        "status": "running",
+        "collection": cfg["collection"],
+        "files_seen": len(manifest),
+        "files_indexed": 0,
+        "chunks_indexed": 0,
+        "skipped_unchanged": 0,
+        "skipped_secret": 0,
+        "failed_count": 0,
+        "ledger": str(ledger_path()),
+    }
+    emit_progress(progress, f"start files={len(manifest)} collection={cfg['collection']}")
     for item in manifest:
         path = item["path"]
         try:
             text = read_source(path)
             if has_secret_material(text):
                 skipped_secret += 1
+                progress["skipped_secret"] = skipped_secret
+                emit_progress(progress, f"skip_secret file={path}")
                 continue
             source_hash = content_hash(text)
             rel_path = str(path)
-            chunks = chunk_text(text)
+            if chunk_mode == "content_chunks":
+                chunks = chunk_text(text)
+            else:
+                chunks = [source_card(path, item, text, source_card_max_chars)]
             previous = sources.get(rel_path) if isinstance(sources.get(rel_path), dict) else {}
             if args.changed_only and previous.get("content_hash") == source_hash and previous.get("chunk_count") == len(chunks):
                 skipped_unchanged += 1
+                progress["skipped_unchanged"] = skipped_unchanged
                 continue
-            for idx, chunk in enumerate(chunks):
-                if chunk_budget and indexed_chunks >= chunk_budget:
+            idx = 0
+            while idx < len(chunks):
+                embed_group: list[tuple[int, str, str]] = []
+                while idx < len(chunks) and len(embed_group) < embed_batch_size:
+                    if chunk_budget and indexed_chunks + len(embed_group) >= chunk_budget:
+                        break
+                    chunk = chunks[idx]
+                    decorated = f"SOURCE: {rel_path}\nAUTHORITY_CLASS: {item.get('authority_class')}\n\n{chunk}"
+                    embed_group.append((idx, chunk, decorated))
+                    idx += 1
+                if not embed_group:
                     break
-                decorated = f"SOURCE: {rel_path}\nAUTHORITY_CLASS: {item.get('authority_class')}\n\n{chunk}"
-                vector = ollama_embed(cfg, decorated)
-                payload = {
-                    "source_path": rel_path,
-                    "source_name": path.name,
-                    "allowlist_id": item.get("allowlist_id"),
-                    "authority_class": item.get("authority_class"),
-                    "lifecycle": item.get("lifecycle"),
-                    "content_hash": source_hash,
-                    "chunk_index": idx,
-                    "chunk_count": len(chunks),
-                    "indexed_at": utc_now(),
-                    "source_updated_at": source_updated_at(path),
-                    "staleness_state": "fresh",
-                    "disposition": "active",
-                    "text": chunk,
-                }
-                batch.append({"id": point_id(source_hash, idx), "vector": vector, "payload": payload})
-                indexed_chunks += 1
-                if len(batch) >= 16:
+                vectors = ollama_embed_many(cfg, [row[2] for row in embed_group])
+                for (chunk_index, chunk, _decorated), vector in zip(embed_group, vectors, strict=True):
+                    payload = {
+                        "source_path": rel_path,
+                        "source_name": path.name,
+                        "allowlist_id": item.get("allowlist_id"),
+                        "authority_class": item.get("authority_class"),
+                        "lifecycle": item.get("lifecycle"),
+                        "content_hash": source_hash,
+                        "chunk_index": chunk_index,
+                        "chunk_count": len(chunks),
+                        "indexed_at": utc_now(),
+                        "source_updated_at": source_updated_at(path),
+                        "staleness_state": "fresh",
+                        "disposition": "active",
+                        "text": chunk,
+                    }
+                    batch.append({"id": point_id(source_hash, chunk_index), "vector": vector, "payload": payload})
+                    indexed_chunks += 1
+                    progress["chunks_indexed"] = indexed_chunks
+                if len(batch) >= batch_size:
                     upsert_points(cfg, batch)
                     batch = []
+                if indexed_chunks % progress_every < embed_batch_size or chunk_budget:
+                    emit_progress(progress, f"chunks={indexed_chunks} files={indexed_files} current={path}")
             indexed_files += 1
             sources[rel_path] = {
                 "content_hash": source_hash,
@@ -339,12 +602,20 @@ def index_sources(args: argparse.Namespace) -> int:
                 "authority_class": item.get("authority_class"),
                 "allowlist_id": item.get("allowlist_id"),
             }
+            ledger["updated_at"] = utc_now()
+            ledger["collection"] = cfg["collection"]
+            write_ledger(ledger)
+            progress["files_indexed"] = indexed_files
+            if indexed_files % progress_every == 0 or chunk_budget:
+                emit_progress(progress, f"files={indexed_files}/{len(manifest)} chunks={indexed_chunks} current={path}")
             if args.pace_sec:
                 time.sleep(args.pace_sec)
             if chunk_budget and indexed_chunks >= chunk_budget:
                 break
         except Exception as exc:  # keep one bad file from poisoning the full reindex
             failed.append({"path": str(path), "error": str(exc)})
+            progress["failed_count"] = len(failed)
+            emit_progress(progress, f"failed file={path} error={exc}")
     upsert_points(cfg, batch)
     result = {
         "status": "indexed",
@@ -361,6 +632,9 @@ def index_sources(args: argparse.Namespace) -> int:
     ledger["updated_at"] = utc_now()
     ledger["collection"] = cfg["collection"]
     write_ledger(ledger)
+    progress.update(result)
+    progress["status"] = "indexed" if not failed else "indexed_with_failures"
+    write_progress(progress)
     print(json.dumps(result, sort_keys=True))
     return 0 if not failed else 1
 
@@ -380,9 +654,97 @@ def qdrant_search(cfg: dict[str, Any], query: str, limit: int) -> list[dict[str,
     return rows if isinstance(rows, list) else []
 
 
+def normalize_for_match(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def query_terms(query: str) -> list[str]:
+    raw_terms = re.findall(r"[A-Za-z0-9][A-Za-z0-9_.:-]{2,}", query)
+    terms: list[str] = []
+    for term in raw_terms:
+        terms.append(term.lower())
+        normalized = normalize_for_match(term)
+        if normalized and normalized != term.lower():
+            terms.extend(part for part in normalized.split() if len(part) >= 3)
+    return list(dict.fromkeys(terms))
+
+
+def lexical_manifest_hits(doc: dict[str, Any], query: str, limit: int) -> list[dict[str, Any]]:
+    terms = query_terms(query)
+    phrase = normalize_for_match(query)
+    hits: list[tuple[float, dict[str, Any]]] = []
+    for item in iter_manifest(doc):
+        path = item["path"]
+        try:
+            text = read_source(path)
+        except Exception:
+            continue
+        if has_secret_material(text):
+            continue
+        source_hash = content_hash(text)
+        card = source_card(path, item, text, max_chars=1800)
+        haystack = normalize_for_match(f"{path.name} {path} {card} {text[:4000]}")
+        score = 0.0
+        if phrase and phrase in haystack:
+            score += 20.0
+        for term in terms:
+            if term in haystack:
+                score += 1.0
+            normalized_term = normalize_for_match(term)
+            if normalized_term and normalized_term in haystack:
+                score += 1.0
+        explicit_ids = re.findall(r"\b(?:PACKET|LOOP|OI|HI|IUR|CAP|RCAP)-[A-Z0-9][A-Z0-9_.:-]*", query, flags=re.IGNORECASE)
+        for explicit_id in explicit_ids:
+            if normalize_for_match(explicit_id) in haystack:
+                score += 15.0
+        if score <= 0:
+            continue
+        payload = {
+            "source_path": str(path),
+            "source_name": path.name,
+            "allowlist_id": item.get("allowlist_id"),
+            "authority_class": item.get("authority_class"),
+            "lifecycle": item.get("lifecycle"),
+            "content_hash": source_hash,
+            "chunk_index": 0,
+            "chunk_count": 1,
+            "indexed_at": "live_manifest",
+            "source_updated_at": source_updated_at(path),
+            "staleness_state": "fresh",
+            "disposition": "active",
+            "retrieval_mode": "lexical_allowlist",
+            "text": card,
+        }
+        hits.append((score, {"score": score, "payload": payload}))
+    hits.sort(key=lambda row: row[0], reverse=True)
+    return [row for _score, row in hits[:limit]]
+
+
+def merge_results(vector_rows: list[dict[str, Any]], lexical_rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in lexical_rows + vector_rows:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        source_path = str(payload.get("source_path") or "")
+        chunk_index = str(payload.get("chunk_index") or "0")
+        key = f"{source_path}:{chunk_index}"
+        if not source_path or key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
 def retrieve(args: argparse.Namespace) -> int:
-    cfg = embedding_config(contract())
-    rows = qdrant_search(cfg, args.query, args.limit)
+    doc = contract()
+    cfg = embedding_config(doc)
+    lexical_rows = lexical_manifest_hits(doc, args.query, args.limit)
+    vector_rows = []
+    if len(lexical_rows) < args.limit:
+        vector_rows = qdrant_search(cfg, args.query, max(args.limit * 3, args.limit))
+    rows = merge_results(vector_rows, lexical_rows, args.limit)
     if args.json:
         print(json.dumps({"query": args.query, "collection": cfg["collection"], "results": rows}, sort_keys=True))
         return 0
@@ -392,14 +754,20 @@ def retrieve(args: argparse.Namespace) -> int:
         text = str(payload.get("text") or "")
         excerpt = re.sub(r"\s+", " ", text).strip()[:700]
         print(f"\n[{i}] score={row.get('score')} source={payload.get('source_path')}")
-        print(f"authority_class={payload.get('authority_class')} staleness={payload.get('staleness_state')} indexed_at={payload.get('indexed_at')}")
+        mode = payload.get("retrieval_mode") or "vector"
+        print(f"authority_class={payload.get('authority_class')} staleness={payload.get('staleness_state')} indexed_at={payload.get('indexed_at')} mode={mode}")
         print(excerpt)
     return 0
 
 
 def query(args: argparse.Namespace) -> int:
-    cfg = embedding_config(contract())
-    rows = qdrant_search(cfg, args.question, args.limit)
+    doc = contract()
+    cfg = embedding_config(doc)
+    lexical_rows = lexical_manifest_hits(doc, args.question, args.limit)
+    vector_rows = []
+    if len(lexical_rows) < args.limit:
+        vector_rows = qdrant_search(cfg, args.question, max(args.limit * 3, args.limit))
+    rows = merge_results(vector_rows, lexical_rows, args.limit)
     context_lines: list[str] = []
     for i, row in enumerate(rows, start=1):
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
@@ -451,6 +819,13 @@ def health(args: argparse.Namespace) -> int:
 def manifest(args: argparse.Namespace) -> int:
     rows = iter_manifest(contract())
     payload = [{"path": str(row["path"]), "allowlist_id": row.get("allowlist_id"), "authority_class": row.get("authority_class")} for row in rows]
+    if args.summary:
+        counts: dict[str, int] = {}
+        for row in payload:
+            key = str(row.get("allowlist_id") or "unknown")
+            counts[key] = counts.get(key, 0) + 1
+        print(json.dumps({"files": len(payload), "by_allowlist_id": counts}, sort_keys=True))
+        return 0
     if args.json:
         print(json.dumps({"files": len(payload), "manifest": payload}, sort_keys=True))
     else:
@@ -468,6 +843,7 @@ def main() -> int:
     p.set_defaults(func=health)
     p = sub.add_parser("manifest")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--summary", action="store_true")
     p.add_argument("--limit", type=int, default=0)
     p.set_defaults(func=manifest)
     p = sub.add_parser("index")
@@ -477,6 +853,10 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--max-chunks", type=int, default=0, help="Test guard: stop after this many chunks.")
     p.add_argument("--pace-sec", type=float, default=0.0)
+    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--embed-batch-size", type=int, default=8)
+    p.add_argument("--progress-every", type=int, default=10)
+    p.add_argument("--chunk-mode", choices=["contract", "source_card", "content_chunks"], default="contract")
     p.set_defaults(func=index_sources)
     p = sub.add_parser("retrieve")
     p.add_argument("query")
