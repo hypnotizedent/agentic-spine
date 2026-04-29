@@ -83,6 +83,32 @@ status_from_rc() {
   [[ "$rc" -eq 0 ]] && echo "ok" || echo "failed"
 }
 
+run_readback_capture() {
+  local out_file="$1"
+  local err_file="$2"
+  shift 2
+  local timeout_sec="${WATCHER_INPUT_READBACK_TIMEOUT_SEC:-120}"
+  local pid deadline
+
+  "$@" >"$out_file" 2>"$err_file" < /dev/null &
+  pid=$!
+  deadline=$((SECONDS + timeout_sec))
+
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      echo "readback_timeout_sec=$timeout_sec" >> "$err_file"
+      return 124
+    fi
+    sleep 1
+  done
+
+  wait "$pid"
+}
+
 while IFS=$'\t' read -r input_id input_class capability args action_level failure_meaning; do
   [[ -n "$input_id" ]] || continue
   [[ "$args" == "-" ]] && args=""
@@ -95,7 +121,7 @@ while IFS=$'\t' read -r input_id input_class capability args action_level failur
   case "$capability" in
     watcher.health)
       set +e
-      "$ROOT/ops/plugins/core/bin/watcher-health" --json >"$out_file" 2>"$err_file" < /dev/null
+      run_readback_capture "$out_file" "$err_file" "$ROOT/ops/plugins/core/bin/watcher-health" --json
       rc=$?
       set -e
       watcher_status="$(jq -r '.status // ""' "$out_file" 2>/dev/null || true)"
@@ -112,7 +138,7 @@ while IFS=$'\t' read -r input_id input_class capability args action_level failur
       ;;
     infra.core.slo.status)
       set +e
-      "$ROOT/ops/plugins/infra/observability/bin/infra-core-slo-status" >"$out_file" 2>"$err_file" < /dev/null
+      run_readback_capture "$out_file" "$err_file" "$ROOT/ops/plugins/infra/observability/bin/infra-core-slo-status"
       rc=$?
       set -e
       if [[ "$rc" -eq 0 ]] && grep -q '^status: OK$' "$out_file"; then
@@ -124,7 +150,7 @@ while IFS=$'\t' read -r input_id input_class capability args action_level failur
       ;;
     backup.posture.snapshot.build)
       set +e
-      "$ROOT/ops/plugins/infra/backup/bin/backup-posture-snapshot-build" >"$out_file" 2>"$err_file" < /dev/null
+      run_readback_capture "$out_file" "$err_file" "$ROOT/ops/plugins/infra/backup/bin/backup-posture-snapshot-build"
       rc=$?
       set -e
       snapshot="$SPINE_DATA_ROOT/snapshots/backup.posture.snapshot.yaml"
@@ -156,7 +182,7 @@ PY
       ;;
     backup.estate.readback.status)
       set +e
-      "$ROOT/ops/plugins/core/bin/backup-estate-readback-status" --json >"$out_file" 2>"$err_file" < /dev/null
+      run_readback_capture "$out_file" "$err_file" "$ROOT/ops/plugins/core/bin/backup-estate-readback-status" --json
       rc=$?
       set -e
       if [[ "$rc" -eq 0 ]] && jq -e '.status == "ok"' "$out_file" >/dev/null 2>&1; then
@@ -172,7 +198,7 @@ PY
       ;;
     services.health.status)
       set +e
-      "$ROOT/ops/plugins/infra/services/bin/services-health-status" >"$out_file" 2>"$err_file" < /dev/null
+      run_readback_capture "$out_file" "$err_file" "$ROOT/ops/plugins/infra/services/bin/services-health-status"
       rc=$?
       set -e
       read -r total ok skip unhealthy < <(python3 - "$out_file" <<'PY'

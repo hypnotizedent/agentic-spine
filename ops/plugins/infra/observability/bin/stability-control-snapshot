@@ -386,7 +386,10 @@ EOF
     ssh_err="$(cat "$err_file" 2>/dev/null || true)"
     local reason
     reason="$(classify_ssh_error "$ssh_err")"
-    if [[ "${VM_PREDICTIVE_SSH_FAILURE_TREATMENT:-incident}" == "warn" ]]; then
+    if [[ "${VM_PREDICTIVE_SSH_FAILURE_TREATMENT:-incident}" == "status_only" ]]; then
+      VM_PROBE_STATUS="pass"
+      VM_PROBE_DETAIL="vm_predictive_probe_ssh_failure(reason=$reason,target=$ssh_target,host=$ssh_host,treatment=status_only)"
+    elif [[ "${VM_PREDICTIVE_SSH_FAILURE_TREATMENT:-incident}" == "warn" ]]; then
       VM_PROBE_STATUS="warn"
       VM_PROBE_DETAIL="vm_predictive_probe_ssh_failure(reason=$reason,target=$ssh_target,host=$ssh_host,treatment=warn)"
     else
@@ -521,8 +524,8 @@ DISK_MIN_PCT="$(yq -r '.predictive_thresholds.vm_disk_headroom_min_percent // 15
 MEM_MIN_PCT="$(yq -r '.predictive_thresholds.vm_memory_headroom_min_percent // 20' "$CONTRACT")"
 LOAD_PER_CORE_WARN="$(yq -r '.predictive_thresholds.vm_load_per_core_warn // ""' "$CONTRACT")"
 VM_PREDICTIVE_SSH_FAILURE_TREATMENT="$(yq -r '.predictive_thresholds.vm_predictive_ssh_failure_treatment // "incident"' "$CONTRACT")"
-if [[ "$VM_PREDICTIVE_SSH_FAILURE_TREATMENT" != "warn" && "$VM_PREDICTIVE_SSH_FAILURE_TREATMENT" != "incident" ]]; then
-  echo "STOP: predictive_thresholds.vm_predictive_ssh_failure_treatment must be warn or incident" >&2
+if [[ "$VM_PREDICTIVE_SSH_FAILURE_TREATMENT" != "status_only" && "$VM_PREDICTIVE_SSH_FAILURE_TREATMENT" != "warn" && "$VM_PREDICTIVE_SSH_FAILURE_TREATMENT" != "incident" ]]; then
+  echo "STOP: predictive_thresholds.vm_predictive_ssh_failure_treatment must be status_only, warn, or incident" >&2
   exit 2
 fi
 API_LAT_WARN_MS="$(yq -r '.predictive_thresholds.api_latency_warn_ms // 2000' "$CONTRACT")"
