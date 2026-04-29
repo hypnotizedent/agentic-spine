@@ -401,6 +401,16 @@ def failed_source_paths() -> set[str]:
     return paths
 
 
+def failed_source_keys() -> set[str]:
+    keys: set[str] = set()
+    for raw_path in failed_source_paths():
+        keys.add(raw_path)
+        name = Path(raw_path).name
+        if name:
+            keys.add(name)
+    return keys
+
+
 def emit_progress(progress: dict[str, Any], message: str) -> None:
     progress["updated_at"] = utc_now()
     progress["message"] = message
@@ -555,12 +565,44 @@ def index_sources(args: argparse.Namespace) -> int:
         ensure_collection(cfg)
     manifest = iter_manifest(doc)
     if getattr(args, "retry_failed", False):
-        failed_paths = failed_source_paths()
-        manifest = [item for item in manifest if str(item["path"]) in failed_paths]
+        failed_keys = failed_source_keys()
+        if failed_keys:
+            manifest = [
+                item
+                for item in manifest
+                if str(item["path"]) in failed_keys or item["path"].name in failed_keys
+            ]
+            if not manifest:
+                print(
+                    json.dumps(
+                        {
+                            "status": "retry_manifest_mismatch",
+                            "files": 0,
+                            "failure_manifest": str(failure_manifest_path()),
+                            "failed_source_keys": len(failed_keys),
+                            "reason": "failure_manifest_sources_do_not_match_current_allowlist",
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 1
+        else:
+            manifest = []
     if args.limit:
         manifest = manifest[: args.limit]
     if args.dry_run:
-        print(json.dumps({"status": "dry_run", "files": len(manifest), "collection": cfg["collection"]}, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "status": "dry_run",
+                    "files": len(manifest),
+                    "collection": cfg["collection"],
+                    "retry_failed": bool(getattr(args, "retry_failed", False)),
+                    "failure_manifest": str(failure_manifest_path()) if getattr(args, "retry_failed", False) else None,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     if chunk_mode == "source_card":
         return index_source_cards(args, cfg, manifest, source_card_max_chars)
