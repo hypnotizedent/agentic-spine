@@ -42,7 +42,6 @@ ROLLOUT_LABELS = [
 ]
 BLOCKED_LABELS = [
     "com.ronny.communications-alerts-dispatcher",
-    "com.ronny.infra-core-smoke",
     "com.ronny.log-rotation-daily",
     "com.ronny.operator-storage-surface-sync",
     "com.ronny.finance-backup-weekly",

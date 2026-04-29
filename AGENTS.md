@@ -26,6 +26,25 @@ public-vs-expert drift, fragmented telemetry/readback, workflow over-visibility,
 doctrine/runtime contradiction, migration residue, and unresolved control-plane
 truth.
 
+Subtraction aperture discipline:
+- Every first-class L1/L2 improvement must subtract the old surface it replaces.
+  Construction is not completion.
+- The spine core defines canonical protocol shape, custody, heartbeat/readback,
+  result/failure, receipt, role truth, and retirement gates. It must not absorb
+  L3 domain bodies, app-specific logic, or old shard behavior as new
+  architecture.
+- Do not create permanent adapter backfill, parallel catchup systems, or
+  domain-specific wrapper subsystems to preserve old residue. A thin adapter is
+  legal only when it is the minimal readback/materialization shape required by
+  an existing canonical L1/L2 contract and it names the old surface it will
+  retire, hide, or demote.
+- Old operational jobs may continue only as operational jobs with canonical
+  readback. They must not remain parallel authority, placement truth, watcher
+  truth, backup truth, status truth, or operator grammar.
+- Parked/deferred is not closure. If a legacy surface cannot be subtracted yet,
+  the live gap is the missing canonical replacement proof, not a new governance
+  shelf.
+
 Legal work:
 - public vs expert boundary work across existing surfaces, including demoting
   `ops loops`, `ops wave`, raw scope/receipt surgery, and similar expert paths

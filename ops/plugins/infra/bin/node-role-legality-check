@@ -12,12 +12,16 @@ set -euo pipefail
 #   - node.role.contract.yaml
 #   - vm.lifecycle.yaml
 #   - ssh.targets.yaml
+#   - hardware.inventory.yaml
+#   - fleet.admission.classification.yaml
 #   - topology.sites.yaml
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 NODE_CONTRACT="${SPINE_REPO}/ops/bindings/node.role.contract.yaml"
 VM_LIFECYCLE="${SPINE_REPO}/ops/bindings/vm.lifecycle.yaml"
 SSH_TARGETS="${SPINE_REPO}/ops/bindings/ssh.targets.yaml"
+HARDWARE_INVENTORY="${SPINE_REPO}/ops/bindings/hardware.inventory.yaml"
+FLEET_ADMISSION="${SPINE_REPO}/ops/bindings/fleet.admission.classification.yaml"
 TOPOLOGY="${SPINE_REPO}/ops/bindings/topology.sites.yaml"
 
 usage() {
@@ -62,7 +66,7 @@ done
 need yq
 need jq
 
-for f in "$NODE_CONTRACT" "$VM_LIFECYCLE" "$SSH_TARGETS" "$TOPOLOGY"; do
+for f in "$NODE_CONTRACT" "$VM_LIFECYCLE" "$SSH_TARGETS" "$HARDWARE_INVENTORY" "$FLEET_ADMISSION" "$TOPOLOGY"; do
     [[ -f "$f" ]] || fail "authority surface not found: $f"
 done
 
@@ -134,7 +138,29 @@ else
             candidate_platform="linux"
         else
             evidence+=("vm.lifecycle.yaml: no entry for ssh_target=$CANDIDATE")
-            candidate_platform="unknown"
+            hw_entry=$(yq e ".machines[] | select(.machine_id == \"$CANDIDATE\" or .hostname == \"$CANDIDATE\")" "$HARDWARE_INVENTORY" 2>/dev/null)
+            if [[ -n "$hw_entry" && "$hw_entry" != "null" ]]; then
+                hw_os=$(echo "$hw_entry" | yq e '.os // ""')
+                hw_model=$(echo "$hw_entry" | yq e '.model // ""')
+                hw_site=$(echo "$hw_entry" | yq e '.site // ""')
+                admission_status=$(yq e ".fleet.\"$CANDIDATE\".admission_status // .classifications.\"$CANDIDATE\".admission_status // \"\"" "$FLEET_ADMISSION" 2>/dev/null)
+                [[ -n "$hw_site" && "$hw_site" != "null" ]] && candidate_site="$hw_site"
+                [[ -n "$admission_status" && "$admission_status" != "null" ]] && candidate_status="$admission_status"
+                candidate_os="$hw_os"
+                evidence+=("hardware.inventory.yaml: machine_id=$CANDIDATE model=$hw_model site=$hw_site os=$hw_os")
+                evidence+=("fleet.admission.classification.yaml: admission_status=${admission_status:-unknown}")
+
+                case "$hw_os" in
+                    *Proxmox*|*proxmox*|ubuntu*|debian*|linux*|Linux*)
+                        candidate_platform="linux"
+                        ;;
+                    *)
+                        candidate_platform="unknown"
+                        ;;
+                esac
+            else
+                candidate_platform="unknown"
+            fi
         fi
     fi
 fi

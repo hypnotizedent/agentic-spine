@@ -12,12 +12,16 @@ set -euo pipefail
 # Authority and evidence sources:
 #   - ssh.targets.yaml
 #   - vm.lifecycle.yaml
+#   - hardware.inventory.yaml
+#   - fleet.admission.classification.yaml
 #   - launchd.scheduler.registry.yaml
 #   - node.role.contract.yaml
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 SSH_TARGETS="${SPINE_REPO}/ops/bindings/ssh.targets.yaml"
 VM_LIFECYCLE="${SPINE_REPO}/ops/bindings/vm.lifecycle.yaml"
+HARDWARE_INVENTORY="${SPINE_REPO}/ops/bindings/hardware.inventory.yaml"
+FLEET_ADMISSION="${SPINE_REPO}/ops/bindings/fleet.admission.classification.yaml"
 SCHEDULER_REGISTRY="${SPINE_REPO}/ops/bindings/launchd.scheduler.registry.yaml"
 NODE_CONTRACT="${SPINE_REPO}/ops/bindings/node.role.contract.yaml"
 
@@ -61,7 +65,7 @@ done
 need yq
 need jq
 
-for f in "$SSH_TARGETS" "$VM_LIFECYCLE" "$SCHEDULER_REGISTRY" "$NODE_CONTRACT"; do
+for f in "$SSH_TARGETS" "$VM_LIFECYCLE" "$HARDWARE_INVENTORY" "$FLEET_ADMISSION" "$SCHEDULER_REGISTRY" "$NODE_CONTRACT"; do
     [[ -f "$f" ]] || fail "authority surface not found: $f"
 done
 
@@ -98,14 +102,31 @@ else
     vm_status=$(yq e ".vms[] | select(.ssh_target == \"$CANDIDATE\") | .status // \"\"" "$VM_LIFECYCLE" 2>/dev/null)
 
     if [[ -z "$vm_os" || "$vm_os" == "null" ]]; then
-        # Not in vm.lifecycle — check ssh.targets
+        # Not in vm.lifecycle — check physical hardware inventory before
+        # falling back to ssh-only access truth.
+        hw_os=$(yq e ".machines[] | select(.machine_id == \"$CANDIDATE\" or .hostname == \"$CANDIDATE\") | .os // \"\"" "$HARDWARE_INVENTORY" 2>/dev/null)
+        admission_status=$(yq e ".fleet.\"$CANDIDATE\".admission_status // .classifications.\"$CANDIDATE\".admission_status // \"\"" "$FLEET_ADMISSION" 2>/dev/null)
+        if [[ -n "$hw_os" && "$hw_os" != "null" ]]; then
+            case "$hw_os" in
+                *Proxmox*|*proxmox*|ubuntu*|debian*|linux*|Linux*)
+                    platform="linux-systemd"
+                    platform_detail="$hw_os (hardware.inventory.yaml), admission=${admission_status:-unknown}, systemd assumed"
+                    ;;
+                *)
+                    platform="unknown"
+                    platform_detail="hardware os=$hw_os — platform classification unclear"
+                    ;;
+            esac
+        fi
+
+        # If hardware inventory did not classify the candidate, check ssh.targets.
         ssh_entry=$(yq e ".ssh.targets[] | select(.id == \"$CANDIDATE\")" "$SSH_TARGETS" 2>/dev/null)
-        if [[ -z "$ssh_entry" || "$ssh_entry" == "null" ]]; then
-            platform="unknown"
-            platform_detail="candidate '$CANDIDATE' not found in vm.lifecycle or ssh.targets"
-        else
-            platform="unknown"
-            platform_detail="candidate in ssh.targets but not in vm.lifecycle; OS unknown"
+        if [[ "$platform" == "unknown" ]]; then
+            if [[ -z "$ssh_entry" || "$ssh_entry" == "null" ]]; then
+                platform_detail="candidate '$CANDIDATE' not found in vm.lifecycle, hardware.inventory, or ssh.targets"
+            else
+                platform_detail="candidate in ssh.targets but not in vm.lifecycle or hardware.inventory; OS unknown"
+            fi
         fi
     else
         case "$vm_os" in
@@ -126,10 +147,11 @@ else
     fi
 fi
 
-# Resolve workload count for the role
-workload_count=$(yq e "[.labels[] | select(.intended_node_role == \"$ROLE\")] | length" "$SCHEDULER_REGISTRY" 2>/dev/null || echo "0")
-daemon_count=$(yq e "[.labels[] | select(.intended_node_role == \"$ROLE\" and .mode == \"daemon\")] | length" "$SCHEDULER_REGISTRY" 2>/dev/null || echo "0")
-scheduled_count=$(yq e "[.labels[] | select(.intended_node_role == \"$ROLE\" and .mode == \"scheduled\")] | length" "$SCHEDULER_REGISTRY" 2>/dev/null || echo "0")
+# Resolve active workload count for the role. Parked labels remain registry
+# evidence, but they are not a runtime placement burden.
+workload_count=$(yq e "[.labels[] | select(.intended_node_role == \"$ROLE\" and .state == \"active\")] | length" "$SCHEDULER_REGISTRY" 2>/dev/null || echo "0")
+daemon_count=$(yq e "[.labels[] | select(.intended_node_role == \"$ROLE\" and .state == \"active\" and .mode == \"daemon\")] | length" "$SCHEDULER_REGISTRY" 2>/dev/null || echo "0")
+scheduled_count=$(yq e "[.labels[] | select(.intended_node_role == \"$ROLE\" and .state == \"active\" and .mode == \"scheduled\")] | length" "$SCHEDULER_REGISTRY" 2>/dev/null || echo "0")
 
 # Assess feasibility
 feasibility="insufficient_evidence"
@@ -147,12 +169,16 @@ case "$platform" in
             feasibility="directly_supported"
             platform_gap="none — no workloads mapped to this role"
             reasons+=("no workloads mapped to $ROLE in scheduler registry")
+        elif [[ "$ROLE" == "watcher_node" ]]; then
+            feasibility="translation_supported"
+            platform_gap="none — watcher_node has a systemd materializer"
+            reasons+=("$workload_count workload(s) in launchd.scheduler.registry can be projected to systemd")
+            reasons+=("$scheduled_count scheduled (to systemd timers) + $daemon_count daemon (to systemd services)")
         else
             feasibility="translation_required"
-            platform_gap="registry is launchd-native; Linux would require a future systemd materializer"
+            platform_gap="registry is launchd-native; this role would require a systemd materializer"
             reasons+=("$workload_count workload(s) in launchd.scheduler.registry are macOS-native")
-            reasons+=("$scheduled_count scheduled (→ systemd timers) + $daemon_count daemon (→ systemd services)")
-            reasons+=("no systemd materializer exists today")
+            reasons+=("$scheduled_count scheduled (to systemd timers) + $daemon_count daemon (to systemd services)")
             reasons+=("translation is structurally feasible but not yet implemented")
         fi
         ;;

@@ -6,7 +6,7 @@ Exposes governed capabilities via stdio JSON-RPC (MCP) with:
   - cap_list
   - cap_run
   - agent_list / agent_info / agent_tools / route_resolve
-  - rag_query / rag_retrieve / rag_health compatibility wrappers
+  - rag_query / rag_retrieve / rag_health direct RAG wrappers
 """
 
 import json
@@ -159,7 +159,7 @@ BASE_TOOLS = [
     },
     {
         "name": "rag_query",
-        "description": "Compatibility wrapper for legacy RAG MCP query tool.",
+        "description": "Direct RAG query wrapper. RAG returns cited source refs; it is not authority.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -170,7 +170,7 @@ BASE_TOOLS = [
     },
     {
         "name": "rag_retrieve",
-        "description": "Compatibility wrapper for legacy RAG MCP retrieve tool.",
+        "description": "Direct RAG retrieve wrapper. Use returned source refs as pointers.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -186,7 +186,7 @@ BASE_TOOLS = [
     },
     {
         "name": "rag_health",
-        "description": "Compatibility wrapper for legacy RAG MCP health tool.",
+        "description": "Direct RAG health wrapper.",
         "inputSchema": {"type": "object", "properties": {}}
     },
     {
@@ -838,15 +838,19 @@ def handle_tools_call(msg: Dict[str, Any]) -> Dict[str, Any]:
             text = route_resolve(str(arguments.get("input", "")))
         elif name == "rag_query":
             text = run_capability(
-                "rag.anythingllm.ask",
+                "rag.direct.query",
                 [arguments["question"]],
                 False,
             )
         elif name == "rag_retrieve":
             limit = int(arguments.get("limit", 5))
-            text = run_rag("retrieve", arguments["query"], "--limit", str(limit))
+            text = run_capability(
+                "rag.direct.retrieve",
+                [arguments["query"], "--limit", str(limit)],
+                False,
+            )
         elif name == "rag_health":
-            text = run_capability("rag.health", [], False)
+            text = run_capability("rag.direct.health", [], False)
         elif name == "get_latest_loop":
             broker_args: List[str] = []
             if bool(arguments.get("include_closed")):

@@ -177,6 +177,12 @@ model:
       max_total_gb: 1000
       max_file_count: 1000
       description: "Canonical 730XD backup plane root for Dev-tools domain. Restore-intent class paths under /md1400/backups are authoritative."
+    r730xd-shop-files-backups:
+      host: pve
+      base_path: /md1400/backups/business/shop-files
+      max_total_gb: 500
+      max_file_count: 1000
+      description: "Canonical MD1400 backup plane for MintPrints shop-files business file data."
     r730xd-media-config-backups:
       host: pve
       base_path: /md1400/backups/configs/media-config
@@ -247,7 +253,7 @@ runtime_units:
       - vm-212-mint-data-primary
       - vm-213-mint-apps-primary
       - vm-214-communications-stack-primary
-      - lxc-220-archive-smb-primary
+      - app-shop-files-md1400
     backup_admission_state: production_ready
     unit_runtime_mode: proxmox_native
   - unit_id: machine-proxmox-home
@@ -559,6 +565,23 @@ runtime_units:
     backup_admission_state: retired
     unit_runtime_mode: historical
     description: "archive-smb LXC 220 retired 2026-04-14. Rootfs backup no longer needed. md1400 dataset snapshot protection continues independently."
+  - unit_id: lxc-221-shop-files
+    kind: lxc
+    hostname: shop-files
+    backup_profile: business-file-data
+    data_class: tier1_critical
+    include_paths:
+      - /tank/shop-files
+    exclude_paths:
+      - payload_regenerable
+    destination_lane: r730xd-shop-files-backups
+    schedule_class: daily-config-est
+    restore_class: tier1-small-state-dry-run-quarterly
+    inventory_targets:
+      - app-shop-files-md1400
+    backup_admission_state: production_ready
+    unit_runtime_mode: file_archive
+    description: "LXC 221 shop-files is first-class MintPrints business file data. Runtime source is pve:/tank/shop-files; canonical backup/readback lane is MD1400."
   - unit_id: container-fleet-docker-host
     kind: container-fleet
     hostname: docker-host
@@ -954,6 +977,15 @@ targets:
     stale_after_hours: 26
     classification: retired
     description: "archive-smb LXC 220 backup target retired 2026-04-14. LXC decommissioned, no live consumers. Existing vzdump artifacts may persist on disk until next cleanup."
+  - name: app-shop-files-md1400
+    enabled: true
+    kind: file_glob
+    host: pve
+    base_path: "/md1400/backups/business/shop-files"
+    glob: "shop-files-data-*.tar.gz"
+    stale_after_hours: 26
+    classification: critical
+    description: "Canonical MD1400 backup/readback target for MintPrints shop-files business file data from pve:/tank/shop-files."
   - name: app-mail-archiver
     enabled: true
     kind: file_glob

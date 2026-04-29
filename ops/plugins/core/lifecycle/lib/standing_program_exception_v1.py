@@ -361,7 +361,7 @@ def _watcher_trigger_evaluations(
             "observed_counts": trigger_counts,
             "suggested_actions": [
                 "Inspect watcher.health recent cycles.",
-                "Check spine-watcher-alerting-probe-cycle timer/logs on proxmox-home.",
+                "Check spine-watcher-alerting-probe-cycle timer/logs on the active watcher node.",
             ],
             "detail": f"consecutive_failures={consecutive_failures} threshold={intervention_threshold}",
         },
@@ -379,7 +379,7 @@ def _watcher_trigger_evaluations(
             },
             "suggested_actions": [
                 "Inspect watcher.health last-run age.",
-                "Confirm watcher timer/service is still advancing on proxmox-home.",
+                "Confirm watcher timer/service is still advancing on the active watcher node.",
             ],
             "detail": f"last_run_age_seconds={last_run_age} stale_threshold_seconds={stale_threshold}",
         },

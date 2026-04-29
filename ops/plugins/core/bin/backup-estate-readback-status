@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# backup.estate.readback.status
+# Estate-wide, read-only backup readback projection.
+# Starts from live pve/proxmox-home subjects, then joins lifecycle,
+# backup inventory, backup.status, and Proxmox jobs.cfg evidence.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+JSON_MODE=0
+SHOW_DETAILS=0
+
+usage() {
+  cat <<'USAGE'
+backup-estate-readback-status
+
+Usage:
+  backup-estate-readback-status [--json] [--details]
+
+Read-only estate backup readback projection. It does not run backups, restore
+backups, change schedules, delete artifacts, or dispatch alerts.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_MODE=1; shift ;;
+    --details) SHOW_DETAILS=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "FAIL: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || { echo "FAIL: missing dependency: $1" >&2; exit 1; }
+}
+
+need python3
+need jq
+need ssh
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+capture_host() {
+  local host="$1"
+  local out="$tmpdir/${host}.txt"
+  local err="$tmpdir/${host}.err"
+  local candidate=""
+  local rc=0
+  local -a candidates=("$host")
+  case "$host" in
+    pve) candidates+=("192.168.1.184" "100.96.211.33") ;;
+    proxmox-home) candidates+=("100.103.99.62") ;;
+  esac
+
+  for candidate in "${candidates[@]}"; do
+    set +e
+    ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$candidate" 'hostname; echo ---QEMU---; qm list 2>/dev/null || true; echo ---LXC---; pct list 2>/dev/null || true; echo ---JOBS---; cat /etc/pve/jobs.cfg 2>/dev/null || true; echo ---STORAGE---; pvesm status 2>/dev/null || true' >"$out" 2>"$err" < /dev/null
+    rc=$?
+    set -e
+    [[ "$rc" -eq 0 ]] && break
+  done
+  printf '%s\n' "$rc" > "$tmpdir/${host}.rc"
+}
+
+capture_host pve
+capture_host proxmox-home
+
+backup_status_out="$tmpdir/backup-status.out"
+backup_status_err="$tmpdir/backup-status.err"
+backup_status_rc=0
+set +e
+"$ROOT/ops/plugins/infra/backup/bin/backup-status" >"$backup_status_out" 2>"$backup_status_err" < /dev/null
+backup_status_rc=$?
+set -e
+
+results_json="$tmpdir/results.json"
+python3 - "$ROOT" "$tmpdir" "$backup_status_out" "$backup_status_rc" > "$results_json" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+import yaml
+
+root = pathlib.Path(sys.argv[1])
+tmpdir = pathlib.Path(sys.argv[2])
+backup_status_path = pathlib.Path(sys.argv[3])
+backup_status_rc = int(sys.argv[4])
+
+lifecycle_path = root / "ops/bindings/vm.lifecycle.yaml"
+inventory_path = root / "ops/bindings/domains/backup/backup.inventory.yaml"
+
+
+def load_yaml(path):
+    if not path.is_file():
+        return {}
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+lifecycle = load_yaml(lifecycle_path)
+inventory = load_yaml(inventory_path)
+
+vm_by_host_id = {}
+for row in lifecycle.get("vms", []) or []:
+    host = str(row.get("proxmox_host") or "pve")
+    vmid = str(row.get("id") or "")
+    if vmid:
+        vm_by_host_id[(host, vmid)] = row
+
+runtime_units = inventory.get("runtime_units", []) or []
+targets = inventory.get("targets", []) or []
+target_by_name = {str(t.get("name") or ""): t for t in targets if t.get("name")}
+target_unit_mode = {}
+for unit in runtime_units:
+    mode = str(unit.get("unit_runtime_mode") or "")
+    for target_name in unit.get("inventory_targets") or []:
+        target_unit_mode[str(target_name)] = mode
+
+policy = (((inventory.get("model") or {}).get("vzdump_schedule_policy") or {}))
+derived = policy.get("derived_assignments") or {}
+policy_by_vmid = {}
+for policy_name, rows in derived.items():
+    for item in rows or []:
+        vmid = str(item.get("vm_id") or "")
+        if vmid:
+            policy_by_vmid[vmid] = policy_name
+
+
+def parse_backup_status(path):
+    statuses = {}
+    summary = {}
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        if line.startswith("summary:"):
+            nums = re.findall(r"(\d+)\s+(targets|ok|degraded|context_blocked)", line)
+            for value, name in nums:
+                summary[name] = int(value)
+            summary["line"] = line
+            continue
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        marker = parts[-2] if len(parts) >= 2 else ""
+        if marker not in {"OK", "STALE", "MISSING", "ERROR", "BLOCKED"}:
+            continue
+        statuses[parts[0]] = {
+            "status": marker.lower(),
+            "reason": parts[-1],
+            "raw": line,
+        }
+    return statuses, summary
+
+
+target_status, backup_summary = parse_backup_status(backup_status_path)
+
+
+def split_sections(text):
+    sections = {}
+    current = "hostname"
+    sections[current] = []
+    for line in text.splitlines():
+        if line.startswith("---") and line.endswith("---"):
+            current = line.strip("-")
+            sections.setdefault(current, [])
+        else:
+            sections.setdefault(current, []).append(line)
+    return sections
+
+
+def parse_qemu(lines):
+    rows = []
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("VMID"):
+            continue
+        parts = line.split()
+        if len(parts) < 3 or not parts[0].isdigit():
+            continue
+        rows.append({
+            "kind": "qemu",
+            "vmid": parts[0],
+            "name": parts[1],
+            "runtime_status": parts[2],
+        })
+    return rows
+
+
+def parse_lxc(lines):
+    rows = []
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("VMID"):
+            continue
+        parts = line.split()
+        if len(parts) < 3 or not parts[0].isdigit():
+            continue
+        rows.append({
+            "kind": "lxc",
+            "vmid": parts[0],
+            "name": parts[-1],
+            "runtime_status": parts[1],
+        })
+    return rows
+
+
+def parse_jobs(lines):
+    jobs = []
+    current = None
+    for line in lines:
+        if line.startswith("vzdump:"):
+            if current:
+                jobs.append(current)
+            current = {"id": line.split(":", 1)[1].strip(), "vmids": []}
+            continue
+        if current is None:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        key, _, value = stripped.partition(" ")
+        if key == "vmid":
+            current["vmids"] = [v.strip() for v in value.split(",") if v.strip()]
+        else:
+            current[key] = value.strip()
+    if current:
+        jobs.append(current)
+    return jobs
+
+
+host_docs = {}
+for host in ["pve", "proxmox-home"]:
+    out = tmpdir / f"{host}.txt"
+    rc_path = tmpdir / f"{host}.rc"
+    rc = int(rc_path.read_text(encoding="utf-8").strip() or "1") if rc_path.is_file() else 1
+    text = out.read_text(encoding="utf-8", errors="replace") if out.is_file() else ""
+    sections = split_sections(text)
+    jobs = parse_jobs(sections.get("JOBS", []))
+    scheduled = {}
+    for job in jobs:
+        for vmid in job.get("vmids", []):
+            scheduled.setdefault(vmid, []).append(job.get("id"))
+    host_docs[host] = {
+        "ssh_rc": rc,
+        "subjects": parse_qemu(sections.get("QEMU", [])) + parse_lxc(sections.get("LXC", [])),
+        "jobs": jobs,
+        "scheduled": scheduled,
+    }
+
+
+def runtime_unit_targets_for(hostname):
+    result = []
+    for unit in runtime_units:
+        if str(unit.get("hostname") or "") == hostname:
+            result.extend(str(x) for x in unit.get("inventory_targets") or [])
+    return result
+
+
+def target_status_for(target_name):
+    if not target_name:
+        return {"status": "none", "reason": "no_target"}
+    if target_name in target_status:
+        return target_status[target_name]
+    if target_name in target_by_name:
+        return {"status": "not_reported", "reason": "inventory_target_not_reported"}
+    return {"status": "missing_inventory", "reason": "target_missing_from_inventory"}
+
+
+subjects = []
+gaps = []
+for host, doc in host_docs.items():
+    if doc["ssh_rc"] != 0:
+        gaps.append({
+            "severity": "blocking",
+            "code": "host_unreachable",
+            "host": host,
+            "meaning": "cannot enumerate backup subjects",
+        })
+        continue
+    for subject in sorted(doc["subjects"], key=lambda x: (x["kind"], int(x["vmid"]))):
+        vmid = subject["vmid"]
+        lifecycle_row = vm_by_host_id.get((host, vmid))
+        lifecycle_status = str((lifecycle_row or {}).get("status") or "unmodeled")
+        backup_target = str((lifecycle_row or {}).get("backup_target") or "")
+        policy_name = policy_by_vmid.get(vmid, "")
+        scheduled_jobs = doc["scheduled"].get(vmid, [])
+        target_readback = target_status_for(backup_target)
+        classification = "subject"
+        status = "ok"
+        reason = "covered_by_inventory_and_readback"
+
+        if subject["runtime_status"] == "stopped":
+            classification = "residue"
+            status = "residue"
+            reason = "stopped_guest_requires_disposition_not_runtime_backup"
+        elif lifecycle_status == "unmodeled":
+            classification = "gap"
+            status = "gap"
+            reason = "live_subject_missing_from_lifecycle_authority"
+        elif lifecycle_status in {"decommissioned", "residual", "abandoned"} and subject["runtime_status"] == "running":
+            classification = "residue"
+            status = "gap"
+            reason = "live_runtime_contradicts_lifecycle_status"
+        elif policy_name == "no_recurring_vzdump":
+            classification = "exclusion"
+            status = "ok"
+            reason = "policy_excludes_recurring_vzdump"
+        elif target_readback["status"] in {"stale", "missing", "error", "blocked", "not_reported", "missing_inventory"}:
+            classification = "subject"
+            status = "degraded"
+            reason = f"backup_target_{target_readback['status']}"
+        elif not backup_target:
+            classification = "gap"
+            status = "gap"
+            reason = "no_backup_target_or_exclusion"
+
+        unit_mode = target_unit_mode.get(backup_target, "")
+        if (
+            subject["runtime_status"] == "running"
+            and backup_target
+            and not scheduled_jobs
+            and policy_name not in {"no_recurring_vzdump", "decommission_capsule"}
+            and unit_mode not in {"file_archive"}
+        ):
+            if status == "ok":
+                status = "partial"
+                reason = "fresh_target_but_no_live_proxmox_job_membership_seen"
+
+        row = {
+            "host": host,
+            "kind": subject["kind"],
+            "vmid": vmid,
+            "name": subject["name"],
+            "runtime_status": subject["runtime_status"],
+            "classification": classification,
+            "status": status,
+            "reason": reason,
+            "lifecycle_status": lifecycle_status,
+            "backup_target": backup_target or None,
+            "backup_target_status": target_readback.get("status"),
+            "backup_target_reason": target_readback.get("reason"),
+            "schedule_policy": policy_name or None,
+            "unit_runtime_mode": unit_mode or None,
+            "scheduled_jobs": scheduled_jobs,
+        }
+        subjects.append(row)
+        if status in {"gap", "degraded", "partial"}:
+            gaps.append({
+                "severity": "high" if status == "gap" else "medium",
+                "code": reason,
+                "host": host,
+                "vmid": vmid,
+                "name": subject["name"],
+            })
+
+for unit in runtime_units:
+    host = str(unit.get("hostname") or "")
+    for target_name in unit.get("inventory_targets") or []:
+        if str(target_name) and str(target_name) not in target_by_name:
+            gaps.append({
+                "severity": "medium",
+                "code": "runtime_unit_target_missing_from_inventory",
+                "host": host,
+                "target": str(target_name),
+            })
+
+overall = "ok"
+if backup_status_rc != 0 or any(g["severity"] == "blocking" for g in gaps):
+    overall = "blocked"
+elif any(g["severity"] == "high" for g in gaps):
+    overall = "degraded"
+elif gaps:
+    overall = "partial"
+
+counts = {
+    "subjects_total": len(subjects),
+    "running_total": sum(1 for s in subjects if s["runtime_status"] == "running"),
+    "stopped_total": sum(1 for s in subjects if s["runtime_status"] == "stopped"),
+    "ok_total": sum(1 for s in subjects if s["status"] == "ok"),
+    "partial_total": sum(1 for s in subjects if s["status"] == "partial"),
+    "degraded_total": sum(1 for s in subjects if s["status"] == "degraded"),
+    "gap_total": sum(1 for s in subjects if s["status"] == "gap"),
+    "residue_total": sum(1 for s in subjects if s["status"] == "residue"),
+}
+
+print(json.dumps({
+    "capability": "backup.estate.readback.status",
+    "status": overall,
+    "control_node": "pve-r620",
+    "mutation_performed": False,
+    "backup_job_performed": False,
+    "restore_execution_performed": False,
+    "deletion_performed": False,
+    "hypervisor_sources": {
+        host: {
+            "ssh_rc": doc["ssh_rc"],
+            "job_count": len(doc["jobs"]),
+            "jobs": doc["jobs"],
+        }
+        for host, doc in host_docs.items()
+    },
+    "backup_status_exit_code": backup_status_rc,
+    "backup_status_summary": backup_summary,
+    "counts": counts,
+    "subjects": subjects,
+    "gaps": gaps,
+}, indent=2, sort_keys=True))
+PY
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  cat "$results_json"
+  exit 0
+fi
+
+echo "backup.estate.readback.status"
+echo "status: $(jq -r '.status' "$results_json")"
+echo "control_node: $(jq -r '.control_node' "$results_json")"
+echo "subjects: $(jq -r '.counts.subjects_total' "$results_json") total, $(jq -r '.counts.running_total' "$results_json") running, $(jq -r '.counts.stopped_total' "$results_json") stopped"
+echo "coverage: $(jq -r '.counts.ok_total' "$results_json") ok, $(jq -r '.counts.partial_total' "$results_json") partial, $(jq -r '.counts.degraded_total' "$results_json") degraded, $(jq -r '.counts.gap_total' "$results_json") gaps, $(jq -r '.counts.residue_total' "$results_json") residue"
+echo
+printf '%-14s %-5s %-24s %-10s %-10s %-34s %s\n' "HOST" "VMID" "NAME" "RUNTIME" "STATUS" "TARGET" "REASON"
+jq -r '.subjects[] | [.host, .vmid, .name, .runtime_status, .status, (.backup_target // "-"), .reason] | @tsv' "$results_json" \
+  | while IFS=$'\t' read -r host vmid name runtime status target reason; do
+      printf '%-14s %-5s %-24s %-10s %-10s %-34s %s\n' "$host" "$vmid" "$name" "$runtime" "$status" "$target" "$reason"
+    done
+
+if [[ "$SHOW_DETAILS" -eq 1 ]]; then
+  echo
+  cat "$results_json"
+fi

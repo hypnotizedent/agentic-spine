@@ -23,7 +23,7 @@ JSON_MODE=0
 SHOW_CYCLES=5
 
 # Watcher node SSH target (declared in ssh.targets.yaml)
-WATCHER_SSH_TARGET="proxmox-home"
+WATCHER_SSH_TARGET="pve-r620"
 # Remote env file that declares the watcher's SPINE_RUNTIME_ROOT
 WATCHER_REMOTE_ENV="/etc/spine/watcher-node.env"
 
@@ -128,7 +128,7 @@ else
           state_path: $state_path,
           watcher_node: $watcher_node,
           read_mode: "failed",
-          suggestion: "Check watcher node reachability: ssh proxmox-home"
+          suggestion: "Check watcher node reachability: ssh pve-r620"
         }'
     else
       echo "watcher.health"
@@ -139,7 +139,7 @@ else
       echo "  SSH remote fetch from $WATCHER_SSH_TARGET also failed."
       echo ""
       echo "  The watcher node may be down or unreachable."
-      echo "  Check: ssh proxmox-home  (or Tailscale status)"
+      echo "  Check: ssh pve-r620  (or Tailscale status)"
     fi
     exit 0
   fi
@@ -170,6 +170,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       consecutive_successes: $state.consecutive_successes,
       consecutive_failures: $state.consecutive_failures,
       pending_interventions: ($state.pending_interventions // 0),
+      watcher_input_projection: ($state.watcher_input_projection // null),
       threshold: $state.threshold,
       recent_cycles: ($state.cycles[:$show_cycles]),
       total_cycles_stored: ($state.cycles | length)
@@ -246,6 +247,15 @@ if (( pending_interventions > 0 )); then
   echo "  PENDING INTERVENTIONS: $pending_interventions"
   echo ""
 fi
+
+projection_status="$(jq -r '.watcher_input_projection.status // "not_recorded"' <<<"$state")"
+projection_count="$(jq -r '.watcher_input_projection.input_count // 0' <<<"$state")"
+echo "  Input projection: $projection_status (${projection_count} admitted inputs)"
+if jq -e '.watcher_input_projection.inputs? | type == "array"' <<<"$state" >/dev/null 2>&1; then
+  jq -r '.watcher_input_projection.inputs[]? | "    - \(.input_id // "unknown"): \(.status // "unknown") [\(.action_level // "unknown")]"' <<<"$state" \
+    | sed 's/[[:space:]]*$//'
+fi
+echo ""
 
 echo "  Recent cycles ($SHOW_CYCLES of $total_cycles stored):"
 echo ""

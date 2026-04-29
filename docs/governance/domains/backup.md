@@ -30,7 +30,7 @@ machine.
 
 ## Reporting
 
-- Canonical recipient for backup receipts and backup-monitor alerts: `backups@spine.ronny.works`
+- Canonical recipient for backup receipts and backup readback alerts: `backups@spine.ronny.works`
 - Runtime implementation: Stalwart alias to `alerts@spine.ronny.works`
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
@@ -40,7 +40,7 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | Capability |
 |---|
 | `backup.calendar.generate` |
-| `backup.monitor` |
+| `backup.estate.readback.status` |
 | `backup.posture.snapshot.build` |
 | `backup.status` |
 | `backup.vzdump.mail.policy.set` |

@@ -50,7 +50,7 @@ This note does not move anything.
 | N4 | domain-app | (no dedicated host — mixed into N2) | shop |
 | N5 | hypervisor-shop | pve, pve-r620 | shop |
 | N6 | hypervisor-home | proxmox-home | home |
-| N7 | watcher | proxmox-home (VM) | home |
+| N7 | watcher | pve-r620 | shop |
 | N8 | observability | observability (VM) | shop |
 | N9 | infrastructure | infra-core (VM) | shop |
 | N10 | media-acquire | download-stack (VM) | shop |

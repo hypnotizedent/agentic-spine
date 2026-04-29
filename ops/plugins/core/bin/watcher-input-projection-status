@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# watcher.input.projection.status
+# Read-only consumer for the bounded R620 watcher input projection.
+# It evaluates only explicitly admitted inputs from watcher.input.projection.v1.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+JSON_MODE=0
+SHOW_DETAILS=0
+
+usage() {
+  cat <<'USAGE'
+watcher-input-projection-status
+
+Usage:
+  watcher-input-projection-status [--json] [--details]
+
+Evaluates only enabled inputs from watcher.input.projection.v1.
+Does not activate monitors, mutate schedules, or admit parked domains.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_MODE=1; shift ;;
+    --details) SHOW_DETAILS=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "FAIL: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+projection_file="$(
+  find "$SPINE_STATE/domain-state/spine" -maxdepth 1 -type f -name 'WATCHER-INPUT-PROJECTION-V1-*.yaml' 2>/dev/null \
+    | sort \
+    | tail -1
+)"
+
+if [[ -z "$projection_file" || ! -f "$projection_file" ]]; then
+  echo "FAIL: watcher input projection not found under $SPINE_STATE/domain-state/spine" >&2
+  exit 1
+fi
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || { echo "FAIL: missing dependency: $1" >&2; exit 1; }
+}
+
+need python3
+need jq
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+inputs_tsv="$tmpdir/inputs.tsv"
+python3 - "$projection_file" > "$inputs_tsv" <<'PY'
+import sys
+import yaml
+
+doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+for item in doc.get("inputs", []):
+    if not item.get("enabled"):
+        continue
+    fields = [
+        str(item.get("input_id") or ""),
+        str(item.get("class") or ""),
+        str(item.get("readback_capability") or ""),
+        " ".join(str(x) for x in item.get("readback_args") or []) or "-",
+        str(item.get("action_level") or ""),
+        str(item.get("failure_meaning") or ""),
+    ]
+    print("\t".join(fields))
+PY
+
+results_jsonl="$tmpdir/results.jsonl"
+: > "$results_jsonl"
+
+status_from_rc() {
+  local rc="$1"
+  [[ "$rc" -eq 0 ]] && echo "ok" || echo "failed"
+}
+
+while IFS=$'\t' read -r input_id input_class capability args action_level failure_meaning; do
+  [[ -n "$input_id" ]] || continue
+  [[ "$args" == "-" ]] && args=""
+  out_file="$tmpdir/${input_id}.out"
+  err_file="$tmpdir/${input_id}.err"
+  rc=0
+  status="unknown"
+  summary=""
+
+  case "$capability" in
+    watcher.health)
+      set +e
+      "$ROOT/ops/plugins/core/bin/watcher-health" --json >"$out_file" 2>"$err_file" < /dev/null
+      rc=$?
+      set -e
+      watcher_status="$(jq -r '.status // ""' "$out_file" 2>/dev/null || true)"
+      if [[ "$watcher_status" == "watcher_node_unreachable" ]]; then
+        status="failed"
+      elif [[ "$rc" -eq 0 ]] && jq -e '.health == "healthy" and .last_run_status == "success"' "$out_file" >/dev/null 2>&1; then
+        status="ok"
+      elif [[ "$rc" -eq 0 ]]; then
+        status="$(jq -r 'if .health == "degraded" then "degraded" else "failed" end' "$out_file" 2>/dev/null || echo "failed")"
+      else
+        status="$(status_from_rc "$rc")"
+      fi
+      summary="$(jq -r '"health=\(.health // .status // "unknown") last_run=\(.last_run_status // "unknown") consecutive_failures=\(.consecutive_failures // "unknown")"' "$out_file" 2>/dev/null || true)"
+      ;;
+    infra.core.slo.status)
+      set +e
+      "$ROOT/ops/plugins/infra/observability/bin/infra-core-slo-status" >"$out_file" 2>"$err_file" < /dev/null
+      rc=$?
+      set -e
+      if [[ "$rc" -eq 0 ]] && grep -q '^status: OK$' "$out_file"; then
+        status="ok"
+      else
+        status="$(status_from_rc "$rc")"
+      fi
+      summary="$(grep '^summary:' "$out_file" | head -1 | sed 's/^summary: //')"
+      ;;
+    backup.posture.snapshot.build)
+      set +e
+      "$ROOT/ops/plugins/infra/backup/bin/backup-posture-snapshot-build" >"$out_file" 2>"$err_file" < /dev/null
+      rc=$?
+      set -e
+      snapshot="$SPINE_DATA_ROOT/snapshots/backup.posture.snapshot.yaml"
+      if [[ "$rc" -eq 0 && -f "$snapshot" ]]; then
+        read -r degraded restore_missing lane_errors lane_over < <(python3 - "$snapshot" <<'PY'
+import sys
+import yaml
+
+doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+summary = doc.get("summary") or {}
+print(
+    summary.get("backup_status_degraded_total", 0),
+    summary.get("restore_coverage_missing_total", 0),
+    summary.get("lane_collect_errors_total", 0),
+    summary.get("lane_over_budget_total", 0),
+)
+PY
+)
+        if [[ "$degraded" == "0" && "$restore_missing" == "0" && "$lane_errors" == "0" && "$lane_over" == "0" ]]; then
+          status="ok"
+        else
+          status="degraded"
+        fi
+        summary="degraded=${degraded} restore_missing=${restore_missing} lane_errors=${lane_errors} lane_over_budget=${lane_over}"
+      else
+        status="$(status_from_rc "$rc")"
+        summary="$(tail -20 "$out_file" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\\+/ /g')"
+      fi
+      ;;
+    backup.estate.readback.status)
+      set +e
+      "$ROOT/ops/plugins/core/bin/backup-estate-readback-status" --json >"$out_file" 2>"$err_file" < /dev/null
+      rc=$?
+      set -e
+      if [[ "$rc" -eq 0 ]] && jq -e '.status == "ok"' "$out_file" >/dev/null 2>&1; then
+        status="ok"
+      elif [[ "$rc" -eq 0 ]] && jq -e '.status == "partial" or .status == "degraded"' "$out_file" >/dev/null 2>&1; then
+        status="degraded"
+      elif [[ "$rc" -eq 0 ]] && jq -e '.status == "blocked"' "$out_file" >/dev/null 2>&1; then
+        status="failed"
+      else
+        status="$(status_from_rc "$rc")"
+      fi
+      summary="$(jq -r '"subjects=\(.counts.subjects_total // 0) running=\(.counts.running_total // 0) ok=\(.counts.ok_total // 0) partial=\(.counts.partial_total // 0) degraded=\(.counts.degraded_total // 0) gaps=\(.counts.gap_total // 0) residue=\(.counts.residue_total // 0)"' "$out_file" 2>/dev/null || true)"
+      ;;
+    services.health.status)
+      set +e
+      "$ROOT/ops/plugins/infra/services/bin/services-health-status" >"$out_file" 2>"$err_file" < /dev/null
+      rc=$?
+      set -e
+      read -r total ok skip unhealthy < <(python3 - "$out_file" <<'PY'
+import re
+import sys
+
+rows = 0
+ok = 0
+skip = 0
+unhealthy = 0
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    line = line.rstrip("\n")
+    if not line or line.startswith(("services.health.status", "binding:", "ssh_binding:", "endpoints:", "ID ", "status:", "-")):
+        continue
+    parts = re.split(r"\s+", line.strip(), maxsplit=5)
+    if len(parts) < 3:
+        continue
+    status = parts[2]
+    if status not in {"OK", "SKIP", "FAIL", "REFUSED", "TIMEOUT", "ERROR", "UNKNOWN"}:
+        continue
+    rows += 1
+    if status == "OK":
+        ok += 1
+    elif status == "SKIP":
+        skip += 1
+    else:
+        unhealthy += 1
+print(rows, ok, skip, unhealthy)
+PY
+)
+      if [[ "$rc" -eq 0 && "$unhealthy" == "0" ]]; then
+        status="ok"
+      elif [[ "$rc" -eq 0 ]]; then
+        status="degraded"
+      else
+        status="$(status_from_rc "$rc")"
+      fi
+      summary="endpoints=${total} ok=${ok} skipped=${skip} unhealthy=${unhealthy}"
+      ;;
+    *)
+      rc=2
+      status="unsupported"
+      summary="unsupported readback capability: $capability"
+      ;;
+  esac
+
+  jq -n \
+    --arg input_id "$input_id" \
+    --arg class "$input_class" \
+    --arg capability "$capability" \
+    --arg action_level "$action_level" \
+    --arg failure_meaning "$failure_meaning" \
+    --arg status "$status" \
+    --arg summary "$summary" \
+    --argjson exit_code "$rc" \
+    '{
+      input_id: $input_id,
+      class: $class,
+      readback_capability: $capability,
+      action_level: $action_level,
+      failure_meaning: $failure_meaning,
+      status: $status,
+      summary: $summary,
+      exit_code: $exit_code
+    }' >> "$results_jsonl"
+done < "$inputs_tsv"
+
+overall="ok"
+if jq -e 'select(.status == "failed" or .status == "unsupported")' "$results_jsonl" >/dev/null; then
+  overall="failed"
+elif jq -e 'select(.status == "degraded")' "$results_jsonl" >/dev/null; then
+  overall="degraded"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -s \
+    --arg capability "watcher.input.projection.status" \
+    --arg projection "$projection_file" \
+    --arg status "$overall" \
+    '{
+      capability: $capability,
+      status: $status,
+      projection: $projection,
+      input_count: length,
+      inputs: .
+    }' "$results_jsonl"
+  exit 0
+fi
+
+echo "watcher.input.projection.status"
+echo "projection: $projection_file"
+echo "status: $overall"
+echo
+printf '%-30s %-10s %-28s %s\n' "INPUT" "STATUS" "ACTION" "SUMMARY"
+jq -r '[.input_id, .status, .action_level, .summary] | @tsv' "$results_jsonl" \
+  | while IFS=$'\t' read -r input status action summary; do
+      printf '%-30s %-10s %-28s %s\n' "$input" "$status" "$action" "$summary"
+    done
+
+if [[ "$SHOW_DETAILS" -eq 1 ]]; then
+  echo
+  jq -s . "$results_jsonl"
+fi

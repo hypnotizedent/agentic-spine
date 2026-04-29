@@ -115,6 +115,7 @@ for i in $(seq 0 $((COUNT-1))); do
 
   # Resolve URL through LAN→Tailscale fallback if host maps to an SSH target
   resolved_url="$url"
+  resolved_ip=""
   path_used="-"
   if [[ -n "$host" && "$host" != "null" ]] && \
      yq -e ".ssh.targets[] | select(.id == \"$host\")" "$SSH_BINDING" >/dev/null 2>&1; then
@@ -142,6 +143,30 @@ for i in $(seq 0 $((COUNT-1))); do
     "$resolved_url" 2>/dev/null)"
   curl_exit=$?
   set -e
+
+  if [[ "$curl_exit" -ne 0 ]]; then
+    probe_via="$(ssh_resolve_probe_via "$host" 2>/dev/null || true)"
+    if [[ -n "$probe_via" && "$probe_via" != "null" ]]; then
+      via_result="$(ssh_resolve_ssh_host_with_fallback "$probe_via" "$DEF_CONNECT")" || true
+      via_ip="$(echo "$via_result" | awk '{print $1}')"
+      via_path="$(echo "$via_result" | awk '{print $2}')"
+      lan_ip="$(ssh_resolve_host "$host")"
+      ts_ip="$(ssh_resolve_tailscale_ip "$host")"
+      via_url="${url//$ts_ip/$lan_ip}"
+      via_url="${via_url//$host/$lan_ip}"
+      if [[ -n "$via_ip" && "$via_path" != "unreachable" && -n "$lan_ip" && "$lan_ip" != "null" ]]; then
+        via_user="$(ssh_resolve_user "$probe_via")"
+        set +e
+        http_code="$(ssh -o BatchMode=yes -o ConnectTimeout="$DEF_CONNECT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${via_user}@${via_ip}" "curl -sS -o /dev/null -w '%{http_code}' --connect-timeout '$DEF_CONNECT' --max-time '$DEF_MAX' '$via_url'" 2>/dev/null)"
+        via_exit=$?
+        set -e
+        if [[ "$via_exit" -eq 0 ]]; then
+          curl_exit=0
+          path_used="probe_via:${probe_via}"
+        fi
+      fi
+    fi
+  fi
 
   end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   dur_ms=$((end_ms - start_ms))

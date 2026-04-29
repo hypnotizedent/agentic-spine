@@ -17,6 +17,7 @@ SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && 
 INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
 PROBE_BIN="${SPINE_ROOT}/ops/plugins/core/alerting/bin/alerting-probe"
 DISPATCH_BIN="${SPINE_ROOT}/ops/plugins/core/alerting/bin/alerting-dispatch"
+WATCHER_INPUT_PROJECTION_BIN="${SPINE_ROOT}/ops/plugins/core/bin/watcher-input-projection-status"
 SNAPSHOT_FILE="/tmp/spine-alerting-probe-latest.json"
 RECOVERY_DISPATCH_BIN="${SPINE_ROOT}/ops/plugins/core/recovery/bin/recovery-dispatch"
 STANDING_PROGRAM_INTERVENTION_BIRTH_BIN="${SPINE_ROOT}/ops/plugins/core/lifecycle/bin/standing-program-intervention-birth"
@@ -112,6 +113,41 @@ _watcher_refresh_pending_interventions() {
     && mv "${WATCHER_CYCLE_STATE}.tmp" "$WATCHER_CYCLE_STATE"
 }
 
+_watcher_capture_input_projection_status() {
+  local projection_tmp projection_rc
+  command -v jq >/dev/null 2>&1 || {
+    printf '{"status":"unavailable","reason":"jq_missing"}\n'
+    return 0
+  }
+  if [[ ! -x "$WATCHER_INPUT_PROJECTION_BIN" ]]; then
+    jq -cn --arg path "$WATCHER_INPUT_PROJECTION_BIN" '{status:"unavailable", reason:"projection_consumer_missing", path:$path}'
+    return 0
+  fi
+
+  projection_tmp="$(mktemp)"
+  set +e
+  "$WATCHER_INPUT_PROJECTION_BIN" --json >"$projection_tmp" 2>/dev/null < /dev/null
+  projection_rc=$?
+  set -e
+
+  if [[ "$projection_rc" -eq 0 ]] && jq -e 'type == "object"' "$projection_tmp" >/dev/null 2>&1; then
+    jq -c '{
+      status: (.status // "unknown"),
+      input_count: (.input_count // 0),
+      inputs: [(.inputs // [])[] | {
+        input_id,
+        status,
+        action_level,
+        failure_meaning,
+        summary
+      }]
+    }' "$projection_tmp"
+  else
+    jq -cn --argjson exit_code "$projection_rc" '{status:"unavailable", reason:"projection_consumer_failed", exit_code:$exit_code}'
+  fi
+  rm -f "$projection_tmp"
+}
+
 _watcher_write_cycle_state() {
   local cycle_status="$1"
   local cycle_duration="$2"
@@ -178,6 +214,9 @@ _watcher_write_cycle_state() {
   local pending_count
   pending_count="$(_watcher_count_open_interventions)"
 
+  local input_projection_status
+  input_projection_status="$(_watcher_capture_input_projection_status)"
+
   # Write cycle state with embedded intervention count
   jq -n \
     --arg node "watcher_node" \
@@ -193,6 +232,7 @@ _watcher_write_cycle_state() {
     --argjson threshold_degraded "$WATCHER_THRESHOLD_DEGRADED" \
     --argjson threshold_intervention "$WATCHER_THRESHOLD_INTERVENTION" \
     --argjson pending_interventions "$pending_count" \
+    --argjson input_projection_status "$input_projection_status" \
     '{
       node: $node,
       program: $program,
@@ -204,6 +244,7 @@ _watcher_write_cycle_state() {
       consecutive_failures: $consecutive_failures,
       health: $health,
       pending_interventions: $pending_interventions,
+      watcher_input_projection: $input_projection_status,
       cycles: $cycles,
       threshold: {
         failure_count_for_degraded: $threshold_degraded,

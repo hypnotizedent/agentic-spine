@@ -9,10 +9,7 @@ CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
 REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
 LOCAL_ROLE="${SPINE_LOCAL_ROLE:-operator_console}"
 
-LABELS=(
-  "com.ronny.backup-monitor-hourly"
-  "com.ronny.infra-core-smoke"
-)
+LABELS=()
 
 command -v launchctl >/dev/null 2>&1 || {
   echo "G15 FAIL: missing dependency: launchctl" >&2

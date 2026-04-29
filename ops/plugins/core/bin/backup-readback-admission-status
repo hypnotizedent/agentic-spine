@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# backup.readback.admission.status
+# Read-only consumer for the first backup subject/readback admission tranche.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+JSON_MODE=0
+SHOW_DETAILS=0
+
+usage() {
+  cat <<'USAGE'
+backup-readback-admission-status
+
+Usage:
+  backup-readback-admission-status [--json] [--details]
+
+Reads the runtime backup subject/tranche artifacts plus backup.status and
+existing restore-drill receipts. It does not run backups, run restore drills,
+move/delete artifacts, change schedules, or dispatch alerts.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_MODE=1; shift ;;
+    --details) SHOW_DETAILS=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    *) echo "FAIL: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || { echo "FAIL: missing dependency: $1" >&2; exit 1; }
+}
+
+need python3
+need jq
+
+state_dir="$SPINE_STATE/domain-state/spine"
+tranche_file="$(
+  find "$state_dir" -maxdepth 1 -type f -name 'BACKUP-READBACK-ADMISSION-TRANCHE-1-*.yaml' 2>/dev/null \
+    | sort \
+    | tail -1
+)"
+design_file="$(
+  find "$state_dir" -maxdepth 1 -type f -name 'BACKUP-READBACK-PROJECTION-DESIGN-*.yaml' 2>/dev/null \
+    | sort \
+    | tail -1
+)"
+
+if [[ -z "$tranche_file" || ! -f "$tranche_file" ]]; then
+  echo "FAIL: backup readback admission tranche artifact not found under $state_dir" >&2
+  exit 1
+fi
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+backup_status_out="$tmpdir/backup-status.out"
+backup_status_err="$tmpdir/backup-status.err"
+backup_status_rc=0
+set +e
+"$ROOT/ops/plugins/infra/backup/bin/backup-status" >"$backup_status_out" 2>"$backup_status_err" < /dev/null
+backup_status_rc=$?
+set -e
+
+results_json="$tmpdir/results.json"
+python3 - "$tranche_file" "$design_file" "$backup_status_out" "${SPINE_OUTBOX:-}" "$backup_status_rc" > "$results_json" <<'PY'
+import glob
+import json
+import pathlib
+import sys
+
+import yaml
+
+tranche_path = pathlib.Path(sys.argv[1])
+design_arg = sys.argv[2]
+status_path = pathlib.Path(sys.argv[3])
+outbox = pathlib.Path(sys.argv[4]) if sys.argv[4] else None
+backup_status_rc = int(sys.argv[5])
+
+tranche_doc = yaml.safe_load(tranche_path.read_text(encoding="utf-8")) or {}
+design_doc = {}
+if design_arg and design_arg != "" and pathlib.Path(design_arg).is_file():
+    design_doc = yaml.safe_load(pathlib.Path(design_arg).read_text(encoding="utf-8")) or {}
+
+target_status = {}
+for raw in status_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    parts = raw.split()
+    if len(parts) < 3:
+        continue
+    if parts[0] in {"target", "backup.status", "binding:", "summary:"}:
+        continue
+    marker = parts[-2] if len(parts) >= 2 else ""
+    if marker not in {"OK", "STALE", "MISSING", "ERROR"}:
+        continue
+    target_status[parts[0]] = {
+        "status": marker.lower(),
+        "reason": parts[-1],
+        "raw": raw,
+    }
+
+receipt_globs = {
+    "homeassistant": ["reports/restore-drills/backup-home-restore-drill-*.yaml"],
+    "pihole-home": ["reports/restore-drills/backup-home-restore-drill-*.yaml"],
+    "media-home": ["reports/restore-drills/media-config-restore-drill-*.yaml"],
+    "infra-core": ["reports/restore-drills/infra-infisical-restore-drill-*.yaml"],
+    "mint-data": [],
+}
+
+def find_receipts(subject):
+    if outbox is None:
+        return []
+    found = []
+    for pattern in receipt_globs.get(subject, []):
+        found.extend(glob.glob(str(outbox / pattern)))
+    accepted = []
+    for path in sorted(found):
+        try:
+            doc = yaml.safe_load(pathlib.Path(path).read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if subject == "homeassistant":
+            ha = ((doc.get("restore") or {}).get("ha") or {})
+            if ha.get("result") == "PASS" and ha.get("config_materialized") is True:
+                accepted.append(path)
+        elif subject == "pihole-home":
+            pihole = ((doc.get("restore") or {}).get("pihole") or {})
+            if pihole.get("result") == "PASS" and pihole.get("config_materialized") is True:
+                accepted.append(path)
+        elif subject == "media-home":
+            if doc.get("result") == "PASS":
+                accepted.append(path)
+        elif subject == "infra-core":
+            if doc.get("result") == "PASS":
+                accepted.append(path)
+        else:
+            accepted.append(path)
+    return accepted
+
+subjects = []
+for item in tranche_doc.get("tranche", []):
+    subject = item.get("subject_id") or ""
+    targets = item.get("current_targets") or []
+    target_rows = []
+    degraded = False
+    missing = False
+    for target in targets:
+        row = target_status.get(target)
+        if row is None:
+            target_rows.append({"target": target, "status": "missing_from_backup_status", "reason": "not_reported"})
+            missing = True
+            continue
+        target_rows.append({"target": target, **row})
+        if row["status"] != "ok":
+            degraded = True
+
+    receipts = find_receipts(subject)
+    if backup_status_rc != 0:
+        status = "blocked"
+        summary = "backup.status failed"
+    elif degraded or missing:
+        status = "degraded_freshness"
+        summary = "one or more targets are stale, missing, or not reported"
+    elif receipts:
+        status = "ok_restore_receipt_present"
+        summary = "freshness ok and at least one matching restore receipt exists"
+    else:
+        status = "ok_freshness_only"
+        summary = "freshness ok; restore/readback proof not accepted yet"
+
+    subjects.append({
+        "subject_id": subject,
+        "status": status,
+        "summary": summary,
+        "recovery_promise": item.get("recovery_promise"),
+        "storage_realization": item.get("storage_realization"),
+        "targets": target_rows,
+        "restore_receipts": receipts[-3:],
+        "residue_disposition": item.get("residue_disposition"),
+        "ronny_decision_needed_now": bool(item.get("ronny_decision_needed_now")),
+    })
+
+overall = "ok"
+if backup_status_rc != 0:
+    overall = "blocked"
+elif any(s["status"] == "degraded_freshness" for s in subjects):
+    overall = "degraded"
+elif any(s["status"] == "ok_freshness_only" for s in subjects):
+    overall = "partial"
+
+print(json.dumps({
+    "capability": "backup.readback.admission.status",
+    "status": overall,
+    "tranche": str(tranche_path),
+    "design": str(design_arg) if design_arg else None,
+    "backup_status_exit_code": backup_status_rc,
+    "watcher_mode": (((design_doc.get("watcher_integration") or {}).get("mode")) or "status_only"),
+    "subject_count": len(subjects),
+    "subjects": subjects,
+}, indent=2, sort_keys=True))
+PY
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  cat "$results_json"
+  exit 0
+fi
+
+echo "backup.readback.admission.status"
+echo "tranche: $tranche_file"
+if [[ -n "$design_file" ]]; then
+  echo "design: $design_file"
+fi
+echo "status: $(jq -r '.status' "$results_json")"
+echo "watcher_mode: $(jq -r '.watcher_mode' "$results_json")"
+echo
+printf '%-18s %-26s %-32s %s\n' "SUBJECT" "STATUS" "STORAGE" "SUMMARY"
+jq -r '.subjects[] | [.subject_id, .status, (.storage_realization // "-"), .summary] | @tsv' "$results_json" \
+  | while IFS=$'\t' read -r subject status storage summary; do
+      printf '%-18s %-26s %-32s %s\n' "$subject" "$status" "$storage" "$summary"
+    done
+
+if [[ "$SHOW_DETAILS" -eq 1 ]]; then
+  echo
+  cat "$results_json"
+fi

@@ -12,6 +12,7 @@ VERIFY_ENGINE="$ROOT/ops/plugins/core/verify/bin/verify-engine"
 VERIFY_ENGINE_HONESTY="$ROOT/ops/plugins/core/verify/bin/verify-engine-honesty"
 VERIFY_SPINE_SCOPE_HELPER="$ROOT/ops/plugins/core/verify/lib/spine_scope_gate_set.py"
 RECOVERY_DISPATCH="$ROOT/ops/plugins/core/recovery/bin/recovery-dispatch"
+OPS_BIN="$ROOT/bin/ops"
 
 fail() {
   echo "verify.run FAIL: $*" >&2
@@ -267,6 +268,100 @@ run_scope() {
   return $?
 }
 
+run_rag_domain_scope() {
+  local mode="domain:rag"
+  local health_rc=0 quality_rc=0 overall_rc=0
+  local health_json quality_json health_summary quality_summary failing_json
+
+  [[ -x "$OPS_BIN" ]] || fail "missing ops runtime: $OPS_BIN"
+
+  if [[ "$json_mode" -eq 0 ]]; then
+    emit_scope_note "$mode"
+    echo "verify.run domain rag"
+    echo "  direct RAG health: rag.direct.health"
+    echo "  direct RAG quality: rag.direct.quality"
+  fi
+
+  set +e
+  health_json="$("$OPS_BIN" cap run rag.direct.health -- --json 2>/dev/null)"
+  health_rc=$?
+  quality_json="$("$OPS_BIN" cap run rag.direct.quality -- --json 2>/dev/null)"
+  quality_rc=$?
+  set -e
+
+  jq -e . >/dev/null 2>&1 <<<"$health_json" || {
+    health_json='{"ok":false,"error":"rag.direct.health did not emit valid JSON"}'
+    health_rc=1
+  }
+  jq -e . >/dev/null 2>&1 <<<"$quality_json" || {
+    quality_json='{"ok":false,"error":"rag.direct.quality did not emit valid JSON"}'
+    quality_rc=1
+  }
+
+  [[ "$health_rc" -eq 0 ]] || overall_rc=1
+  [[ "$quality_rc" -eq 0 ]] || overall_rc=1
+
+  health_summary="$(jq -c --argjson rc "$health_rc" '. + {capability:"rag.direct.health", exit_code:$rc}' <<<"$health_json")"
+  quality_summary="$(jq -c --argjson rc "$quality_rc" '. + {capability:"rag.direct.quality", exit_code:$rc}' <<<"$quality_json")"
+  failing_json="$(jq -n \
+    --argjson health_rc "$health_rc" \
+    --argjson quality_rc "$quality_rc" \
+    '[
+      (if $health_rc == 0 then empty else "rag.direct.health" end),
+      (if $quality_rc == 0 then empty else "rag.direct.quality" end)
+    ]')"
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    jq -n \
+      --arg mode "$mode" \
+      --arg truth_plane "estate_health" \
+      --arg scope_reading "$(scope_reading "$mode")" \
+      --argjson may_block_spine_truth false \
+      --argjson total 2 \
+      --argjson pass "$((2 - $(jq 'length' <<<"$failing_json")))" \
+      --argjson fail "$(jq 'length' <<<"$failing_json")" \
+      --argjson failing_ids "$failing_json" \
+      --argjson health "$health_summary" \
+      --argjson quality "$quality_summary" \
+      '{
+        mode: $mode,
+        truth_plane: $truth_plane,
+        scope_reading: $scope_reading,
+        may_block_spine_truth: $may_block_spine_truth,
+        total: $total,
+        pass: $pass,
+        fail: $fail,
+        warn: 0,
+        skipped_inline: 0,
+        skipped_retired: 0,
+        skipped_network: 0,
+        receipt_integrity_warnings: 0,
+        failing_ids: $failing_ids,
+        warning_ids: [],
+        blocking_fail_ids: [],
+        non_blocking_fail_ids: $failing_ids,
+        checks: [$health, $quality]
+      }'
+    return "$overall_rc"
+  fi
+
+  if [[ "$health_rc" -eq 0 ]]; then
+    echo "  PASS rag.direct.health"
+  else
+    echo "  FAIL rag.direct.health"
+    jq -r '(.error // .message // "health failed") | "    " + .' <<<"$health_json"
+  fi
+
+  if [[ "$quality_rc" -eq 0 ]]; then
+    echo "  PASS rag.direct.quality"
+  else
+    echo "  FAIL rag.direct.quality"
+    jq -r '(.error // .message // "quality failed") | "    " + .' <<<"$quality_json"
+  fi
+
+  return "$overall_rc"
+}
+
 load_spine_helper_json() {
   [[ -f "$VERIFY_SPINE_SCOPE_HELPER" ]] || fail "missing spine scope helper: $VERIFY_SPINE_SCOPE_HELPER"
 
@@ -405,7 +500,11 @@ case "$scope" in
     ;;
   domain)
     [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
-    run_scope "domain:$target_domain" "$VERIFY_TOPOLOGY" domain "$target_domain"
+    if [[ "${target_domain,,}" == "rag" ]]; then
+      run_rag_domain_scope
+    else
+      run_scope "domain:$target_domain" "$VERIFY_TOPOLOGY" domain "$target_domain"
+    fi
     ;;
   release)
     [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
