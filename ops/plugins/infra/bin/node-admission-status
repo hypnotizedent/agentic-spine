@@ -8,9 +8,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[4]
 NODE_RECOVERY_STATUS = ROOT / "ops/plugins/infra/bin/node-recovery-status"
+LAUNCHD_SCHEDULER_REGISTRY = ROOT / "ops/bindings/launchd.scheduler.registry.yaml"
+NODE_ROLE_CONTRACT = ROOT / "ops/bindings/node.role.contract.yaml"
+ALERTING_RULES = ROOT / "ops/bindings/alerting.rules.yaml"
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -33,6 +38,16 @@ def run_lines(args: list[str]) -> list[str]:
     if proc.returncode != 0:
         fail(proc.stderr.strip() or proc.stdout.strip() or f"command failed: {' '.join(args)}")
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
 
 
 def first_present(*values: Any, default: Any = None) -> Any:
@@ -102,6 +117,14 @@ def source_surfaces_for_row(recovery: dict[str, Any]) -> list[dict[str, str]]:
         refs.append(source_ref("ops/bindings/ssh.targets.yaml", "access_path_evidence"))
     if sources.get("placement_host") or sources.get("required_vm_targets"):
         refs.append(source_ref("ops/bindings/infra.placement.policy.yaml", "placement_truth"))
+    runtime_truth = recovery.get("__runtime_role_truth") or {}
+    source_paths = runtime_truth.get("source_paths") or []
+    if "ops/bindings/launchd.scheduler.registry.yaml" in source_paths:
+        refs.append(source_ref("ops/bindings/launchd.scheduler.registry.yaml", "active_role_runtime"))
+    if "ops/bindings/node.role.contract.yaml" in source_paths:
+        refs.append(source_ref("ops/bindings/node.role.contract.yaml", "role_authority_runtime"))
+    if "ops/bindings/alerting.rules.yaml" in source_paths:
+        refs.append(source_ref("ops/bindings/alerting.rules.yaml", "escalation_origin_runtime"))
     refs.append(source_ref("node.recovery.status", "recovery_evidence_not_promotion_authority"))
     return refs
 
@@ -132,8 +155,11 @@ def subtraction_caption(recovery: dict[str, Any]) -> str:
 def lifecycle_state(recovery: dict[str, Any]) -> str:
     object_truth = recovery.get("object_truth") or {}
     estate_truth = recovery.get("estate_truth") or {}
+    runtime_truth = recovery.get("__runtime_role_truth") or {}
     admission_state = object_truth.get("admission_state")
     placement_status = estate_truth.get("placement_status")
+    if admission_state == "admitted" and runtime_truth.get("active"):
+        return "admitted_runtime_present"
     if admission_state == "admitted" and placement_status in {"runtime_present", "admitted_runtime_host"}:
         return "admitted_runtime_present"
     if admission_state == "admitted":
@@ -141,6 +167,84 @@ def lifecycle_state(recovery: dict[str, Any]) -> str:
     if admission_state and admission_state != "unclassified":
         return str(admission_state)
     return "candidate_or_access_evidence_only"
+
+
+def runtime_role_truth_for(node_id: str) -> dict[str, Any]:
+    roles: list[str] = []
+    labels: list[dict[str, Any]] = []
+    source_paths: set[str] = set()
+
+    scheduler = load_yaml(LAUNCHD_SCHEDULER_REGISTRY)
+    for item in scheduler.get("labels") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("state") != "active":
+            continue
+        if item.get("active_runtime_host") != node_id:
+            continue
+        role = str(item.get("intended_node_role") or "").strip()
+        if role:
+            roles.append(role)
+        labels.append(
+            compact_dict(
+                {
+                    "label": item.get("label"),
+                    "role": role,
+                    "unit": item.get("active_runtime_unit"),
+                    "proof": item.get("runtime_transfer_proof"),
+                    "transferred_at": item.get("runtime_transferred_at"),
+                }
+            )
+        )
+        source_paths.add("ops/bindings/launchd.scheduler.registry.yaml")
+
+    node_role = load_yaml(NODE_ROLE_CONTRACT)
+    external_observation = node_role.get("external_observation") or {}
+    if external_observation.get("separation_runtime") == node_id:
+        roles.append("watcher_node")
+        evidence = external_observation.get("separation_evidence") or {}
+        labels.append(
+            compact_dict(
+                {
+                    "label": "external_observation.separation_runtime",
+                    "role": "watcher_node",
+                    "unit": evidence.get("systemd_unit"),
+                    "proof": evidence.get("dispatch_result") or evidence.get("interrupt_origin"),
+                    "transferred_at": external_observation.get("separation_realized_at"),
+                }
+            )
+        )
+        source_paths.add("ops/bindings/node.role.contract.yaml")
+
+    alerting = load_yaml(ALERTING_RULES)
+    escalation = ((alerting.get("operator_interrupt") or {}).get("escalation_authority") or {})
+    if escalation.get("active_origin") == node_id:
+        role = str(escalation.get("active_origin_role") or "").strip()
+        if role:
+            roles.append(role)
+        labels.append(
+            compact_dict(
+                {
+                    "label": "operator_critical_interrupt.escalation_authority",
+                    "role": role,
+                    "proof": escalation.get("active_origin_proof"),
+                    "transferred_at": escalation.get("active_origin_proved_at"),
+                }
+            )
+        )
+        source_paths.add("ops/bindings/alerting.rules.yaml")
+
+    deduped_roles = []
+    for role in roles:
+        if role and role not in deduped_roles:
+            deduped_roles.append(role)
+
+    return {
+        "active": bool(deduped_roles or labels),
+        "roles": deduped_roles,
+        "labels": labels,
+        "source_paths": sorted(source_paths),
+    }
 
 
 def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
@@ -152,10 +256,14 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     estate_truth = recovery.get("estate_truth") or {}
     control = recovery.get("control_plane_truth") or {}
     primary_access = recovery.get("primary_access") or {}
+    runtime_truth = runtime_role_truth_for(str(recovery.get("node_id") or ""))
+    recovery["__runtime_role_truth"] = runtime_truth
 
     role_candidacy = as_list(operator.get("role_candidacy"))
     if not role_candidacy:
         role_candidacy = as_list(appliance.get("class"))
+    if runtime_truth.get("roles"):
+        role_candidacy = runtime_truth["roles"]
     if not role_candidacy:
         role_candidacy = ["none"]
 
@@ -165,6 +273,21 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         admission.get("promotion_stage"),
         default="taxonomy",
     )
+    if runtime_truth.get("active"):
+        promotion_stage = "delivered"
+
+    placement_truth = dict(estate_truth)
+    if runtime_truth.get("active"):
+        placement_truth["role_runtime_status"] = "active"
+        placement_truth["active_runtime_roles"] = runtime_truth.get("roles") or []
+        placement_truth["active_runtime_count"] = len(runtime_truth.get("labels") or [])
+        if placement_truth.get("placement_status") in {None, "", "unknown", "unassigned"}:
+            placement_truth["placement_status"] = "role_runtime_present"
+        note = placement_truth.get("note") or ""
+        if "runtime role" not in str(note):
+            placement_truth["note"] = (
+                f"{note} Active runtime role truth is declared by scheduler/role surfaces."
+            ).strip()
 
     proof_channels = []
     for primitive in recovery.get("status_primitives") or []:
@@ -198,11 +321,13 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
                 "tailscale_ip": primary_access.get("tailscale_ip"),
             }
         ),
-        "placement_truth": estate_truth,
+        "placement_truth": placement_truth,
         "runtime_obligations": {
-            "assignment_required": estate_truth.get("assignment_required"),
-            "required_vm_targets": estate_truth.get("required_vm_targets") or [],
-            "note": estate_truth.get("note"),
+            "assignment_required": placement_truth.get("assignment_required"),
+            "required_vm_targets": placement_truth.get("required_vm_targets") or [],
+            "active_runtime_roles": runtime_truth.get("roles") or [],
+            "active_runtime_labels": runtime_truth.get("labels") or [],
+            "note": placement_truth.get("note"),
         },
         "recovery_planes": recovery.get("recovery_planes") or {},
         "proof_channels": proof_channels,

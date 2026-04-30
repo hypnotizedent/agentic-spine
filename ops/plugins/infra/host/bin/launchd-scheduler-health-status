@@ -234,7 +234,7 @@ def _remote_execution_host_connection(root: Path) -> tuple[str, str, list[str]] 
     return host, user, identity_opts
 
 
-def remote_systemd_probe(root: Path, label: str, unit: str = "") -> dict[str, Any] | None:
+def remote_systemd_probe(root: Path, label: str, unit: str = "", scope: str = "system") -> dict[str, Any] | None:
     if not unit and label not in {
         "com.ronny.domain-inventory-refresh-daily",
         "com.ronny.simplefin-daily-sync",
@@ -256,6 +256,7 @@ def remote_systemd_probe(root: Path, label: str, unit: str = "") -> dict[str, An
     else:
         timer_unit = f"{label_to_systemd_unit(label)}.timer"
         service_unit = f"{label_to_systemd_unit(label)}.service"
+    scope = scope.strip().lower() or "system"
     remote_script = f"""python3 - <<'PY'
 import json
 import subprocess
@@ -263,11 +264,15 @@ import subprocess
 label = {json.dumps(label)}
 timer_unit = {json.dumps(timer_unit)}
 service_unit = {json.dumps(service_unit)}
+systemd_scope = {json.dumps(scope)}
+systemctl_cmd = ["systemctl"]
+if systemd_scope == "user":
+    systemctl_cmd.append("--user")
 
 
 def read_props(unit, props):
     proc = subprocess.run(
-        ["systemctl", "show", unit, f"--property={{','.join(props)}}", "--no-pager"],
+        [*systemctl_cmd, "show", unit, f"--property={{','.join(props)}}", "--no-pager"],
         capture_output=True,
         text=True,
         check=False,
@@ -330,6 +335,7 @@ service = read_props(
 payload = {{
     "label": label,
     "reachable": True,
+    "systemd_scope": systemd_scope,
     "timer_load_state": timer.get("LoadState", ""),
     "timer_unit_file_state": timer.get("UnitFileState", ""),
     "timer_active_state": timer.get("ActiveState", ""),
@@ -449,7 +455,9 @@ def scheduled_template_rows(root: Path, contract: dict[str, Any]) -> list[dict[s
     for item in registry.get("labels", []) or []:
         if not isinstance(item, dict):
             continue
-        if item.get("state") != "active" or item.get("birth_mode") != "standing_program":
+        state = str(item.get("state") or "").strip()
+        birth_mode = str(item.get("birth_mode") or "").strip()
+        if state != "active" or birth_mode not in {"standing_program", "migration_project"}:
             continue
         proof_channel = item.get("proof_channel") if isinstance(item.get("proof_channel"), dict) else {}
         if not proof_channel:
@@ -462,8 +470,10 @@ def scheduled_template_rows(root: Path, contract: dict[str, Any]) -> list[dict[s
         row["proof_channel_host"] = str(proof_channel.get("host") or "")
         row["proof_channel_path"] = str(proof_channel.get("path") or "")
         row["proof_channel_unit"] = str(proof_channel.get("unit") or "")
+        row["proof_channel_scope"] = str(proof_channel.get("scope") or "system")
         row["proof_channel_stale_threshold_seconds"] = str(proof_channel.get("stale_threshold_seconds") or "")
         row["monitor"] = str(item.get("monitor", True)).lower()
+        row["mode"] = str(item.get("mode") or "")
 
     return list(rows_by_label.values())
 
@@ -592,6 +602,8 @@ def build_payload(root: Path) -> dict[str, Any]:
         plist_payload = load_plist(plist_path)
         proof_channel_type = str(entry.get("proof_channel_type") or "").strip()
         proof_channel_unit = str(entry.get("proof_channel_unit") or "").strip()
+        proof_channel_scope = str(entry.get("proof_channel_scope") or "system").strip() or "system"
+        mode = str(entry.get("mode") or "").strip()
         remote_required = proof_channel_type == "systemd_journal" or label in {
             "com.ronny.domain-inventory-refresh-daily",
             "com.ronny.simplefin-daily-sync",
@@ -600,8 +612,13 @@ def build_payload(root: Path) -> dict[str, Any]:
         cadence_seconds, schedule = cadence_from_plist(plist_payload)
         job_name = label.replace("com.ronny.", "", 1)
 
-        remote_probe = remote_systemd_probe(root, label, proof_channel_unit)
+        remote_probe = remote_systemd_probe(root, label, proof_channel_unit, proof_channel_scope)
+        daemon_active = False
         if remote_probe and remote_probe.get("reachable"):
+            daemon_active = (
+                mode == "daemon"
+                and str(remote_probe.get("service_active_state") or "").strip() == "active"
+            )
             last_trigger = parse_iso8601(str(remote_probe.get("last_trigger_at", "")))
             service_exec_start = parse_iso8601(str(remote_probe.get("service_exec_main_start_at", "")))
             service_exec_exit = parse_iso8601(str(remote_probe.get("service_exec_main_exit_at", "")))
@@ -618,12 +635,20 @@ def build_payload(root: Path) -> dict[str, Any]:
                     exit_code = None
             if exit_code is None and str(remote_probe.get("service_result", "") or "").strip() == "success":
                 exit_code = 0
-            evidence = JobEvidence(
-                timestamp=last_trigger,
-                exit_code=exit_code,
-                source="remote-systemd",
-                execution_source="systemd_scheduler",
-            )
+            if daemon_active:
+                evidence = JobEvidence(
+                    timestamp=now,
+                    exit_code=0,
+                    source=f"remote-systemd-{proof_channel_scope}-active",
+                    execution_source="systemd_daemon",
+                )
+            else:
+                evidence = JobEvidence(
+                    timestamp=last_trigger,
+                    exit_code=exit_code,
+                    source="remote-systemd",
+                    execution_source="systemd_scheduler",
+                )
         else:
             runtime_evidence = runtime_index.get(job_name) or JobEvidence(timestamp=None, exit_code=None, source="none")
             # Only use runtime-jobs evidence if it's from a scheduled execution.
@@ -681,6 +706,7 @@ def build_payload(root: Path) -> dict[str, Any]:
             {
                 "label": label,
                 "job_name": job_name,
+                "mode": mode,
                 "schedule": schedule,
                 "cadence_seconds": cadence_seconds,
                 "last_run_at": evidence.timestamp.strftime("%Y-%m-%dT%H:%M:%SZ") if evidence.timestamp else "",
@@ -696,12 +722,15 @@ def build_payload(root: Path) -> dict[str, Any]:
                 "proof_channel_host": str(entry.get("proof_channel_host") or ""),
                 "proof_channel_path": str(entry.get("proof_channel_path") or ""),
                 "proof_channel_unit": proof_channel_unit,
+                "proof_channel_scope": proof_channel_scope,
                 "monitor": str(entry.get("monitor") or "true"),
                 "next_run_at": str((remote_probe or {}).get("next_run_at", "") or ""),
                 "timer_load_state": str((remote_probe or {}).get("timer_load_state", "") or ""),
                 "timer_unit_file_state": str((remote_probe or {}).get("timer_unit_file_state", "") or ""),
                 "service_load_state": str((remote_probe or {}).get("service_load_state", "") or ""),
                 "service_unit_file_state": str((remote_probe or {}).get("service_unit_file_state", "") or ""),
+                "service_active_state": str((remote_probe or {}).get("service_active_state", "") or ""),
+                "service_sub_state": str((remote_probe or {}).get("service_sub_state", "") or ""),
             }
         )
 
