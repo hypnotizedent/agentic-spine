@@ -8,12 +8,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATUS_BIN="$ROOT/ops/plugins/core/lifecycle/bin/execution-pickup-status"
 OPS="$ROOT/bin/ops"
+WAVE_SH="$ROOT/ops/commands/wave.sh"
+WAVE_EXECUTE="$ROOT/ops/plugins/core/orchestration/bin/wave-execute"
 
 fail() { echo "D452 FAIL: $*" >&2; exit 1; }
 
 command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -x "$STATUS_BIN" ]] || fail "missing execution pickup status executable"
 [[ -x "$OPS" ]] || fail "missing ops entrypoint"
+[[ -x "$WAVE_SH" ]] || fail "missing wave.sh"
+[[ -x "$WAVE_EXECUTE" ]] || fail "missing wave-execute"
 
 "$STATUS_BIN" --self-check >/dev/null
 
@@ -63,6 +67,14 @@ for row in data.get("requests") or []:
 PY
 
 (cd "$ROOT" && "$OPS" cap list | grep -q "execution.pickup.status") || fail "capability registry missing execution.pickup.status"
+
+grep -q -- "--route-capability" "$WAVE_EXECUTE" || fail "wave.execute dispatch must expose --route-capability"
+grep -q -- "--route-capability" "$WAVE_SH" || fail "ops wave dispatch must accept --route-capability"
+grep -q "Dispatch Result:" "$WAVE_SH" || fail "operational wave dispatch must write worker result back to dispatch"
+grep -q "Worker: claimed=" "$WAVE_SH" || fail "operational wave dispatch must run bounded worker pickup"
+if grep -q "deferred-agent-tool" "$WAVE_SH"; then
+  fail "operational wave dispatch must not route through deferred agent-tool bridge"
+fi
 
 python3 - "$ROOT/ops/capabilities.yaml" "$ROOT/ops/bindings/mailroom.task.worker.contract.yaml" <<'PY'
 import sys

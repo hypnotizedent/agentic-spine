@@ -10,7 +10,7 @@
 #
 # Subcommands:
 #   start    --loop-id LOOP-... [--wave-id WAVE-...] [--objective "..."] [wave.sh start flags...]
-#   dispatch --wave-id WAVE-... --lane <lane> --task "desc" [--gap-ids GAP-OP-1234,GAP-OP-1235]
+#   dispatch --wave-id WAVE-... --lane <lane> --task "desc" [--route-capability <cap>] [--route-arg <arg>] [--gap-ids GAP-OP-1234,GAP-OP-1235]
 #   collect  --wave-id WAVE-...
 #   close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate] [--fixed-in <sha>] [--verify-receipt <path>] [--controller-only] [--skip-residue-check] [--no-finish]
 #   status   --wave-id WAVE-...
@@ -112,7 +112,7 @@ wave-execute - Governed wave dispatch with authority binding
 
 Usage:
   wave-execute start    --loop-id LOOP-... [--wave-id WAVE-...] [--objective "..."]
-  wave-execute dispatch --wave-id WAVE-... --lane <lane> --task "desc" [--gap-ids GAP-OP-1234,GAP-OP-1235]
+  wave-execute dispatch --wave-id WAVE-... --lane <lane> --task "desc" [--route-capability <cap>] [--route-arg <arg>] [--gap-ids GAP-OP-1234,GAP-OP-1235]
   wave-execute collect  --wave-id WAVE-...
   wave-execute close    --wave-id WAVE-... [--disposition landed|deferred] [--completion-level slice|loop|domain|estate] [--fixed-in <sha>] [--verify-receipt <path>] [--controller-only] [--skip-residue-check] [--no-finish]
   wave-execute status   --wave-id WAVE-...
@@ -740,6 +740,10 @@ worktree = str(workspace.get("worktree") or "").strip()
 branch = str(workspace.get("branch") or "").strip()
 lifecycle_state = str(workspace.get("lifecycle_state") or "").strip()
 force_workspace_refresh = "wrapper-managed worktree rehydrate" in workspace_note
+workspace_enabled = workspace.get("enabled")
+if isinstance(workspace_enabled, str):
+    workspace_enabled = workspace_enabled.strip().lower() == "true"
+workspace_disabled = workspace_enabled is False or lifecycle_state == "disabled"
 
 def missing_path(value: str) -> bool:
     return not value or not Path(value).exists()
@@ -770,20 +774,20 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
             except FileNotFoundError:
                 pass
 
-if fallback_repo and (not repo or missing_path(repo) or force_workspace_refresh):
+if not workspace_disabled and fallback_repo and (not repo or missing_path(repo) or force_workspace_refresh):
     workspace["repo"] = fallback_repo
     repo = fallback_repo
     changed = True
-if fallback_worktree and (not worktree or missing_path(worktree) or force_workspace_refresh):
+if not workspace_disabled and fallback_worktree and (not worktree or missing_path(worktree) or force_workspace_refresh):
     workspace["worktree"] = fallback_worktree
     worktree = fallback_worktree
     changed = True
-if fallback_branch and (not branch or force_workspace_refresh):
+if not workspace_disabled and fallback_branch and (not branch or force_workspace_refresh):
     workspace["branch"] = fallback_branch
     branch = fallback_branch
     changed = True
 
-if repo or worktree or branch:
+if not workspace_disabled and (repo or worktree or branch):
     if not bool(workspace.get("enabled")):
         workspace["enabled"] = True
         changed = True
@@ -1069,6 +1073,7 @@ cmd_dispatch() {
   local lane=""
   local task=""
   local gap_ids=""
+  local route_capability=""
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -1078,6 +1083,8 @@ cmd_dispatch() {
       --lane)       lane="${2:?--lane requires a value}"; shift 2 ;;
       --task)       task="${2:?--task requires a value}"; shift 2 ;;
       --gap-ids)    gap_ids="${2:?--gap-ids requires a value}"; shift 2 ;;
+      --route-capability) route_capability="${2:?--route-capability requires a value}"; passthrough_args+=("$1" "$2"); shift 2 ;;
+      --route-arg)   passthrough_args+=("$1" "${2:?--route-arg requires a value}"); shift 2 ;;
       -h|--help)    usage; exit 0 ;;
       *)            passthrough_args+=("$1"); shift ;;
     esac
@@ -1110,6 +1117,9 @@ cmd_dispatch() {
   printf "Loop:      %s\n" "$loop_id"
   printf "Lane:      %s\n" "$lane"
   printf "Task:      %s\n" "$task"
+  if [[ -n "$route_capability" ]]; then
+    printf "Route Cap: %s\n" "$route_capability"
+  fi
   if [[ -n "$gap_ids" ]]; then
     printf "Gap IDs:   %s\n" "$gap_ids"
   fi

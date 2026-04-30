@@ -1057,6 +1057,8 @@ cmd_start() {
   local workspace_note=""
   local default_role="researcher"
   local default_next_role="worker"
+  local execution_mode="code"
+  local transport="git"
   local current_role_explicit=0
   local next_role_explicit=0
   local wave_kind="production"
@@ -1076,6 +1078,8 @@ cmd_start() {
       --claimed-paths) claimed_paths_raw="${2:-}"; shift 2 ;;
       --current-role) default_role="${2:-}"; current_role_explicit=1; shift 2 ;;
       --next-role) default_next_role="${2:-}"; next_role_explicit=1; shift 2 ;;
+      --execution-mode) execution_mode="${2:-}"; shift 2 ;;
+      --transport) transport="${2:-}"; shift 2 ;;
       --worktree) worktree_mode="${2:-}"; shift 2 ;;
       --repo) workspace_repo="${2:-}"; shift 2 ;;
       --synthetic) wave_kind="synthetic"; shift ;;
@@ -1101,6 +1105,17 @@ cmd_start() {
       exit 1
       ;;
   esac
+  case "$execution_mode" in
+    code|local|operational) ;;
+    *) echo "FAIL: invalid execution mode '$execution_mode' (allowed: code|local|operational)" >&2; exit 1 ;;
+  esac
+  case "$transport" in
+    git|local|mailroom) ;;
+    *) echo "FAIL: invalid transport '$transport' (allowed: git|local|mailroom)" >&2; exit 1 ;;
+  esac
+  if [[ "$execution_mode" == "operational" && "$transport" == "git" ]]; then
+    transport="mailroom"
+  fi
 
   # Track artifacts for rollback on failure (GAP-OP-1491, GAP-OP-1585).
   wave_start_reset_cleanup_state
@@ -1331,7 +1346,7 @@ PYCLAIMS
   wave_starting_head="$(git -C "$SPINE_REPO" rev-parse HEAD 2>/dev/null || echo "")"
 
   WAVE_STARTING_HEAD="$wave_starting_head" \
-  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$prior_wave_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$packet_allowed_roles" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" "$wave_kind" <<'PYSTART'
+  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$prior_wave_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$packet_allowed_roles" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" "$wave_kind" "$execution_mode" "$transport" <<'PYSTART'
 import json, sys
 import os
 import tempfile
@@ -1369,6 +1384,8 @@ except Exception:
     path_claims_ttl_minutes = 180
 path_claims_non_overlap = (sys.argv[24].lower() == "true") if len(sys.argv) > 24 else True
 wave_kind = (sys.argv[25].strip() if len(sys.argv) > 25 and sys.argv[25].strip() else "production")
+execution_mode = (sys.argv[26].strip() if len(sys.argv) > 26 and sys.argv[26].strip() else "code")
+transport = (sys.argv[27].strip() if len(sys.argv) > 27 and sys.argv[27].strip() else "git")
 single_terminal_mode = str(owner_terminal or "").strip().startswith("SPINE-CONTROL-")
 
 packet = {
@@ -1384,6 +1401,8 @@ packet = {
     "horizon": horizon,
     "execution_readiness": execution_readiness,
     "claimed_paths": claimed_paths,
+    "execution_mode": execution_mode,
+    "transport": transport,
     "single_terminal_mode": single_terminal_mode,
     "lane_outcomes": [],
     "stub_matrix": [],
@@ -1638,6 +1657,8 @@ state = {
         "expires_at": expires_at,
     },
     "packet": packet,
+    "execution_mode": execution_mode,
+    "transport": transport,
 }
 
 _atomic_write_json(sf, state)
@@ -1943,8 +1964,12 @@ _dispatch_operational_mailroom() {
   local transition_gate="${6:-}"
   local input_refs_json="${7:-}"
   local output_refs_json="${8:-}"
+  local route_capability="${9:-}"
+  local route_args_json="${10:-[]}"
   local enqueue_script
+  local worker_script
   enqueue_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue"
+  worker_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/plugins/infra/mailroom-bridge/bin/mailroom-task-worker"
 
   [[ -n "$input_refs_json" ]] || input_refs_json='{}'
   [[ -n "$output_refs_json" ]] || output_refs_json='{}'
@@ -1953,14 +1978,18 @@ _dispatch_operational_mailroom() {
     echo "FAIL: operational dispatch requires mailroom-task-enqueue at $enqueue_script" >&2
     exit 1
   }
-
-  echo "FAIL: wave operational mailroom dispatch previously targeted a deferred agent-tool bridge, but no governed bridge is delivered." >&2
-  echo "  Current operational mailroom worker supports capability-backed tasks only." >&2
-  echo "  Use delegate.to.execution --execution-lane operational --route-capability <capability>, or use interactive worker handoff." >&2
-  exit 1
+  [[ -x "$worker_script" ]] || {
+    echo "FAIL: operational dispatch requires mailroom-task-worker at $worker_script" >&2
+    exit 1
+  }
+  [[ -n "$route_capability" ]] || {
+    echo "FAIL: operational wave dispatch requires --route-capability <allowlisted-capability>" >&2
+    echo "  Research/agent dispatch remains request-only until a governed worker bridge exists." >&2
+    exit 1
+  }
 
   local dispatch_ctx_json=""
-  dispatch_ctx_json="$(python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" <<'PYMAILROOMCTX'
+  dispatch_ctx_json="$(python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" "$route_capability" "$route_args_json" <<'PYMAILROOMCTX'
 import hashlib
 import json
 import re
@@ -1975,6 +2004,8 @@ to_role = sys.argv[5] if len(sys.argv) > 5 else ""
 transition_gate = sys.argv[6] if len(sys.argv) > 6 else ""
 input_refs = json.loads(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else {}
 expected_output_refs = json.loads(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] else {}
+route_capability = sys.argv[9] if len(sys.argv) > 9 else ""
+route_args = json.loads(sys.argv[10]) if len(sys.argv) > 10 and sys.argv[10] else []
 
 with open(sf, "r", encoding="utf-8") as f:
     state = json.load(f)
@@ -2030,8 +2061,10 @@ payload = {
     "horizon": horizon,
     "execution_readiness": execution_readiness,
     "dispatch_transport": "mailroom",
-    "route_target": {"type": "agent_tool", "tool": "route_resolve", "input": route_input},
-    "routing_status": "pending_resolution",
+    "route_target": {"type": "capability", "capability": route_capability, "args": route_args},
+    "route_capability": route_capability,
+    "route_args": route_args,
+    "routing_status": "capability_bound",
 }
 
 # ── Dispatch Envelope (dispatch.envelope.contract.yaml) ──
@@ -2085,6 +2118,8 @@ print(
             "execution_readiness": execution_readiness,
             "route_input": route_input,
             "summary": summary,
+            "route_capability": route_capability,
+            "route_args": route_args,
             "payload": payload,
         },
         separators=(",", ":"),
@@ -2097,11 +2132,18 @@ PYMAILROOMCTX
   summary="$(jq -r '.summary' <<<"$dispatch_ctx_json")"
   local payload_json=""
   payload_json="$(jq -c '.payload' <<<"$dispatch_ctx_json")"
+  local route_args=()
+  while IFS= read -r _route_arg; do
+    [[ -n "$_route_arg" ]] || continue
+    route_args+=(--route-arg "$_route_arg")
+  done < <(jq -r '.route_args[]? // empty' <<<"$dispatch_ctx_json")
 
   local enqueue_json=""
   enqueue_json="$("$enqueue_script" \
     --summary "$summary" \
     --route-target capability \
+    --route-capability "$route_capability" \
+    "${route_args[@]+"${route_args[@]}"}" \
     --payload "$payload_json" \
     --json)"
 
@@ -2111,6 +2153,7 @@ import fcntl
 import json
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 sf = sys.argv[1]
@@ -2128,6 +2171,32 @@ ctx_payload = ctx.get("payload") if isinstance(ctx.get("payload"), dict) else {}
 ctx_envelope = ctx_payload.get("dispatch_envelope") if isinstance(ctx_payload.get("dispatch_envelope"), dict) else {}
 lock_file = sf + ".lock"
 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _atomic_write_json(path, payload):
+    dirpath = os.path.dirname(path) or "."
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
@@ -2168,6 +2237,7 @@ try:
         "mailroom_task_file": str(queue_data.get("file") or ""),
         "mailroom_task_state": str(queue_data.get("state") or "queued"),
         "mailroom_route_target": str(queue_data.get("route_target") or "capability"),
+        "mailroom_route_capability": str(queue_data.get("route_capability") or ""),
         "mailroom_required_agents": queue_data.get("required_agents") if isinstance(queue_data.get("required_agents"), list) else [],
         "mailroom_summary": str(queue_data.get("summary") or ""),
         "mailroom_route_input": str(ctx.get("route_input") or ""),
@@ -2261,12 +2331,133 @@ PYMAILROOMDISP
   echo "  Mailroom Task: ${mailroom_task_id}"
   echo "  Queue File: ${mailroom_task_file}"
   echo "  Status: dispatched"
-  if [[ -n "$route_input" ]]; then
-    echo "  Route: deferred-agent-tool/route_resolve input=${route_input}"
-  fi
+  echo "  Route: capability/${route_capability}"
   if [[ -n "$from_role" || -n "$to_role" ]]; then
     echo "  Role transition: ${from_role:-?} -> ${to_role:-?} (gate=${transition_gate:-none})"
   fi
+
+  local worker_json=""
+  worker_json="$("$worker_script" --once --worker-id "${SPINE_TERMINAL_ID:-SPINE-EXECUTION-01}" --claim-limit 1 --json)"
+  echo "$worker_json" | jq -r '"  Worker: claimed=\(.claimed | length) completed=\(.completed | length) failed=\(.failed | length) skipped=\(.skipped | length)"'
+
+  python3 - "$sf" "$dispatch_id" "$mailroom_task_id" "$worker_json" <<'PYMAILROOMSYNC'
+import fcntl
+import json
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+try:
+    import yaml
+except Exception:
+    yaml = None
+
+sf = sys.argv[1]
+dispatch_id = sys.argv[2]
+mailroom_task_id = sys.argv[3]
+worker = json.loads(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else {}
+state_root = Path(os.environ.get("SPINE_STATE", ""))
+task_root = state_root / "agent-tasks"
+
+def load_task(task_id):
+    if yaml is None:
+        return {}, ""
+    for folder in ("done", "failed", "running", "queued"):
+        path = task_root / folder / f"{task_id}.yaml"
+        if path.exists():
+            return yaml.safe_load(path.read_text(encoding="utf-8")) or {}, folder
+    return {}, ""
+
+def atomic_write(path, payload):
+    dirpath = os.path.dirname(path) or "."
+    fd_tmp = None
+    tmp_path = None
+    try:
+        fd_tmp, tmp_path = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dirpath)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        fd_tmp = None
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if fd_tmp is not None:
+            try:
+                os.close(fd_tmp)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+
+task_doc, task_state = load_task(mailroom_task_id)
+completed = {str(item.get("task_id")): item for item in worker.get("completed", []) if isinstance(item, dict)}
+run_key = ""
+result = str(task_doc.get("result") or "")
+failure = str(task_doc.get("failure_reason") or "")
+if mailroom_task_id in completed:
+    run_key = str(completed[mailroom_task_id].get("run_key") or "")
+if not run_key and result:
+    match = re.search(r"run_key=([^ ]+)", result)
+    if match:
+        run_key = match.group(1)
+
+if task_state == "done":
+    dispatch_status = "done"
+elif task_state == "failed":
+    dispatch_status = "failed"
+elif task_state == "running":
+    dispatch_status = "running"
+else:
+    dispatch_status = "dispatched"
+
+lock_file = sf + ".lock"
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    state = json.load(open(sf, encoding="utf-8"))
+    for dispatch in state.get("dispatches", []):
+        if str(dispatch.get("task_id") or "") != dispatch_id:
+            continue
+        dispatch["mailroom_task_state"] = task_state or dispatch.get("mailroom_task_state")
+        dispatch["worker_id"] = str(worker.get("worker_id") or "")
+        dispatch["worker_completed_at"] = str(worker.get("generated_at") or "")
+        if task_doc.get("claimed_by"):
+            dispatch["claimed_by"] = task_doc.get("claimed_by")
+        if task_doc.get("claimed_at"):
+            dispatch["claimed_at"] = task_doc.get("claimed_at")
+        if task_doc.get("heartbeat_at"):
+            dispatch["heartbeat_at"] = task_doc.get("heartbeat_at")
+        if task_doc.get("completed_at"):
+            dispatch["completed_at"] = task_doc.get("completed_at")
+        elif task_doc.get("updated_at"):
+            dispatch["completed_at"] = task_doc.get("updated_at")
+        dispatch["status"] = dispatch_status
+        if result:
+            dispatch["result"] = result
+        elif failure:
+            dispatch["result"] = failure
+        if run_key:
+            dispatch["run_key"] = run_key
+            dispatch["receipt_validated"] = True
+        elif dispatch_status == "failed":
+            dispatch["receipt_validated"] = False
+        break
+    atomic_write(sf, state)
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+print(f"  Dispatch Result: {dispatch_status}")
+if run_key:
+    print(f"  Run Key: {run_key}")
+PYMAILROOMSYNC
 }
 
 cmd_dispatch() {
@@ -2278,6 +2469,9 @@ cmd_dispatch() {
   local input_refs_raw=""
   local output_refs_raw=""
   local transition_gate=""
+  local route_capability=""
+  local route_args_json="[]"
+  local -a route_args=()
   # control_lane_override compatibility marker: controller-owned lane overrides
   # now flow through --lock-override / lock_override_reason.
   local lock_override_reason=""
@@ -2293,6 +2487,8 @@ cmd_dispatch() {
       --to-role) to_role="${2:-}"; shift 2 ;;
       --input-refs) input_refs_raw="${2:-}"; shift 2 ;;
       --output-refs) output_refs_raw="${2:-}"; shift 2 ;;
+      --route-capability) route_capability="${2:-}"; shift 2 ;;
+      --route-arg) route_args+=("${2:-}"); shift 2 ;;
       --transition-gate) transition_gate="${2:-}"; shift 2 ;;
       --lock-override)
         if [[ $# -lt 2 || -z "${2:-}" ]]; then
@@ -2311,7 +2507,7 @@ cmd_dispatch() {
     echo "Usage: ops wave dispatch <WAVE_ID> --lane <lane> --task \"<text>\" [OPTIONS]" >&2
     echo "" >&2
     echo "  Lanes must be one of: $(wave_allowed_lanes_display)" >&2
-    echo "  Options: --from-role, --to-role, --input-refs, --output-refs, --lock-override" >&2
+    echo "  Options: --route-capability, --route-arg, --from-role, --to-role, --input-refs, --output-refs, --lock-override" >&2
     exit 1
   fi
 
@@ -2781,7 +2977,8 @@ PYDISPATCHMODE
   IFS='|' read -r wave_execution_mode wave_transport <<<"$dispatch_mode"
 
   if [[ "$wave_execution_mode" == "operational" || "$wave_transport" == "mailroom" ]]; then
-    _dispatch_operational_mailroom "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json"
+    route_args_json="$(printf '%s\n' "${route_args[@]:-}" | sed '/^$/d' | jq -Rsc 'split("\n") | map(select(length > 0))')"
+    _dispatch_operational_mailroom "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" "$route_capability" "$route_args_json"
     sync_runtime_traffic_index "$sf" "dispatch"
     return
   fi
