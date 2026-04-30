@@ -160,6 +160,16 @@ def parse_backup_status(path):
 
 
 target_status, backup_summary = parse_backup_status(backup_status_path)
+backup_status_degraded_targets = [
+    {
+        "target": name,
+        "status": row.get("status"),
+        "reason": row.get("reason"),
+        "raw": row.get("raw"),
+    }
+    for name, row in sorted(target_status.items())
+    if row.get("status") in {"stale", "missing", "error", "blocked"}
+]
 
 
 def split_sections(text):
@@ -374,16 +384,20 @@ if backup_status_rc != 0 or any(g["severity"] == "blocking" for g in gaps):
     overall = "blocked"
 elif any(g["severity"] == "high" for g in gaps):
     overall = "degraded"
-elif gaps:
+elif gaps or backup_status_degraded_targets:
     overall = "partial"
 
+subject_degraded_total = sum(1 for s in subjects if s["status"] == "degraded")
+backup_status_degraded_total = len(backup_status_degraded_targets)
 counts = {
     "subjects_total": len(subjects),
     "running_total": sum(1 for s in subjects if s["runtime_status"] == "running"),
     "stopped_total": sum(1 for s in subjects if s["runtime_status"] == "stopped"),
     "ok_total": sum(1 for s in subjects if s["status"] == "ok"),
     "partial_total": sum(1 for s in subjects if s["status"] == "partial"),
-    "degraded_total": sum(1 for s in subjects if s["status"] == "degraded"),
+    "degraded_total": subject_degraded_total + backup_status_degraded_total,
+    "subject_degraded_total": subject_degraded_total,
+    "backup_status_degraded_total": backup_status_degraded_total,
     "gap_total": sum(1 for s in subjects if s["status"] == "gap"),
     "residue_total": sum(1 for s in subjects if s["status"] == "residue"),
 }
@@ -406,6 +420,7 @@ print(json.dumps({
     },
     "backup_status_exit_code": backup_status_rc,
     "backup_status_summary": backup_summary,
+    "backup_status_degraded_targets": backup_status_degraded_targets,
     "counts": counts,
     "subjects": subjects,
     "gaps": gaps,

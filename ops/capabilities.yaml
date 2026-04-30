@@ -105,7 +105,7 @@ capabilities:
     implementation_path: backup-plane/
     layer: L2_shared_infrastructure
   backup.readback.admission.status:
-    description: Read-only status consumer for the first backup subject/readback admission tranche. Reads admitted subjects, backup.status, and existing restore receipts only; does not run backups or restores.
+    description: Legacy read-only admission tranche drilldown. Canonical live backup truth is backup.status plus backup.estate.readback.status; this surface must not be used as estate status authority.
     tags:
       - backup
       - readback
@@ -120,6 +120,7 @@ capabilities:
     lifecycle: ready
     outputs:
       - stdout
+    retired_reason: Replaced for canonical live readback by backup.estate.readback.status.
     plane: fabric
     domain: backup
     layer: L2_shared_infrastructure
@@ -159,6 +160,47 @@ capabilities:
     outputs:
       - stdout
       - mailroom/outbox/reports/restore-drills/backup-shopvm-restore-drill-<YYYYMMDD>.yaml
+    plane: domain_external
+    domain: backup
+    implementation_repo: workbench
+    implementation_path: backup-plane/
+    layer: L2_shared_infrastructure
+  backup.home.restore.drill:
+    description: Run the governed home backup scratch-restore drill for proxmox-home artifacts and write the canonical YAML receipt under restore-drills outbox.
+    tags:
+      - backup
+      - restore-drill
+      - home
+    command: ./ops/plugins/infra/backup/bin/backup-home-restore-drill
+    script_path: ./ops/plugins/infra/backup/bin/backup-home-restore-drill
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+      - stdout
+      - mailroom/outbox/reports/restore-drills/backup-home-restore-drill-<YYYYMMDD>.yaml
+    plane: domain_external
+    domain: backup
+    implementation_repo: workbench
+    implementation_path: backup-plane/
+    layer: L2_shared_infrastructure
+  backup.vzdump.prune:
+    description: Governed vzdump retention prune with dry-run default; execute deletes only through Proxmox prune-backups policy.
+    tags:
+      - backup
+      - retention
+      - prune
+    command: ./ops/plugins/infra/backup/bin/backup-vzdump-prune
+    script_path: ./ops/plugins/infra/backup/bin/backup-vzdump-prune
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+      - stdout
     plane: domain_external
     domain: backup
     implementation_repo: workbench
@@ -1030,6 +1072,26 @@ capabilities:
     outputs:
       - stdout
     domain: infra
+    plane: fabric
+    layer: L2_shared_infrastructure
+  infra.infisical.restore.drill:
+    description: Run the governed Infisical scratch database restore drill and write the canonical YAML receipt under restore-drills outbox.
+    tags:
+      - infra
+      - backup
+      - restore-drill
+      - infisical
+    command: ./ops/plugins/infra/bin/infra-infisical-restore-drill
+    script_path: ./ops/plugins/infra/bin/infra-infisical-restore-drill
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+      - stdout
+      - mailroom/outbox/reports/restore-drills/infra-infisical-restore-drill-<YYYYMMDD>.yaml
+    domain: backup
     plane: fabric
     layer: L2_shared_infrastructure
   infra.placement.policy:
