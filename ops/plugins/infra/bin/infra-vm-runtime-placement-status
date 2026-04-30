@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # infra-vm-runtime-placement-status
-# Read-only expert diagnostic: compares placement refs against live qm/pct config on pve.
+# Read-only expert diagnostic: compares placement refs against live qm/pct config
+# on each declared Proxmox host.
 # Canonical operator truth is folded into node.admission.status,
 # payload.custody.status, and backup.estate.readback.status.
 # Does NOT mutate remote state.
@@ -21,15 +22,9 @@ if [[ ! -f "$BINDING_FILE" ]]; then
   exit 2
 fi
 
-HOST="pve"
-SSH_HOST="$(ssh_resolve_host "$HOST")"
-SSH_USER="$(ssh_resolve_user "$HOST" "root")"
-IDENTITY_OPTS="$(ssh_resolve_machine_identity_opts "$HOST" 2>/dev/null)" || true
-SSH_TARGET="${SSH_USER}@${SSH_HOST}"
-
 echo "=== VM Runtime Placement Status ==="
 echo "Authority: diagnostic evidence only; canonical readbacks are node.admission.status, payload.custody.status, backup.estate.readback.status"
-echo "Host: $HOST"
+echo "Host: estate declared per vm_storage[*].proxmox_host (default pve)"
 echo "Binding: $BINDING_FILE"
 echo ""
 
@@ -56,6 +51,7 @@ vm_keys="$(yq -r '.vm_storage | keys | .[]' "$BINDING_FILE")"
 
 for key in $vm_keys; do
   vm_id="$(yq -r ".vm_storage.\"$key\".vm_id" "$BINDING_FILE")"
+  host="$(yq -r ".vm_storage.\"$key\".proxmox_host // \"pve\"" "$BINDING_FILE")"
   boot_ref="$(yq -r ".vm_storage.\"$key\".current_boot_ref // \"\"" "$BINDING_FILE")"
   placement_status="$(yq -r ".vm_storage.\"$key\".placement_status // \"unknown\"" "$BINDING_FILE")"
 
@@ -74,22 +70,27 @@ for key in $vm_keys; do
     is_ct=true
   fi
 
+  ssh_host="$(ssh_resolve_host "$host")"
+  ssh_user="$(ssh_resolve_user "$host" "root")"
+  identity_opts="$(ssh_resolve_machine_identity_opts "$host" 2>/dev/null)" || true
+  ssh_target="${ssh_user}@${ssh_host}"
+
   # Fetch live config
   # shellcheck disable=SC2086
   if $is_ct; then
-    live_config="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $IDENTITY_OPTS "$SSH_TARGET" \
+    live_config="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $identity_opts "$ssh_target" \
       "pct config $vm_id 2>/dev/null" 2>/dev/null || echo "UNREACHABLE")"
   else
-    live_config="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $IDENTITY_OPTS "$SSH_TARGET" \
+    live_config="$(ssh -n -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new $identity_opts "$ssh_target" \
       "qm config $vm_id 2>/dev/null" 2>/dev/null || echo "UNREACHABLE")"
   fi
 
   if [[ "$live_config" == "UNREACHABLE" ]]; then
-    check "VM${vm_id}" "WARN" "$key: could not fetch config"
+    check "VM${vm_id}" "WARN" "$key@$host: could not fetch config"
     continue
   fi
 
-  label="VM${vm_id}"
+  label="${host}:VM${vm_id}"
 
   # --- Check boot ref ---
   if [[ -n "$boot_ref" && "$boot_ref" != "null" ]]; then

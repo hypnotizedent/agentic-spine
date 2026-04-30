@@ -5,6 +5,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ BACKUP_INVENTORY = ROOT / "ops" / "bindings" / "domains" / "backup" / "backup.in
 STACK_SCRIPT = ROOT / "ops" / "plugins" / "infra" / "observability" / "bin" / "observability-stack-status"
 TARGETS_SCRIPT = ROOT / "ops" / "plugins" / "infra" / "observability" / "bin" / "prometheus-targets-status"
 WATCHER_HEALTH_SCRIPT = ROOT / "ops" / "plugins" / "core" / "bin" / "watcher-health"
+WATCHER_INPUT_SCRIPT = ROOT / "ops" / "plugins" / "core" / "bin" / "watcher-input-projection-status"
 
 
 def fail(message: str) -> None:
@@ -50,6 +52,19 @@ def run(args: list[str]) -> dict[str, Any]:
     return payload
 
 
+def run_readback(args: list[str], *, retries: int = 1) -> dict[str, Any]:
+    result = run(args)
+    attempts = [result]
+    for _ in range(retries):
+        if result.get("exit") == 0:
+            break
+        time.sleep(2)
+        result = run(args)
+        attempts.append(result)
+    result["attempts"] = attempts
+    return result
+
+
 def service_count() -> int:
     data = load_yaml(SERVICES_HEALTH)
     endpoints = data.get("endpoints") or []
@@ -80,6 +95,17 @@ def backup_posture(runtime: dict[str, Any]) -> dict[str, Any]:
 
 
 def watcher_summary() -> dict[str, Any]:
+    if WATCHER_INPUT_SCRIPT.is_file():
+        projection_result = run([str(WATCHER_INPUT_SCRIPT), "--json"])
+        projection = projection_result.get("json") if isinstance(projection_result.get("json"), dict) else {}
+        if projection_result.get("exit") == 0 and projection:
+            return {
+                "status": "healthy" if projection.get("status") == "ok" else projection.get("status"),
+                "input_projection_status": projection.get("status"),
+                "input_count": projection.get("input_count"),
+                "read_source": "watcher.input.projection.status",
+                "source_node": projection.get("source_node"),
+            }
     if not WATCHER_HEALTH_SCRIPT.is_file():
         return {"status": "unknown", "reason": "watcher.health script missing"}
     result = run([str(WATCHER_HEALTH_SCRIPT), "--json"])
@@ -125,8 +151,8 @@ def main() -> None:
     runtime_current = runtime.get("current") or {}
     current_target = str(runtime_current.get("node_id") or "observability")
     previous_runtime = runtime.get("previous") or {}
-    stack = run([str(STACK_SCRIPT), "--target", current_target])
-    targets = run([str(TARGETS_SCRIPT), "--json", "--target", current_target])
+    stack = run_readback([str(STACK_SCRIPT), "--target", current_target])
+    targets = run_readback([str(TARGETS_SCRIPT), "--json", "--target", current_target])
     previous_node = previous_runtime.get("node_id")
     targets_json = targets.get("json") if isinstance(targets.get("json"), dict) else {}
     stack_status = "ok" if stack["exit"] == 0 else "degraded"

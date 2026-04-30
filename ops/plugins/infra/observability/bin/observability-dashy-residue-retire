@@ -49,7 +49,7 @@ def verify_dashy_stopped() -> dict[str, Any]:
 
 
 def container_state() -> dict[str, Any]:
-    proc = run(["ssh", "observability", "docker inspect dashy --format '{{.Name}}|{{.State.Status}}|{{.State.ExitCode}}' 2>/dev/null || true"], check=True)
+    proc = run(["ssh", "observability-legacy", "docker inspect dashy --format '{{.Name}}|{{.State.Status}}|{{.State.ExitCode}}' 2>/dev/null || true"], check=True)
     line = proc.stdout.strip()
     if not line:
         return {"present": False}
@@ -59,7 +59,7 @@ def container_state() -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="observability-dashy-residue-retire")
-    parser.add_argument("--execute", action="store_true", help="Remove the stopped dashy container from the observability VM.")
+    parser.add_argument("--execute", action="store_true", help="Remove the stopped dashy container from the legacy observability VM.")
     parser.add_argument("--json", action="store_true", help="Emit JSON.")
     parser.add_argument("--self-check", action="store_true", help="Verify local retirement evidence only.")
     return parser.parse_args()
@@ -76,11 +76,12 @@ def main() -> None:
     if args.execute and before.get("present"):
         if before.get("status") == "running":
             fail("refusing to remove running dashy container")
-        run(["ssh", "observability", "docker rm dashy"], check=True)
+        run(["ssh", "observability-legacy", "docker rm dashy"], check=True)
         removed = True
     after = container_state()
     payload = {
         "capability": "observability.dashy.residue.retire",
+        "remote_host": "observability-legacy",
         "status": "removed" if removed else ("noop" if not before.get("present") else "would_remove"),
         "mode": "execute" if args.execute else "dry_run",
         "proof": proof,

@@ -107,7 +107,7 @@ def runtime_status_is_live(vm: dict[str, Any]) -> bool:
 
 
 def runtime_is_shop(vm: dict[str, Any]) -> bool:
-    return str(vm.get("proxmox_host") or "") == "pve"
+    return str(vm.get("proxmox_host") or "") in {"pve", "pve-r620"}
 
 
 def service_status_is_active(row: dict[str, Any]) -> bool:
@@ -123,6 +123,13 @@ def route_is_live(route: dict[str, Any]) -> bool:
 def normalize_service_name(name: str) -> str:
     value = re.sub(r"-vm\d+$", "", (name or "").strip())
     return re.sub(r"-v\d+$", "", value)
+
+
+def runtime_host_aliases(hostname: str) -> list[str]:
+    aliases = [hostname]
+    if hostname == "observability-r620":
+        aliases.append("observability")
+    return aliases
 
 
 def parse_pool_from_source(source: str) -> str | None:
@@ -801,12 +808,17 @@ def build_authority_model(*, generated_at_utc: str) -> dict[str, Any]:
                 )
             backup_targets.append(target_row)
 
+        alias_hosts = runtime_host_aliases(hostname)
         public_routes = sorted(
-            route_rows_by_host.get(hostname, []),
+            [
+                route
+                for alias in alias_hosts
+                for route in route_rows_by_host.get(alias, [])
+            ],
             key=lambda row: (row.get("routing_layer") or "", row.get("hostname") or ""),
         )
-        probe_ids = sorted(set(probes_by_host.get(hostname, [])))
-        active_services = sorted(set(active_services_by_host.get(hostname, [])))
+        probe_ids = sorted({probe for alias in alias_hosts for probe in probes_by_host.get(alias, [])})
+        active_services = sorted({service for alias in alias_hosts for service in active_services_by_host.get(alias, [])})
 
         placement_status = str(
             placement_row.get("placement_status") or placement_row.get("status") or "missing"

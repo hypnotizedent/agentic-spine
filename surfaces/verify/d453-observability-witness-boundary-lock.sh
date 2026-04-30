@@ -15,6 +15,9 @@ TARGETS="$ROOT/ops/plugins/infra/observability/bin/prometheus-targets-status"
 RECONCILE="$ROOT/ops/plugins/infra/observability/bin/observability-prometheus-retired-targets-reconcile"
 DASHY_RETIRE="$ROOT/ops/plugins/infra/observability/bin/observability-dashy-residue-retire"
 VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
+PLACEMENT_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
+STACK_REGISTRY="$ROOT/docs/governance/STACK_REGISTRY.yaml"
+SHOP_STORAGE_MAP="$ROOT/ops/bindings/shop.storage.map.yaml"
 
 fail() { echo "D453 FAIL: $*" >&2; exit 1; }
 
@@ -28,13 +31,16 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -x "$RECONCILE" ]] || fail "missing executable retired-target reconcile"
 [[ -x "$DASHY_RETIRE" ]] || fail "missing executable dashy residue retire"
 [[ -f "$VM_LIFECYCLE" ]] || fail "missing VM lifecycle binding"
+[[ -f "$PLACEMENT_POLICY" ]] || fail "missing infra storage placement policy"
+[[ -f "$STACK_REGISTRY" ]] || fail "missing stack registry"
+[[ -f "$SHOP_STORAGE_MAP" ]] || fail "missing shop storage projection"
 
 "$CONTEXT" --self-check >/dev/null
 "$TARGETS" --self-check >/dev/null
 "$RECONCILE" --self-check >/dev/null
 "$DASHY_RETIRE" --self-check >/dev/null
 
-python3 - "$CAPS" "$BUNDLE" "$CONTRACT" "$DOC" "$TARGETS" "$CONTEXT" "$RECONCILE" "$DASHY_RETIRE" "$VM_LIFECYCLE" <<'PY'
+python3 - "$CAPS" "$BUNDLE" "$CONTRACT" "$DOC" "$TARGETS" "$CONTEXT" "$RECONCILE" "$DASHY_RETIRE" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" "$STACK_REGISTRY" "$SHOP_STORAGE_MAP" <<'PY'
 import sys
 from pathlib import Path
 
@@ -49,6 +55,9 @@ context_path = Path(sys.argv[6])
 reconcile_path = Path(sys.argv[7])
 dashy_retire_path = Path(sys.argv[8])
 vm_lifecycle_path = Path(sys.argv[9])
+placement_policy_path = Path(sys.argv[10])
+stack_registry_path = Path(sys.argv[11])
+shop_storage_map_path = Path(sys.argv[12])
 
 
 def fail(message: str) -> None:
@@ -153,6 +162,10 @@ context_text = context_path.read_text(encoding="utf-8")
 for forbidden in ["docker restart", "sudo tee", "--execute"]:
     if forbidden in context_text:
         fail(f"read-only context script must not contain mutation primitive: {forbidden}")
+if "watcher-input-projection-status" not in context_text:
+    fail("observability context must read watcher.input.projection.status directly")
+if "run_readback" not in context_text:
+    fail("observability context must retry transient witness readbacks before reporting degraded")
 
 reconcile_text = reconcile_path.read_text(encoding="utf-8")
 for required in ["verify_targets_are_decommissioned", "promtool check config", "backup", "--execute"]:
@@ -163,6 +176,42 @@ dashy_text = dashy_retire_path.read_text(encoding="utf-8")
 for required in ["verify_dashy_stopped", "refusing to remove running dashy container", "docker rm dashy", "--execute"]:
     if required not in dashy_text:
         fail(f"dashy residue retire missing safeguard: {required}")
+if "observability-legacy" not in dashy_text:
+    fail("dashy residue retire must target observability-legacy, not the canonical VM 216 alias")
+
+placement = load_yaml(placement_policy_path)
+vm_storage = placement.get("vm_storage") or {}
+current_storage = vm_storage.get("observability-r620") or {}
+legacy_storage = vm_storage.get("observability-legacy") or {}
+if int(current_storage.get("vm_id") or 0) != 216 or current_storage.get("proxmox_host") != "pve-r620":
+    fail("infra storage placement must declare observability-r620 VM 216 on pve-r620")
+if int(legacy_storage.get("vm_id") or 0) != 205 or legacy_storage.get("placement_status") != "retirement-hold":
+    fail("infra storage placement must keep VM 205 as observability-legacy retirement-hold")
+
+stack_registry = load_yaml(stack_registry_path)
+active_observability_stacks = {
+    "prometheus",
+    "grafana",
+    "loki",
+    "uptime-kuma",
+    "node-exporter",
+}
+for row in stack_registry.get("stacks") or []:
+    if not isinstance(row, dict) or row.get("stack_id") not in active_observability_stacks:
+        continue
+    if row.get("path") != "proxmox:vm-216":
+        fail(f"active observability stack {row.get('stack_id')} must point at proxmox:vm-216")
+
+shop_storage = load_yaml(shop_storage_map_path)
+runtime_rows = shop_storage.get("runtime_storage") or []
+projected_current = next((row for row in runtime_rows if isinstance(row, dict) and row.get("hostname") == "observability-r620"), None)
+projected_legacy = next((row for row in runtime_rows if isinstance(row, dict) and row.get("hostname") == "observability"), None)
+if not isinstance(projected_current, dict) or int(projected_current.get("vm_id") or 0) != 216:
+    fail("shop storage projection must include observability-r620 VM 216")
+if projected_legacy is not None:
+    fail("shop storage projection must not keep legacy VM 205 as active observability runtime")
+if len(projected_current.get("health_probe_ids") or []) < 5:
+    fail("shop storage projection must join observability probe aliases onto observability-r620")
 
 vm_lifecycle = load_yaml(vm_lifecycle_path)
 observability = next(
