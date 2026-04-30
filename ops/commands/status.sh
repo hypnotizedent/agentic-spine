@@ -840,6 +840,74 @@ def collect_watcher_input_projection():
     return result
 
 
+def collect_worktree_cleanup_state():
+    result = {
+        "status": "unavailable",
+        "worktree_count": 0,
+        "cleanable_worktrees": 0,
+        "dirty_blocked_worktrees": 0,
+        "temp_clone_count": 0,
+        "dirty_temp_clones": 0,
+        "stash_blocked": 0,
+        "root_blocked": False,
+        "root_issues": [],
+        "worktrees": [],
+    }
+    reconcile_bin = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "worktree-lifecycle-reconcile"
+    if not reconcile_bin.exists():
+        result["error"] = f"missing worktree lifecycle reconcile: {reconcile_bin}"
+        return result
+
+    data = run_json_command([str(reconcile_bin), "--json"], timeout=20)
+    if data.get("status") == "error":
+        result["error"] = data.get("error", "worktree lifecycle reconcile failed")
+        return result
+
+    worktrees = data.get("worktrees") if isinstance(data.get("worktrees"), list) else []
+    temp_clones = data.get("temp_clones") if isinstance(data.get("temp_clones"), list) else []
+    stashes = data.get("stashes") if isinstance(data.get("stashes"), list) else []
+    root_checkout = data.get("root_checkout") if isinstance(data.get("root_checkout"), dict) else {}
+    cleanable = 0
+    dirty_blocked = 0
+    for row in worktrees:
+        if not isinstance(row, dict):
+            continue
+        lease = row.get("lease") if isinstance(row.get("lease"), dict) else {}
+        dirty = bool(row.get("dirty"))
+        if dirty:
+            dirty_blocked += 1
+            continue
+        if bool(row.get("merged_into_main")) and not bool(lease.get("active")):
+            cleanable += 1
+
+    dirty_temp_clones = sum(
+        1 for row in temp_clones
+        if isinstance(row, dict) and bool(row.get("dirty"))
+    )
+    stash_blocked = sum(
+        1 for row in stashes
+        if isinstance(row, dict) and (row.get("issues") or not bool(row.get("cleanup_candidate")))
+    )
+    root_issues = [
+        str(item).strip()
+        for item in (root_checkout.get("issues") or [])
+        if str(item).strip()
+    ]
+    result.update({
+        "status": "attention" if dirty_blocked or dirty_temp_clones or stash_blocked or root_issues else "ok",
+        "worktree_count": len(worktrees),
+        "cleanable_worktrees": cleanable,
+        "dirty_blocked_worktrees": dirty_blocked,
+        "temp_clone_count": len(temp_clones),
+        "dirty_temp_clones": dirty_temp_clones,
+        "stash_blocked": stash_blocked,
+        "root_blocked": bool(root_issues),
+        "root_issues": root_issues,
+        "worktrees": worktrees,
+    })
+    return result
+
+
 def collect_delegation_summary():
     result = {
         "status": "unavailable",
@@ -898,6 +966,7 @@ linked_gap_count = len(linked_gaps) if gaps_available else None
 unlinked_gap_count = len(unlinked_gaps) if gaps_available else None
 standing_program_health = collect_standing_program_health()
 watcher_input_projection = collect_watcher_input_projection()
+worktree_cleanup_state = collect_worktree_cleanup_state()
 delegation_summary = collect_delegation_summary()
 
 # ── Parse inbox lanes ─────────────────────────────────────────────────────
@@ -1596,6 +1665,7 @@ if mode == "--json":
         "temporal_truth": temporal_truth_payload,
         "standing_program_health": standing_program_health,
         "watcher_input_projection": watcher_input_projection,
+        "worktree_cleanup": worktree_cleanup_state,
         "delegations": delegation_summary,
         "execution_lane_truth": {
             "mailroom_execution": "capability_backed",
@@ -1619,6 +1689,8 @@ if mode == "--json":
             "watcher_inputs_ok": int((watcher_input_projection.get("summary") or {}).get("ok", 0) or 0),
             "watcher_inputs_degraded": int((watcher_input_projection.get("summary") or {}).get("degraded", 0) or 0),
             "watcher_inputs_failed": int((watcher_input_projection.get("summary") or {}).get("failed", 0) or 0),
+            "worktree_cleanup_cleanable": int(worktree_cleanup_state.get("cleanable_worktrees", 0) or 0),
+            "worktree_cleanup_dirty_blocked": int(worktree_cleanup_state.get("dirty_blocked_worktrees", 0) or 0),
             "fresh_terminals": len(fresh_terminals),
             "fresh_custody_terminals": len(fresh_custody_terminals),
             "active_delegations": int(delegation_summary.get("active", 0) or 0),
@@ -1695,6 +1767,10 @@ if mode == "--brief":
     if _watcher_total:
         _watcher_attention = sum(int(_watcher_summary.get(key, 0) or 0) for key in ("degraded", "failed", "unsupported", "unknown"))
         parts.append(f"Watcher inputs: {_watcher_total - _watcher_attention} ok / {_watcher_attention} attention")
+    _wt_cleanable = int(worktree_cleanup_state.get("cleanable_worktrees", 0) or 0)
+    _wt_dirty = int(worktree_cleanup_state.get("dirty_blocked_worktrees", 0) or 0)
+    if _wt_cleanable or _wt_dirty:
+        parts.append(f"Worktrees: {_wt_cleanable} cleanable / {_wt_dirty} dirty blocked")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
@@ -1718,6 +1794,10 @@ if mode != "--expert":
         int(_watcher_summary.get(key, 0) or 0)
         for key in ("degraded", "failed", "unsupported", "unknown")
     )
+    _wt_cleanable = int(worktree_cleanup_state.get("cleanable_worktrees", 0) or 0)
+    _wt_dirty_blocked = int(worktree_cleanup_state.get("dirty_blocked_worktrees", 0) or 0)
+    _wt_temp_dirty = int(worktree_cleanup_state.get("dirty_temp_clones", 0) or 0)
+    _wt_stash_blocked = int(worktree_cleanup_state.get("stash_blocked", 0) or 0)
     _blocked_loops = [
         loop for loop in open_loops
         if loop.get("execution_readiness", "runnable") == "blocked"
@@ -1741,6 +1821,12 @@ if mode != "--expert":
         _attention.append(f"AUTOMATION DRIFT: {_sp_degraded} standing program(s) degraded")
     if _watcher_inputs_attention:
         _attention.append(f"WATCHER INPUT ATTENTION: {_watcher_inputs_attention} admitted input(s) need attention")
+    if _wt_dirty_blocked:
+        _attention.append(f"WORKTREE RESIDUE: {_wt_dirty_blocked} dirty worktree(s) blocked from cleanup")
+    if _wt_temp_dirty:
+        _attention.append(f"TEMP CLONE RESIDUE: {_wt_temp_dirty} dirty temp clone(s) blocked from cleanup")
+    if _wt_stash_blocked:
+        _attention.append(f"STASH REVIEW: {_wt_stash_blocked} stash item(s) require review before cleanup")
     if joined_state_summary.get("coherence_attention"):
         _attention.append("HEALTH DRIFT: engine coherence needs attention")
     if inbox_actionable:
@@ -1780,6 +1866,10 @@ if mode != "--expert":
         print(f"  authority:         {gap_state.get('status', 'degraded')}")
     print(f"  blocked work:      {len(_blocked_loops)}")
     print(f"  custody:           {terminal_telemetry_status} ({mapped_open_loops}/{len(open_loops)} open work item(s) mapped)")
+    if worktree_cleanup_state.get("status") == "unavailable":
+        print("  worktree cleanup:  unavailable")
+    else:
+        print(f"  worktree cleanup:  {_wt_cleanable} cleanable, {_wt_dirty_blocked} dirty blocked")
     print()
 
     print("AUTOMATION")
