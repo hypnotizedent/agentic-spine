@@ -4,7 +4,7 @@
 # Queries Prometheus /api/v1/targets and reports UP/DOWN status for each scrape job.
 #
 # Usage:
-#   prometheus-targets-status
+#   prometheus-targets-status [--json|--self-check]
 
 set -euo pipefail
 
@@ -14,10 +14,29 @@ BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
+JSON_OUTPUT=0
+SELF_CHECK=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_OUTPUT=1; shift ;;
+    --self-check) SELF_CHECK=1; shift ;;
+    -h|--help)
+      sed -n '1,12p' "$0"
+      exit 0
+      ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
 command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
 command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 [[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+  echo "prometheus.targets.status self-check: OK"
+  exit 0
+fi
 
 # Resolve Prometheus URL from services.health.yaml
 PROM_URL=$(yq -r '.endpoints[] | select(.id == "prometheus") | .url' "$BINDING" | sed 's|/-/healthy||')
@@ -26,32 +45,62 @@ if [[ -z "$PROM_URL" || "$PROM_URL" == "null" ]]; then
   stop "prometheus endpoint not found in $BINDING"
 fi
 
-echo "prometheus.targets.status"
-echo "endpoint: ${PROM_URL}"
-echo
+source "${SPINE_ROOT}/ops/lib/ssh-resolve.sh"
+_resolve_result="$(ssh_resolve_host_with_fallback "observability" 2)" || true
+_RESOLVED_IP="$(echo "$_resolve_result" | awk '{print $1}')"
+_PATH_USED="$(echo "$_resolve_result" | awk '{print $2}')"
+_LAN_IP="$(ssh_resolve_host "observability")"
+if [[ -n "$_LAN_IP" && -n "$_RESOLVED_IP" && "$_RESOLVED_IP" != "$_LAN_IP" ]]; then
+  PROM_URL="${PROM_URL//$_LAN_IP/$_RESOLVED_IP}"
+fi
+
+if [[ "$JSON_OUTPUT" != "1" ]]; then
+  echo "prometheus.targets.status"
+  echo "endpoint: ${PROM_URL}"
+  echo "path: ${_PATH_USED:-unknown}"
+  echo
+fi
 
 # Fetch targets
 TARGETS_JSON=$(curl -s --connect-timeout 5 --max-time 10 "${PROM_URL}/api/v1/targets" 2>/dev/null) || {
-  echo "status: UNREACHABLE"
-  echo "reason: could not reach Prometheus API"
+  if [[ "$JSON_OUTPUT" == "1" ]]; then
+    python3 -c 'import json; print(json.dumps({"capability":"prometheus.targets.status","status":"unreachable","reason":"could not reach Prometheus API"}, indent=2))'
+  else
+    echo "status: UNREACHABLE"
+    echo "reason: could not reach Prometheus API"
+  fi
   exit 1
 }
 
 # Parse and display
-python3 -c "
+JSON_OUTPUT="$JSON_OUTPUT" PROM_URL="$PROM_URL" PATH_USED="${_PATH_USED:-unknown}" TARGETS_JSON="$TARGETS_JSON" python3 - <<'PY'
 import json, sys
+import os
 
-data = json.loads('''${TARGETS_JSON}''')
+json_output = os.environ.get("JSON_OUTPUT") == "1"
+endpoint = os.environ.get("PROM_URL", "")
+path_used = os.environ.get("PATH_USED", "unknown")
+data = json.loads(os.environ.get("TARGETS_JSON", "{}"))
 if data.get('status') != 'success':
-    print('status: ERROR')
-    print(f'reason: {data}')
+    payload = {
+        "capability": "prometheus.targets.status",
+        "status": "error",
+        "endpoint": endpoint,
+        "path": path_used,
+        "reason": data,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print('status: ERROR')
+        print(f'reason: {data}')
     sys.exit(1)
 
 active = data['data'].get('activeTargets', [])
 up = 0
 down = 0
+targets = []
 
-print(f'{'JOB':<30} {'TARGET':<35} {'STATE':<8} {'LAST_SCRAPE':<12}')
 for t in sorted(active, key=lambda x: (x.get('labels', {}).get('job', ''), x.get('labels', {}).get('instance', ''))):
     job = t.get('labels', {}).get('job', '?')
     instance = t.get('labels', {}).get('instance', '?')
@@ -67,16 +116,36 @@ for t in sorted(active, key=lambda x: (x.get('labels', {}).get('job', ''), x.get
         marker = '✗'
         down += 1
 
-    print(f'  {job:<28} {instance:<35} {marker} {health:<6} {last}')
+    targets.append({
+        "job": job,
+        "instance": instance,
+        "health": health,
+        "last_scrape": last,
+        "marker": marker,
+    })
 
-print()
-print(f'summary: {up}/{up+down} targets UP, {down} DOWN')
-if down > 0:
-    print('status: DEGRADED')
-else:
-    print('status: OK')
-" 2>/dev/null || {
-  echo "status: PARSE_ERROR"
-  echo "reason: failed to parse Prometheus targets response"
-  exit 1
+status = "ok" if down == 0 else "degraded"
+payload = {
+    "capability": "prometheus.targets.status",
+    "status": status,
+    "endpoint": endpoint,
+    "path": path_used,
+    "targets_up": up,
+    "targets_down": down,
+    "targets_total": up + down,
+    "down_targets": [t for t in targets if t["health"] != "up"],
+    "targets": targets,
 }
+
+if json_output:
+    print(json.dumps(payload, indent=2, sort_keys=True))
+else:
+    print(f'{"JOB":<30} {"TARGET":<35} {"STATE":<8} {"LAST_SCRAPE":<12}')
+    for target in targets:
+        print(f'  {target["job"]:<28} {target["instance"]:<35} {target["marker"]} {target["health"]:<6} {target["last_scrape"][:19]}')
+    print()
+    print(f'summary: {up}/{up+down} targets UP, {down} DOWN')
+    print(f'status: {status.upper()}')
+
+sys.exit(0 if down == 0 else 1)
+PY

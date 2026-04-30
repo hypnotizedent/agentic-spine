@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+STACK_REGISTRY = ROOT / "docs" / "governance" / "STACK_REGISTRY.yaml"
+
+
+def fail(message: str) -> None:
+    print(f"observability.dashy.residue.retire FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def run(cmd: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
+    if check and proc.returncode != 0:
+        fail(proc.stderr.strip() or proc.stdout.strip() or f"command failed: {' '.join(cmd)}")
+    return proc
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def verify_dashy_stopped() -> dict[str, Any]:
+    data = load_yaml(STACK_REGISTRY)
+    stacks = data.get("stacks") or []
+    row = next((item for item in stacks if isinstance(item, dict) and item.get("stack_id") == "dashy"), None)
+    if not isinstance(row, dict):
+        fail("dashy missing from STACK_REGISTRY.yaml")
+    if row.get("status") != "stopped":
+        fail("refusing to retire dashy container unless STACK_REGISTRY status remains stopped")
+    notes = str(row.get("notes") or "")
+    if "Intentionally stopped" not in notes:
+        fail("dashy stack notes must explain intentional stop before container residue removal")
+    return {"status": row.get("status"), "deploy_target": row.get("deploy_target"), "notes": notes}
+
+
+def container_state() -> dict[str, Any]:
+    proc = run(["ssh", "observability", "docker inspect dashy --format '{{.Name}}|{{.State.Status}}|{{.State.ExitCode}}' 2>/dev/null || true"], check=True)
+    line = proc.stdout.strip()
+    if not line:
+        return {"present": False}
+    name, status, exit_code = (line.split("|", 2) + ["", "", ""])[:3]
+    return {"present": True, "name": name.lstrip("/"), "status": status, "exit_code": exit_code}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="observability-dashy-residue-retire")
+    parser.add_argument("--execute", action="store_true", help="Remove the stopped dashy container from the observability VM.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON.")
+    parser.add_argument("--self-check", action="store_true", help="Verify local retirement evidence only.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    proof = verify_dashy_stopped()
+    if args.self_check:
+        print("observability.dashy.residue.retire self-check: OK")
+        return
+    before = container_state()
+    removed = False
+    if args.execute and before.get("present"):
+        if before.get("status") == "running":
+            fail("refusing to remove running dashy container")
+        run(["ssh", "observability", "docker rm dashy"], check=True)
+        removed = True
+    after = container_state()
+    payload = {
+        "capability": "observability.dashy.residue.retire",
+        "status": "removed" if removed else ("noop" if not before.get("present") else "would_remove"),
+        "mode": "execute" if args.execute else "dry_run",
+        "proof": proof,
+        "before": before,
+        "after": after,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("observability.dashy.residue.retire")
+        print(f"status: {payload['status']}")
+        print(f"before: {before}")
+        print(f"after: {after}")
+
+
+if __name__ == "__main__":
+    main()

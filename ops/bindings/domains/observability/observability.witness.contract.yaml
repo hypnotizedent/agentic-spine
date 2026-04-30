@@ -1,0 +1,90 @@
+version: 1
+domain: observability
+contract_id: observability.witness.contract
+status: canonical
+owner: "@ronny"
+authority_boundary:
+  role: witness_only
+  statement: "Observability exposes readback for agents and operators; it is not spine authority, backup authority, placement authority, or watcher authority."
+  allowed:
+    - expose service and scrape-target readback
+    - provide preflight context before risky work
+    - report degraded witness inputs without mutating workloads
+  forbidden:
+    - decide canonical service truth without the owning capability/readback
+    - create backup authority or backup schedules
+    - mutate placement, VM lifecycle, cron, systemd timers, or workload state
+    - replace watcher.health, watcher.input.projection.status, node.admission.status, or backup.estate.readback.status
+agent_context:
+  capability: observability.context.status
+  safety: read-only
+  contract: "small witness-only context before risky work"
+  stop_lines:
+    - no mutation
+    - no restore drills
+    - no backup jobs
+    - no VM cutover or decommission
+    - no service restart
+governed_mutation:
+  retired_prometheus_targets:
+    capability: observability.prometheus.retired-targets.reconcile
+    default_mode: dry_run
+    execute_rule: "May execute only when each target is already status=decommissioned in vm.lifecycle.yaml."
+    allowed_targets:
+      - download-stack
+      - streaming-stack
+    allowed_mutation:
+      - backup current Prometheus config
+      - remove decommissioned static scrape targets
+      - validate Prometheus config with promtool
+      - reload or restart Prometheus container on the observability VM
+    forbidden_mutation:
+      - mutate decommissioned workloads
+      - delete VM disks, restore artifacts, or backups
+      - edit generated services.health.yaml
+  dashy_residue:
+    capability: observability.dashy.residue.retire
+    default_mode: dry_run
+    execute_rule: "May execute only while Dashy remains status=stopped in STACK_REGISTRY and the live container is not running."
+    allowed_mutation:
+      - remove stopped Dashy container residue from the observability VM
+    forbidden_mutation:
+      - delete Dashy compose/config files
+      - restart or re-enable Dashy
+      - publish Dashy as an active health probe
+runtime:
+  current:
+    node_id: observability
+    vmid: 205
+    proxmox_host: pve
+    state: active_witness_runtime
+    services:
+      - prometheus
+      - grafana
+      - loki
+      - uptime-kuma
+      - node-exporter
+  target:
+    node_id: pve-r620
+    state: approved_relocation_target_pending_guest_build
+    hard_rule: "No Docker workloads directly on the pve-r620 hypervisor; observability must run inside a guest."
+acceptance_gates:
+  before_cutover:
+    - observability.context.status returns reachable stack readback
+    - prometheus.targets.status returns scrape target readback through governed host resolution
+    - watcher.health remains healthy
+    - watcher.input.projection.status remains ok
+    - node.admission.status keeps pve-r620 admitted and keeps observability classified as runtime evidence until promoted
+    - backup.estate.readback.status does not depend on app-local observability backup debt
+  before_old_vm_decommission:
+    - new guest routes and DNS/bindings are canonical
+    - old VM 205 has preserve/hold evidence
+    - no two canonical observability runtimes remain
+    - spine.verify and verify.engine.run pass
+subtraction_policy:
+  stale_truth_to_subtract:
+    - hard-coded LAN-only observability probes
+    - Dashy as active observability service
+    - generated services.health manual edits
+    - observability VM access being mistaken for node admission
+    - Prometheus scrape failure being treated as workload outage without owner readback corroboration

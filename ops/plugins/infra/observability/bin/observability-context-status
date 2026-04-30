@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+CONTRACT = ROOT / "ops" / "bindings" / "domains" / "observability" / "observability.witness.contract.yaml"
+SERVICES_HEALTH = ROOT / "ops" / "bindings" / "services.health.yaml"
+BACKUP_INVENTORY = ROOT / "ops" / "bindings" / "domains" / "backup" / "backup.inventory.yaml"
+STACK_SCRIPT = ROOT / "ops" / "plugins" / "infra" / "observability" / "bin" / "observability-stack-status"
+TARGETS_SCRIPT = ROOT / "ops" / "plugins" / "infra" / "observability" / "bin" / "prometheus-targets-status"
+WATCHER_STATE = ROOT.parent / ".runtime" / "spine" / "logs" / "watcher-cycle-state.json"
+
+
+def fail(message: str) -> None:
+    print(f"observability.context.status FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def run(args: list[str]) -> dict[str, Any]:
+    proc = subprocess.run(args, cwd=ROOT, text=True, capture_output=True)
+    payload: dict[str, Any] = {
+        "command": " ".join(args),
+        "exit": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+    }
+    if proc.stdout.strip().startswith("{"):
+        try:
+            payload["json"] = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            pass
+    return payload
+
+
+def service_count() -> int:
+    data = load_yaml(SERVICES_HEALTH)
+    endpoints = data.get("endpoints") or []
+    return sum(1 for row in endpoints if isinstance(row, dict) and row.get("host") == "observability")
+
+
+def backup_posture() -> dict[str, Any]:
+    if not BACKUP_INVENTORY.is_file():
+        return {"status": "unknown", "reason": "backup inventory missing"}
+    data = load_yaml(BACKUP_INVENTORY)
+    runtime_units = data.get("runtime_units") or []
+    targets = data.get("targets") or []
+    unit = next((row for row in runtime_units if isinstance(row, dict) and row.get("unit_id") == "vm-205-observability"), {})
+    target = next((row for row in targets if isinstance(row, dict) and row.get("name") == "vm-205-observability-primary"), {})
+    return {
+        "status": "declared" if unit or target else "missing",
+        "runtime_unit": unit.get("unit_id"),
+        "backup_admission_state": unit.get("backup_admission_state"),
+        "target": target.get("name"),
+        "target_enabled": target.get("enabled"),
+        "classification": target.get("classification"),
+    }
+
+
+def watcher_summary() -> dict[str, Any]:
+    if not WATCHER_STATE.is_file():
+        return {"status": "unknown", "reason": "watcher state file missing"}
+    try:
+        data = json.loads(WATCHER_STATE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"status": "unknown", "reason": f"watcher state parse failed: {exc}"}
+    projection = data.get("watcher_input_projection") or {}
+    return {
+        "status": data.get("health") or data.get("status") or "unknown",
+        "last_run_status": data.get("last_run_status"),
+        "last_success_at": data.get("last_success_at"),
+        "input_projection_status": projection.get("status"),
+        "input_count": projection.get("input_count"),
+    }
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="observability-context-status")
+    parser.add_argument("--json", action="store_true", help="Emit JSON.")
+    parser.add_argument("--self-check", action="store_true", help="Verify local contract and registration prerequisites only.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    contract = load_yaml(CONTRACT)
+    boundary = (contract.get("authority_boundary") or {}).get("role")
+    if boundary != "witness_only":
+        fail("contract authority_boundary.role must be witness_only")
+    if not STACK_SCRIPT.is_file() or not TARGETS_SCRIPT.is_file():
+        fail("missing observability readback scripts")
+    if args.self_check:
+        print("observability.context.status self-check: OK")
+        return
+
+    stack = run([str(STACK_SCRIPT)])
+    targets = run([str(TARGETS_SCRIPT), "--json"])
+    targets_json = targets.get("json") if isinstance(targets.get("json"), dict) else {}
+    stack_status = "ok" if stack["exit"] == 0 else "degraded"
+    targets_status = str(targets_json.get("status") or ("ok" if targets["exit"] == 0 else "degraded"))
+    status = "ok" if stack_status == "ok" and targets_status == "ok" else "degraded"
+
+    payload = {
+        "capability": "observability.context.status",
+        "status": status,
+        "authority_boundary": boundary,
+        "statement": (contract.get("authority_boundary") or {}).get("statement"),
+        "runtime": contract.get("runtime"),
+        "agent_context": contract.get("agent_context"),
+        "service_endpoint_count": service_count(),
+        "stack": {
+            "status": stack_status,
+            "exit": stack["exit"],
+        },
+        "prometheus_targets": {
+            "status": targets_status,
+            "exit": targets["exit"],
+            "endpoint": targets_json.get("endpoint"),
+            "path": targets_json.get("path"),
+            "targets_up": targets_json.get("targets_up"),
+            "targets_down": targets_json.get("targets_down"),
+            "targets_total": targets_json.get("targets_total"),
+            "down_targets": targets_json.get("down_targets") or [],
+        },
+        "watcher": watcher_summary(),
+        "backup_posture": backup_posture(),
+        "stop_lines": (contract.get("agent_context") or {}).get("stop_lines") or [],
+        "subtraction_policy": contract.get("subtraction_policy"),
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("observability.context.status")
+        print(f"status: {status.upper()}")
+        print(f"authority_boundary: {boundary}")
+        print(f"runtime_current: {((contract.get('runtime') or {}).get('current') or {}).get('node_id')} vmid={((contract.get('runtime') or {}).get('current') or {}).get('vmid')}")
+        print(f"runtime_target: {((contract.get('runtime') or {}).get('target') or {}).get('node_id')} state={((contract.get('runtime') or {}).get('target') or {}).get('state')}")
+        print(f"stack: {stack_status.upper()}")
+        print(
+            "prometheus_targets: "
+            f"{targets_status.upper()} "
+            f"({targets_json.get('targets_up')}/{targets_json.get('targets_total')} up, "
+            f"{targets_json.get('targets_down')} down, path={targets_json.get('path')})"
+        )
+        print(f"watcher: {payload['watcher'].get('status')} input_projection={payload['watcher'].get('input_projection_status')}")
+        print(f"backup_posture: {payload['backup_posture'].get('status')} target={payload['backup_posture'].get('target')}")
+        print("stop_lines: no mutation, no backups, no restore drills, no VM cutover/decommission")
+
+    raise SystemExit(0 if status == "ok" else 1)
+
+
+if __name__ == "__main__":
+    main()

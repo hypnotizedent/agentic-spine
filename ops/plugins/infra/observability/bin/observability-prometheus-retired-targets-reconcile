@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import base64
+from datetime import datetime, timezone
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+VM_LIFECYCLE = ROOT / "ops" / "bindings" / "vm.lifecycle.yaml"
+PROM_CONFIG = "/opt/stacks/prometheus/prometheus.yml"
+PROM_CONFIG_IN_CONTAINER = "/etc/prometheus/prometheus.yml"
+DEFAULT_RETIRED_TARGETS = ["download-stack", "streaming-stack"]
+
+
+def fail(message: str) -> None:
+    print(f"observability.prometheus.retired-targets.reconcile FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def run(cmd: list[str], *, input_text: str | None = None, check: bool = False) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(cmd, cwd=ROOT, input=input_text, text=True, capture_output=True)
+    if check and proc.returncode != 0:
+        fail(proc.stderr.strip() or proc.stdout.strip() or f"command failed: {' '.join(cmd)}")
+    return proc
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def verify_targets_are_decommissioned(targets: list[str]) -> dict[str, Any]:
+    data = load_yaml(VM_LIFECYCLE)
+    rows = data.get("vms") or data.get("virtual_machines") or []
+    if not isinstance(rows, list):
+        fail("vm.lifecycle.yaml missing VM list")
+    by_hostname = {str(row.get("hostname") or ""): row for row in rows if isinstance(row, dict)}
+    proof: dict[str, Any] = {}
+    for target in targets:
+        row = by_hostname.get(target)
+        if not isinstance(row, dict):
+            fail(f"retired target not found in vm.lifecycle.yaml: {target}")
+        if row.get("status") != "decommissioned":
+            fail(f"refusing to remove active/non-decommissioned target from Prometheus: {target}")
+        proof[target] = {
+            "status": row.get("status"),
+            "decommissioned_at": row.get("decommissioned_at"),
+            "tombstone": (row.get("tombstone") or {}).get("runtime_cleanup_class"),
+        }
+    return proof
+
+
+def read_remote_config() -> str:
+    proc = run(["ssh", "observability", f"sudo cat {PROM_CONFIG}"], check=True)
+    return proc.stdout
+
+
+def render_config(original: str, retired_targets: set[str]) -> tuple[str, list[dict[str, Any]]]:
+    data = yaml.safe_load(original) or {}
+    if not isinstance(data, dict):
+        fail("remote Prometheus config is not a YAML mapping")
+    removed: list[dict[str, Any]] = []
+    scrape_configs = data.get("scrape_configs") or []
+    if not isinstance(scrape_configs, list):
+        fail("remote Prometheus config missing scrape_configs list")
+    for job in scrape_configs:
+        if not isinstance(job, dict):
+            continue
+        static_configs = job.get("static_configs")
+        if not isinstance(static_configs, list):
+            continue
+        kept = []
+        for static_config in static_configs:
+            labels = static_config.get("labels") if isinstance(static_config, dict) else {}
+            instance = str((labels or {}).get("instance") or "")
+            if instance in retired_targets:
+                removed.append(
+                    {
+                        "job_name": job.get("job_name"),
+                        "instance": instance,
+                        "targets": static_config.get("targets"),
+                        "vmid": (labels or {}).get("vmid"),
+                    }
+                )
+                continue
+            kept.append(static_config)
+        job["static_configs"] = kept
+    rendered = yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+    return rendered, removed
+
+
+def write_remote_config(rendered: str) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = f"{PROM_CONFIG}.spine-{stamp}.bak"
+    run(["ssh", "observability", f"sudo cp {PROM_CONFIG} {backup}"], check=True)
+    encoded = base64.b64encode(rendered.encode("utf-8")).decode("ascii")
+    run(
+        [
+            "ssh",
+            "observability",
+            f"base64 -d | sudo tee {PROM_CONFIG} >/dev/null",
+        ],
+        input_text=encoded,
+        check=True,
+    )
+    check = run(
+        ["ssh", "observability", f"docker exec prometheus promtool check config {PROM_CONFIG_IN_CONTAINER}"],
+    )
+    if check.returncode != 0:
+        run(["ssh", "observability", f"sudo cp {backup} {PROM_CONFIG}"], check=False)
+        fail("promtool check failed; restored backup: " + (check.stderr.strip() or check.stdout.strip()))
+    return backup
+
+
+def reload_prometheus() -> str:
+    reload_proc = run(
+        [
+            "ssh",
+            "observability",
+            "docker exec prometheus wget -qO- --post-data='' http://localhost:9090/-/reload",
+        ]
+    )
+    if reload_proc.returncode == 0:
+        return "reload_endpoint"
+    run(["ssh", "observability", "docker restart prometheus"], check=True)
+    return "container_restart"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="observability-prometheus-retired-targets-reconcile")
+    parser.add_argument("--execute", action="store_true", help="Apply the removal and reload/restart Prometheus.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON.")
+    parser.add_argument("--self-check", action="store_true", help="Verify local dependencies only.")
+    parser.add_argument("--target", action="append", default=[], help="Retired instance label to remove. Defaults to known decommissioned media stack targets.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if args.self_check:
+        verify_targets_are_decommissioned(DEFAULT_RETIRED_TARGETS)
+        print("observability.prometheus.retired-targets.reconcile self-check: OK")
+        return
+
+    targets = args.target or DEFAULT_RETIRED_TARGETS
+    decommission_proof = verify_targets_are_decommissioned(targets)
+    original = read_remote_config()
+    rendered, removed = render_config(original, set(targets))
+    payload: dict[str, Any] = {
+        "capability": "observability.prometheus.retired-targets.reconcile",
+        "status": "noop" if not removed else ("applied" if args.execute else "would_apply"),
+        "mode": "execute" if args.execute else "dry_run",
+        "remote_host": "observability",
+        "remote_config": PROM_CONFIG,
+        "targets": targets,
+        "removed": removed,
+        "decommission_proof": decommission_proof,
+        "backup": None,
+        "reload_method": None,
+    }
+    if removed and args.execute:
+        backup = write_remote_config(rendered)
+        method = reload_prometheus()
+        time.sleep(3)
+        payload["backup"] = backup
+        payload["reload_method"] = method
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("observability.prometheus.retired-targets.reconcile")
+        print(f"status: {payload['status']}")
+        print(f"mode: {payload['mode']}")
+        for row in removed:
+            print(f"  remove: {row['instance']} targets={row.get('targets')} vmid={row.get('vmid')}")
+        if payload["backup"]:
+            print(f"backup: {payload['backup']}")
+        if payload["reload_method"]:
+            print(f"reload_method: {payload['reload_method']}")
+
+
+if __name__ == "__main__":
+    main()
