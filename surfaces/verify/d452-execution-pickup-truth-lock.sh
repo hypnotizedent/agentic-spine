@@ -64,4 +64,25 @@ PY
 
 (cd "$ROOT" && "$OPS" cap list | grep -q "execution.pickup.status") || fail "capability registry missing execution.pickup.status"
 
+python3 - "$ROOT/ops/capabilities.yaml" "$ROOT/ops/bindings/mailroom.task.worker.contract.yaml" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+capabilities_path = Path(sys.argv[1])
+worker_contract_path = Path(sys.argv[2])
+
+capabilities = (yaml.safe_load(capabilities_path.read_text(encoding="utf-8")) or {}).get("capabilities") or {}
+worker_contract = yaml.safe_load(worker_contract_path.read_text(encoding="utf-8")) or {}
+allowlist = (
+    ((worker_contract.get("task_execution") or {}).get("capability_allowlist"))
+    or []
+)
+
+missing = [cap for cap in allowlist if cap not in capabilities]
+if missing:
+    raise SystemExit(f"D452 FAIL: worker capability allowlist has unregistered entries: {', '.join(missing)}")
+PY
+
 echo "D452 PASS: execution pickup truth locked"
