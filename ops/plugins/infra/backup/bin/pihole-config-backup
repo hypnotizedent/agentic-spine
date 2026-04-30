@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# pihole-config-backup - Back up the canonical home Pi-hole appliance config.
+#
+# Default is dry-run. Use --execute to stream a root-owned tarball from
+# pihole-home into the existing Synology backup plane.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/ops/lib/ssh-resolve.sh"
+
+TARGET_ID="pihole-home"
+DEST_ID="nas"
+DEST_DIR="/volume1/backups/apps/pihole-home"
+EXECUTE=0
+
+usage() {
+  cat <<'EOF'
+pihole-config-backup
+
+Usage:
+  pihole-config-backup [--target pihole-home] [--dest nas] [--execute]
+
+Backs up small Pi-hole DNS appliance state:
+  - /etc/pihole
+  - /etc/dnsmasq.d
+  - /etc/unbound/unbound.conf.d
+
+Writes:
+  /volume1/backups/apps/pihole-home/pihole-home-config-<UTC>.tar.gz
+  /volume1/backups/apps/pihole-home/pihole-home-config-<UTC>.sha256
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target) TARGET_ID="${2:?--target requires a value}"; shift 2 ;;
+    --dest) DEST_ID="${2:?--dest requires a value}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    --dry-run) EXECUTE=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "STOP: unknown arg: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+src_host="$(ssh_resolve_ssh_host_with_fallback "$TARGET_ID" 2>/dev/null | awk '{print $1}')"
+src_user="$(ssh_resolve_user "$TARGET_ID")"
+dest_host="$(ssh_resolve_ssh_host_with_fallback "$DEST_ID" 2>/dev/null | awk '{print $1}')"
+dest_user="$(ssh_resolve_user "$DEST_ID")"
+
+[[ -n "$src_host" ]] || { echo "STOP: cannot resolve source target $TARGET_ID" >&2; exit 2; }
+[[ -n "$dest_host" ]] || { echo "STOP: cannot resolve destination target $DEST_ID" >&2; exit 2; }
+[[ -n "$src_user" ]] || src_user=ubuntu
+[[ -n "$dest_user" ]] || dest_user=root
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+artifact="pihole-home-config-${stamp}.tar.gz"
+remote_path="${DEST_DIR}/${artifact}"
+sha_path="${remote_path}.sha256"
+
+echo "pihole.config.backup"
+echo "source: ${TARGET_ID} (${src_user}@${src_host})"
+echo "destination: ${DEST_ID}:${remote_path}"
+echo "execute: $EXECUTE"
+
+if [[ "$EXECUTE" != "1" ]]; then
+  echo "DRY-RUN: would create ${remote_path}"
+  exit 0
+fi
+
+ssh "${dest_user}@${dest_host}" "mkdir -p '$DEST_DIR'"
+
+ssh "${src_user}@${src_host}" \
+  "sudo tar -C / --warning=no-file-changed -czf - etc/pihole etc/dnsmasq.d etc/unbound/unbound.conf.d" \
+  | ssh "${dest_user}@${dest_host}" "cat > '$remote_path'"
+
+ssh "${dest_user}@${dest_host}" "cd '$DEST_DIR' && sha256sum '$artifact' > '${artifact}.sha256'"
+
+bytes="$(ssh "${dest_user}@${dest_host}" "stat -c %s '$remote_path' 2>/dev/null || stat -f %z '$remote_path'")"
+sha="$(ssh "${dest_user}@${dest_host}" "cut -d' ' -f1 '$sha_path'")"
+
+echo "artifact: $remote_path"
+echo "bytes: $bytes"
+echo "sha256: $sha"
+echo "status: OK"
