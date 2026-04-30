@@ -10,7 +10,7 @@ set -euo pipefail
 # recovery truth surface.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SPINE_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
 HW_BINDING="$SPINE_ROOT/ops/bindings/hardware.inventory.yaml"
 OP_HW_BINDING="$SPINE_ROOT/ops/bindings/operator.hardware.inventory.yaml"
@@ -145,6 +145,25 @@ primary_tailscale_ip="$(jq -r '.tailscale_ip // empty' <<<"$ssh_json")"
 primary_lan_ip="$(jq -r '.lan_ip // empty' <<<"$ssh_json")"
 primary_description="$(jq -r '.description // empty' <<<"$ssh_json")"
 
+if [[ -z "$primary_host" && "$op_hw_json" != "{}" ]]; then
+  primary_host="$(jq -r '.tailscale_ip // empty' <<<"$op_hw_json")"
+  primary_tailscale_ip="$primary_host"
+  primary_user="$(jq -r '.default_user // "unknown"' <<<"$op_hw_json")"
+  primary_access_policy="tailscale_declared_if_admin_enabled"
+  primary_access_method="operator_hardware_inventory"
+  primary_description="$(jq -r '.notes // empty' <<<"$op_hw_json")"
+fi
+
+if [[ -z "$primary_host" && "$appliance_json" != "{}" ]]; then
+  primary_host="$(jq -r '.network_identities.tailscale_ip // .backed_by.tailscale_ip // empty' <<<"$appliance_json")"
+  primary_tailscale_ip="$primary_host"
+  primary_lan_ip="$(jq -r '.network_identities.lan_ip // .backed_by.lan_ip // empty' <<<"$appliance_json")"
+  primary_user="$(jq -r '.access_methods[0].user // "unknown"' <<<"$appliance_json")"
+  primary_access_policy="appliance_declared_access"
+  primary_access_method="$(jq -r '.access_methods[0].method // "appliance_readback"' <<<"$appliance_json")"
+  primary_description="$(jq -r '.notes // .class // empty' <<<"$appliance_json")"
+fi
+
 recovery_target_id="$(jq -r '.recovery_target_id // empty' <<<"$ssh_json")"
 recovery_target_json='{}'
 if [[ -n "$recovery_target_id" ]]; then
@@ -155,10 +174,23 @@ fi
 recovery_status="$(jq -r '.recovery_status // empty' <<<"$recovery_target_json")"
 [[ -n "$recovery_status" ]] || recovery_status="$(jq -r '.recovery_substrate.status // empty' <<<"$hw_json")"
 [[ -n "$recovery_status" ]] || recovery_status="$(jq -r '.recovery_status // empty' <<<"$appliance_json")"
+[[ -n "$recovery_status" ]] || recovery_status="$(jq -r '.recovery_control.power // empty' <<<"$op_hw_json")"
+if [[ -z "$recovery_status" && "$op_hw_json" != "{}" ]]; then
+  if jq -e '.known_constraints[]? | test("power-loss recovery unproved|No remote admin plane|manual|physical"; "i")' <<<"$op_hw_json" >/dev/null 2>&1; then
+    recovery_status="physical_presence_required"
+  fi
+fi
 [[ -n "$recovery_status" ]] || recovery_status="unproven"
 
 physical_action_required="$(jq -r '.physical_action_required // empty' <<<"$recovery_target_json")"
 [[ -n "$physical_action_required" ]] || physical_action_required="$(jq -r '.recovery_substrate.blocker // empty' <<<"$hw_json")"
+[[ -n "$physical_action_required" ]] || physical_action_required="$(jq -r '.recovery_control.manual_action // empty' <<<"$op_hw_json")"
+if [[ -z "$physical_action_required" && "$op_hw_json" != "{}" ]]; then
+  physical_action_required="$(jq -r '[.known_constraints[]? | select(test("power-loss recovery unproved|No remote admin plane|manual|physical"; "i"))] | first // empty' <<<"$op_hw_json")"
+fi
+if [[ -z "$physical_action_required" && "$appliance_json" != "{}" && "$recovery_status" == "physical_presence_required" ]]; then
+  physical_action_required="operator physical presence required for power or console recovery"
+fi
 
 cross_site_recovery="$(jq -r '.recovery_substrate.cross_site_recovery // empty' <<<"$hw_json")"
 [[ -n "$cross_site_recovery" ]] || cross_site_recovery="false"
@@ -182,6 +214,12 @@ if [[ -n "$primary_host" ]]; then
 fi
 
 if [[ "$recovery_target_json" != "{}" || "$(jq -r '.recovery_substrate.type // empty' <<<"$hw_json")" != "" ]]; then
+  power_plane="$recovery_status"
+  console_plane="$recovery_status"
+elif [[ "$op_hw_json" != "{}" && "$(jq -r '.recovery_control.power // empty' <<<"$op_hw_json")" != "" ]]; then
+  power_plane="$(jq -r '.recovery_control.power' <<<"$op_hw_json")"
+  console_plane="$(jq -r '.recovery_control.console // .recovery_control.power' <<<"$op_hw_json")"
+elif [[ "$recovery_status" == "physical_presence_required" || "$recovery_status" == "readback_only" ]]; then
   power_plane="$recovery_status"
   console_plane="$recovery_status"
 fi
@@ -266,6 +304,8 @@ fi
 
 status_primitives='[]'
 invoke_primitives='[]'
+invoke_modes='[]'
+manual_limits='[]'
 
 append_json_item() {
   local base="$1"
@@ -273,6 +313,23 @@ append_json_item() {
   local mode="$3"
   jq -cn --argjson base "$base" --arg capability "$cap" --arg mode "$mode" \
     '$base + [{capability:$capability, mode:$mode}]'
+}
+
+append_mode() {
+  local base="$1"
+  local mode="$2"
+  local capability="$3"
+  local description="$4"
+  jq -cn --argjson base "$base" --arg mode "$mode" --arg capability "$capability" --arg description "$description" \
+    '$base + [{mode:$mode, capability:$capability, description:$description}]'
+}
+
+append_limit() {
+  local base="$1"
+  local id="$2"
+  local description="$3"
+  jq -cn --argjson base "$base" --arg id "$id" --arg description "$description" \
+    '$base + [{id:$id, description:$description}]'
 }
 
 if [[ "$NODE_ID" == "pve" ]]; then
@@ -305,6 +362,42 @@ elif [[ "$node_kind" == "appliance" ]]; then
 else
   status_primitives="$(append_json_item "$status_primitives" "ssh.target.status" "reachability")"
 fi
+
+if [[ "$node_kind" == "infra_machine" && "$hardware_os" == Proxmox* && "$ssh_json" != "{}" ]]; then
+  status_primitives="$(append_json_item "$status_primitives" "infra.proxmox.host.status" "host_state")"
+  if [[ "$site_mutation_posture" == "true" || "$site_mutation_posture" == "site_local_only" ]]; then
+    invoke_modes="$(append_mode "$invoke_modes" "host_startup" "infra.proxmox.host.control" "Start admitted Proxmox guests on an already reachable host over SSH.")"
+  fi
+fi
+
+if [[ "$power_plane" == "proved" || "$power_plane" == "known_and_reachable" ]]; then
+  if [[ "$site_mutation_posture" == "true" ]]; then
+    invoke_modes="$(append_mode "$invoke_modes" "power_status" "infra.proxmox.power.control" "Read out-of-band power state through the declared recovery target.")"
+    invoke_modes="$(append_mode "$invoke_modes" "power_on" "infra.proxmox.power.control" "Power on through proved out-of-band recovery.")"
+    invoke_modes="$(append_mode "$invoke_modes" "power_off" "infra.proxmox.power.control" "Hard power off through proved out-of-band recovery; use only when graceful control is insufficient.")"
+    invoke_modes="$(append_mode "$invoke_modes" "power_cycle" "infra.proxmox.power.control" "Power cycle through proved out-of-band recovery.")"
+    if [[ "$node_kind" == "infra_machine" && "$hardware_os" == Proxmox* && "$ssh_json" != "{}" ]]; then
+      invoke_modes="$(append_mode "$invoke_modes" "host_shutdown" "infra.proxmox.host.control" "Gracefully shut down guests and host; safe because a proved power-on path exists.")"
+    fi
+  else
+    manual_limits="$(append_limit "$manual_limits" "oob_site_limit" "Out-of-band power or console exists but is not safely invokable from the current operator site/posture.")"
+  fi
+elif [[ "$power_plane" == "physical_presence_required" ]]; then
+  manual_limits="$(append_limit "$manual_limits" "manual_power_required" "No governed remote power path is declared; operator physical presence is required for power recovery.")"
+elif [[ "$power_plane" == "readback_only" ]]; then
+  manual_limits="$(append_limit "$manual_limits" "vendor_owned_control" "Spine has readback access only; vendor/appliance control plane owns mutation.")"
+else
+  manual_limits="$(append_limit "$manual_limits" "remote_power_unproved" "No proved remote power or console path is declared.")"
+fi
+
+if [[ "$identity_plane" != "ssh_identity_declared" ]]; then
+  manual_limits="$(append_limit "$manual_limits" "admin_plane_unproved" "No governed SSH/admin identity is declared for agent control.")"
+fi
+
+status_primitives="$(jq -c 'unique_by((.capability // "") + ":" + (.mode // ""))' <<<"$status_primitives")"
+invoke_primitives="$(jq -c 'unique_by((.capability // "") + ":" + (.mode // ""))' <<<"$invoke_primitives")"
+invoke_modes="$(jq -c 'unique_by((.mode // ""))' <<<"$invoke_modes")"
+manual_limits="$(jq -c 'unique_by((.id // ""))' <<<"$manual_limits")"
 
 result_json="$(jq -n \
   --arg node_id "$NODE_ID" \
@@ -350,6 +443,8 @@ result_json="$(jq -n \
   --argjson required_vm_targets "$required_vm_targets_json" \
   --argjson status_primitives "$status_primitives" \
   --argjson invoke_primitives "$invoke_primitives" \
+  --argjson invoke_modes "$invoke_modes" \
+  --argjson manual_limits "$manual_limits" \
   '{
     node_id:$node_id,
     node_kind:$node_kind,
@@ -399,6 +494,11 @@ result_json="$(jq -n \
     recovery_links:{
       recovery_target_id:$recovery_target_id,
       physical_action_required:$physical_action_required
+    },
+    control_modes:{
+      status:$status_primitives,
+      invoke:$invoke_modes,
+      manual_limits:$manual_limits
     },
     source_surfaces:{
       admission_record:$admission_record,
@@ -484,6 +584,20 @@ echo "  status:"
 jq -r '.[] | "    - \(.capability) [\(.mode)]"' <<<"$status_primitives"
 echo "  invoke:"
 jq -r '.[] | "    - \(.capability) [\(.mode)]"' <<<"$invoke_primitives"
+echo ""
+echo "CONTROL MODES"
+echo "  invoke:"
+if [[ "$(jq 'length' <<<"$invoke_modes")" -gt 0 ]]; then
+  jq -r '.[] | "    - \(.mode): \(.description) [\(.capability)]"' <<<"$invoke_modes"
+else
+  echo "    none"
+fi
+echo "  manual_limits:"
+if [[ "$(jq 'length' <<<"$manual_limits")" -gt 0 ]]; then
+  jq -r '.[] | "    - \(.id): \(.description)"' <<<"$manual_limits"
+else
+  echo "    none"
+fi
 echo ""
 echo "------------------------------------------------------------"
 # Summary verdict
