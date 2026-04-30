@@ -448,6 +448,65 @@ def machine_spec_row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def golden_path_row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
+    row = machine_spec_row_from_recovery(recovery)
+    spec = row.get("machine_spec") or {}
+    known = spec.get("known") or {}
+    missing = spec.get("missing_fields") or []
+    placement = row.get("placement_truth") or {}
+    runtime = row.get("runtime_obligations") or {}
+    proof = ((row.get("setup_correctness") or {}).get("admission_proof") or {})
+    stages = [
+        {
+            "stage": "first_touch",
+            "state": row.get("first_touch_state") or "unknown",
+            "proof": first_present(proof.get("first_boot_claim"), proof.get("proof_ref"), default="missing"),
+        },
+        {
+            "stage": "machine_facts",
+            "state": "complete" if not missing else "missing_fields",
+            "known_fields": sorted(known.keys()),
+            "missing_fields": missing,
+        },
+        {
+            "stage": "node_admission",
+            "state": row.get("admission_state") or "unknown",
+            "proof": first_present(proof.get("proof_ref"), default="node.recovery.status composition"),
+        },
+        {
+            "stage": "placement",
+            "state": first_present(placement.get("placement_status"), default="unknown"),
+            "required_vm_targets": placement.get("required_vm_targets") or [],
+        },
+        {
+            "stage": "runtime",
+            "state": "active" if runtime.get("active_runtime_roles") else row.get("lifecycle_state"),
+            "active_runtime_roles": runtime.get("active_runtime_roles") or [],
+        },
+        {
+            "stage": "receipts",
+            "state": "present" if proof.get("proof_ref") or proof.get("first_boot_claim") else "readback_only",
+            "refs": [ref for ref in [proof.get("proof_ref"), proof.get("first_boot_claim")] if ref],
+        },
+    ]
+    blockers = []
+    if missing:
+        blockers.append("machine_facts_missing")
+    if row.get("admission_state") not in {"admitted", "candidate"}:
+        blockers.append("admission_not_complete")
+    if (placement.get("placement_status") or "unknown") in {"", "unknown", "unassigned"}:
+        blockers.append("placement_not_declared")
+    row["golden_path"] = {
+        "packet": "PACKET-534-NODE-PROVISIONING-RUNTIME-GOLDEN-PATH",
+        "definition": "first_touch -> machine_facts -> node_admission -> placement -> runtime -> receipts",
+        "stages": stages,
+        "state": "ready" if not blockers else "incomplete",
+        "blockers": blockers,
+        "stop_line": "read-only proof path; does not promote, place, or mutate the node",
+    }
+    return row
+
+
 def all_node_ids() -> list[str]:
     return run_lines([str(NODE_RECOVERY_STATUS), "--list"])
 
@@ -456,16 +515,21 @@ def recovery_for(node_id: str) -> dict[str, Any]:
     return run_json([str(NODE_RECOVERY_STATUS), "--node", node_id, "--json"])
 
 
-def build_rows(node_id: str | None, machine_spec: bool = False) -> list[dict[str, Any]]:
+def build_rows(node_id: str | None, machine_spec: bool = False, golden_path: bool = False) -> list[dict[str, Any]]:
     ids = [node_id] if node_id else all_node_ids()
     rows: list[dict[str, Any]] = []
     for item in ids:
         recovery = recovery_for(item)
-        rows.append(machine_spec_row_from_recovery(recovery) if machine_spec else row_from_recovery(recovery))
+        if golden_path:
+            rows.append(golden_path_row_from_recovery(recovery))
+        elif machine_spec:
+            rows.append(machine_spec_row_from_recovery(recovery))
+        else:
+            rows.append(row_from_recovery(recovery))
     return rows
 
 
-def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False) -> None:
+def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False, golden_path: bool = False) -> None:
     print("============================================================")
     print("  node.admission.status")
     print("============================================================")
@@ -488,6 +552,12 @@ def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False) -> None:
             print(f"  spec_known: {json.dumps(spec.get('known') or {}, sort_keys=True)}")
             print(f"  spec_missing_fields: {', '.join(spec.get('missing_fields') or []) or 'none'}")
             print("  role_assignment: none")
+        if golden_path:
+            path = row.get("golden_path") or {}
+            print(f"  golden_path: {path.get('state')}")
+            print(f"  blockers:    {', '.join(path.get('blockers') or []) or 'none'}")
+            for stage in path.get("stages") or []:
+                print(f"    - {stage.get('stage')}: {stage.get('state')}")
         print(f"  subtracts:  {row['subtraction_caption']}")
         print("")
 
@@ -500,6 +570,7 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     parser.add_argument("--list", action="store_true", help="List governed subject IDs")
     parser.add_argument("--machine-spec", action="store_true", help="Include machine facts from bootstrap claim and canonical inventories")
+    parser.add_argument("--golden-path", action="store_true", help="Include first-touch -> runtime proof path for Packet 534")
     args = parser.parse_args()
 
     if args.list:
@@ -507,11 +578,11 @@ def main() -> None:
             print(node_id)
         return
 
-    rows = build_rows(args.node, machine_spec=args.machine_spec)
+    rows = build_rows(args.node, machine_spec=args.machine_spec, golden_path=args.golden_path)
     payload = {
         "capability": "node.admission.status",
         "status": "ok",
-        "mode": "machine_spec" if args.machine_spec else "admission",
+        "mode": "golden_path" if args.golden_path else "machine_spec" if args.machine_spec else "admission",
         "canonical_authority": "node.admission.status",
         "recovery_evidence": "node.recovery.status",
         "subtracted_peer_authority": [
@@ -524,7 +595,7 @@ def main() -> None:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        emit_human(rows, machine_spec=args.machine_spec)
+        emit_human(rows, machine_spec=args.machine_spec, golden_path=args.golden_path)
 
 
 if __name__ == "__main__":

@@ -59,6 +59,32 @@ for cap in rag.direct.health rag.direct.quality rag.direct.retrieve rag.direct.q
   rg -q "^[[:space:]]*$cap:" "$ROOT/ops/capabilities.yaml" || fail "missing direct RAG capability: $cap"
 done
 
+python3 - "$ROOT" <<'PY' || exit 1
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+status_bin = root / "ops/plugins/core/lifecycle/bin/operator-ingress-status"
+proc = subprocess.run([sys.executable, str(status_bin), "--source-ledger", "--json"], text=True, capture_output=True)
+if proc.returncode != 0:
+    print(proc.stderr.strip() or proc.stdout.strip(), file=sys.stderr)
+    raise SystemExit(1)
+payload = json.loads(proc.stdout)
+rows = payload.get("rows") or []
+if len(rows) < 5:
+    print("D446 FAIL: source ledger must include Packet 535 source rows", file=sys.stderr)
+    raise SystemExit(1)
+for row in rows:
+    if row.get("retrieval_status") != "source_preserved_in_operator_ingress":
+        print("D446 FAIL: source ledger row missing preserved-source status", file=sys.stderr)
+        raise SystemExit(1)
+    if "rag.direct" not in str(row.get("canonical_home") or ""):
+        print("D446 FAIL: source ledger row must name rag.direct canonical home", file=sys.stderr)
+        raise SystemExit(1)
+PY
+
 if rg -n '100\.98\.70\.70:11434|100\.71\.17\.29:6333' "$ROOT/ops/plugins/infra/rag/bin" >/tmp/d446-rag-endpoint-residue.txt 2>/dev/null; then
   cat /tmp/d446-rag-endpoint-residue.txt >&2
   rm -f /tmp/d446-rag-endpoint-residue.txt

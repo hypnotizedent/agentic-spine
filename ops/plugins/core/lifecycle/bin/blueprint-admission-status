@@ -15,6 +15,26 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[5]
 ADMISSION_PATH = ROOT / "ops" / "bindings" / "operator.blueprint.admission.yaml"
+RONNY_PROJECTS_ROOT = Path("/Users/ronnyworks/code/ronny-projects")
+
+
+L3_PROOF_SUBJECTS = [
+    {
+        "domain": "travel",
+        "source_oi": "OI-20260429-023809-21a9",
+        "expected_files": ["README.md", "pyproject.toml", "tests", "src"],
+    },
+    {
+        "domain": "health",
+        "source_oi": "OI-20260429-023725-75b4",
+        "expected_files": ["README.md", "pyproject.toml", "tests", "src"],
+    },
+    {
+        "domain": "investment",
+        "source_oi": "OI-20260429-023732-a58e",
+        "expected_files": ["README.md", "pyproject.toml", "tests", "src"],
+    },
+]
 
 
 def load_matrix() -> dict:
@@ -139,6 +159,64 @@ def render_text(data: dict) -> str:
     return "\n".join(lines)
 
 
+def l3_proof_tranche() -> dict:
+    rows = []
+    for subject in L3_PROOF_SUBJECTS:
+        project_path = RONNY_PROJECTS_ROOT / subject["domain"]
+        expected = []
+        for rel in subject["expected_files"]:
+            path = project_path / rel
+            expected.append({"path": str(path), "present": path.exists()})
+        build_summary = project_path / "BUILD_SUMMARY.md"
+        readme = project_path / "README.md"
+        rows.append(
+            {
+                "domain": subject["domain"],
+                "source_oi": subject["source_oi"],
+                "project_path": str(project_path),
+                "project_present": project_path.exists(),
+                "expected_files": expected,
+                "spec_state": "v1_base_present" if all(item["present"] for item in expected) else "incomplete",
+                "build_summary_present": build_summary.exists(),
+                "readme_present": readme.exists(),
+                "proof_state": "ready_for_governed_spec_readback"
+                if project_path.exists() and readme.exists()
+                else "missing_project_base",
+                "stop_line": "new L3 proof only; does not launch old L3 cleanup",
+            }
+        )
+    ready = sum(1 for row in rows if row["proof_state"] == "ready_for_governed_spec_readback")
+    return {
+        "status": "ok",
+        "packet": "PACKET-536-NEW-L3-PROOF-TRANCHE",
+        "root": str(RONNY_PROJECTS_ROOT),
+        "summary": {
+            "subjects": len(rows),
+            "ready_for_governed_spec_readback": ready,
+            "old_l3_cleanup_excluded": True,
+        },
+        "rows": rows,
+    }
+
+
+def render_l3_proof(payload: dict) -> str:
+    lines = ["=== NEW L3 PROOF TRANCHE ===", ""]
+    summary = payload.get("summary") or {}
+    lines.append(f"Root: {payload.get('root')}")
+    lines.append(f"Subjects: {summary.get('subjects')}  ready: {summary.get('ready_for_governed_spec_readback')}")
+    lines.append("Old L3 cleanup excluded: true")
+    lines.append("")
+    for row in payload.get("rows") or []:
+        lines.append(f"[{row['domain']}] {row['proof_state']}")
+        lines.append(f"  source_oi: {row['source_oi']}")
+        lines.append(f"  path: {row['project_path']}")
+        lines.append(f"  spec_state: {row['spec_state']}")
+        missing = [item["path"] for item in row["expected_files"] if not item["present"]]
+        lines.append(f"  missing: {', '.join(missing) if missing else 'none'}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="blueprint-admission-status",
@@ -170,6 +248,11 @@ def main() -> int:
         help="Filter entries by admission status.",
     )
     parser.add_argument(
+        "--l3-proof-tranche",
+        action="store_true",
+        help="Read Packet 536 proof tranche against ronny-projects v1 bases.",
+    )
+    parser.add_argument(
         "--self-check",
         action="store_true",
         help="Verify dependencies and exit.",
@@ -181,6 +264,14 @@ def main() -> int:
             print(f"BLOCKED: {ADMISSION_PATH} not found")
             return 1
         print(f"OK: {ADMISSION_PATH}")
+        return 0
+
+    if args.l3_proof_tranche:
+        payload = l3_proof_tranche()
+        if args.json_output:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(render_l3_proof(payload))
         return 0
 
     data = load_matrix()

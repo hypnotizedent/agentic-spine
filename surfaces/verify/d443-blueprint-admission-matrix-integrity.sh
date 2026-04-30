@@ -50,4 +50,29 @@ if [[ "$FAIL" -eq 1 ]]; then
   exit 1
 fi
 
+python3 - "$REPO_ROOT" <<'PY' || exit 1
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+status_bin = root / "ops/plugins/core/lifecycle/bin/blueprint-admission-status"
+proc = subprocess.run([sys.executable, str(status_bin), "--l3-proof-tranche", "--json"], text=True, capture_output=True)
+if proc.returncode != 0:
+    print(proc.stderr.strip() or proc.stdout.strip(), file=sys.stderr)
+    raise SystemExit(1)
+payload = json.loads(proc.stdout)
+summary = payload.get("summary") or {}
+if summary.get("subjects") != 3:
+    print("FAIL D443: L3 proof tranche must cover travel, health, and investment", file=sys.stderr)
+    raise SystemExit(1)
+if summary.get("ready_for_governed_spec_readback") != 3:
+    print("FAIL D443: L3 proof tranche subjects must all have v1 bases present", file=sys.stderr)
+    raise SystemExit(1)
+if summary.get("old_l3_cleanup_excluded") is not True:
+    print("FAIL D443: L3 proof tranche must exclude old L3 cleanup", file=sys.stderr)
+    raise SystemExit(1)
+PY
+
 echo "OK D443: blueprint admission matrix valid ($entry_count entries)"

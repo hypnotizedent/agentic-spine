@@ -197,6 +197,28 @@ setup = spec_row.get("setup_correctness") or {}
 if "activation_statement" not in setup:
     fail("machine-spec readback must state it is evidence only, not activation")
 
+proc = subprocess.run(
+    [str(node_admission), "--node", "pve-r620", "--golden-path", "--json"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    fail(proc.stderr.strip() or proc.stdout.strip() or "node.admission.status golden-path sample failed")
+payload = json.loads(proc.stdout)
+rows = payload.get("rows") or []
+if len(rows) != 1:
+    fail("node.admission.status --golden-path sample must emit exactly one row")
+golden = rows[0].get("golden_path") or {}
+if golden.get("definition") != "first_touch -> machine_facts -> node_admission -> placement -> runtime -> receipts":
+    fail("golden-path definition must preserve first-touch to receipts ladder")
+if golden.get("state") != "ready":
+    fail("pve-r620 golden path must read ready")
+stage_names = [stage.get("stage") for stage in golden.get("stages") or []]
+if stage_names != ["first_touch", "machine_facts", "node_admission", "placement", "runtime", "receipts"]:
+    fail("golden-path stages must stay ordered and complete")
+if "does not promote" not in golden.get("stop_line", ""):
+    fail("golden-path readback must state non-mutating stop line")
+
 for subject in [
     "optiplex-9020-001",
     "optiplex-9020-002",

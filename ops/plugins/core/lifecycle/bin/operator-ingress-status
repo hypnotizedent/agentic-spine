@@ -18,6 +18,16 @@ sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 import operator_ingress as oi
 
 
+MEANING_TRANSLATION_PATH = (
+    Path(os.environ.get("SPINE_STATE", "/Users/ronnyworks/code/.runtime/spine/state"))
+    / "domain-state/spine/PACKET-531-OI-PAGE-MEANING-FULL-RAW-TRANSLATION-DRAFT-V3-20260430.json"
+)
+MEANING_SYNTHESIS_PATH = (
+    Path(os.environ.get("SPINE_STATE", "/Users/ronnyworks/code/.runtime/spine/state"))
+    / "domain-state/spine/PACKET-531-OI-PAGE-MEANING-OUTCOME-SYNTHESIS-20260430.md"
+)
+
+
 OPERATING_SEMANTICS = {
     "authority": "operator ingress is raw human notepad/context, not workflow authority",
     "paths": [
@@ -58,6 +68,134 @@ OPERATING_SEMANTICS = {
 }
 
 
+VIEWPORT_CONTRACT = {
+    "authority_boundary": "chat, mobile, shell, browser, and remote agents are viewports; spine readbacks decide authority",
+    "required_context_before_action": [
+        "current aperture from AGENTS.md",
+        "public orientation from session.v3.attach or ops status",
+        "bounded work object when execution is requested",
+        "existing canonical home for the subject",
+        "allowed mutation class and required proof",
+    ],
+    "action_ladder": [
+        {"class": "A", "name": "capture_context", "allowed": "preserve raw input; no execution"},
+        {"class": "B", "name": "meaning_translation", "allowed": "slim source and state confidence; no mutation"},
+        {"class": "C", "name": "bounded_spec", "allowed": "create or amend governed packet/loop when acceptance exists"},
+        {"class": "D", "name": "implementation", "allowed": "mutate only through existing governed homes and worktrees"},
+        {"class": "E", "name": "closure", "allowed": "verify, receipt, and closeout through canonical surfaces"},
+    ],
+    "hard_lines": [
+        "viewport text is never authority by itself",
+        "wrapper state is never proof that page meaning is satisfied",
+        "low-confidence meaning translation cannot activate work",
+        "Ronny confirmation is escalation, not a default paperwork queue",
+    ],
+}
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _meaning_items() -> list[dict[str, Any]]:
+    data = _read_json(MEANING_TRANSLATION_PATH)
+    items = data.get("items")
+    return items if isinstance(items, list) else []
+
+
+def _confidence(item: dict[str, Any]) -> dict[str, Any]:
+    conf = item.get("agent_understanding_confidence")
+    return conf if isinstance(conf, dict) else {}
+
+
+def _meaning_outcomes(oi_filter: str = "", min_confidence: str = "") -> dict[str, Any]:
+    order = {"low": 0, "medium": 1, "high": 2}
+    min_score = order.get(min_confidence, -1)
+    rows: list[dict[str, Any]] = []
+    confidence_counts = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    for item in _meaning_items():
+        oi_id = str(item.get("oi") or "")
+        if oi_filter and oi_id != oi_filter:
+            continue
+        conf = _confidence(item)
+        level = str(conf.get("level") or "unknown")
+        confidence_counts[level] = confidence_counts.get(level, 0) + 1
+        if min_score >= 0 and order.get(level, -1) < min_score:
+            continue
+        outcome = item.get("outcome_this_asks_for") or []
+        proof = item.get("proof_should_satisfy") or []
+        saying = item.get("what_doc_is_saying") or []
+        rows.append(
+            {
+                "oi": oi_id,
+                "raw_words": item.get("raw_words"),
+                "raw_sha256": item.get("raw_sha256"),
+                "confidence": conf,
+                "what_doc_is_saying": saying,
+                "outcome_this_asks_for": outcome,
+                "proof_should_satisfy": proof,
+                "activation_state": (
+                    "eligible_for_synthesis"
+                    if level == "high"
+                    else "review_before_activation"
+                    if level == "medium"
+                    else "blocked_until_corrected"
+                ),
+                "source_ref": item.get("source_ref"),
+            }
+        )
+    return {
+        "status": "ok" if rows or oi_filter else "ok",
+        "capability": "operator.ingress.status",
+        "mode": "meaning_outcomes",
+        "translation_artifact": str(MEANING_TRANSLATION_PATH),
+        "synthesis_artifact": str(MEANING_SYNTHESIS_PATH),
+        "confidence_counts": confidence_counts,
+        "rows": rows,
+    }
+
+
+def _source_ledger() -> dict[str, Any]:
+    source_ids = {
+        "OI-20260429-023749-71e6",
+        "OI-20260429-023802-a5eb",
+        "OI-20260429-023806-49c4",
+        "OI-20260429-023825-ccce",
+        "OI-20260429-023747-3a9c",
+    }
+    rows = []
+    for item in _meaning_items():
+        if item.get("oi") not in source_ids:
+            continue
+        conf = _confidence(item)
+        rows.append(
+            {
+                "oi": item.get("oi"),
+                "source_ref": item.get("source_ref"),
+                "raw_sha256": item.get("raw_sha256"),
+                "confidence": conf,
+                "slimmed_machine_content": item.get("slimmed_machine_content") or [],
+                "retrieval_status": "source_preserved_in_operator_ingress",
+                "canonical_home": "operator ingress raw source + rag.direct retrieval/source-card lane",
+                "usage_receipt_status": "required_before_execution",
+                "activation_state": "eligible_for_source_synthesis"
+                if conf.get("level") == "high"
+                else "review_before_activation",
+            }
+        )
+    return {
+        "status": "ok",
+        "capability": "operator.ingress.status",
+        "mode": "source_ledger",
+        "packet": "PACKET-535-SOURCE-KNOWLEDGE-CONTINUITY-LEDGER",
+        "rows": rows,
+    }
+
+
 def _print_operating_semantics() -> None:
     print("Operating semantics:")
     print(f"  authority: {OPERATING_SEMANTICS['authority']}")
@@ -68,6 +206,45 @@ def _print_operating_semantics() -> None:
     print("  hard lines:")
     for line in OPERATING_SEMANTICS["hard_lines"]:
         print(f"    - {line}")
+
+
+def _print_viewport_contract() -> None:
+    print("Operating surface viewport contract:")
+    print(f"  authority_boundary: {VIEWPORT_CONTRACT['authority_boundary']}")
+    print("  required_context_before_action:")
+    for item in VIEWPORT_CONTRACT["required_context_before_action"]:
+        print(f"    - {item}")
+    print("  action_ladder:")
+    for row in VIEWPORT_CONTRACT["action_ladder"]:
+        print(f"    {row['class']}. {row['name']}: {row['allowed']}")
+    print("  hard_lines:")
+    for item in VIEWPORT_CONTRACT["hard_lines"]:
+        print(f"    - {item}")
+
+
+def _print_meaning_outcomes(payload: dict[str, Any]) -> None:
+    print("Meaning-to-outcome readback:")
+    print(f"  translation_artifact: {payload['translation_artifact']}")
+    print(f"  confidence_counts: {json.dumps(payload['confidence_counts'], sort_keys=True)}")
+    for row in payload["rows"]:
+        conf = row.get("confidence") or {}
+        print(f"- {row['oi']}  confidence={conf.get('level', 'unknown')}({conf.get('score', 'n/a')})  {row['activation_state']}")
+        for line in (row.get("what_doc_is_saying") or [])[:2]:
+            print(f"    says: {line}")
+        for line in (row.get("outcome_this_asks_for") or [])[:2]:
+            print(f"    outcome: {line}")
+        for line in (row.get("proof_should_satisfy") or [])[:2]:
+            print(f"    proof: {line}")
+
+
+def _print_source_ledger(payload: dict[str, Any]) -> None:
+    print("Source knowledge continuity ledger:")
+    for row in payload["rows"]:
+        conf = row.get("confidence") or {}
+        print(f"- {row['oi']}  confidence={conf.get('level', 'unknown')}  {row['activation_state']}")
+        print(f"    source: {row['source_ref']}")
+        print(f"    home:   {row['canonical_home']}")
+        print(f"    usage:  {row['usage_receipt_status']}")
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -112,6 +289,32 @@ def main() -> int:
         help="Show the unambiguous operator-ingress operating model and exit.",
     )
     parser.add_argument(
+        "--viewport-contract",
+        action="store_true",
+        help="Show the operating-surface viewport contract derived from Packet 532.",
+    )
+    parser.add_argument(
+        "--meaning-outcomes",
+        action="store_true",
+        help="Show confidence-gated meaning-to-outcome readback derived from Packet 533.",
+    )
+    parser.add_argument(
+        "--source-ledger",
+        action="store_true",
+        help="Show source knowledge continuity rows derived from Packet 535.",
+    )
+    parser.add_argument(
+        "--oi",
+        default="",
+        help="Filter meaning/source readbacks to one OI id.",
+    )
+    parser.add_argument(
+        "--min-confidence",
+        choices=["low", "medium", "high"],
+        default="",
+        help="Minimum confidence for meaning-outcomes rows.",
+    )
+    parser.add_argument(
         "--remote",
         action="store_true",
         help="Read from canonical remote root (ai-consolidation) via API.",
@@ -145,6 +348,8 @@ def main() -> int:
                 raise RuntimeError("OI/HI readback chain omitted human_intent_id")
             if "capture_idea" not in {row["name"] for row in OPERATING_SEMANTICS["paths"]}:
                 raise RuntimeError("operator-ingress operating semantics omitted capture_idea path")
+            if not _meaning_items():
+                raise RuntimeError("operator-ingress meaning outcome artifact missing or empty")
             print("operator.ingress.status self-check PASS")
             return 0
         except ImportError as exc:
@@ -160,6 +365,29 @@ def main() -> int:
             print(json.dumps({"operating_semantics": OPERATING_SEMANTICS}, indent=2))
         else:
             _print_operating_semantics()
+        return 0
+    if args.viewport_contract:
+        payload = {"viewport_contract": VIEWPORT_CONTRACT}
+        if args.json_output:
+            print(json.dumps(payload, indent=2))
+        else:
+            _print_viewport_contract()
+        return 0
+    if args.meaning_outcomes:
+        payload = _meaning_outcomes(oi_filter=args.oi, min_confidence=args.min_confidence)
+        if args.json_output:
+            print(json.dumps(payload, indent=2))
+        else:
+            _print_meaning_outcomes(payload)
+        return 0
+    if args.source_ledger:
+        payload = _source_ledger()
+        if args.oi:
+            payload["rows"] = [row for row in payload["rows"] if row.get("oi") == args.oi]
+        if args.json_output:
+            print(json.dumps(payload, indent=2))
+        else:
+            _print_source_ledger(payload)
         return 0
 
     # --- Remote readback: fetch from canonical root via /ingress.json ---
@@ -194,6 +422,8 @@ def main() -> int:
         read_root = result.get("state_root", "canonical (remote)")
         if args.json_output:
             result["operating_semantics"] = OPERATING_SEMANTICS
+            result["viewport_contract"] = VIEWPORT_CONTRACT
+            result["meaning_outcome_summary"] = _meaning_outcomes(min_confidence="high")["confidence_counts"]
             print(json.dumps(result, indent=2))
         else:
             _print_operating_semantics()
@@ -237,6 +467,8 @@ def main() -> int:
     if args.json_output:
         result["state_root"] = state_root
         result["operating_semantics"] = OPERATING_SEMANTICS
+        result["viewport_contract"] = VIEWPORT_CONTRACT
+        result["meaning_outcome_summary"] = _meaning_outcomes(min_confidence="high")["confidence_counts"]
         print(json.dumps(result, indent=2))
     else:
         _print_operating_semantics()
