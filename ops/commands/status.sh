@@ -801,6 +801,45 @@ def collect_standing_program_health():
     return result
 
 
+def collect_watcher_input_projection():
+    result = {
+        "status": "unavailable",
+        "input_count": 0,
+        "inputs": [],
+        "summary": {"ok": 0, "degraded": 0, "failed": 0, "unsupported": 0, "unknown": 0},
+    }
+    watcher_bin = spine / "ops" / "plugins" / "core" / "bin" / "watcher-health"
+    if not watcher_bin.exists():
+        result["error"] = f"missing watcher health readback: {watcher_bin}"
+        return result
+    data = run_json_command([str(watcher_bin), "--json"], timeout=30)
+    if data.get("status") == "error":
+        result["error"] = data.get("error", "watcher health readback failed")
+        return result
+    projection = data.get("watcher_input_projection")
+    if not isinstance(projection, dict):
+        result["error"] = "watcher health did not expose watcher_input_projection"
+        return result
+    data = projection
+    inputs = data.get("inputs") if isinstance(data.get("inputs"), list) else []
+    summary = {"ok": 0, "degraded": 0, "failed": 0, "unsupported": 0, "unknown": 0}
+    for item in inputs:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "unknown").strip()
+        if status not in summary:
+            status = "unknown"
+        summary[status] += 1
+    result.update({
+        "status": str(data.get("status") or "unknown"),
+        "projection": str(data.get("projection") or ""),
+        "input_count": int(data.get("input_count", len(inputs)) or 0),
+        "inputs": inputs,
+        "summary": summary,
+    })
+    return result
+
+
 def collect_delegation_summary():
     result = {
         "status": "unavailable",
@@ -858,6 +897,7 @@ open_gap_count = len(open_gaps) if gaps_available else None
 linked_gap_count = len(linked_gaps) if gaps_available else None
 unlinked_gap_count = len(unlinked_gaps) if gaps_available else None
 standing_program_health = collect_standing_program_health()
+watcher_input_projection = collect_watcher_input_projection()
 delegation_summary = collect_delegation_summary()
 
 # ── Parse inbox lanes ─────────────────────────────────────────────────────
@@ -1555,6 +1595,7 @@ if mode == "--json":
         "daemons": daemons_summary,
         "temporal_truth": temporal_truth_payload,
         "standing_program_health": standing_program_health,
+        "watcher_input_projection": watcher_input_projection,
         "delegations": delegation_summary,
         "execution_lane_truth": {
             "mailroom_execution": "capability_backed",
@@ -1574,6 +1615,10 @@ if mode == "--json":
                 int((standing_program_health.get("summary") or {}).get(key, 0) or 0)
                 for key in ("stale", "failed", "unreachable", "never_run", "unknown")
             ),
+            "watcher_inputs_total": int(watcher_input_projection.get("input_count", 0) or 0),
+            "watcher_inputs_ok": int((watcher_input_projection.get("summary") or {}).get("ok", 0) or 0),
+            "watcher_inputs_degraded": int((watcher_input_projection.get("summary") or {}).get("degraded", 0) or 0),
+            "watcher_inputs_failed": int((watcher_input_projection.get("summary") or {}).get("failed", 0) or 0),
             "fresh_terminals": len(fresh_terminals),
             "fresh_custody_terminals": len(fresh_custody_terminals),
             "active_delegations": int(delegation_summary.get("active", 0) or 0),
@@ -1645,6 +1690,11 @@ if mode == "--brief":
         _sp_healthy = int(_sp_summary.get("healthy", 0) or 0)
         _sp_degraded = sum(int(_sp_summary.get(key, 0) or 0) for key in ("stale", "failed", "unreachable", "never_run", "unknown"))
         parts.append(f"Standing: {_sp_healthy} healthy / {_sp_degraded} drift")
+    _watcher_summary = watcher_input_projection.get("summary") if isinstance(watcher_input_projection.get("summary"), dict) else {}
+    _watcher_total = int(watcher_input_projection.get("input_count", 0) or 0)
+    if _watcher_total:
+        _watcher_attention = sum(int(_watcher_summary.get(key, 0) or 0) for key in ("degraded", "failed", "unsupported", "unknown"))
+        parts.append(f"Watcher inputs: {_watcher_total - _watcher_attention} ok / {_watcher_attention} attention")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
@@ -1660,6 +1710,13 @@ if mode != "--expert":
     _sp_degraded = sum(
         int(_sp_summary.get(key, 0) or 0)
         for key in ("stale", "failed", "unreachable", "never_run", "unknown")
+    )
+    _watcher_summary = watcher_input_projection.get("summary") if isinstance(watcher_input_projection.get("summary"), dict) else {}
+    _watcher_inputs_total = int(watcher_input_projection.get("input_count", 0) or 0)
+    _watcher_inputs_ok = int(_watcher_summary.get("ok", 0) or 0)
+    _watcher_inputs_attention = sum(
+        int(_watcher_summary.get(key, 0) or 0)
+        for key in ("degraded", "failed", "unsupported", "unknown")
     )
     _blocked_loops = [
         loop for loop in open_loops
@@ -1682,6 +1739,8 @@ if mode != "--expert":
         _attention.append(f"BLOCKED WORK: {len(_blocked_loops)} work item(s) blocked or not runnable")
     if _sp_degraded:
         _attention.append(f"AUTOMATION DRIFT: {_sp_degraded} standing program(s) degraded")
+    if _watcher_inputs_attention:
+        _attention.append(f"WATCHER INPUT ATTENTION: {_watcher_inputs_attention} admitted input(s) need attention")
     if joined_state_summary.get("coherence_attention"):
         _attention.append("HEALTH DRIFT: engine coherence needs attention")
     if inbox_actionable:
@@ -1725,6 +1784,10 @@ if mode != "--expert":
 
     print("AUTOMATION")
     print("-" * 72)
+    if _watcher_inputs_total:
+        print(f"  watcher inputs:    {_watcher_inputs_total} total, {_watcher_inputs_ok} ok, {_watcher_inputs_attention} attention")
+    else:
+        print("  watcher inputs:    unavailable")
     if _sp_total:
         print(f"  standing programs: {_sp_total} total, {_sp_healthy} healthy, {_sp_degraded} degraded")
     else:

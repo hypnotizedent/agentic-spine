@@ -26,17 +26,6 @@ SCHEDULER_HEALTH_BIN = (
     REPO_ROOT / "ops" / "plugins" / "infra" / "host" / "bin" / "launchd-scheduler-health-status"
 )
 
-STALE_FAILURE_ROLLOUT_LABELS = (
-    "com.ronny.domain-inventory-refresh-daily",
-    "com.ronny.simplefin-daily-sync",
-)
-
-V1_ALLOWED_LABELS: dict[str, tuple[str, ...]] = {
-    "com.ronny.alerting-probe-cycle": ("threshold_breach", "stale_failure"),
-    "com.ronny.operator-ingress-auto-metabolizer": ("missed_heartbeat",),
-    **{label: ("stale_failure",) for label in STALE_FAILURE_ROLLOUT_LABELS},
-}
-
 OPEN_DISPOSITIONS = frozenset({
     "active",  # legacy compatibility
     "pending",
@@ -219,13 +208,48 @@ def registry_entry(label: str) -> dict[str, Any]:
     raise KeyError(f"registry label not found: {label}")
 
 
+def standing_program_entries() -> list[dict[str, Any]]:
+    registry = load_registry()
+    entries: list[dict[str, Any]] = []
+    for entry in registry.get("labels", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("state") != "active" or entry.get("birth_mode") != "standing_program":
+            continue
+        proof = entry.get("proof_channel") if isinstance(entry.get("proof_channel"), dict) else {}
+        if not proof:
+            continue
+        label = str(entry.get("label") or "").strip()
+        if not label:
+            continue
+        entries.append(entry)
+    return entries
+
+
+def proof_channel_trigger_types(entry: dict[str, Any]) -> tuple[str, ...]:
+    proof = entry.get("proof_channel") if isinstance(entry.get("proof_channel"), dict) else {}
+    proof_type = str(proof.get("type") or "").strip()
+    if proof_type == "cycle_state":
+        return ("threshold_breach", "stale_failure")
+    if proof_type == "heartbeat":
+        return ("missed_heartbeat",)
+    if proof_type in {"runtime_telemetry", "systemd_journal"}:
+        return ("stale_failure",)
+    return ()
+
+
+def trigger_types_for_label(label: str) -> tuple[str, ...]:
+    return proof_channel_trigger_types(registry_entry(label))
+
+
 def v1_labels(labels: list[str] | None = None) -> list[str]:
+    eligible = {str(entry.get("label") or "").strip() for entry in standing_program_entries()}
     if labels is None:
-        return list(V1_ALLOWED_LABELS.keys())
-    invalid = [label for label in labels if label not in V1_ALLOWED_LABELS]
+        return sorted(eligible)
+    invalid = [label for label in labels if label not in eligible]
     if invalid:
         joined = ", ".join(sorted(invalid))
-        raise ValueError(f"labels outside bounded V1 lane: {joined}")
+        raise ValueError(f"labels outside active standing-program proof set: {joined}")
     return labels
 
 
@@ -338,6 +362,7 @@ def _watcher_trigger_evaluations(
     entry: dict[str, Any],
     data: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
+    monitor_enabled = entry.get("monitor", True) is not False
     threshold = data.get("threshold", {}) if isinstance(data.get("threshold"), dict) else {}
     consecutive_failures = int(data.get("consecutive_failures", 0) or 0)
     intervention_threshold = int(threshold.get("failure_count_for_intervention", 0) or 0)
@@ -352,7 +377,7 @@ def _watcher_trigger_evaluations(
     }
     return {
         "threshold_breach": {
-            "enabled": True,
+            "enabled": monitor_enabled,
             "condition_met": bool(intervention_threshold and consecutive_failures >= intervention_threshold),
             "required_observations": 1,
             "evidence_surface": "watcher.health",
@@ -366,7 +391,7 @@ def _watcher_trigger_evaluations(
             "detail": f"consecutive_failures={consecutive_failures} threshold={intervention_threshold}",
         },
         "stale_failure": {
-            "enabled": True,
+            "enabled": monitor_enabled,
             "condition_met": bool(last_run_age is not None and stale_threshold and last_run_age > stale_threshold),
             "required_observations": 2,
             "evidence_surface": "watcher.health",
@@ -449,6 +474,7 @@ def _metabolizer_trigger_evaluations(
     entry: dict[str, Any],
     data: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
+    monitor_enabled = entry.get("monitor", True) is not False
     proof_channel = entry.get("proof_channel") or {}
     heartbeat_state = str(data.get("heartbeat_state") or "unavailable").strip().lower()
     stale_threshold = int(data.get("stale_threshold_seconds", 0) or proof_channel.get("stale_threshold_seconds", 0) or 0)
@@ -459,7 +485,7 @@ def _metabolizer_trigger_evaluations(
     }
     return {
         "missed_heartbeat": {
-            "enabled": True,
+            "enabled": monitor_enabled,
             "condition_met": heartbeat_state in {"missing", "stale"},
             "required_observations": 2,
             "evidence_surface": "operator.ingress.auto_metabolize.status",
@@ -521,6 +547,109 @@ def evaluate_operator_ingress_auto_metabolizer(entry: dict[str, Any]) -> dict[st
     )
 
 
+def _heartbeat_file_trigger_evaluations(
+    entry: dict[str, Any],
+    *,
+    heartbeat_age: int | None,
+    stale_threshold: int | None,
+    read_state: str,
+) -> dict[str, dict[str, Any]]:
+    monitor_enabled = entry.get("monitor", True) is not False
+    condition_met = read_state != "ok" or (
+        heartbeat_age is not None and stale_threshold is not None and heartbeat_age > stale_threshold
+    )
+    return {
+        "missed_heartbeat": {
+            "enabled": monitor_enabled,
+            "condition_met": condition_met,
+            "required_observations": 2,
+            "evidence_surface": "standing_program.proof_channel.heartbeat",
+            "evidence_ref": str((entry.get("proof_channel") or {}).get("path") or ""),
+            "observed_status": "stale" if condition_met else "fresh",
+            "observed_counts": {
+                "heartbeat_age_seconds": heartbeat_age,
+                "stale_threshold_seconds": stale_threshold,
+            },
+            "suggested_actions": [
+                "Inspect the declared proof_channel heartbeat file.",
+                "Restore the standing program that writes this heartbeat.",
+            ],
+            "detail": f"read_state={read_state} heartbeat_age_seconds={heartbeat_age}",
+        },
+    }
+
+
+def _local_heartbeat_candidate(path_text: str) -> Path:
+    path = Path(path_text)
+    if path.is_file():
+        return path
+    marker = "/.runtime/spine/state/"
+    if marker in path_text:
+        tail = path_text.split(marker, 1)[1]
+        state_root = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code" / ".runtime" / "spine" / "state")))
+        return state_root / tail
+    return path
+
+
+def evaluate_file_heartbeat_label(entry: dict[str, Any]) -> dict[str, Any]:
+    label = str(entry.get("label") or "")
+    proof_channel = entry.get("proof_channel") or {}
+    path_text = str(proof_channel.get("path") or "")
+    stale_threshold = int(proof_channel.get("stale_threshold_seconds", 0) or 0) or None
+    path = _local_heartbeat_candidate(path_text)
+    heartbeat_at = None
+    read_state = "missing"
+    detail = "heartbeat file missing"
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            data = {}
+            read_state = "error"
+            detail = f"heartbeat json unreadable: {exc}"
+        if isinstance(data, dict):
+            heartbeat_at = str(
+                data.get("heartbeat_at")
+                or data.get("updated_at")
+                or data.get("recorded_at")
+                or data.get("last_run_at")
+                or data.get("timestamp")
+                or ""
+            ).strip() or None
+            read_state = "ok" if heartbeat_at else "missing_timestamp"
+            detail = str(data.get("health") or data.get("status") or read_state)
+    heartbeat_age = seconds_since(heartbeat_at)
+    trigger_evaluations = _heartbeat_file_trigger_evaluations(
+        entry,
+        heartbeat_age=heartbeat_age,
+        stale_threshold=stale_threshold,
+        read_state=read_state,
+    )
+    if read_state != "ok":
+        health = "unknown"
+    elif heartbeat_age is not None and stale_threshold is not None and heartbeat_age > stale_threshold:
+        health = "stale"
+    else:
+        health = "healthy"
+    return _surface_result(
+        label=label,
+        entry=entry,
+        health=health,
+        detail=detail,
+        last_evidence_at_utc=heartbeat_at,
+        staleness_seconds=heartbeat_age,
+        stale_threshold_seconds=stale_threshold,
+        evidence_surface="standing_program.proof_channel.heartbeat",
+        evidence_ref=path_text,
+        observed_status=read_state,
+        observed_counts={
+            "heartbeat_age_seconds": heartbeat_age,
+            "stale_threshold_seconds": stale_threshold,
+        },
+        trigger_evaluations=trigger_evaluations,
+    )
+
+
 def _scheduler_evidence_ref(entry: dict[str, Any], label: str) -> str:
     proof_channel = entry.get("proof_channel") or {}
     path = str(proof_channel.get("path") or "").strip()
@@ -558,9 +687,10 @@ def _scheduler_stale_failure_trigger(
 
     required_observations = 1 if status == "failed" else 2
     label = str(entry.get("label") or "")
+    monitor_enabled = entry.get("monitor", True) is not False
     return {
         "stale_failure": {
-            "enabled": True,
+            "enabled": monitor_enabled,
             "condition_met": status in {"stale", "failed"},
             "required_observations": required_observations,
             "evidence_surface": "host.launchd.scheduler.health.status",
@@ -690,13 +820,17 @@ def evaluate_scheduler_stale_failure_label(entry: dict[str, Any]) -> dict[str, A
 
 def evaluate_label(label: str) -> dict[str, Any]:
     entry = registry_entry(label)
+    proof = entry.get("proof_channel") if isinstance(entry.get("proof_channel"), dict) else {}
+    proof_type = str(proof.get("type") or "").strip()
     if label == "com.ronny.alerting-probe-cycle":
         return evaluate_alerting_probe_cycle(entry)
     if label == "com.ronny.operator-ingress-auto-metabolizer":
         return evaluate_operator_ingress_auto_metabolizer(entry)
-    if label in STALE_FAILURE_ROLLOUT_LABELS:
+    if proof_type in {"runtime_telemetry", "systemd_journal"}:
         return evaluate_scheduler_stale_failure_label(entry)
-    raise ValueError(f"label outside bounded V1 lane: {label}")
+    if proof_type == "heartbeat":
+        return evaluate_file_heartbeat_label(entry)
+    raise ValueError(f"unsupported standing-program proof_channel.type for {label}: {proof_type}")
 
 
 def evaluate_labels(labels: list[str] | None = None) -> list[dict[str, Any]]:

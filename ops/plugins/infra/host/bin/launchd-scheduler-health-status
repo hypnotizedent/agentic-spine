@@ -35,12 +35,6 @@ WEEKDAY_NAMES = {
 }
 
 REMOTE_EXECUTION_HOST_TARGET = "ai-consolidation"
-REMOTE_SYSTEMD_LABELS = {
-    "com.ronny.domain-inventory-refresh-daily",
-    "com.ronny.simplefin-daily-sync",
-}
-
-
 @dataclass
 class JobEvidence:
     timestamp: datetime | None
@@ -181,7 +175,7 @@ def cadence_from_plist(plist_payload: dict[str, Any]) -> tuple[int, str]:
 
 
 def load_plist(path: Path) -> dict[str, Any]:
-    if not path.exists():
+    if not path.exists() or not path.is_file():
         return {}
     with path.open("rb") as handle:
         payload = plistlib.load(handle)
@@ -240,8 +234,11 @@ def _remote_execution_host_connection(root: Path) -> tuple[str, str, list[str]] 
     return host, user, identity_opts
 
 
-def remote_systemd_probe(root: Path, label: str) -> dict[str, Any] | None:
-    if label not in REMOTE_SYSTEMD_LABELS:
+def remote_systemd_probe(root: Path, label: str, unit: str = "") -> dict[str, Any] | None:
+    if not unit and label not in {
+        "com.ronny.domain-inventory-refresh-daily",
+        "com.ronny.simplefin-daily-sync",
+    }:
         return None
 
     conn = _remote_execution_host_connection(root)
@@ -249,8 +246,16 @@ def remote_systemd_probe(root: Path, label: str) -> dict[str, Any] | None:
         return {"reachable": False, "error": "execution_host_unreachable"}
 
     host, user, identity_opts = conn
-    timer_unit = f"{label_to_systemd_unit(label)}.timer"
-    service_unit = f"{label_to_systemd_unit(label)}.service"
+    unit = unit.strip()
+    if unit.endswith(".timer"):
+        timer_unit = unit
+        service_unit = unit[:-6] + ".service"
+    elif unit.endswith(".service"):
+        service_unit = unit
+        timer_unit = unit[:-8] + ".timer"
+    else:
+        timer_unit = f"{label_to_systemd_unit(label)}.timer"
+        service_unit = f"{label_to_systemd_unit(label)}.service"
     remote_script = f"""python3 - <<'PY'
 import json
 import subprocess
@@ -430,7 +435,7 @@ def scheduled_template_rows(root: Path, contract: dict[str, Any]) -> list[dict[s
             if label:
                 configured_labels.add(label)
 
-    rows: list[dict[str, str]] = []
+    rows_by_label: dict[str, dict[str, str]] = {}
     for plist_path in sorted(source_dir.glob("com.ronny.*.plist")):
         plist_payload = load_plist(plist_path)
         label = str(plist_payload.get("Label", "") or plist_path.stem).strip()
@@ -438,8 +443,29 @@ def scheduled_template_rows(root: Path, contract: dict[str, Any]) -> list[dict[s
             continue
         if "StartInterval" not in plist_payload and "StartCalendarInterval" not in plist_payload:
             continue
-        rows.append({"label": label, "template_path": display_path(root, plist_path)})
-    return rows
+        rows_by_label[label] = {"label": label, "template_path": display_path(root, plist_path)}
+
+    registry = load_yaml(root / "ops/bindings/launchd.scheduler.registry.yaml")
+    for item in registry.get("labels", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("state") != "active" or item.get("birth_mode") != "standing_program":
+            continue
+        proof_channel = item.get("proof_channel") if isinstance(item.get("proof_channel"), dict) else {}
+        if not proof_channel:
+            continue
+        label = str(item.get("label") or "").strip()
+        if not label:
+            continue
+        row = rows_by_label.setdefault(label, {"label": label, "template_path": str(item.get("template_path") or "")})
+        row["proof_channel_type"] = str(proof_channel.get("type") or "")
+        row["proof_channel_host"] = str(proof_channel.get("host") or "")
+        row["proof_channel_path"] = str(proof_channel.get("path") or "")
+        row["proof_channel_unit"] = str(proof_channel.get("unit") or "")
+        row["proof_channel_stale_threshold_seconds"] = str(proof_channel.get("stale_threshold_seconds") or "")
+        row["monitor"] = str(item.get("monitor", True)).lower()
+
+    return list(rows_by_label.values())
 
 
 def launchctl_last_exit_code(label: str) -> int | None:
@@ -564,12 +590,17 @@ def build_payload(root: Path) -> dict[str, Any]:
         template_path = str(entry.get("template_path", "")).strip()
         plist_path = (root / template_path) if template_path else Path()
         plist_payload = load_plist(plist_path)
-        remote_required = label in REMOTE_SYSTEMD_LABELS
+        proof_channel_type = str(entry.get("proof_channel_type") or "").strip()
+        proof_channel_unit = str(entry.get("proof_channel_unit") or "").strip()
+        remote_required = proof_channel_type == "systemd_journal" or label in {
+            "com.ronny.domain-inventory-refresh-daily",
+            "com.ronny.simplefin-daily-sync",
+        }
 
         cadence_seconds, schedule = cadence_from_plist(plist_payload)
         job_name = label.replace("com.ronny.", "", 1)
 
-        remote_probe = remote_systemd_probe(root, label)
+        remote_probe = remote_systemd_probe(root, label, proof_channel_unit)
         if remote_probe and remote_probe.get("reachable"):
             last_trigger = parse_iso8601(str(remote_probe.get("last_trigger_at", "")))
             service_exec_start = parse_iso8601(str(remote_probe.get("service_exec_main_start_at", "")))
@@ -622,6 +653,14 @@ def build_payload(root: Path) -> dict[str, Any]:
                     )
 
         status, age_seconds, stale_threshold = classify_status(now, evidence, cadence_seconds)
+        declared_threshold_raw = str(entry.get("proof_channel_stale_threshold_seconds") or "").strip()
+        if declared_threshold_raw.isdigit() and evidence.timestamp is not None:
+            declared_threshold = int(declared_threshold_raw)
+            stale_threshold = declared_threshold
+            if age_seconds is not None and age_seconds > declared_threshold:
+                status = "stale"
+            elif status == "stale":
+                status = "ok"
         if remote_required and not (remote_probe and remote_probe.get("reachable")) and status == "stale":
             status = "unknown"
         expectation = scheduler_expectations.get(label, {}) if isinstance(scheduler_expectations, dict) else {}
@@ -653,6 +692,11 @@ def build_payload(root: Path) -> dict[str, Any]:
                 "execution_source": evidence.execution_source,
                 "template_path": template_path,
                 "scheduler_backend": "systemd" if remote_probe and remote_probe.get("reachable") else "launchd",
+                "proof_channel_type": proof_channel_type,
+                "proof_channel_host": str(entry.get("proof_channel_host") or ""),
+                "proof_channel_path": str(entry.get("proof_channel_path") or ""),
+                "proof_channel_unit": proof_channel_unit,
+                "monitor": str(entry.get("monitor") or "true"),
                 "next_run_at": str((remote_probe or {}).get("next_run_at", "") or ""),
                 "timer_load_state": str((remote_probe or {}).get("timer_load_state", "") or ""),
                 "timer_unit_file_state": str((remote_probe or {}).get("timer_unit_file_state", "") or ""),
