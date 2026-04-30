@@ -132,6 +132,11 @@ Non-promoted work, synthesis artifacts, and parked material belong in
 New repo docs require deliberate promotion and human-steward co-sign.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
+The primary `agentic-spine` checkout must stay on `main` and clean. If repo
+mutation is needed, do the work in a managed worktree; do not use the primary
+checkout as a work lane.
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
+
 Governed session start/admission:
 `ops terminal launch --tool <tool> --terminal <name>`
 Public readback: `./bin/ops status`
