@@ -111,6 +111,13 @@ resolve_launch_mode() {
 
 LAUNCH_MODE="$(resolve_launch_mode "$LAUNCH_MODE")"
 
+tool_mutates_repo() {
+    case "${1:-}" in
+        claude|codex|opencode) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # ── Resolve execution class from contract ─────────────────────────────────
 # Reads terminal.role.contract.yaml to map terminal name → type → execution class.
 # Falls back to "researcher" (read-only) if no terminal or contract missing.
@@ -320,6 +327,10 @@ if [[ "$TOOL" != "verify" && -n "$LOOP_ID" ]]; then
         *)
             ;;
     esac
+fi
+
+if tool_mutates_repo "$TOOL" && [[ "$LAUNCH_CWD" == "$SPINE_ROOT" ]]; then
+    fail "mutating terminal launch would start on the primary checkout. Main must remain clean; pass --loop for a loop with an active governed worktree, or start/rehydrate a wave worktree first."
 fi
 
 # ── Build the in-terminal command ────────────────────────────────────────

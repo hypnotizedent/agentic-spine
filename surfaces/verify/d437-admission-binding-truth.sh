@@ -5,10 +5,12 @@ set -euo pipefail
 
 SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 ATTACH_SCRIPT="$SPINE_CODE/ops/plugins/core/lifecycle/bin/session-v3-attach"
+OPS_BIN="$SPINE_CODE/bin/ops"
 
 fail() { echo "D437 FAIL: $*" >&2; exit 1; }
 
 [[ -f "$ATTACH_SCRIPT" ]] || fail "session-v3-attach not found"
+[[ -x "$OPS_BIN" ]] || fail "bin/ops not executable"
 
 # Must check admission status based on canonical terminal identity / aliases
 if ! grep -q 'ADMISSION_STATUS.*unbound' "$ATTACH_SCRIPT"; then
@@ -29,5 +31,18 @@ if ! grep -q 'UNBOUND' "$ATTACH_SCRIPT"; then
   fail "session-v3-attach does not emit UNBOUND status for standalone invocation"
 fi
 
-echo "D437 PASS: admission binding truth is explicit (ADMITTED vs UNBOUND, canonical terminal identity resolved)"
+set +e
+main_launch_output="$("$OPS_BIN" terminal launch --role solo --tool claude --terminal SPINE-CONTROL-01 --dry-run 2>&1)"
+main_launch_rc=$?
+set -e
+
+if [[ "$main_launch_rc" -eq 0 ]]; then
+  fail "mutating terminal launch on primary checkout succeeded; main must stay clean"
+fi
+
+if [[ "$main_launch_output" != *"Main must remain clean"* ]]; then
+  fail "mutating terminal launch denial did not name the clean-main invariant"
+fi
+
+echo "D437 PASS: admission binding truth is explicit and mutating terminal entry cannot default to main"
 exit 0
