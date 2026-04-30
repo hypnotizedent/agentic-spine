@@ -249,6 +249,26 @@ execution_lane_contract:
         - task readback is still subsystem-local rather than unified with delegation.status
         - the active worker runs `ops cap run <capability>`; it does not spawn Claude/OpenAI/API agents or inject compiled prompts into a model context
 
+    durable_remote_transfer_job:
+      status: contract_defined
+      realization_mode: operational
+      lane_id: durable_remote_transfer_job
+      admission_surface: durable.transfer.start|durable.transfer.adopt
+      queue_state_surface: durable transfer job record
+      claim_surface: durable transfer job claim/adoption record
+      heartbeat_surface: durable transfer proof_channel
+      terminal_completion_surface: durable transfer receipt -> loop/packet closeout gate
+      escalation_surface: stale heartbeat, missing host process, failed verification, or destructive-tail approval required
+      truthful_operator_statement: >
+        Long-running payload movement is owned by a durable host job with its own
+        claim, heartbeat, log, status, and receipt. A terminal may launch,
+        adopt, or monitor the job, but terminal liveness is not the custody
+        source of truth.
+      current_limitations:
+        - durable.transfer.status and durable.transfer.adopt are implemented; durable.transfer.start is not yet implemented
+        - current terminal-started remote transfers must be adopted before ops status can map loop custody
+        - destructive cleanup remains a separate approval gate after copy and verification
+
     agent_tool_bridge:
       status: deferred
       realization_mode: operational
@@ -269,6 +289,8 @@ execution_lane_contract:
     - no execution request may claim autonomous behavior without a standing operational realization
     - interactive handoff and operational autonomy are different realizations, not different kernels
     - claim, heartbeat, and completion semantics must be readable per realization
+    - long-running remote transfer custody belongs to a durable job record, not to terminal liveness alone
+    - controller-prompt packet birth must amend existing loop-local live packets by default; new live siblings require explicit sibling or supersession declaration
     - realization-specific transport must not redefine the kernel execution-request primitive
 
 # ── Routing Semantics ────────────────────────────────────────────────────────

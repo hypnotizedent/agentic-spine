@@ -61,6 +61,7 @@ supersedes: []
 <!-- Agents use this section to avoid rediscovering ceremony from memory. -->
 - **Evidence**: collect source refs, run keys, files, receipts, or operator approval before mutation.
 - **Loop**: this scope is the bounded parent objective; attach related work here instead of creating siblings.
+- **Custody**: do not start from a loop claim; derive custody from carried evidence plus governed claim/heartbeat/receipt proof.
 - **Packet**: create or use a packet when there is a bounded research or implementation slice.
 - **Execution**: use governed capabilities, waves, delegation, or mailroom tasks; fallback shell only when no surface exists.
 - **Verification**: record `verify.engine.run`, `spine.verify`, and scoped capability receipts as evidence refs.

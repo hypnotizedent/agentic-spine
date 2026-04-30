@@ -5,8 +5,9 @@ Creates a controller-prompt packet by:
   2. Checking filesystem uniqueness (derived path must not exist)
   3. Checking packet_id uniqueness across all existing controller-prompt packets
   4. Validating loop scope exists and is active
-  5. Composing frontmatter (governed) + body (operator-authored)
-  6. Atomic file write via tmp+rename
+  5. Refusing accidental live sibling packets for the same loop
+  6. Composing frontmatter (governed) + body (operator-authored)
+  7. Atomic file write via tmp+rename
 
 Transaction model: single write target (packet file). Either the file exists
 with valid frontmatter and body, or it does not.
@@ -103,6 +104,88 @@ def _check_packet_id_uniqueness(
             )
 
 
+def _packet_frontmatter(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    if not text.startswith("---"):
+        return {}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        fm = yaml.safe_load(parts[1])
+    except yaml.YAMLError:
+        return {}
+    return fm if isinstance(fm, dict) else {}
+
+
+def _live_packets_for_loop(
+    loop_id: str, controller_prompts_dir: str
+) -> list[dict[str, str]]:
+    prompts_path = Path(controller_prompts_dir)
+    if not prompts_path.is_dir():
+        return []
+
+    packets: list[dict[str, str]] = []
+    for path in sorted(prompts_path.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+        fm = _packet_frontmatter(path)
+        if str(fm.get("loop_id") or "").strip() != loop_id:
+            continue
+        status = str(fm.get("status") or "unknown").strip().lower()
+        if status in {"closed", "retired"}:
+            continue
+        packet_id = str(fm.get("packet_id") or "").strip()
+        if not packet_id:
+            continue
+        packets.append({
+            "packet_id": packet_id,
+            "status": status,
+            "path": str(path),
+        })
+    return packets
+
+
+def _check_loop_sibling_policy(
+    *,
+    packet_id: str,
+    loop_id: str,
+    controller_prompts_dir: str,
+    allow_sibling: bool,
+    sibling_justification: str,
+    supersedes_packet: str,
+) -> None:
+    siblings = [
+        packet
+        for packet in _live_packets_for_loop(loop_id, controller_prompts_dir)
+        if packet.get("packet_id") != packet_id
+    ]
+    if not siblings:
+        return
+
+    sibling_ids = [packet["packet_id"] for packet in siblings]
+    if not allow_sibling and not supersedes_packet:
+        raise ControllerPromptCreateError(
+            f"loop '{loop_id}' already has live controller packet(s): "
+            f"{', '.join(sibling_ids)}. Use controller_prompt.amend for the "
+            "existing packet, or rerun with --allow-sibling plus "
+            "--sibling-justification, or --supersedes-packet PACKET-ID."
+        )
+
+    if supersedes_packet and supersedes_packet not in sibling_ids:
+        raise ControllerPromptCreateError(
+            f"--supersedes-packet '{supersedes_packet}' is not a live packet "
+            f"for loop '{loop_id}' (live: {', '.join(sibling_ids)})"
+        )
+
+    if allow_sibling and not sibling_justification.strip() and not supersedes_packet:
+        raise ControllerPromptCreateError(
+            "--allow-sibling requires --sibling-justification unless "
+            "--supersedes-packet is supplied"
+        )
+
+
 def _validate_loop_scope(loop_id: str, state_root: str) -> None:
     """Validate that loop_id references an active loop in SQLite authority.
 
@@ -168,6 +251,9 @@ def _compose_frontmatter(
     human_intent_id: str = "",
     materialization_status: str = "",
     materialization_ref: str = "",
+    allow_sibling: bool = False,
+    sibling_justification: str = "",
+    supersedes_packet: str = "",
 ) -> str:
     """Compose YAML frontmatter for the packet."""
     fm: dict[str, Any] = {
@@ -197,6 +283,13 @@ def _compose_frontmatter(
         fm["materialization_status"] = materialization_status
     if materialization_ref:
         fm["materialization_ref"] = materialization_ref
+    if allow_sibling or sibling_justification or supersedes_packet:
+        fm["loop_sibling_policy"] = "supersedes" if supersedes_packet else "explicit_sibling"
+        fm["sibling_of_loop"] = loop_id
+    if sibling_justification:
+        fm["sibling_justification"] = sibling_justification
+    if supersedes_packet:
+        fm["supersedes_packet"] = supersedes_packet
 
     return yaml.safe_dump(
         fm,
@@ -268,6 +361,9 @@ def create_packet(
     human_intent_id: str = "",
     materialization_status: str = "",
     materialization_ref: str = "",
+    allow_sibling: bool = False,
+    sibling_justification: str = "",
+    supersedes_packet: str = "",
 ) -> dict[str, Any]:
     """Create a controller-prompt packet with governed frontmatter.
 
@@ -300,6 +396,16 @@ def create_packet(
     # ── Loop validation ───────────────────────────────────────────
     _validate_loop_scope(loop_id, state_root)
 
+    # ── Loop sibling policy ───────────────────────────────────────
+    _check_loop_sibling_policy(
+        packet_id=packet_id,
+        loop_id=loop_id,
+        controller_prompts_dir=controller_prompts_dir,
+        allow_sibling=allow_sibling,
+        sibling_justification=sibling_justification,
+        supersedes_packet=supersedes_packet,
+    )
+
     # ── Compose content ───────────────────────────────────────────
     frontmatter = _compose_frontmatter(
         packet_id=packet_id,
@@ -316,6 +422,9 @@ def create_packet(
         human_intent_id=human_intent_id,
         materialization_status=materialization_status,
         materialization_ref=materialization_ref,
+        allow_sibling=allow_sibling,
+        sibling_justification=sibling_justification,
+        supersedes_packet=supersedes_packet,
     )
 
     body = _read_body(body_source, body_inline)
@@ -367,5 +476,8 @@ def create_packet(
         "human_intent_id": human_intent_id,
         "materialization_status": materialization_status,
         "materialization_ref": materialization_ref,
+        "allow_sibling": allow_sibling,
+        "sibling_justification": sibling_justification,
+        "supersedes_packet": supersedes_packet,
         "message": f"packet created at {packet_path}",
     }

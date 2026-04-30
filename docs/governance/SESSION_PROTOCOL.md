@@ -104,6 +104,13 @@ or many packets. A packet's frontmatter carries `loop_id`.
 - Orchestration packets: `$SPINE_STATE/orchestration/{LOOP_ID}/packet.yaml` — governed create/amend/close
 - Controller-prompt packets: `$SPINE_STATE/controller-prompts/` — governed create (`controller_prompt.create`) and governed close (`controller_prompt.close`); packet frontmatter/identity/path binding is governed at birth and death, packet body remains operator-authored; historical packets (pre-governed-create) are valid legacy, not drift
 
+Controller-prompt packet birth is subtraction-biased: if a live packet already
+exists for the same loop, the default path is `controller_prompt.amend`. A new
+live sibling packet must explicitly declare either `--allow-sibling` with a
+human-readable justification or `--supersedes-packet PACKET-ID`. This prevents
+loop-local packet split-brain where agents see multiple draft packets as
+parallel truths.
+
 ### Wave
 
 A single execution run against a packet. The wave does the actual work.
@@ -169,6 +176,13 @@ approval removes the only review gate and close eligibility passes, the agent
 should close the eligible object and report the receipt instead of asking the
 human steward to rediscover ceremony.
 
+Do not invert this into loop-first custody. When a terminal is alive but open
+work is unmapped, the first read is "what evidence or operator intent is this
+terminal carrying?" not "which loop should be claimed?" Loops are bounded work
+containers. Custody becomes first-class when carried evidence is attached to the
+right seam and execution claim/heartbeat/receipt evidence proves who is doing
+the work.
+
 When the work promotes a new first-class L1/L2 authority or readback, the
 workflow also has a subtraction tail: answer the first-class closure contract,
 demote or retire the old surface vocabulary, and make the normal readback teach
@@ -226,6 +240,28 @@ This is the node-architecture path for unattended work:
 - governed worker lanes claim custody
 - `execution_host` carries runtime execution
 - receipts and status survive terminal loss
+
+### Durable Remote Transfer Job Lane
+
+Long-running payload movement must not depend on terminal liveness as its only
+custody proof. When a transfer can outlive the terminal that launched it, the
+durable host job is the owner of claim, heartbeat, log, status, result, failure,
+and receipt truth.
+
+```
+operator or system intent
+  -> durable transfer admitted or adopted       [governed: durable.transfer.start|adopt]
+    -> host job owns custody                    [governed: transfer job record]
+      -> host job proves liveness               [governed: transfer proof_channel]
+      -> copy phase reaches terminal outcome    [governed: transfer receipt]
+      -> verify phase records evidence          [governed: verification receipt]
+      -> destructive tail remains separate      [governed: explicit approval gate]
+```
+
+Terminal telemetry may monitor this lane, but it must not be the only ownership
+surface. If the terminal dies and the remote transfer continues, the loop should
+read as `owned by durable transfer job` or `stale transfer job`, not as vague
+unattended work.
 
 ### Compatibility: Manual Custody Path
 

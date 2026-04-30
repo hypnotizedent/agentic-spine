@@ -164,6 +164,18 @@ kernel_primitives:
   authority: docs/governance/KERNEL_PRIMITIVE_CANON.md
   declared_in: NORTH_STAR.md
   kernel_lifecycle_protocol:
+    evidence_precondition:
+      canonical_statement: >
+        Evidence enters before request/claim execution machinery. Evidence may
+        be human words, file paths, status readbacks, traces, run keys,
+        receipts, or explicit operator approval. The spine preserves and
+        classifies that evidence, then attaches it to an existing seam/loop,
+        creates bounded work only when needed, or records no-op/deferred
+        disposition.
+      anti_pattern: >
+        Do not start public operator flow by asking for a loop claim. Loops are
+        bounded work containers; custody is derived from carried evidence plus
+        governed execution claims, not from ambient loop selection.
     ordered_primitives:
       - request
       - claim
@@ -193,8 +205,13 @@ kernel_primitives:
         execution_request:
           canonical_authority: ops/bindings/dispatch.envelope.contract.yaml
           birth_capability: delegate.to.execution
+          additional_birth_capabilities:
+            - mailroom.task.enqueue
+            - durable.transfer.adopt
+            - durable.transfer.start (contracted)
           read_capabilities:
             - delegation.status
+            - durable.transfer.status
           residue:
             - wave.start without delegation
           realization_note: >
@@ -203,7 +220,10 @@ kernel_primitives:
             realizations are explicit interactive handoff
             (`delegate.to.execution` -> `delegation.pickup`) and operational
             mailroom task admission (`mailroom.task.enqueue` ->
-            `mailroom.task.claim`).
+            `mailroom.task.claim`). Long-running payload movement is a
+            host-durable execution realization via `durable.transfer.adopt` and
+            `durable.transfer.status`; terminals may monitor it, but terminal
+            liveness is not custody truth.
       invariants:
         - execution_request must bind loop_id and packet_id
         - execution_request cannot honestly bypass governed delegation birth
@@ -215,11 +235,13 @@ kernel_primitives:
       canonical_capabilities:
         - delegation.pickup
         - mailroom.task.claim
+        - durable.transfer.adopt
     heartbeat:
       realization: first_class_protocol
       canonical_capabilities:
         - worktree.lease.heartbeat
         - mailroom.task.heartbeat
+        - durable.transfer.status
       protocol_requirements:
         - liveness timestamp
         - proof channel
@@ -234,7 +256,7 @@ kernel_primitives:
     request:
       realization: first_class_protocol
       canonical_home: ops/bindings/workflow.vocabulary.contract.yaml
-      note: Two canonical classes — work-request (loop birth) and execution-request (delegation birth)
+      note: Two canonical classes — work-request (loop birth) and execution-request (delegation, mailroom, or durable transfer birth)
     claim:
       realization: first_class_protocol
       canonical_home: ops/plugins/core/lifecycle/lib/delegation_broker.py
@@ -242,7 +264,7 @@ kernel_primitives:
     heartbeat:
       realization: first_class_protocol
       canonical_home: ops/bindings/launchd.scheduler.registry.yaml
-      note: Heartbeat protocol = liveness timestamp + proof channel + staleness threshold
+      note: Heartbeat protocol = liveness timestamp + proof channel + staleness threshold; durable transfer status realizes this for long payload movement
     result:
       realization: collapsed
       canonical_home: ops/bindings/closeout.disposition.contract.yaml

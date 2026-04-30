@@ -71,7 +71,7 @@ A valid request must declare:
 | Request Class | Meaning | Birth Surface | Canonical Artifact | Canonical Read Surface |
 |---|---|---|---|---|
 | `work_request` | This bounded work should exist | `loops.create` | SQLite loop row + loop scope projection | `loops.status`, `ops status` |
-| `execution_request` | This bounded work should be executed by a governed execution lane | `delegate.to.execution` (interactive or operational admission), `mailroom.task.enqueue` (operational) | dispatch envelope lifecycle via realization-specific queue artifact | `delegation.status` (interactive); controller packet runtime state + task envelope (operational) |
+| `execution_request` | This bounded work should be executed by a governed execution lane | `delegate.to.execution` (interactive), `mailroom.task.enqueue` (operational), `durable.transfer.adopt` (host-durable existing transfer), `durable.transfer.start` (contracted future launch) | dispatch envelope lifecycle via realization-specific queue artifact | `delegation.status` (interactive); controller packet runtime state + task envelope (operational); `durable.transfer.status` (host-durable transfer) |
 
 **What is canonical:** work-request class via loop birth and loop authority;
 execution-request class via dispatch envelope contract and its execution-lane
@@ -104,6 +104,12 @@ explicit rather than autonomous.
 **Realization status:** First-class — claim is the governed proof of custody,
 canonically realized as the `delegated → picked_up` transition.
 
+**Evidence precondition:** Claim is not the operator front door. Evidence or
+operator intent enters first, is classified, and is attached to the right seam
+or bounded work container. A claim proves custody of an already-governed work
+item; it must not be used as a loop-first prompt to manufacture custody before
+the carried evidence is known.
+
 | Aspect | Current State |
 |--------|---------------|
 | **Canonical authority** | `delegation_broker.py` state machine (canonical home for the CLAIM primitive) |
@@ -132,6 +138,7 @@ A valid claim requires these fields on the custody artifact:
 | `delegation.pickup` | interactive / proof | DEL-*.yaml | `picked_up_by` | `picked_up_at_utc` |
 | `mailroom.task.claim` | operational | running/*.yaml | `claimed_by` | `claimed_at` |
 | worktree lease creation | execution isolation | `.spine-lane-lease.yaml` | `owner` | `created_at` |
+| durable transfer job adoption | operational / host-durable | durable transfer job record | `claimed_by` / `adopted_by` | `claimed_at_utc` / `adopted_at_utc` |
 
 **What is canonical:** `delegation.pickup` (interactive), `mailroom.task.claim`
 (operational), the claim protocol semantics above.
@@ -191,6 +198,7 @@ Staleness classification:
 | Worktree lease | `heartbeat_at` | `.spine-lane-lease.yaml` | `ttl_hours` in worktree lifecycle contract |
 | Mailroom task | `heartbeat_at` | running/*.yaml | implicit (no declared threshold — subsystem gap) |
 | Terminal telemetry | attach timestamp | `shared_authority.db` terminal row | implicit (no declared threshold — subsystem gap) |
+| Durable transfer job | `heartbeat_at_utc` / process or log progress timestamp | durable transfer proof_channel | `staleness_threshold_seconds` in dispatch envelope durable transfer contract |
 
 **What is canonical:** The heartbeat protocol (three required semantics above).
 The `proof_channel` pattern in `launchd.scheduler.registry.yaml` is the
@@ -352,6 +360,13 @@ receipt/result/failure collapse, and the claim/heartbeat first-classing.
 Request, claim, and heartbeat are defined as protocols with canonical
 semantics, not as synthetic single artifacts — this is the right shape for
 request, custody, and liveness primitives.
+
+**Durable transfer custody note (Tank incident; Packet 509 superseded into
+Packet 01):** Long-running remote payload movement is named as a first-class
+operational realization across request, claim, and heartbeat.
+`durable.transfer.adopt` and `durable.transfer.status` let active transfer loops
+map custody without relying on terminal liveness; `durable.transfer.start`
+remains contracted for future governed launches.
 
 ## What This Canon Pass Enables
 

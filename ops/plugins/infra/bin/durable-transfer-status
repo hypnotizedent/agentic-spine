@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_STATE = ROOT.parent / ".runtime" / "spine" / "state"
+TRANSFER_DIR_NAME = "durable-transfers"
+
+
+def state_root() -> Path:
+    return Path(os.environ.get("SPINE_STATE") or DEFAULT_STATE).expanduser()
+
+
+def transfer_root() -> Path:
+    return state_root() / TRANSFER_DIR_NAME
+
+
+def iso_now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def age_seconds(value: Any, now: datetime) -> int | None:
+    parsed = parse_iso(value)
+    if parsed is None:
+        return None
+    return max(0, int((now - parsed).total_seconds()))
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def split_ref(ref: Any) -> tuple[str, str]:
+    text = str(ref or "").strip()
+    if not text:
+        return "", ""
+    if ":/" in text and not text.startswith("/"):
+        host, path = text.split(":", 1)
+        return host, path
+    return "", text
+
+
+def shell_quote(value: str) -> str:
+    return shlex.quote(value)
+
+
+def remote_stat(host: str, path: str, timeout: int) -> dict[str, Any]:
+    if not host or not path:
+        return {"exists": False, "error": "missing host/path"}
+    script = """
+import datetime
+import json
+import os
+import sys
+
+p = sys.argv[1]
+exists = os.path.exists(p)
+payload = {"exists": exists, "path": p}
+if exists:
+    st = os.stat(p)
+    payload.update({
+        "size": st.st_size,
+        "mtime_utc": datetime.datetime.fromtimestamp(
+            st.st_mtime,
+            datetime.timezone.utc,
+        ).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    })
+print(json.dumps(payload))
+""".strip()
+    cmd = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={timeout}",
+        host,
+        f"python3 -c {shell_quote(script)} {shell_quote(path)}",
+    ]
+    proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout + 2)
+    if proc.returncode != 0:
+        return {
+            "exists": False,
+            "path": path,
+            "error": (proc.stderr or proc.stdout).strip()[:240],
+        }
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {"exists": False, "path": path, "error": f"invalid remote stat json: {exc}"}
+    return payload if isinstance(payload, dict) else {"exists": False, "path": path}
+
+
+def local_stat(path: str) -> dict[str, Any]:
+    p = Path(path).expanduser()
+    if not p.exists():
+        return {"exists": False, "path": str(p)}
+    st = p.stat()
+    return {
+        "exists": True,
+        "path": str(p),
+        "size": st.st_size,
+        "mtime_utc": datetime.fromtimestamp(st.st_mtime, UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+    }
+
+
+def stat_ref(ref: Any, timeout: int) -> dict[str, Any]:
+    host, path = split_ref(ref)
+    if not path:
+        return {"exists": False, "path": ""}
+    if host:
+        result = remote_stat(host, path, timeout)
+        result["host"] = host
+        result["ref"] = str(ref)
+        return result
+    result = local_stat(path)
+    result["host"] = ""
+    result["ref"] = str(ref)
+    return result
+
+
+def remote_process(host: str, pattern: str, timeout: int) -> dict[str, Any]:
+    if not host or not pattern:
+        return {"observed": False, "error": "missing host/pattern"}
+    cmd = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={timeout}",
+        host,
+        "pgrep -af " + shell_quote(pattern) + " | head -5",
+    ]
+    proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout + 2)
+    output = proc.stdout.strip()
+    if proc.returncode == 0 and output:
+        return {"observed": True, "sample": output}
+    return {"observed": False, "error": (proc.stderr or "").strip()[:240]}
+
+
+def local_process(pattern: str) -> dict[str, Any]:
+    if not pattern:
+        return {"observed": False, "error": "missing pattern"}
+    proc = subprocess.run(["pgrep", "-af", pattern], text=True, capture_output=True)
+    output = proc.stdout.strip()
+    if proc.returncode == 0 and output:
+        return {"observed": True, "sample": "\n".join(output.splitlines()[:5])}
+    return {"observed": False, "error": ""}
+
+
+def process_ref(record: dict[str, Any], timeout: int) -> dict[str, Any]:
+    pattern = str(
+        record.get("process_pattern")
+        or record.get("observed_process")
+        or record.get("command_ref")
+        or ""
+    ).strip()
+    host = str(record.get("host_node_id") or "").strip()
+    if not pattern:
+        return {"observed": False, "error": "missing process pattern"}
+    if host and host not in {"localhost", "127.0.0.1", os.uname().nodename}:
+        return remote_process(host, pattern, timeout)
+    return local_process(pattern)
+
+
+def refs_from_record(record: dict[str, Any]) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    for role, key in (
+        ("status_file", "status_path"),
+        ("log_file", "log_path"),
+        ("completion_marker", "completion_marker_path"),
+    ):
+        value = str(record.get(key) or "").strip()
+        if value:
+            refs.append((role, value))
+    proof = record.get("proof_channel")
+    if isinstance(proof, dict):
+        proof_type = str(proof.get("type") or "").strip()
+        proof_path = str(proof.get("path") or "").strip()
+        if proof_type and proof_path:
+            refs.append((proof_type, proof_path))
+    return refs
+
+
+def build_row(path: Path, now: datetime, timeout: int, probe_process: bool) -> dict[str, Any]:
+    record = load_yaml(path)
+    job_id = str(record.get("transfer_job_id") or path.stem).strip()
+    claim_state = str(record.get("claim_state") or "admitted").strip()
+    threshold = int(record.get("staleness_threshold_seconds") or 1800)
+
+    proof_observations = []
+    heartbeat_candidates: list[str] = []
+    for role, ref in refs_from_record(record):
+        observed = stat_ref(ref, timeout)
+        observed["role"] = role
+        proof_observations.append(observed)
+        if observed.get("exists") and observed.get("mtime_utc"):
+            heartbeat_candidates.append(str(observed["mtime_utc"]))
+
+    process_observation = {}
+    if probe_process:
+        process_observation = process_ref(record, timeout)
+        if process_observation.get("observed"):
+            heartbeat_candidates.append(iso_now())
+
+    record_heartbeat = str(record.get("heartbeat_at_utc") or record.get("heartbeat_at") or "").strip()
+    if record_heartbeat:
+        heartbeat_candidates.append(record_heartbeat)
+
+    latest_heartbeat = ""
+    parsed_candidates = [(parse_iso(candidate), candidate) for candidate in heartbeat_candidates]
+    parsed_candidates = [(dt, candidate) for dt, candidate in parsed_candidates if dt is not None]
+    if parsed_candidates:
+        latest_heartbeat = max(parsed_candidates, key=lambda item: item[0])[1]
+
+    hb_age = age_seconds(latest_heartbeat, now)
+    fresh = hb_age is not None and hb_age <= threshold
+
+    completion_observed = any(
+        obs.get("role") == "completion_marker" and obs.get("exists")
+        for obs in proof_observations
+    )
+    if str(record.get("claim_state") or "").strip() == "completed" or completion_observed:
+        effective_state = "completed"
+    elif str(record.get("claim_state") or "").strip() == "failed":
+        effective_state = "failed"
+    elif claim_state in {"claimed", "adopted"} and fresh:
+        effective_state = claim_state
+    elif claim_state in {"claimed", "adopted"}:
+        effective_state = "stale"
+    else:
+        effective_state = claim_state or "admitted"
+
+    return {
+        "transfer_job_id": job_id,
+        "loop_id": str(record.get("loop_id") or "").strip(),
+        "payload_family": str(record.get("payload_family") or "").strip(),
+        "host_node_id": str(record.get("host_node_id") or "").strip(),
+        "source_uri": str(record.get("source_uri") or "").strip(),
+        "destination_uri": str(record.get("destination_uri") or "").strip(),
+        "command_kind": str(record.get("command_kind") or "").strip(),
+        "claim_state": effective_state,
+        "declared_claim_state": claim_state,
+        "heartbeat_at_utc": latest_heartbeat,
+        "heartbeat_age_seconds": hb_age,
+        "staleness_threshold_seconds": threshold,
+        "heartbeat_fresh": fresh,
+        "proof_observations": proof_observations,
+        "process_observation": process_observation,
+        "record_path": str(path),
+        "receipt_ref": str(record.get("receipt_ref") or "").strip(),
+        "verification_ref": str(record.get("verification_ref") or "").strip(),
+        "destructive_tail_policy": str(record.get("destructive_tail_policy") or "").strip(),
+    }
+
+
+def load_rows(timeout: int, probe_process: bool) -> list[dict[str, Any]]:
+    root = transfer_root()
+    rows = []
+    if root.is_dir():
+        for path in sorted(root.glob("*.yaml")):
+            rows.append(build_row(path, datetime.now(UTC), timeout, probe_process))
+        for path in sorted(root.glob("*.json")):
+            rows.append(build_row(path, datetime.now(UTC), timeout, probe_process))
+    rows.sort(key=lambda row: str(row.get("heartbeat_at_utc") or ""), reverse=True)
+    return rows
+
+
+def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    active_states = {"claimed", "adopted"}
+    stale_states = {"stale", "failed"}
+    return {
+        "total": len(rows),
+        "active": sum(1 for row in rows if row.get("claim_state") in active_states),
+        "fresh": sum(1 for row in rows if row.get("heartbeat_fresh")),
+        "stale": sum(1 for row in rows if row.get("claim_state") in stale_states),
+        "completed": sum(1 for row in rows if row.get("claim_state") == "completed"),
+        "admitted": sum(1 for row in rows if row.get("claim_state") == "admitted"),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Read durable transfer custody status.")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--probe-process", action="store_true", help="Probe declared host process patterns over SSH/local pgrep.")
+    parser.add_argument("--timeout", type=int, default=2)
+    args = parser.parse_args()
+
+    rows = load_rows(timeout=max(1, args.timeout), probe_process=args.probe_process)
+    payload = {
+        "canonical_authority": "durable.transfer.status",
+        "state_root": str(state_root()),
+        "record_root": str(transfer_root()),
+        "generated_at_utc": iso_now(),
+        "summary": summarize(rows),
+        "rows": rows,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    summary = payload["summary"]
+    print("DURABLE TRANSFER STATUS")
+    print(f"  records:   {summary['total']} total, {summary['active']} active, {summary['stale']} stale, {summary['completed']} completed")
+    for row in rows:
+        loop = row.get("loop_id") or "<none>"
+        hb = row.get("heartbeat_at_utc") or "none"
+        print(f"  - {row['transfer_job_id']}: {row['claim_state']} loop={loop} heartbeat={hb}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

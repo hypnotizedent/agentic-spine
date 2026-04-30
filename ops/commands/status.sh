@@ -603,6 +603,67 @@ for loop in open_loops:
             loop["active_terminal_source"] = "terminal_custody"
             loop["loop_custody_fresh"] = bool(loop.get("active_terminal"))
 
+durable_transfer_status = {
+    "canonical_authority": "durable.transfer.status",
+    "summary": {"total": 0, "active": 0, "fresh": 0, "stale": 0, "completed": 0, "admitted": 0},
+    "rows": [],
+    "status": "unavailable",
+}
+durable_transfer_bin = spine / "ops" / "plugins" / "infra" / "bin" / "durable-transfer-status"
+if durable_transfer_bin.exists() and os.access(str(durable_transfer_bin), os.X_OK):
+    try:
+        _proc = subprocess.run(
+            [str(durable_transfer_bin), "--json", "--probe-process", "--timeout", "2"],
+            capture_output=True, text=True, timeout=8, cwd=str(spine),
+        )
+        if _proc.returncode == 0 and _proc.stdout.strip():
+            durable_transfer_status = json.loads(_proc.stdout)
+            durable_transfer_status["status"] = "ok"
+        else:
+            durable_transfer_status["status"] = "degraded"
+            durable_transfer_status["error"] = (_proc.stderr or _proc.stdout).strip()
+    except Exception as _exc:
+        durable_transfer_status["status"] = "degraded"
+        durable_transfer_status["error"] = str(_exc)
+
+durable_transfer_rows = [
+    row for row in durable_transfer_status.get("rows", [])
+    if isinstance(row, dict)
+]
+durable_transfer_by_loop = {}
+durable_transfer_live_claims = 0
+for row in durable_transfer_rows:
+    loop_id = str(row.get("loop_id") or "").strip()
+    if not loop_id or loop_id not in live_open_loop_ids:
+        continue
+    state = str(row.get("claim_state") or "").strip()
+    fresh = bool(row.get("heartbeat_fresh"))
+    if state in {"claimed", "adopted"} and fresh:
+        durable_transfer_live_claims += 1
+    existing = durable_transfer_by_loop.get(loop_id)
+    existing_ts = str(existing.get("heartbeat_at_utc") or "") if existing else ""
+    current_ts = str(row.get("heartbeat_at_utc") or "")
+    if existing is None or current_ts > existing_ts:
+        durable_transfer_by_loop[loop_id] = row
+
+for loop in open_loops:
+    loop_id = str(loop.get("loop_id") or "").strip()
+    if not loop_id or loop.get("loop_custody_fresh"):
+        continue
+    transfer_row = durable_transfer_by_loop.get(loop_id)
+    if not transfer_row:
+        continue
+    state = str(transfer_row.get("claim_state") or "").strip()
+    fresh = bool(transfer_row.get("heartbeat_fresh"))
+    if (state in {"claimed", "adopted"} and fresh) or state == "completed":
+        loop["loop_custody_fresh"] = True
+        loop["active_terminal"] = str(transfer_row.get("transfer_job_id") or "").strip()
+        loop["active_terminal_source"] = "durable_transfer"
+        loop["durable_transfer_job_id"] = str(transfer_row.get("transfer_job_id") or "").strip()
+        loop["durable_transfer_state"] = state
+        loop["last_heartbeat_utc"] = str(transfer_row.get("heartbeat_at_utc") or loop.get("last_heartbeat_utc") or "")
+        loop["heartbeat_source"] = "durable_transfer"
+
 mapped_open_loops = sum(1 for loop in open_loops if loop.get("loop_custody_fresh"))
 unmapped_open_loops = sum(1 for loop in open_loops if not loop.get("loop_custody_fresh"))
 terminal_telemetry_status = "ok"
@@ -622,6 +683,7 @@ terminal_telemetry_summary = {
     "fresh_custody_terminals": len(fresh_custody_terminals),
     "observed_terminals": len(terminal_telemetry),
     "fresh_custody_live_claims": fresh_custody_live_claims,
+    "durable_transfer_live_claims": durable_transfer_live_claims,
     "mapped_open_loops": mapped_open_loops,
     "unmapped_open_loops": unmapped_open_loops,
     "terminals": terminal_telemetry,
@@ -1187,8 +1249,13 @@ elif terminal_telemetry_status == "unattended":
         "WORK CUSTODY UNATTENDED:"
         f" {len(open_loops)} open work item(s),"
         f" {len(fresh_terminals)} fresh terminal heartbeat(s),"
-        " no fresh custody claim for live open work"
+        " no carried evidence or governed custody claim maps a fresh terminal to live open work"
     )
+
+_durable_transfer_summary = durable_transfer_status.get("summary") if isinstance(durable_transfer_status.get("summary"), dict) else {}
+_durable_transfer_stale = int(_durable_transfer_summary.get("stale", 0) or 0)
+if _durable_transfer_stale:
+    anomalies.append(f"DURABLE TRANSFER ATTENTION: {_durable_transfer_stale} stale or failed transfer job(s)")
 
 # Check background loop heartbeat freshness
 now_utc = telemetry_now_utc
@@ -1628,6 +1695,7 @@ if mode == "--json":
         "open_loops": open_loops,
         "planned_loops": planned_loops,
         "terminal_telemetry": terminal_telemetry_summary,
+        "durable_transfer": durable_transfer_status,
         "open_gaps": open_gaps,
         "gap_state": {
             "status": gap_state.get("status", "degraded"),
@@ -1693,6 +1761,8 @@ if mode == "--json":
             "worktree_cleanup_dirty_blocked": int(worktree_cleanup_state.get("dirty_blocked_worktrees", 0) or 0),
             "fresh_terminals": len(fresh_terminals),
             "fresh_custody_terminals": len(fresh_custody_terminals),
+            "durable_transfer_active": int((durable_transfer_status.get("summary") or {}).get("active", 0) or 0),
+            "durable_transfer_stale": int((durable_transfer_status.get("summary") or {}).get("stale", 0) or 0),
             "active_delegations": int(delegation_summary.get("active", 0) or 0),
             "background_loops": sum(1 for loop in open_loops if loop.get("execution_mode") == "background"),
             "stale_background_loops": stale_background_count,
@@ -1882,6 +1952,10 @@ if mode != "--expert":
         print(f"  standing programs: {_sp_total} total, {_sp_healthy} healthy, {_sp_degraded} degraded")
     else:
         print("  standing programs: unavailable")
+    _dt_summary = durable_transfer_status.get("summary") if isinstance(durable_transfer_status.get("summary"), dict) else {}
+    _dt_total = int(_dt_summary.get("total", 0) or 0)
+    if _dt_total:
+        print(f"  durable transfers: {_dt_total} total, {int(_dt_summary.get('active', 0) or 0)} active, {int(_dt_summary.get('stale', 0) or 0)} attention")
     print("  mailroom lane:     capability-backed")
     print("  AI agent lane:     not delivered")
     print("  interactive lane:  explicit worker pickup required")
@@ -1970,6 +2044,24 @@ if terminal_telemetry:
         if term.get("branch"):
             term_bits.append(f"branch={term['branch']}")
         print(f"  {term['terminal_id']:18s} {' | '.join(term_bits) if term_bits else 'observed'}")
+    print()
+
+_dt_summary = durable_transfer_status.get("summary") if isinstance(durable_transfer_status.get("summary"), dict) else {}
+if int(_dt_summary.get("total", 0) or 0):
+    print("DURABLE TRANSFERS")
+    print("-" * 72)
+    print(f"  status:             {durable_transfer_status.get('status', 'unknown')}")
+    print(f"  active:             {int(_dt_summary.get('active', 0) or 0)}")
+    print(f"  stale/failed:       {int(_dt_summary.get('stale', 0) or 0)}")
+    print(f"  completed:          {int(_dt_summary.get('completed', 0) or 0)}")
+    for transfer in durable_transfer_rows[:6]:
+        bits = [
+            str(transfer.get("claim_state") or "unknown"),
+            f"loop={transfer.get('loop_id') or '<none>'}",
+        ]
+        if transfer.get("heartbeat_at_utc"):
+            bits.append(f"heartbeat={transfer.get('heartbeat_at_utc')}")
+        print(f"  {str(transfer.get('transfer_job_id') or '?'):24s} {' | '.join(bits)}")
     print()
 
 _sp_summary = standing_program_health.get("summary") if isinstance(standing_program_health.get("summary"), dict) else {}

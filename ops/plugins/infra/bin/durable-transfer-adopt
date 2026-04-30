@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_STATE = ROOT.parent / ".runtime" / "spine" / "state"
+
+
+def state_root() -> Path:
+    return Path(os.environ.get("SPINE_STATE") or DEFAULT_STATE).expanduser()
+
+
+def transfer_root() -> Path:
+    return state_root() / "durable-transfers"
+
+
+def iso_now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def safe_id(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-")
+    return text or f"transfer-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+
+
+def write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Adopt an already-running long transfer into durable custody.")
+    parser.add_argument("--transfer-job-id", required=True)
+    parser.add_argument("--loop-id", required=True)
+    parser.add_argument("--host-node-id", required=True)
+    parser.add_argument("--source-uri", required=True)
+    parser.add_argument("--destination-uri", required=True)
+    parser.add_argument("--command-kind", default="rsync")
+    parser.add_argument("--command-ref", default="")
+    parser.add_argument("--process-pattern", default="")
+    parser.add_argument("--payload-family", default="payload_transfer")
+    parser.add_argument("--status-path", default="")
+    parser.add_argument("--log-path", default="")
+    parser.add_argument("--completion-marker-path", default="")
+    parser.add_argument("--staleness-threshold-seconds", type=int, default=1800)
+    parser.add_argument("--adoption-evidence-ref", default="")
+    parser.add_argument("--destructive-tail-policy", default="separate_explicit_approval_after_copy_and_verify")
+    args = parser.parse_args()
+
+    job_id = safe_id(args.transfer_job_id)
+    path = transfer_root() / f"{job_id}.yaml"
+    now = iso_now()
+    payload = {
+        "version": 1,
+        "transfer_job_id": job_id,
+        "loop_id": args.loop_id,
+        "payload_family": args.payload_family,
+        "host_node_id": args.host_node_id,
+        "source_uri": args.source_uri,
+        "destination_uri": args.destination_uri,
+        "command_kind": args.command_kind,
+        "command_ref": args.command_ref,
+        "process_pattern": args.process_pattern or args.command_ref,
+        "started_by": "unknown_existing_process",
+        "started_at_utc": "",
+        "claim_state": "adopted",
+        "adopted_by": os.environ.get("USER") or "operator",
+        "adopted_at_utc": now,
+        "adoption_evidence_ref": args.adoption_evidence_ref,
+        "heartbeat_at_utc": now,
+        "staleness_threshold_seconds": args.staleness_threshold_seconds,
+        "proof_channel": {
+            "type": "status_file" if args.status_path else "process",
+            "path": args.status_path,
+        },
+        "log_path": args.log_path,
+        "status_path": args.status_path,
+        "completion_marker_path": args.completion_marker_path,
+        "resume_policy": "reconcile_before_duplicate_start",
+        "verification_policy": "receipt_required_before_destructive_tail",
+        "destructive_tail_policy": args.destructive_tail_policy,
+    }
+    write_yaml(path, payload)
+    print(f"adopted: {job_id}")
+    print(f"record:  {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
