@@ -1018,6 +1018,44 @@ def collect_delegation_summary():
     return result
 
 
+def collect_execution_pickup_status():
+    result = {
+        "status": "unavailable",
+        "summary": {
+            "requests_total": 0,
+            "not_claimed": 0,
+            "claimed_or_running": 0,
+            "stale": 0,
+            "done_recent": 0,
+            "failed_recent": 0,
+            "ai_agent_bridge": "not_delivered",
+        },
+        "worker": {},
+        "requests": [],
+    }
+    pickup_bin = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "execution-pickup-status"
+    if not pickup_bin.exists():
+        result["error"] = f"missing execution pickup status surface: {pickup_bin}"
+        return result
+
+    data = run_json_command([sys.executable, str(pickup_bin), "--json"], timeout=20)
+    if data.get("status") == "error":
+        result["error"] = data.get("error", "execution-pickup-status failed")
+        return result
+
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    requests = data.get("requests") if isinstance(data.get("requests"), list) else []
+    worker = data.get("worker") if isinstance(data.get("worker"), dict) else {}
+    result.update({
+        "status": "ok",
+        "summary": summary,
+        "worker": worker,
+        "requests": requests,
+        "subtraction": data.get("subtraction") if isinstance(data.get("subtraction"), dict) else {},
+    })
+    return result
+
+
 gap_state = collect_gap_state()
 gaps_available = gap_state.get("status") == "ok"
 open_gaps = gap_state.get("open_gaps", []) if gaps_available else []
@@ -1030,6 +1068,7 @@ standing_program_health = collect_standing_program_health()
 watcher_input_projection = collect_watcher_input_projection()
 worktree_cleanup_state = collect_worktree_cleanup_state()
 delegation_summary = collect_delegation_summary()
+execution_pickup_status = collect_execution_pickup_status()
 
 # ── Parse inbox lanes ─────────────────────────────────────────────────────
 
@@ -1735,11 +1774,13 @@ if mode == "--json":
         "watcher_input_projection": watcher_input_projection,
         "worktree_cleanup": worktree_cleanup_state,
         "delegations": delegation_summary,
+        "execution_pickup": execution_pickup_status,
         "execution_lane_truth": {
-            "mailroom_execution": "capability_backed",
+            "capability_worker": "operational_capability_worker",
             "agent_tool_bridge": "deferred",
             "interactive_delegation": "explicit_worker_pickup_required",
             "autonomous_ai_agent_lane": "not_delivered",
+            "public_readback": "execution.pickup.status",
         },
         "counts": {
             # Direct SQLite-backed open loops are authoritative for loop count.
@@ -1764,6 +1805,10 @@ if mode == "--json":
             "durable_transfer_active": int((durable_transfer_status.get("summary") or {}).get("active", 0) or 0),
             "durable_transfer_stale": int((durable_transfer_status.get("summary") or {}).get("stale", 0) or 0),
             "active_delegations": int(delegation_summary.get("active", 0) or 0),
+            "execution_requests": int((execution_pickup_status.get("summary") or {}).get("requests_total", 0) or 0),
+            "execution_not_claimed": int((execution_pickup_status.get("summary") or {}).get("not_claimed", 0) or 0),
+            "execution_claimed_or_running": int((execution_pickup_status.get("summary") or {}).get("claimed_or_running", 0) or 0),
+            "execution_stale": int((execution_pickup_status.get("summary") or {}).get("stale", 0) or 0),
             "background_loops": sum(1 for loop in open_loops if loop.get("execution_mode") == "background"),
             "stale_background_loops": stale_background_count,
             "planned_loops": len(planned_loops),
@@ -1868,6 +1913,14 @@ if mode != "--expert":
     _wt_dirty_blocked = int(worktree_cleanup_state.get("dirty_blocked_worktrees", 0) or 0)
     _wt_temp_dirty = int(worktree_cleanup_state.get("dirty_temp_clones", 0) or 0)
     _wt_stash_blocked = int(worktree_cleanup_state.get("stash_blocked", 0) or 0)
+    _pickup_summary = execution_pickup_status.get("summary") if isinstance(execution_pickup_status.get("summary"), dict) else {}
+    _pickup_total = int(_pickup_summary.get("requests_total", 0) or 0)
+    _pickup_unclaimed = int(_pickup_summary.get("not_claimed", 0) or 0)
+    _pickup_running = int(_pickup_summary.get("claimed_or_running", 0) or 0)
+    _pickup_stale = int(_pickup_summary.get("stale", 0) or 0)
+    _pickup_worker = execution_pickup_status.get("worker") if isinstance(execution_pickup_status.get("worker"), dict) else {}
+    _pickup_worker_status = str(_pickup_worker.get("status") or "unknown")
+    _pickup_worker_fresh = bool(_pickup_worker.get("fresh"))
     _blocked_loops = [
         loop for loop in open_loops
         if loop.get("execution_readiness", "runnable") == "blocked"
@@ -1897,12 +1950,16 @@ if mode != "--expert":
         _attention.append(f"TEMP CLONE RESIDUE: {_wt_temp_dirty} dirty temp clone(s) blocked from cleanup")
     if _wt_stash_blocked:
         _attention.append(f"STASH REVIEW: {_wt_stash_blocked} stash item(s) require review before cleanup")
+    if _pickup_unclaimed:
+        _attention.append(f"EXECUTION PICKUP: {_pickup_unclaimed} request(s) not claimed")
+    if _pickup_stale:
+        _attention.append(f"EXECUTION PICKUP STALE: {_pickup_stale} claimed request(s) stale")
     if joined_state_summary.get("coherence_attention"):
         _attention.append("HEALTH DRIFT: engine coherence needs attention")
     if inbox_actionable:
         _attention.append(f"INBOX ATTENTION: {inbox_actionable} actionable inbox item(s)")
     if int(delegation_summary.get("active", 0) or 0):
-        _attention.append(f"EXECUTION ATTENTION: {int(delegation_summary.get('active', 0) or 0)} active delegation(s)")
+        _attention.append(f"INTERACTIVE HANDOFF: {int(delegation_summary.get('active', 0) or 0)} active delegation(s)")
 
     print("=" * 72)
     print("  OPS STATUS")
@@ -1956,9 +2013,9 @@ if mode != "--expert":
     _dt_total = int(_dt_summary.get("total", 0) or 0)
     if _dt_total:
         print(f"  durable transfers: {_dt_total} total, {int(_dt_summary.get('active', 0) or 0)} active, {int(_dt_summary.get('stale', 0) or 0)} attention")
-    print("  mailroom lane:     capability-backed")
-    print("  AI agent lane:     not delivered")
-    print("  interactive lane:  explicit worker pickup required")
+    print(f"  execution pickup:  {_pickup_total} request(s), {_pickup_running} claimed/running, {_pickup_unclaimed} not claimed, {_pickup_stale} stale")
+    print(f"  capability worker: {_pickup_worker_status}{' fresh' if _pickup_worker_fresh else ' not fresh'}")
+    print("  AI agent bridge:   not delivered")
     print()
 
     print("HEALTH")
@@ -2062,6 +2119,39 @@ if int(_dt_summary.get("total", 0) or 0):
         if transfer.get("heartbeat_at_utc"):
             bits.append(f"heartbeat={transfer.get('heartbeat_at_utc')}")
         print(f"  {str(transfer.get('transfer_job_id') or '?'):24s} {' | '.join(bits)}")
+    print()
+
+_expert_pickup_summary = execution_pickup_status.get("summary") if isinstance(execution_pickup_status.get("summary"), dict) else {}
+if int(_expert_pickup_summary.get("requests_total", 0) or 0):
+    print("EXECUTION PICKUP (DRILLDOWN)")
+    print("-" * 72)
+    print("  public authority:   execution.pickup.status")
+    print(f"  active requests:    {int(_expert_pickup_summary.get('requests_total', 0) or 0)}")
+    print(f"  not claimed:        {int(_expert_pickup_summary.get('not_claimed', 0) or 0)}")
+    print(f"  claimed/running:    {int(_expert_pickup_summary.get('claimed_or_running', 0) or 0)}")
+    print(f"  stale:              {int(_expert_pickup_summary.get('stale', 0) or 0)}")
+    print(f"  AI agent bridge:    {_expert_pickup_summary.get('ai_agent_bridge', 'not_delivered')}")
+    _expert_pickup_worker = execution_pickup_status.get("worker") if isinstance(execution_pickup_status.get("worker"), dict) else {}
+    print(
+        "  capability worker:  "
+        f"{_expert_pickup_worker.get('status', 'unknown')} "
+        f"({'fresh' if _expert_pickup_worker.get('fresh') else 'not fresh'})"
+    )
+    for row in execution_pickup_status.get("requests", [])[:8]:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("pickup_state") or "") in ("done", "failed", "cancelled"):
+            continue
+        bits = [
+            str(row.get("pickup_state") or "unknown"),
+            str(row.get("realization") or row.get("source") or "unknown"),
+        ]
+        if row.get("loop_id"):
+            bits.append(f"loop={row.get('loop_id')}")
+        detail = str(row.get("task") or row.get("route_capability") or "").strip()
+        if detail:
+            bits.append(detail[:80])
+        print(f"  {str(row.get('request_id') or '?')[:32]:32s} {' | '.join(bits)}")
     print()
 
 _sp_summary = standing_program_health.get("summary") if isinstance(standing_program_health.get("summary"), dict) else {}

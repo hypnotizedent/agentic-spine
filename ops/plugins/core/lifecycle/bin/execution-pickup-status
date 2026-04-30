@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""Public execution pickup readback.
+
+This joins the existing execution-request realizations without creating a new
+queue or transport. Plain wave dispatches are requests only until a delegation
+or operational task claim exists.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+WORKSPACE_ROOT = ROOT.parent
+RUNTIME_ROOT = Path(os.environ.get("SPINE_RUNTIME_ROOT") or WORKSPACE_ROOT / ".runtime" / "spine")
+STATE_ROOT = Path(os.environ.get("SPINE_STATE") or RUNTIME_ROOT / "state")
+WAVES_ROOT = RUNTIME_ROOT / "waves"
+DELEGATIONS_ROOT = STATE_ROOT / "delegations"
+TASK_ROOT = STATE_ROOT / "agent-tasks"
+STALE_SECONDS = int(os.environ.get("EXECUTION_PICKUP_STALE_SECONDS") or "300")
+
+
+ACTIVE_DELEGATION_STATES = {"delegated", "picked_up", "executing", "running"}
+TERMINAL_TASK_STATES = {"done", "failed", "cancelled"}
+
+
+def now_utc() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def parse_time(value: Any) -> dt.datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def age_seconds(value: Any) -> int | None:
+    parsed = parse_time(value)
+    if parsed is None:
+        return None
+    return max(0, int((now_utc() - parsed).total_seconds()))
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def add_request(rows: list[dict[str, Any]], **kwargs: Any) -> None:
+    rows.append({k: v for k, v in kwargs.items() if v not in (None, "", [], {})})
+
+
+def collect_wave_dispatches(rows: list[dict[str, Any]]) -> None:
+    if not WAVES_ROOT.is_dir():
+        return
+    for state_file in sorted(WAVES_ROOT.glob("*/state.json")):
+        state = load_json(state_file)
+        if state.get("status") != "active":
+            continue
+        wave_id = str(state.get("wave_id") or state_file.parent.name)
+        loop_id = str(((state.get("packet") or {}).get("loop_id")) or "")
+        transport = str(state.get("transport") or ((state.get("packet") or {}).get("transport")) or "")
+        execution_mode = str(state.get("execution_mode") or ((state.get("packet") or {}).get("execution_mode")) or "")
+        for dispatch in state.get("dispatches") or []:
+            if not isinstance(dispatch, dict):
+                continue
+            status = str(dispatch.get("status") or "dispatched")
+            if status in {"done", "failed"}:
+                continue
+            task_id = str(dispatch.get("task_id") or "")
+            mailroom_task_id = str(dispatch.get("mailroom_task_id") or "")
+            mailroom_state = str(dispatch.get("mailroom_task_state") or "")
+            if mailroom_task_id:
+                pickup_state = "claimed" if mailroom_state == "running" else mailroom_state or "queued"
+                realization = "operational_capability_worker"
+            else:
+                pickup_state = "not_claimed"
+                realization = "wave_dispatch_request_only"
+            add_request(
+                rows,
+                request_id=f"{wave_id}:{task_id}" if task_id else wave_id,
+                source="wave_dispatch",
+                realization=realization,
+                pickup_state=pickup_state,
+                loop_id=loop_id,
+                wave_id=wave_id,
+                dispatch_id=task_id,
+                lane=dispatch.get("lane"),
+                transport=transport,
+                execution_mode=execution_mode,
+                task=str(dispatch.get("task") or "")[:180],
+                dispatched_at=dispatch.get("dispatched_at"),
+                worker=dispatch.get("claimed_by") or dispatch.get("worker"),
+                heartbeat_at=dispatch.get("heartbeat_at"),
+                result=dispatch.get("result"),
+                run_key=dispatch.get("run_key"),
+            )
+
+
+def collect_delegations(rows: list[dict[str, Any]]) -> None:
+    if not DELEGATIONS_ROOT.is_dir():
+        return
+    for path in sorted(DELEGATIONS_ROOT.glob("DEL-*.yaml")):
+        doc = load_yaml(path)
+        state = str(doc.get("delegation_state") or doc.get("state") or "").strip()
+        if state not in ACTIVE_DELEGATION_STATES:
+            continue
+        picked_up = state in {"picked_up", "executing", "running"}
+        heartbeat = doc.get("heartbeat_at") or doc.get("updated_at") or doc.get("picked_up_at")
+        heartbeat_age = age_seconds(heartbeat)
+        stale = picked_up and (heartbeat_age is None or heartbeat_age > STALE_SECONDS)
+        add_request(
+            rows,
+            request_id=str(doc.get("delegation_id") or path.stem),
+            source="delegation",
+            realization="interactive_worker_handoff",
+            pickup_state="stale" if stale else ("claimed" if picked_up else "not_claimed"),
+            loop_id=doc.get("loop_id"),
+            packet_id=doc.get("packet_id") or doc.get("packet"),
+            worker=doc.get("worker") or doc.get("claimed_by"),
+            heartbeat_at=heartbeat,
+            heartbeat_age_seconds=heartbeat_age,
+            task=str(doc.get("summary") or doc.get("objective") or "")[:180],
+        )
+
+
+def collect_task_dir(rows: list[dict[str, Any]], state_name: str) -> None:
+    directory = TASK_ROOT / state_name
+    if not directory.is_dir():
+        return
+    for path in sorted(directory.glob("TASK-*.yaml")):
+        doc = load_yaml(path)
+        task_id = str(doc.get("task_id") or path.stem)
+        heartbeat = doc.get("heartbeat_at") or doc.get("updated_at")
+        heartbeat_age = age_seconds(heartbeat)
+        if state_name == "queued":
+            pickup_state = "not_claimed"
+        elif state_name == "running":
+            pickup_state = "stale" if heartbeat_age is None or heartbeat_age > STALE_SECONDS else "claimed"
+        else:
+            pickup_state = state_name
+        add_request(
+            rows,
+            request_id=task_id,
+            source="operational_task",
+            realization="operational_capability_worker",
+            pickup_state=pickup_state,
+            loop_id=doc.get("loop_id"),
+            packet_id=doc.get("packet_id"),
+            worker=doc.get("claimed_by"),
+            heartbeat_at=heartbeat,
+            heartbeat_age_seconds=heartbeat_age,
+            route_target=doc.get("route_target"),
+            route_capability=doc.get("route_capability"),
+            task=str(doc.get("summary") or "")[:180],
+            result=doc.get("result"),
+            failure_reason=doc.get("failure_reason"),
+            updated_at=doc.get("updated_at"),
+        )
+
+
+def collect_operational_tasks(rows: list[dict[str, Any]]) -> None:
+    for state_name in ("queued", "running", "done", "failed"):
+        collect_task_dir(rows, state_name)
+
+
+def worker_status() -> dict[str, Any]:
+    candidates = [
+        TASK_ROOT / "mailroom-task-worker.status.json",
+        STATE_ROOT / "mailroom-task-worker.status.json",
+    ]
+    payloads = [load_json(path) | {"path": str(path)} for path in candidates if path.is_file()]
+    freshest: dict[str, Any] = {}
+    freshest_age: int | None = None
+    for payload in payloads:
+        timestamp = payload.get("generated_at")
+        current_age = age_seconds(timestamp)
+        if freshest_age is None or (current_age is not None and current_age < freshest_age):
+            freshest = payload
+            freshest_age = current_age
+    if not freshest:
+        return {"status": "missing", "fresh": False}
+    fresh = freshest_age is not None and freshest_age <= STALE_SECONDS
+    return {
+        "status": freshest.get("status") or "recorded",
+        "fresh": fresh,
+        "generated_at": freshest.get("generated_at"),
+        "age_seconds": freshest_age,
+        "worker_id": freshest.get("worker_id") or ((freshest.get("data") or {}).get("worker_id") if isinstance(freshest.get("data"), dict) else ""),
+        "path": freshest.get("path"),
+    }
+
+
+def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    active_rows = [row for row in rows if row.get("pickup_state") not in TERMINAL_TASK_STATES]
+    return {
+        "requests_total": len(active_rows),
+        "not_claimed": sum(1 for row in active_rows if row.get("pickup_state") == "not_claimed"),
+        "claimed_or_running": sum(1 for row in active_rows if row.get("pickup_state") == "claimed"),
+        "stale": sum(1 for row in active_rows if row.get("pickup_state") == "stale"),
+        "done_recent": sum(1 for row in rows if row.get("pickup_state") == "done"),
+        "failed_recent": sum(1 for row in rows if row.get("pickup_state") == "failed"),
+        "wave_dispatch_request_only": sum(1 for row in active_rows if row.get("realization") == "wave_dispatch_request_only"),
+        "operational_capability_worker": sum(1 for row in active_rows if row.get("realization") == "operational_capability_worker"),
+        "interactive_worker_handoff": sum(1 for row in active_rows if row.get("realization") == "interactive_worker_handoff"),
+        "ai_agent_bridge": "not_delivered",
+    }
+
+
+def collect() -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    collect_wave_dispatches(rows)
+    collect_delegations(rows)
+    collect_operational_tasks(rows)
+    rows.sort(key=lambda row: (str(row.get("pickup_state")), str(row.get("request_id"))))
+    return {
+        "capability": "execution.pickup.status",
+        "generated_at": now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "summary": summarize(rows),
+        "worker": worker_status(),
+        "requests": rows,
+        "subtraction": {
+            "public_language": "execution pickup",
+            "expert_drilldowns": [
+                "delegation.status",
+                "orchestration.wave.status",
+                "wave.execute.status",
+                "mailroom.task.*",
+            ],
+            "demoted_public_terms": [
+                "mailroom lane",
+                "mailroom bridge",
+                "dispatch means executing",
+            ],
+        },
+    }
+
+
+def render_human(data: dict[str, Any]) -> None:
+    summary = data["summary"]
+    worker = data["worker"]
+    print("execution.pickup.status")
+    print()
+    print(f"  requests:          {summary['requests_total']} active")
+    print(f"  not claimed:       {summary['not_claimed']}")
+    print(f"  claimed/running:   {summary['claimed_or_running']}")
+    print(f"  stale:             {summary['stale']}")
+    print(f"  done recent:       {summary['done_recent']}")
+    print(f"  failed recent:     {summary['failed_recent']}")
+    print(f"  AI agent bridge:   {summary['ai_agent_bridge']}")
+    worker_line = worker.get("status", "unknown")
+    if worker.get("generated_at"):
+        worker_line += f" ({worker.get('generated_at')}, age={worker.get('age_seconds')}s)"
+    print(f"  capability worker: {worker_line}")
+    print()
+    rows = [row for row in data["requests"] if row.get("pickup_state") not in TERMINAL_TASK_STATES]
+    if rows:
+        print(f"{'STATE':14s} {'SOURCE':18s} {'REQUEST':34s} DETAIL")
+        print("-" * 96)
+        for row in rows:
+            request_id = str(row.get("request_id") or "")[:34]
+            detail = row.get("task") or row.get("route_capability") or row.get("packet_id") or ""
+            print(f"{str(row.get('pickup_state'))[:14]:14s} {str(row.get('source'))[:18]:18s} {request_id:34s} {str(detail)[:60]}")
+    else:
+        print("  no active execution requests")
+    print()
+    print("Drilldown: delegation.status | orchestration.wave.status | wave.execute.status | mailroom.task.*")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Read-only execution pickup status.")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--self-check", action="store_true")
+    args = parser.parse_args()
+
+    data = collect()
+    if args.self_check:
+        dispatch_only = [
+            row for row in data["requests"]
+            if row.get("source") == "wave_dispatch" and row.get("realization") == "wave_dispatch_request_only"
+        ]
+        for row in dispatch_only:
+            if row.get("pickup_state") != "not_claimed":
+                print("execution.pickup.status self-check FAIL: dispatch-only row rendered as claimed", file=os.sys.stderr)
+                return 1
+        print("execution.pickup.status self-check PASS")
+        return 0
+
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+    else:
+        render_human(data)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
