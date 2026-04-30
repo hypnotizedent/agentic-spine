@@ -23,8 +23,7 @@ grep -q "intent_use_receipts" "$ROOT/ops/plugins/core/lifecycle/lib/controller_p
 grep -q "source_human_intent_id" "$ROOT/ops/plugins/core/lifecycle/lib/controller_prompt_create.py" || fail "controller_prompt.create does not project source_human_intent_id"
 grep -q "intent_use_receipts" "$ROOT/ops/plugins/core/lifecycle/bin/planning-plans-create" || fail "planning.plans.create does not use receipt library"
 grep -q "intent_use" "$ROOT/ops/plugins/core/lifecycle/lib/operator_ingress.py" || fail "operator_ingress readback does not expose intent_use receipts"
-grep -q -- "--meaning-outcomes" "$ROOT/ops/plugins/core/lifecycle/bin/operator-ingress-status" || fail "operator.ingress.status missing meaning outcome readback"
-grep -q -- "--viewport-contract" "$ROOT/ops/plugins/core/lifecycle/bin/operator-ingress-status" || fail "operator.ingress.status missing viewport contract readback"
+grep -q "operator ingress is raw human notepad/context, not workflow authority" "$ROOT/ops/plugins/core/lifecycle/bin/operator-ingress-status" || fail "operator.ingress.status missing non-authority operating guide"
 
 python3 - "$ROOT" <<'PY' || exit 1
 import shutil
@@ -117,22 +116,16 @@ finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
 status_bin = root / "ops/plugins/core/lifecycle/bin/operator-ingress-status"
-for args, expected_key in [
-    (["--viewport-contract", "--json"], "viewport_contract"),
-    (["--meaning-outcomes", "--min-confidence", "high", "--json"], "rows"),
+proc = subprocess.run([sys.executable, str(status_bin), "--guide"], text=True, capture_output=True)
+if proc.returncode != 0:
+    raise SystemExit(proc.stderr.strip() or proc.stdout.strip())
+for expected in [
+    "operator ingress is raw human notepad/context, not workflow authority",
+    "raw OI/HI remains evidence",
+    "raw OI never becomes execution by itself",
 ]:
-    proc = subprocess.run([sys.executable, str(status_bin), *args], text=True, capture_output=True)
-    if proc.returncode != 0:
-        raise SystemExit(proc.stderr.strip() or proc.stdout.strip())
-    payload = json.loads(proc.stdout)
-    if expected_key not in payload:
-        raise SystemExit(f"operator.ingress.status {' '.join(args)} missing {expected_key}")
-    if expected_key == "rows":
-        rows = payload.get("rows") or []
-        if not rows:
-            raise SystemExit("meaning outcome readback must emit high-confidence rows")
-        if any((row.get("confidence") or {}).get("level") != "high" for row in rows):
-            raise SystemExit("meaning outcome --min-confidence high emitted non-high row")
+    if expected not in proc.stdout:
+        raise SystemExit(f"operator.ingress.status --guide missing: {expected}")
 PY
 
 echo "D444 PASS: intent-use receipt authority, capture hooks, projections, readback seam, and raw OI non-authority are locked"
