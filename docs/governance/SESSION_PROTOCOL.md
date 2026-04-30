@@ -64,8 +64,12 @@ direct file reads.
 
 ## Workflow Objects
 
-Everything an agent does lives inside these five objects. If you do not know
-which loop you are in, stop and ask.
+Evidence and human intent enter first. The objects below govern execution,
+closeout, and recovery after that evidence has a real work home. If you do not
+know which loop you are in, do not create one to satisfy ceremony; identify the
+evidence or operator intent being carried, attach it to an existing loop when
+the fit is clear, and create a loop only when there is a bounded objective with
+acceptance and close criteria.
 
 These are control-plane truth objects and expert/drilldown grammar. Default
 operator surfaces should center on intent, progress, blockers, acceptance, and
@@ -90,7 +94,9 @@ only when public status gives a reason for drilldown.
 
 A bounded problem slice with a named objective. Opens via `loops.create`
 (enforces WIP cap). Closes via `loop-closeout-finalize` (archives scope,
-generates receipt). If there is no loop, the work is ungoverned.
+generates receipt). If there is no loop, mutation or execution is ungoverned;
+capture/readback/research evidence may still exist as intake, but it must not
+be treated as active work until attached or promoted into a bounded loop.
 
 - State: `$SPINE_STATE/loop-scopes/LOOP-{NAME}-{DATE}.scope.md`
 - Authority: `ops/bindings/loop.closeout.contract.yaml`

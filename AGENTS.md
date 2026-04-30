@@ -132,6 +132,13 @@ Non-promoted work, synthesis artifacts, and parked material belong in
 New repo docs require deliberate promotion and human-steward co-sign.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
+Evidence and human intent are the entry point; loops are bounded execution
+containers, not intake buckets. Do not create a loop just to hold Q&A, make
+status/readback prettier, or satisfy packet binding. Attach evidence to an
+existing loop when the fit is clear; create a loop only when there is a bounded
+objective with acceptance and close criteria.
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
+
 The primary `agentic-spine` checkout must stay on `main` and clean. If repo
 mutation is needed, do the work in a managed worktree; do not use the primary
 checkout as a work lane.

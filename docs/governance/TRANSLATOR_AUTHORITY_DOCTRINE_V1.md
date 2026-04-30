@@ -7,7 +7,7 @@ updated: "2026-03-31"
 decision_loop_id: LOOP-TRANSLATOR-DOCTRINE-CONSOLIDATION-20260324
 source_triangulation:
   - docs/governance/SPINE.md (controller lane, closure, and verify discipline)
-  - docs/governance/SESSION_PROTOCOL.md (loop anchorage and floating-WIP prevention)
+  - docs/governance/SESSION_PROTOCOL.md (evidence-first anchorage and floating-WIP prevention)
   - docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md (control-plane placement and entry surface)
   - ops/bindings/node.role.contract.yaml (live physical-node taxonomy and role semantics)
   - ops/bindings/membrane.authority.contract.yaml (machine-evaluable boundary)
@@ -256,12 +256,17 @@ Every session, every agent, every operator interaction must begin with this ques
 
 This is not a formality. This question enforces:
 
-1. **Loop anchorage** — work is attached to a governed scope before execution begins
+1. **Evidence-first anchorage** — human intent or evidence is identified first,
+   then execution work is attached to a governed scope before execution begins
 2. **Session initialization** — the entry packet, policy, and friction snapshot are loaded
 3. **Operator intent clarity** — the human has stated what "done" looks like
 4. **Membrane boundary** — the agent is asking, not assuming. Asking is normalization. Assuming is execution.
 
-If the operator cannot answer this question, the session should operate in read-only fact-finding mode until a loop scope is established.
+If the operator cannot answer this question, the session should operate in
+read-only fact-finding mode until the carried evidence or intent can be attached
+to an existing loop or promoted into a bounded loop with acceptance and close
+criteria. Do not create an active loop only to hold Q&A, make readback prettier,
+or satisfy packet syntax.
 
 ---
 
@@ -292,7 +297,7 @@ This preserves the separation: **membrane is the boundary, wave.execute is the e
 | Document | Relationship |
 |----------|-------------|
 | `SPINE.md` | Parent operating contract. This doctrine inherits controller-lane, closure, and verification discipline from the spine operating contract. |
-| `SESSION_PROTOCOL.md` | Defines loop anchorage and floating-WIP requirements referenced in this doctrine. |
+| `SESSION_PROTOCOL.md` | Defines evidence-first anchorage and floating-WIP requirements referenced in this doctrine. |
 | `SPINE_V3_COMPLETION_DECLARATION_20260403.md` | Historical V3 completion marker. Useful for closure context, not part of the daily operating stack. |
 | `LOCAL_CONTROL_PLANE_CONTRACT.md` | Current control-plane placement and workstation entry-surface authority. |
 | `ops/bindings/node.role.contract.yaml` | Current node taxonomy and role-semantics authority. |
