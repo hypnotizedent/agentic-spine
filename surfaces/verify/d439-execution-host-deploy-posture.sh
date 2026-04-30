@@ -59,7 +59,7 @@ if [[ -f "$hook" ]]; then
   hook_exists=true
   [[ -x "$hook" ]] && hook_executable=true
   grep -q 'exit 1' "$hook" && hook_blocks=true
-  grep -qi 'deploy target\\|deploy-target' "$hook" && hook_names_deploy_target=true
+  grep -Eqi 'deploy target|deploy-target' "$hook" && hook_names_deploy_target=true
   grep -q 'SPINE_DEPLOY_TARGET_OVERRIDE' "$hook" && hook_names_override=true
 fi
 
