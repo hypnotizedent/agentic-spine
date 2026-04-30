@@ -23,16 +23,23 @@ L3_PROOF_SUBJECTS = [
         "domain": "travel",
         "source_oi": "OI-20260429-023809-21a9",
         "expected_files": ["README.md", "pyproject.toml", "tests", "src"],
+        "admission_status": "proved",
+        "admission_reason": "README and BUILD_SUMMARY declare a v1 scaffold with runnable CLI, tests, stubs, and hard stop lines.",
     },
     {
         "domain": "health",
         "source_oi": "OI-20260429-023725-75b4",
         "expected_files": ["README.md", "pyproject.toml", "tests", "src"],
+        "admission_status": "proved",
+        "admission_reason": "README and BUILD_SUMMARY declare a v1 scaffold with runnable CLI, SQLite store, tests, and medical hard stop lines.",
     },
     {
         "domain": "investment",
         "source_oi": "OI-20260429-023732-a58e",
         "expected_files": ["README.md", "pyproject.toml", "tests", "src"],
+        "admission_status": "materializing",
+        "admission_reason": "README and BUILD_SUMMARY declare a v1 scaffold, but SPEC_DRAFT.md explicitly requires operator redline before treating the extracted product spec as proved.",
+        "needs_operator_redline": "SPEC_DRAFT.md",
     },
 ]
 
@@ -170,6 +177,14 @@ def l3_proof_tranche() -> dict:
             expected.append({"path": str(path), "present": path.exists()})
         build_summary = project_path / "BUILD_SUMMARY.md"
         readme = project_path / "README.md"
+        spec_draft = project_path / str(subject.get("needs_operator_redline") or "")
+        spec_state = "v1_base_present" if all(item["present"] for item in expected) else "incomplete"
+        proof_state = (
+            "ready_for_governed_spec_readback"
+            if project_path.exists() and readme.exists()
+            else "missing_project_base"
+        )
+        admission_status = str(subject.get("admission_status") or "materializing")
         rows.append(
             {
                 "domain": subject["domain"],
@@ -177,16 +192,20 @@ def l3_proof_tranche() -> dict:
                 "project_path": str(project_path),
                 "project_present": project_path.exists(),
                 "expected_files": expected,
-                "spec_state": "v1_base_present" if all(item["present"] for item in expected) else "incomplete",
+                "spec_state": spec_state,
                 "build_summary_present": build_summary.exists(),
                 "readme_present": readme.exists(),
-                "proof_state": "ready_for_governed_spec_readback"
-                if project_path.exists() and readme.exists()
-                else "missing_project_base",
+                "proof_state": proof_state,
+                "admission_status": admission_status if proof_state == "ready_for_governed_spec_readback" else "missing",
+                "admission_reason": subject.get("admission_reason"),
+                "needs_operator_redline": str(spec_draft) if subject.get("needs_operator_redline") else None,
+                "redline_present": spec_draft.exists() if subject.get("needs_operator_redline") else None,
                 "stop_line": "new L3 proof only; does not launch old L3 cleanup",
             }
         )
     ready = sum(1 for row in rows if row["proof_state"] == "ready_for_governed_spec_readback")
+    proved = sum(1 for row in rows if row.get("admission_status") == "proved")
+    materializing = sum(1 for row in rows if row.get("admission_status") == "materializing")
     return {
         "status": "ok",
         "packet": "PACKET-536-NEW-L3-PROOF-TRANCHE",
@@ -194,6 +213,8 @@ def l3_proof_tranche() -> dict:
         "summary": {
             "subjects": len(rows),
             "ready_for_governed_spec_readback": ready,
+            "proved_v1_bases": proved,
+            "materializing_pending_operator_redline": materializing,
             "old_l3_cleanup_excluded": True,
         },
         "rows": rows,
@@ -205,13 +226,22 @@ def render_l3_proof(payload: dict) -> str:
     summary = payload.get("summary") or {}
     lines.append(f"Root: {payload.get('root')}")
     lines.append(f"Subjects: {summary.get('subjects')}  ready: {summary.get('ready_for_governed_spec_readback')}")
+    lines.append(
+        "Admission: "
+        f"proved={summary.get('proved_v1_bases')}  "
+        f"materializing={summary.get('materializing_pending_operator_redline')}"
+    )
     lines.append("Old L3 cleanup excluded: true")
     lines.append("")
     for row in payload.get("rows") or []:
-        lines.append(f"[{row['domain']}] {row['proof_state']}")
+        lines.append(f"[{row['domain']}] {row['proof_state']}  admission={row.get('admission_status')}")
         lines.append(f"  source_oi: {row['source_oi']}")
         lines.append(f"  path: {row['project_path']}")
         lines.append(f"  spec_state: {row['spec_state']}")
+        if row.get("admission_reason"):
+            lines.append(f"  reason: {row['admission_reason']}")
+        if row.get("needs_operator_redline"):
+            lines.append(f"  needs_operator_redline: {row['needs_operator_redline']}")
         missing = [item["path"] for item in row["expected_files"] if not item["present"]]
         lines.append(f"  missing: {', '.join(missing) if missing else 'none'}")
         lines.append("")

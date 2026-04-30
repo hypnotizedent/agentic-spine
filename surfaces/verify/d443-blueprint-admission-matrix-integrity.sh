@@ -70,6 +70,12 @@ if summary.get("subjects") != 3:
 if summary.get("ready_for_governed_spec_readback") != 3:
     print("FAIL D443: L3 proof tranche subjects must all have v1 bases present", file=sys.stderr)
     raise SystemExit(1)
+if summary.get("proved_v1_bases") != 2:
+    print("FAIL D443: L3 proof tranche must mark travel and health as proved v1 bases", file=sys.stderr)
+    raise SystemExit(1)
+if summary.get("materializing_pending_operator_redline") != 1:
+    print("FAIL D443: L3 proof tranche must keep investment materializing pending operator redline", file=sys.stderr)
+    raise SystemExit(1)
 if summary.get("old_l3_cleanup_excluded") is not True:
     print("FAIL D443: L3 proof tranche must exclude old L3 cleanup", file=sys.stderr)
     raise SystemExit(1)
