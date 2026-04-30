@@ -5,7 +5,9 @@ Canonical domain policy for `backup`.
 - **Doctrine**: `ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md` (historical VM primary/offsite/app-level/restore-proof law)
 - **Operator Checklist**: `ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md` (historical operator checklist for VM protection and offsite exceptions)
 - Authority: `docs/governance/SPINE.md`
-- Canonical inventory: `ops/bindings/backup.inventory.yaml`
+- Canonical inventory: `ops/bindings/domains/backup/backup.inventory.yaml`
+- Canonical schedule: `ops/bindings/domains/backup/backup.schedule.yaml`
+- Canonical calendar projection: `ops/bindings/domains/backup/backup.calendar.yaml`
 - Runtime contracts: `ops/bindings/domains/backup.bundle.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain backup`
 
@@ -15,9 +17,14 @@ machine.
 
 ## Canonical Model
 
-- `data/backups/vzdump/dump/` is the shop VM/LXC source backup generator plane (migrated from tank 2026-03-23).
+- `data/backups/vzdump/dump/` is the shop VM/LXC source backup generator plane only (migrated from tank 2026-03-23); it is not shop backup readiness authority.
+- `md1400/backups/vm-images/pve/` is the canonical shop VM/LXC restore lane. Non-home VM/LXC backup readback must prove this path, not only the generator path.
 - `md1400/backup-cold/...` is the shop cold backup plane for app/state and promoted shop VM/LXC copies.
 - Synology is the canonical home backup plane for Home Assistant VM `100` and home Pi-hole LXC `105`.
+- If the backup plane covers the workload, old app-local backups are debt unless they protect unique data not captured by the backup plane.
+- App-local backup scripts, folders, and stale rows are not backup authority by existence. They must be admitted in `backup.inventory.yaml` with a unique-data reason, or they are retired/demoted from readiness.
+- Retiring an app-local backup target does not delete retained artifacts. It removes the target from first-class readiness truth.
+- Canonical live readback is `backup.status` for admitted enabled targets and `backup.estate.readback.status` for estate subject coverage. Older tranche/admission readbacks are drilldown aids only and must not override these two surfaces.
 
 ## Explicit Exclusions
 
