@@ -17,6 +17,7 @@ OP_HW_BINDING="$SPINE_ROOT/ops/bindings/operator.hardware.inventory.yaml"
 APPLIANCE_BINDING="$SPINE_ROOT/ops/bindings/appliance.identity.contract.yaml"
 FLEET_ADMISSION_BINDING="$SPINE_ROOT/ops/bindings/fleet.admission.classification.yaml"
 PLACEMENT_BINDING="$SPINE_ROOT/ops/bindings/infra.placement.policy.yaml"
+SHOP_DEVICE_BINDING="$SPINE_ROOT/ops/bindings/shop.device.registry.yaml"
 SESSION_POSTURE_LIB="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/session_posture.sh"
 
 usage() {
@@ -59,7 +60,7 @@ done
 need yq
 need jq
 
-for f in "$SSH_BINDING" "$HW_BINDING" "$OP_HW_BINDING" "$APPLIANCE_BINDING" "$FLEET_ADMISSION_BINDING" "$PLACEMENT_BINDING" "$SESSION_POSTURE_LIB"; do
+for f in "$SSH_BINDING" "$HW_BINDING" "$OP_HW_BINDING" "$APPLIANCE_BINDING" "$FLEET_ADMISSION_BINDING" "$PLACEMENT_BINDING" "$SHOP_DEVICE_BINDING" "$SESSION_POSTURE_LIB"; do
   [[ -f "$f" ]] || fail "missing required surface: $f"
 done
 
@@ -69,6 +70,7 @@ if $LIST_MODE; then
     yq -r '.machines[].machine_id' "$HW_BINDING" 2>/dev/null || true
     yq -r '.machines[].device_id' "$OP_HW_BINDING" 2>/dev/null || true
     yq -r '.appliances[].appliance_id' "$APPLIANCE_BINDING" 2>/dev/null || true
+    yq -r '.devices[].id' "$SHOP_DEVICE_BINDING" 2>/dev/null || true
   } | awk 'NF' | sort -u
   exit 0
 fi
@@ -85,6 +87,7 @@ ssh_json="$(yq e -o=json ".ssh.targets[] | select(.id == \"$NODE_ID\")" "$SSH_BI
 hw_json="$(yq e -o=json ".machines[] | select(.machine_id == \"$NODE_ID\")" "$HW_BINDING" 2>/dev/null || true)"
 op_hw_json="$(yq e -o=json ".machines[] | select(.device_id == \"$NODE_ID\")" "$OP_HW_BINDING" 2>/dev/null || true)"
 appliance_json="$(yq e -o=json ".appliances[] | select(.appliance_id == \"$NODE_ID\")" "$APPLIANCE_BINDING" 2>/dev/null || true)"
+shop_device_json="$(yq e -o=json ".devices[] | select(.id == \"$NODE_ID\")" "$SHOP_DEVICE_BINDING" 2>/dev/null || true)"
 
 [[ -n "$admission_binding_json" && "$admission_binding_json" != "null" ]] || admission_binding_json='{}'
 [[ -n "$placement_binding_json" && "$placement_binding_json" != "null" ]] || placement_binding_json='{}'
@@ -92,8 +95,9 @@ appliance_json="$(yq e -o=json ".appliances[] | select(.appliance_id == \"$NODE_
 [[ -n "$hw_json" && "$hw_json" != "null" ]] || hw_json='{}'
 [[ -n "$op_hw_json" && "$op_hw_json" != "null" ]] || op_hw_json='{}'
 [[ -n "$appliance_json" && "$appliance_json" != "null" ]] || appliance_json='{}'
+[[ -n "$shop_device_json" && "$shop_device_json" != "null" ]] || shop_device_json='{}'
 
-if [[ "$ssh_json" == "{}" && "$hw_json" == "{}" && "$op_hw_json" == "{}" && "$appliance_json" == "{}" ]]; then
+if [[ "$ssh_json" == "{}" && "$hw_json" == "{}" && "$op_hw_json" == "{}" && "$appliance_json" == "{}" && "$shop_device_json" == "{}" ]]; then
   fail "node not found in governed recovery surfaces: $NODE_ID"
 fi
 
@@ -104,12 +108,17 @@ elif [[ "$hw_json" != "{}" ]]; then
   node_kind="infra_machine"
 elif [[ "$op_hw_json" != "{}" ]]; then
   node_kind="operator_hardware"
+elif [[ "$shop_device_json" != "{}" ]]; then
+  node_kind="shop_physical_machine"
 fi
 
 node_site="$(jq -r '.site // empty' <<<"$hw_json")"
 [[ -n "$node_site" ]] || node_site="$(jq -r '.site // empty' <<<"$appliance_json")"
 [[ -n "$node_site" ]] || node_site="$(jq -r '.site // empty' <<<"$op_hw_json")"
 [[ -n "$node_site" ]] || node_site="$(jq -r '.site // empty' <<<"$ssh_json")"
+if [[ -z "$node_site" && "$shop_device_json" != "{}" ]]; then
+  node_site="shop"
+fi
 [[ -n "$node_site" ]] || node_site="unknown"
 
 admission_json="$(jq -c --arg node "$NODE_ID" '.fleet[$node] // {}' <<<"$admission_binding_json")"
@@ -144,6 +153,9 @@ primary_access_method="$(jq -r '.access_method // "ssh"' <<<"$ssh_json")"
 primary_tailscale_ip="$(jq -r '.tailscale_ip // empty' <<<"$ssh_json")"
 primary_lan_ip="$(jq -r '.lan_ip // empty' <<<"$ssh_json")"
 primary_description="$(jq -r '.description // empty' <<<"$ssh_json")"
+if [[ -z "$primary_description" && "$shop_device_json" != "{}" ]]; then
+  primary_description="$(jq -r '.notes // .role // .name // empty' <<<"$shop_device_json")"
+fi
 
 if [[ -z "$primary_host" && "$op_hw_json" != "{}" ]]; then
   primary_host="$(jq -r '.tailscale_ip // empty' <<<"$op_hw_json")"
@@ -175,6 +187,9 @@ recovery_status="$(jq -r '.recovery_status // empty' <<<"$recovery_target_json")
 [[ -n "$recovery_status" ]] || recovery_status="$(jq -r '.recovery_substrate.status // empty' <<<"$hw_json")"
 [[ -n "$recovery_status" ]] || recovery_status="$(jq -r '.recovery_status // empty' <<<"$appliance_json")"
 [[ -n "$recovery_status" ]] || recovery_status="$(jq -r '.recovery_control.power // empty' <<<"$op_hw_json")"
+if [[ -z "$recovery_status" && "$shop_device_json" != "{}" ]]; then
+  recovery_status="physical_presence_required"
+fi
 if [[ -z "$recovery_status" && "$op_hw_json" != "{}" ]]; then
   if jq -e '.known_constraints[]? | test("power-loss recovery unproved|No remote admin plane|manual|physical"; "i")' <<<"$op_hw_json" >/dev/null 2>&1; then
     recovery_status="physical_presence_required"
@@ -185,6 +200,9 @@ fi
 physical_action_required="$(jq -r '.physical_action_required // empty' <<<"$recovery_target_json")"
 [[ -n "$physical_action_required" ]] || physical_action_required="$(jq -r '.recovery_substrate.blocker // empty' <<<"$hw_json")"
 [[ -n "$physical_action_required" ]] || physical_action_required="$(jq -r '.recovery_control.manual_action // empty' <<<"$op_hw_json")"
+if [[ -z "$physical_action_required" && "$shop_device_json" != "{}" ]]; then
+  physical_action_required="Shop production physical machine; remote power/control path is not admitted. Operator physical presence or vendor console is required for power recovery."
+fi
 if [[ -z "$physical_action_required" && "$op_hw_json" != "{}" ]]; then
   physical_action_required="$(jq -r '[.known_constraints[]? | select(test("power-loss recovery unproved|No remote admin plane|manual|physical"; "i"))] | first // empty' <<<"$op_hw_json")"
 fi
@@ -219,6 +237,9 @@ if [[ "$recovery_target_json" != "{}" || "$(jq -r '.recovery_substrate.type // e
 elif [[ "$op_hw_json" != "{}" && "$(jq -r '.recovery_control.power // empty' <<<"$op_hw_json")" != "" ]]; then
   power_plane="$(jq -r '.recovery_control.power' <<<"$op_hw_json")"
   console_plane="$(jq -r '.recovery_control.console // .recovery_control.power' <<<"$op_hw_json")"
+elif [[ "$shop_device_json" != "{}" ]]; then
+  power_plane="physical_presence_required"
+  console_plane="local_physical_or_vendor_ui"
 elif [[ "$recovery_status" == "physical_presence_required" || "$recovery_status" == "readback_only" ]]; then
   power_plane="$recovery_status"
   console_plane="$recovery_status"
@@ -438,6 +459,7 @@ result_json="$(jq -n \
   --argjson hardware_machine "$hw_json" \
   --argjson operator_hardware "$op_hw_json" \
   --argjson appliance_identity "$appliance_json" \
+  --argjson shop_device "$shop_device_json" \
   --argjson admission_record "$admission_json" \
   --argjson placement_host "$placement_host_json" \
   --argjson required_vm_targets "$required_vm_targets_json" \
@@ -507,7 +529,8 @@ result_json="$(jq -n \
       recovery_target:$recovery_target,
       hardware_machine:$hardware_machine,
       operator_hardware:$operator_hardware,
-      appliance_identity:$appliance_identity
+      appliance_identity:$appliance_identity,
+      shop_device:$shop_device
     },
     status_primitives:$status_primitives,
     invoke_primitives:$invoke_primitives,
