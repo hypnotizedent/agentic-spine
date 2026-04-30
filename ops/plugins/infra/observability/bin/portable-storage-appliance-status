@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+BINDING="$SPINE_ROOT/ops/bindings/appliance.identity.contract.yaml"
+
+usage() {
+  cat <<'EOF'
+portable-storage-appliance-status - Read-only portable storage appliance readback
+
+Usage:
+  portable-storage-appliance-status [--id <appliance_id>]
+
+This capability is READ-ONLY. It reports identity, attachment, filesystem, and
+role posture for a portable storage appliance declared in
+appliance.identity.contract.yaml.
+EOF
+}
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+APPLIANCE_ID="wd-elements-5tb-01"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id) APPLIANCE_ID="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+need yq
+need jq
+[[ -f "$BINDING" ]] || fail "missing binding: $BINDING"
+
+row_json="$(yq e -o=json ".appliances[] | select(.appliance_id == \"$APPLIANCE_ID\")" "$BINDING" 2>/dev/null || true)"
+[[ -n "$row_json" && "$row_json" != "null" ]] || fail "unknown portable storage appliance: $APPLIANCE_ID"
+
+class="$(jq -r '.class // ""' <<<"$row_json")"
+[[ "$class" == "portable_storage_appliance" ]] || fail "$APPLIANCE_ID is not class=portable_storage_appliance"
+
+host_node_id="$(jq -r '.current_attachment.host_node_id // ""' <<<"$row_json")"
+by_id_path="$(jq -r '.current_attachment.by_id_path // ""' <<<"$row_json")"
+expected_label="$(jq -r '.current_filesystem.label // ""' <<<"$row_json")"
+expected_uuid="$(jq -r '.current_filesystem.uuid // ""' <<<"$row_json")"
+expected_serial="$(jq -r '.hardware_identity.serial_short // ""' <<<"$row_json")"
+current_role="$(jq -r '.role_policy.current_role // ""' <<<"$row_json")"
+
+attachment_status="not_checked"
+filesystem_status="not_checked"
+mount_status="unknown"
+observed_label=""
+observed_uuid=""
+observed_serial=""
+observed_path=""
+
+if [[ -n "$host_node_id" && -n "$by_id_path" ]]; then
+  # Intentionally uses the governed SSH target id from current_attachment.
+  remote_script='
+set -euo pipefail
+by_id_path="$1"
+if [[ ! -e "$by_id_path" ]]; then
+  echo "ATTACHMENT=detached"
+  exit 0
+fi
+real_path="$(readlink -f "$by_id_path")"
+echo "ATTACHMENT=attached"
+echo "OBSERVED_PATH=$real_path"
+udevadm info --query=property --name="$real_path" | awk -F= "
+  /^ID_SERIAL_SHORT=/ {print \"SERIAL_SHORT=\" \$2}
+  /^ID_FS_LABEL=/ {print \"FS_LABEL=\" \$2}
+  /^ID_FS_UUID=/ {print \"FS_UUID=\" \$2}
+"
+if findmnt -no TARGET "$real_path" >/dev/null 2>&1; then
+  echo "MOUNT_STATE=mounted"
+else
+  echo "MOUNT_STATE=unmounted"
+fi
+'
+  remote_out="$(ssh "$host_node_id" "bash -s -- '$by_id_path'" <<<"$remote_script" 2>/dev/null || true)"
+  if grep -q '^ATTACHMENT=attached$' <<<"$remote_out"; then
+    attachment_status="attached"
+  elif grep -q '^ATTACHMENT=detached$' <<<"$remote_out"; then
+    attachment_status="detached"
+  else
+    attachment_status="unreachable"
+  fi
+  observed_path="$(awk -F= '/^OBSERVED_PATH=/{print $2; exit}' <<<"$remote_out")"
+  observed_serial="$(awk -F= '/^SERIAL_SHORT=/{print $2; exit}' <<<"$remote_out")"
+  observed_label="$(awk -F= '/^FS_LABEL=/{print $2; exit}' <<<"$remote_out")"
+  observed_uuid="$(awk -F= '/^FS_UUID=/{print $2; exit}' <<<"$remote_out")"
+  mount_status="$(awk -F= '/^MOUNT_STATE=/{print $2; exit}' <<<"$remote_out")"
+fi
+
+if [[ "$attachment_status" == "attached" ]]; then
+  if [[ "$observed_serial" == "$expected_serial" && "$observed_label" == "$expected_label" && "$observed_uuid" == "$expected_uuid" ]]; then
+    filesystem_status="matches_declared_clean_filesystem"
+  else
+    filesystem_status="mismatch"
+  fi
+elif [[ "$attachment_status" == "detached" ]]; then
+  filesystem_status="not_observable_detached"
+fi
+
+overall="OK"
+if [[ "$attachment_status" == "unreachable" || "$filesystem_status" == "mismatch" ]]; then
+  overall="ATTENTION"
+fi
+
+cat <<EOF
+portable-storage-appliance.status
+appliance_id: $APPLIANCE_ID
+status: $overall
+identity: $expected_serial
+role: $current_role
+host_node_id: $host_node_id
+attachment: $attachment_status
+observed_path: ${observed_path:-<none>}
+filesystem: $filesystem_status
+expected_label: $expected_label
+observed_label: ${observed_label:-<none>}
+expected_uuid: $expected_uuid
+observed_uuid: ${observed_uuid:-<none>}
+mount_state: ${mount_status:-unknown}
+read: stable appliance identity; role remains flexible by assignment
+EOF
+
+[[ "$overall" == "OK" ]]
