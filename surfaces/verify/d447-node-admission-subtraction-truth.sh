@@ -174,6 +174,59 @@ for required_source in {
         fail(f"pve-r620 readback must cite active runtime source: {required_source}")
 
 proc = subprocess.run(
+    [str(node_admission), "--node", "optiplex-9020-001", "--machine-spec", "--json"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    fail(proc.stderr.strip() or proc.stdout.strip() or "node.admission.status machine-spec sample failed")
+payload = json.loads(proc.stdout)
+rows = payload.get("rows") or []
+if len(rows) != 1:
+    fail("node.admission.status --machine-spec sample must emit exactly one row")
+spec_row = rows[0]
+spec = spec_row.get("machine_spec") or {}
+if "known" not in spec or "source_ownership" not in spec or "missing_fields" not in spec:
+    fail("machine-spec readback must stay inside node.admission.status with known/source/missing fields")
+ownership = spec.get("source_ownership") or {}
+if ownership.get("machine_facts") != "firstboot claim machine_facts when present; otherwise canonical inventory fact fields":
+    fail("machine-spec source ownership must point to bootstrap claim/canonical inventory, not a new subsystem")
+if spec_row.get("role_suitability", {}).get("assignment_made") is not False:
+    fail("machine-spec readback must not assign a role")
+setup = spec_row.get("setup_correctness") or {}
+if "activation_statement" not in setup:
+    fail("machine-spec readback must state it is evidence only, not activation")
+
+for subject in [
+    "optiplex-9020-001",
+    "optiplex-9020-002",
+    "pve-r620",
+    "macbook-2016-pro",
+    "raspberry-pi-home-1",
+    "proxmox-home",
+    "pve",
+    "nas",
+    "macbook-primary",
+]:
+    proc = subprocess.run(
+        [str(node_admission), "--node", subject, "--machine-spec", "--json"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        fail(f"machine-spec readback failed for {subject}: {proc.stderr.strip() or proc.stdout.strip()}")
+    payload = json.loads(proc.stdout)
+    rows = payload.get("rows") or []
+    if len(rows) != 1:
+        fail(f"machine-spec readback for {subject} must emit exactly one row")
+    known = ((rows[0].get("machine_spec") or {}).get("known") or {})
+    missing = [field for field in ["model", "cpu_model", "cpu_threads", "memory_bytes", "storage_summary"] if known.get(field) in (None, "", [], {})]
+    if missing:
+        fail(f"machine-spec readback for {subject} missing canonical spec fields: {', '.join(missing)}")
+    if rows[0].get("role_suitability", {}).get("assignment_made") is not False:
+        fail(f"machine-spec readback for {subject} must not assign a role")
+
+proc = subprocess.run(
     [str(node_admission), "--node", "docker-host", "--json"],
     text=True,
     capture_output=True,
@@ -198,5 +251,5 @@ if candidate.get("runtime_obligations", {}).get("active_runtime_labels"):
 if candidate.get("recovery_planes", {}).get("identity") != "ssh_identity_declared":
     fail("ssh target may only provide access/identity evidence for candidate subjects")
 
-print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, active role runtime truth is composed, and candidate evidence cannot promote itself")
+print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, machine specs stay inside admission, active role runtime truth is composed, and candidate evidence cannot promote itself")
 PY

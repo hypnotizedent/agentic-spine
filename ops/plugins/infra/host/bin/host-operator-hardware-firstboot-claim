@@ -46,6 +46,37 @@ EOF
 fail() { echo "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
 
+collect_machine_facts() {
+    timeout 10 ssh \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -o ConnectTimeout=5 \
+        "${OPERATOR_USER}@${SSH_PROOF_ENDPOINT}" \
+        "sh -lc '
+            kv() { printf \"%s=%s\\n\" \"\$1\" \"\$2\"; }
+            kv hostname \"\$(hostname 2>/dev/null || true)\"
+            kv kernel \"\$(uname -r 2>/dev/null || true)\"
+            kv arch \"\$(uname -m 2>/dev/null || true)\"
+            if [ -f /etc/os-release ]; then . /etc/os-release; kv os_pretty \"\${PRETTY_NAME:-}\"; else kv os_pretty \"\"; fi
+            kv cpu_model \"\$(lscpu 2>/dev/null | sed -n \"s/^Model name:[[:space:]]*//p\" | head -1)\"
+            kv cpu_threads \"\$(nproc --all 2>/dev/null || true)\"
+            kv memory_bytes \"\$(awk \"/MemTotal/ {print \\\$2*1024}\" /proc/meminfo 2>/dev/null || true)\"
+            kv sys_vendor \"\$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)\"
+            kv product_name \"\$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)\"
+            kv serial \"\$(cat /sys/class/dmi/id/product_serial 2>/dev/null || true)\"
+            kv bios_version \"\$(cat /sys/class/dmi/id/bios_version 2>/dev/null || true)\"
+            kv storage_summary \"\$(lsblk -dn -b -o NAME,SIZE,MODEL,SERIAL,TRAN 2>/dev/null | paste -sd \";\" - || true)\"
+            kv nic_summary \"\$(ip -o link show 2>/dev/null | cut -d: -f2 | sed \"s/^ //\" | grep -v \"^lo$\" | paste -sd, - || true)\"
+        '" 2>/dev/null \
+        | jq -Rn '
+            reduce inputs as $line ({};
+              if ($line | test("=")) then
+                ($line | split("=")) as $parts
+                | . + {($parts[0]): ($parts[1:] | join("="))}
+              else . end
+            )'
+}
+
 DEVICE=""
 HOSTNAME=""
 OPERATOR_USER="ronnyworks"
@@ -228,6 +259,8 @@ fi
 IFS=',' read -r -a package_array <<<"$PACKAGE_BASELINE"
 package_json=$(printf '%s\n' "${package_array[@]}" | awk 'NF {print}' | jq -R -s 'split("\n") | map(select(length > 0))')
 entropy_json=$(printf '%s\n' "${ENTROPY_MARKERS[@]:-}" | jq -R -s 'split("\n") | map(select(length > 0))')
+machine_facts_json="$(collect_machine_facts || printf '{}')"
+[[ -n "$machine_facts_json" && "$machine_facts_json" != "null" ]] || machine_facts_json='{}'
 
 if [[ -z "$OUTPUT_PATH" ]]; then
     OUTPUT_PATH="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}/firstboot-claim.${DEVICE}.json"
@@ -265,6 +298,7 @@ jq -n \
     --arg realized_operator_user "$realized_operator_user" \
     --argjson package_baseline "$package_json" \
     --argjson entropy_markers "$entropy_json" \
+    --argjson machine_facts "$machine_facts_json" \
     '{
         contract_ref: $contract_ref,
         device_id: $device_id,
@@ -287,6 +321,7 @@ jq -n \
         target_distro: $target_distro,
         target_distro_version: $target_distro_version,
         disk_partition_shape: $disk_partition_shape,
+        machine_facts: $machine_facts,
         bootstrap_completed_at: $bootstrap_completed_at,
         entropy_markers: $entropy_markers,
         bootstrap_notes: [

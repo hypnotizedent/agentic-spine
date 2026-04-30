@@ -73,6 +73,16 @@ def compact_dict(data: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if value not in (None, "", [], {})}
 
 
+def load_json_file(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def durable_identifiers(recovery: dict[str, Any]) -> dict[str, Any]:
     sources = recovery.get("source_surfaces") or {}
     hardware = sources.get("hardware_machine") or {}
@@ -340,6 +350,104 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def machine_facts_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
+    sources = recovery.get("source_surfaces") or {}
+    operator = sources.get("operator_hardware") or {}
+    hardware = sources.get("hardware_machine") or {}
+    appliance = sources.get("appliance_identity") or {}
+    admission = sources.get("admission_record") or {}
+    ssh = sources.get("ssh_target") or {}
+    proof = admission.get("proof") or {}
+    claim_path = proof.get("proof_ref")
+    claim = load_json_file(claim_path)
+    claim_facts = claim.get("machine_facts") if isinstance(claim.get("machine_facts"), dict) else {}
+    operator_facts = operator.get("machine_facts") if isinstance(operator.get("machine_facts"), dict) else {}
+    hardware_facts = hardware.get("machine_facts") if isinstance(hardware.get("machine_facts"), dict) else {}
+    appliance_facts = appliance.get("machine_facts") if isinstance(appliance.get("machine_facts"), dict) else {}
+    inventory_facts = {**appliance_facts, **hardware_facts, **operator_facts}
+
+    known = compact_dict(
+        {
+            "device_id": first_present(operator.get("device_id"), admission.get("machine_id"), claim.get("device_id")),
+            "machine_id": first_present(hardware.get("machine_id"), admission.get("machine_id")),
+            "appliance_id": appliance.get("appliance_id"),
+            "hostname": first_present(claim.get("hostname"), hardware.get("hostname"), appliance.get("hostname"), ssh.get("id")),
+            "model": first_present(claim_facts.get("product_name"), inventory_facts.get("product_name"), hardware.get("model"), operator.get("model"), appliance.get("model"), admission.get("model")),
+            "vendor": first_present(claim_facts.get("sys_vendor"), inventory_facts.get("sys_vendor")),
+            "serial": first_present(claim_facts.get("serial"), inventory_facts.get("serial"), hardware.get("service_tag")),
+            "platform": first_present(operator.get("platform"), claim.get("target_platform_truth")),
+            "site": first_present(operator.get("site"), hardware.get("site"), appliance.get("site"), admission.get("site"), ssh.get("site")),
+            "os": first_present(claim_facts.get("os_pretty"), inventory_facts.get("os_pretty"), hardware.get("os"), appliance.get("appliance_os")),
+            "kernel": first_present(claim_facts.get("kernel"), inventory_facts.get("kernel")),
+            "arch": first_present(claim_facts.get("arch"), inventory_facts.get("arch")),
+            "cpu_model": first_present(claim_facts.get("cpu_model"), inventory_facts.get("cpu_model")),
+            "cpu_threads": first_present(claim_facts.get("cpu_threads"), inventory_facts.get("cpu_threads")),
+            "memory_bytes": first_present(claim_facts.get("memory_bytes"), inventory_facts.get("memory_bytes")),
+            "storage_summary": first_present(claim_facts.get("storage_summary"), inventory_facts.get("storage_summary")),
+            "nic_summary": first_present(claim_facts.get("nic_summary"), inventory_facts.get("nic_summary")),
+            "bios_version": first_present(claim_facts.get("bios_version"), inventory_facts.get("bios_version")),
+            "lan_ip": first_present(ssh.get("host"), hardware.get("lan_ip")),
+            "tailscale_ip": first_present(claim.get("tailscale_ip"), operator.get("tailscale_ip"), hardware.get("tailscale_ip"), ssh.get("tailscale_ip")),
+            "bootstrap_claim": claim_path,
+        }
+    )
+    required_fact_fields = [
+        "cpu_model",
+        "cpu_threads",
+        "memory_bytes",
+        "storage_summary",
+        "nic_summary",
+    ]
+    missing_fields = [field for field in required_fact_fields if known.get(field) in (None, "", [], {})]
+    source_ownership = {
+        "machine_facts": "firstboot claim machine_facts when present; otherwise canonical inventory fact fields",
+        "admission_proof": "ops/bindings/fleet.admission.classification.yaml",
+        "operator_inventory": "ops/bindings/operator.hardware.inventory.yaml",
+        "hardware_inventory": "ops/bindings/hardware.inventory.yaml",
+        "appliance_identity": "ops/bindings/appliance.identity.contract.yaml",
+        "access_path": "ops/bindings/ssh.targets.yaml",
+    }
+    if claim_path:
+        source_ownership["firstboot_claim"] = claim_path
+
+    return {
+        "known": known,
+        "missing_fields": missing_fields,
+        "source_ownership": source_ownership,
+        "claim_loaded": bool(claim),
+    }
+
+
+def machine_spec_row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
+    row = row_from_recovery(recovery)
+    sources = recovery.get("source_surfaces") or {}
+    admission = sources.get("admission_record") or {}
+    operator = sources.get("operator_hardware") or {}
+    proof = admission.get("proof") or {}
+    row["machine_spec"] = machine_facts_from_recovery(recovery)
+    row["setup_correctness"] = {
+        "admission_proof": compact_dict(
+            {
+                "ssh_access_proved": proof.get("ssh_access_proved"),
+                "bootstrap_completed": proof.get("bootstrap_completed"),
+                "identity_enrolled": proof.get("identity_enrolled"),
+                "runtime_posture_verified": proof.get("runtime_posture_verified"),
+                "first_boot_claim": proof.get("first_boot_claim"),
+                "proof_ref": proof.get("proof_ref"),
+            }
+        ),
+        "activation_statement": "machine facts are admission evidence only; no role promotion, runtime duty, or placement assignment is implied",
+    }
+    row["role_suitability"] = {
+        "candidate_roles": as_list(operator.get("role_candidacy")) or row.get("role_candidacy") or ["none"],
+        "eligibility_state": row.get("eligibility_state"),
+        "known_constraints": as_list(operator.get("known_constraints")),
+        "assignment_made": False,
+        "suitability_basis": "node admission composes evidence; role delivery still follows node promotion ladder",
+    }
+    return row
+
+
 def all_node_ids() -> list[str]:
     return run_lines([str(NODE_RECOVERY_STATUS), "--list"])
 
@@ -348,15 +456,16 @@ def recovery_for(node_id: str) -> dict[str, Any]:
     return run_json([str(NODE_RECOVERY_STATUS), "--node", node_id, "--json"])
 
 
-def build_rows(node_id: str | None) -> list[dict[str, Any]]:
+def build_rows(node_id: str | None, machine_spec: bool = False) -> list[dict[str, Any]]:
     ids = [node_id] if node_id else all_node_ids()
     rows: list[dict[str, Any]] = []
     for item in ids:
-        rows.append(row_from_recovery(recovery_for(item)))
+        recovery = recovery_for(item)
+        rows.append(machine_spec_row_from_recovery(recovery) if machine_spec else row_from_recovery(recovery))
     return rows
 
 
-def emit_human(rows: list[dict[str, Any]]) -> None:
+def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False) -> None:
     print("============================================================")
     print("  node.admission.status")
     print("============================================================")
@@ -374,6 +483,11 @@ def emit_human(rows: list[dict[str, Any]]) -> None:
         print(f"  promotion:  {row['promotion_stage']}")
         print(f"  access:     {(row.get('access_path') or {}).get('host', 'none')}")
         print(f"  recovery:   {json.dumps(row.get('recovery_planes') or {}, sort_keys=True)}")
+        if machine_spec:
+            spec = row.get("machine_spec") or {}
+            print(f"  spec_known: {json.dumps(spec.get('known') or {}, sort_keys=True)}")
+            print(f"  spec_missing_fields: {', '.join(spec.get('missing_fields') or []) or 'none'}")
+            print("  role_assignment: none")
         print(f"  subtracts:  {row['subtraction_caption']}")
         print("")
 
@@ -385,6 +499,7 @@ def main() -> None:
     parser.add_argument("--node", help="Limit readback to one governed subject")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     parser.add_argument("--list", action="store_true", help="List governed subject IDs")
+    parser.add_argument("--machine-spec", action="store_true", help="Include machine facts from bootstrap claim and canonical inventories")
     args = parser.parse_args()
 
     if args.list:
@@ -392,10 +507,11 @@ def main() -> None:
             print(node_id)
         return
 
-    rows = build_rows(args.node)
+    rows = build_rows(args.node, machine_spec=args.machine_spec)
     payload = {
         "capability": "node.admission.status",
         "status": "ok",
+        "mode": "machine_spec" if args.machine_spec else "admission",
         "canonical_authority": "node.admission.status",
         "recovery_evidence": "node.recovery.status",
         "subtracted_peer_authority": [
@@ -408,7 +524,7 @@ def main() -> None:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        emit_human(rows)
+        emit_human(rows, machine_spec=args.machine_spec)
 
 
 if __name__ == "__main__":

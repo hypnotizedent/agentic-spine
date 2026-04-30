@@ -23,6 +23,7 @@ import yaml
 path = Path(sys.argv[1])
 data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 required = [
+    "authority_research_trace",
     "canonical_authority",
     "replaced_surfaces",
     "compatibility_surfaces",
@@ -38,6 +39,7 @@ if missing:
     raise SystemExit("missing required closure fields: " + ", ".join(missing))
 rules = {row.get("id") for row in data.get("rules") or [] if isinstance(row, dict)}
 for rule in [
+    "research_existing_authority_before_change",
     "canonical_replacement_must_subtract",
     "compatibility_is_not_peer_truth",
     "backfill_must_use_new_authority",
