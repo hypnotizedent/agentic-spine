@@ -9,6 +9,7 @@ set -euo pipefail
 
 BINDING_FILE="${BINDING_FILE:-ops/bindings/infra.storage.placement.policy.yaml}"
 SSH_TARGETS_FILE="${SSH_TARGETS_FILE:-ops/bindings/ssh.targets.yaml}"
+VM_LIFECYCLE_FILE="${VM_LIFECYCLE_FILE:-ops/bindings/vm.lifecycle.yaml}"
 
 _need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
 _need yq
@@ -21,11 +22,16 @@ if [[ ! -f "$BINDING_FILE" ]]; then
   echo "STOP: missing binding file: $BINDING_FILE" >&2
   exit 2
 fi
+if [[ ! -f "$VM_LIFECYCLE_FILE" ]]; then
+  echo "STOP: missing VM lifecycle file: $VM_LIFECYCLE_FILE" >&2
+  exit 2
+fi
 
 echo "=== VM Runtime Placement Status ==="
 echo "Authority: diagnostic evidence only; canonical readbacks are node.admission.status, payload.custody.status, backup.estate.readback.status"
 echo "Host: estate declared per vm_storage[*].proxmox_host (default pve)"
 echo "Binding: $BINDING_FILE"
+echo "Lifecycle: $VM_LIFECYCLE_FILE"
 echo ""
 
 PASS=0
@@ -54,6 +60,19 @@ for key in $vm_keys; do
   host="$(yq -r ".vm_storage.\"$key\".proxmox_host // \"pve\"" "$BINDING_FILE")"
   boot_ref="$(yq -r ".vm_storage.\"$key\".current_boot_ref // \"\"" "$BINDING_FILE")"
   placement_status="$(yq -r ".vm_storage.\"$key\".placement_status // \"unknown\"" "$BINDING_FILE")"
+  lifecycle_status="$(yq -r "(.vms[] | select(((.id // \"\") | tostring) == \"$vm_id\" or .hostname == \"$key\") | .status) // \"\"" "$VM_LIFECYCLE_FILE" | head -1)"
+  closure_class="$(yq -r "(.vms[] | select(((.id // \"\") | tostring) == \"$vm_id\" or .hostname == \"$key\") | .closure_class) // \"\"" "$VM_LIFECYCLE_FILE" | head -1)"
+  runtime_cleanup_class="$(yq -r "(.vms[] | select(((.id // \"\") | tostring) == \"$vm_id\" or .hostname == \"$key\") | .runtime_cleanup_class) // \"\"" "$VM_LIFECYCLE_FILE" | head -1)"
+
+  # Lifecycle closure dominates lower-plane placement diagnostics. A destroyed
+  # or completed decommissioned runtime must not be actively probed just because
+  # an old placement row still carries historical refs.
+  if [[ "$lifecycle_status" == "decommissioned" || "$lifecycle_status" == "tombstone" || "$lifecycle_status" == "abandoned" ]]; then
+    if [[ "$closure_class" == "destroyed" || "$closure_class" == "deleted" || "$runtime_cleanup_class" == "completed" ]]; then
+      check "VM${vm_id}" "PASS" "$key: lifecycle closed; no active runtime probe (status=$lifecycle_status closure=$closure_class cleanup=$runtime_cleanup_class placement=$placement_status)"
+      continue
+    fi
+  fi
 
   # Skip tombstoned VMs without boot refs
   if [[ -z "$boot_ref" || "$boot_ref" == "null" ]]; then

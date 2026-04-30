@@ -12,6 +12,8 @@ SCHEDULER_HEALTH="$ROOT/ops/plugins/infra/host/bin/launchd-scheduler-health-stat
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
 SCHEDULER_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
 GATE_TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
+VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
+PLACEMENT_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
 
 fail() { echo "D456 FAIL: $*" >&2; exit 1; }
 
@@ -21,11 +23,13 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -f "$CAPABILITIES" ]] || fail "missing ops/capabilities.yaml"
 [[ -f "$SCHEDULER_REGISTRY" ]] || fail "missing launchd.scheduler.registry.yaml"
 [[ -f "$GATE_TOPOLOGY" ]] || fail "missing gate.execution.topology.yaml"
+[[ -f "$VM_LIFECYCLE" ]] || fail "missing vm.lifecycle.yaml"
+[[ -f "$PLACEMENT_POLICY" ]] || fail "missing infra.storage.placement.policy.yaml"
 
 bash -n "$RUNTIME_PLACEMENT"
 python3 -m py_compile "$SCHEDULER_HEALTH"
 
-python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CAPABILITIES" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" <<'PY'
+python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CAPABILITIES" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" <<'PY'
 import sys
 from pathlib import Path
 
@@ -44,12 +48,14 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
-runtime_path, scheduler_path, caps_path, registry_path, topology_path = map(Path, sys.argv[1:])
+runtime_path, scheduler_path, caps_path, registry_path, topology_path, lifecycle_path, placement_path = map(Path, sys.argv[1:])
 runtime_text = runtime_path.read_text(encoding="utf-8")
 scheduler_text = scheduler_path.read_text(encoding="utf-8")
 caps_text = caps_path.read_text(encoding="utf-8")
 registry = load_yaml(registry_path)
 topology = load_yaml(topology_path)
+lifecycle = load_yaml(lifecycle_path)
+placement = load_yaml(placement_path)
 
 for phrase in [
     "diagnostic evidence only",
@@ -62,6 +68,36 @@ for phrase in [
 for bad_counter in ["((PASS++))", "((FAIL++))", "((WARN++))"]:
     if bad_counter in runtime_text:
         fail(f"runtime placement readback must not use post-increment counters under set -e: {bad_counter}")
+
+for phrase in [
+    "VM_LIFECYCLE_FILE",
+    "Lifecycle closure dominates lower-plane placement diagnostics",
+    "lifecycle closed; no active runtime probe",
+]:
+    if phrase not in runtime_text:
+        fail(f"runtime placement readback must lifecycle-gate retired machines before probing: missing {phrase!r}")
+
+archive_lifecycle = next(
+    (
+        row
+        for row in lifecycle.get("vms") or []
+        if isinstance(row, dict)
+        and (str(row.get("id") or "") == "220" or row.get("hostname") == "archive-smb")
+    ),
+    None,
+)
+if not archive_lifecycle:
+    fail("archive-smb lifecycle row missing")
+if archive_lifecycle.get("status") != "decommissioned":
+    fail("archive-smb lifecycle row must remain decommissioned")
+if archive_lifecycle.get("closure_class") != "destroyed" or archive_lifecycle.get("runtime_cleanup_class") != "completed":
+    fail("archive-smb destroyed/completed closure must remain explicit so placement diagnostics do not probe it as active runtime")
+
+archive_placement = (placement.get("vm_storage") or {}).get("archive-smb") or {}
+if archive_placement.get("placement_status") != "retired":
+    fail("archive-smb placement row must remain explicitly retired while historical refs persist")
+if str(archive_placement.get("vm_id") or "") != "220":
+    fail("archive-smb placement row must remain bound to VMID 220")
 
 if '"--property=" + ",".join(props)' not in scheduler_text:
     fail("remote systemd probe must join requested systemctl properties explicitly")
