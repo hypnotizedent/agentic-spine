@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+SOURCE_TARGET="observability"
+DEST_TARGET="observability-r620"
+EXECUTE=0
+STACKS=(prometheus grafana loki uptime-kuma node-exporter)
+
+usage() {
+  cat <<'USAGE'
+observability-r620-dualrun-deploy - deploy active observability stack definitions to the R620 witness VM.
+
+Usage:
+  observability-r620-dualrun-deploy [--source observability] [--dest observability-r620] [--execute]
+
+Default mode is dry-run. Dashy is intentionally excluded because it is parked residue.
+USAGE
+}
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --source) SOURCE_TARGET="${2:?}"; shift 2 ;;
+    --dest) DEST_TARGET="${2:?}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    --dry-run) EXECUTE=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+build_ssh() {
+  local target="$1"
+  local result host path user identity_opts proxy_target proxy_ref
+  result="$(ssh_resolve_ssh_host_with_fallback "$target" 5 2>/dev/null || true)"
+  host="$(echo "$result" | awk '{print $1}')"
+  path="$(echo "$result" | awk '{print $2}')"
+  user="$(ssh_resolve_user "$target" "ubuntu")"
+  [[ -n "$host" && "$host" != "null" ]] || host="$(ssh_resolve_host "$target")"
+  [[ -n "$host" && "$host" != "null" ]] || fail "missing ssh host for $target"
+
+  local -a opts=(-o BatchMode=yes -o ConnectTimeout=8 -o ControlMaster=no -o ControlPath=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+  identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null)" || true
+  if [[ -n "$identity_opts" ]]; then
+    # shellcheck disable=SC2206
+    opts+=($identity_opts)
+  fi
+  if [[ "$path" == "unreachable" ]]; then
+    proxy_target="$(ssh_resolve_probe_via "$target")"
+    if [[ -n "$proxy_target" && "$proxy_target" != "null" ]]; then
+      proxy_ref="$(ssh_resolve_ref "$proxy_target")"
+      [[ -n "$proxy_ref" ]] || fail "probe_via target '$proxy_target' could not be resolved"
+      opts+=(-o "ProxyJump=${proxy_ref}")
+      host="$(ssh_resolve_host "$target")"
+      path="probe_via:${proxy_target}"
+    fi
+  fi
+
+  printf 'ssh'
+  printf ' %q' "${opts[@]}"
+  printf ' %q' "${user}@${host}"
+  printf '\t%s\t%s@%s\n' "${path:-direct}" "$user" "$host"
+}
+
+source_line="$(build_ssh "$SOURCE_TARGET")"
+dest_line="$(build_ssh "$DEST_TARGET")"
+source_cmd="${source_line%%$'\t'*}"
+dest_cmd="${dest_line%%$'\t'*}"
+source_ref="${source_line#*$'\t'}"
+dest_ref="${dest_line#*$'\t'}"
+
+echo "observability.r620.dualrun.deploy"
+echo "mode: $([[ "$EXECUTE" -eq 1 ]] && echo execute || echo dry-run)"
+echo "source: $SOURCE_TARGET ($source_ref)"
+echo "dest: $DEST_TARGET ($dest_ref)"
+echo "stacks: ${STACKS[*]}"
+echo "excluded: dashy"
+
+source_check='set -euo pipefail; for stack in "$@"; do [[ -f "/opt/stacks/$stack/docker-compose.yml" ]] || { echo "missing /opt/stacks/$stack/docker-compose.yml"; exit 1; }; done'
+dest_check='set -euo pipefail; command -v docker >/dev/null 2>&1; docker compose version >/dev/null 2>&1'
+
+# shellcheck disable=SC2086
+$source_cmd "bash -lc $(printf "%q" "$source_check") -- ${STACKS[*]}"
+# shellcheck disable=SC2086
+$dest_cmd "bash -lc $(printf "%q" "$dest_check")"
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+  echo "status: DRY_RUN_OK"
+  exit 0
+fi
+
+dest_user="$(ssh_resolve_user "$DEST_TARGET" "ubuntu")"
+source_self_ip="$(ssh_resolve_tailscale_ip "$SOURCE_TARGET")"
+dest_self_ip="$(ssh_resolve_tailscale_ip "$DEST_TARGET")"
+# shellcheck disable=SC2086
+$dest_cmd "sudo install -d -m 0755 /opt/stacks && sudo chown -R $(printf "%q" "$dest_user"):$(printf "%q" "$dest_user") /opt/stacks"
+# shellcheck disable=SC2086
+$source_cmd "tar -C /opt/stacks -czf - ${STACKS[*]}" | $dest_cmd "tar -C /opt/stacks -xzf -"
+
+if [[ -n "$source_self_ip" && "$source_self_ip" != "null" && -n "$dest_self_ip" && "$dest_self_ip" != "null" ]]; then
+  # Keep the witness self-contained: copied Prometheus config must prove the
+  # destination's Loki/node-exporter, not silently keep proving VM 205.
+  # shellcheck disable=SC2086
+  $dest_cmd "python3 - <<'PY'
+from pathlib import Path
+path = Path('/opt/stacks/prometheus/prometheus.yml')
+text = path.read_text()
+text = text.replace('$(printf "%q" "$source_self_ip")', '$(printf "%q" "$dest_self_ip")')
+text = text.replace('instance: $(printf "%q" "$SOURCE_TARGET")', 'instance: $(printf "%q" "$DEST_TARGET")')
+text = text.replace(\"vmid: '205'\", \"vmid: '216'\")
+path.write_text(text)
+PY"
+fi
+
+for stack in "${STACKS[@]}"; do
+  # shellcheck disable=SC2086
+  $dest_cmd "cd /opt/stacks/$(printf "%q" "$stack") && docker compose up -d --force-recreate"
+done
+
+# shellcheck disable=SC2086
+$dest_cmd 'docker ps --format "{{.Names}} {{.Status}}" | sort'
+echo "status: OK"

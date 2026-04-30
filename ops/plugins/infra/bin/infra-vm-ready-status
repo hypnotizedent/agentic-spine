@@ -13,7 +13,7 @@ set -euo pipefail
 #   - cron service running
 #   - backup inventory entry exists for vmid
 
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
 PROFILES="${INFRA_VM_PROFILES:-$SPINE_REPO/ops/bindings/infra.vm.profiles.yaml}"
 SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
@@ -115,6 +115,17 @@ check_fail() {
 }
 
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+if [[ "$ssh_path" == "unreachable" ]]; then
+    proxy_target="$(ssh_resolve_probe_via "$TARGET")"
+    if [[ -n "$proxy_target" && "$proxy_target" != "null" ]]; then
+        proxy_ref="$(ssh_resolve_ref "$proxy_target")"
+        if [[ -n "$proxy_ref" ]]; then
+            ssh_opts+=(-o "ProxyJump=${proxy_ref}")
+            ssh_host="$(ssh_resolve_host "$TARGET")"
+            ssh_path="probe_via:${proxy_target}"
+        fi
+    fi
+fi
 
 if [[ "$require_running" == "true" ]]; then
     set +e

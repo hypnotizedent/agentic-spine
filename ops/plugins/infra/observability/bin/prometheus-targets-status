@@ -4,7 +4,7 @@
 # Queries Prometheus /api/v1/targets and reports UP/DOWN status for each scrape job.
 #
 # Usage:
-#   prometheus-targets-status [--json|--self-check]
+#   prometheus-targets-status [--json|--self-check] [--target observability-r620]
 
 set -euo pipefail
 
@@ -16,10 +16,14 @@ stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
 JSON_OUTPUT=0
 SELF_CHECK=0
+TARGET="observability"
+SOURCE_HOST="observability"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --json) JSON_OUTPUT=1; shift ;;
     --self-check) SELF_CHECK=1; shift ;;
+    --target) TARGET="${2:?}"; shift 2 ;;
+    --source-host) SOURCE_HOST="${2:?}"; shift 2 ;;
     -h|--help)
       sed -n '1,12p' "$0"
       exit 0
@@ -46,10 +50,10 @@ if [[ -z "$PROM_URL" || "$PROM_URL" == "null" ]]; then
 fi
 
 source "${SPINE_ROOT}/ops/lib/ssh-resolve.sh"
-_resolve_result="$(ssh_resolve_host_with_fallback "observability" 2)" || true
+_resolve_result="$(ssh_resolve_host_with_fallback "$TARGET" 2)" || true
 _RESOLVED_IP="$(echo "$_resolve_result" | awk '{print $1}')"
 _PATH_USED="$(echo "$_resolve_result" | awk '{print $2}')"
-_LAN_IP="$(ssh_resolve_host "observability")"
+_LAN_IP="$(ssh_resolve_host "$SOURCE_HOST")"
 if [[ -n "$_LAN_IP" && -n "$_RESOLVED_IP" && "$_RESOLVED_IP" != "$_LAN_IP" ]]; then
   PROM_URL="${PROM_URL//$_LAN_IP/$_RESOLVED_IP}"
 fi

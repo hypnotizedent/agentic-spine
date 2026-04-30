@@ -3,7 +3,7 @@
 # Default mode is dry-run; pass --execute to write.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
 SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 BACKUP_INV="$ROOT/ops/bindings/domains/backup/backup.inventory.yaml"
@@ -27,6 +27,9 @@ OWNER="@ronny"
 SSH_USER="ubuntu"
 LAN_IP=""
 TAILSCALE_IP=""
+PROBE_VIA=""
+MACHINE_AUTH_ORIGIN="explicit"
+MACHINE_IDENTITY_FILE="~/.ssh/id_ed25519"
 BACKUP_CLASSIFICATION="important"
 BACKUP_PROFILE="vm-primary"
 BACKUP_ADMISSION_STATE="planned"
@@ -54,6 +57,9 @@ Options:
   --ssh-user <user>                     default: ubuntu
   --lan-ip <ip>
   --tailscale-ip <ip>
+  --probe-via <ssh-target-id>           optional ProxyJump target for LAN-only guests
+  --machine-auth-origin <explicit|ambient> default: explicit
+  --machine-identity-file <path>        default: ~/.ssh/id_ed25519
   --backup-classification <critical|important|rebuildable> default: important
   --backup-profile <id>                 default: vm-primary
   --backup-admission-state <planned|production_ready> default: planned
@@ -148,6 +154,9 @@ while [[ $# -gt 0 ]]; do
     --ssh-user) SSH_USER="${2:?}"; shift 2 ;;
     --lan-ip) LAN_IP="${2:?}"; shift 2 ;;
     --tailscale-ip) TAILSCALE_IP="${2:?}"; shift 2 ;;
+    --probe-via) PROBE_VIA="${2:?}"; shift 2 ;;
+    --machine-auth-origin) MACHINE_AUTH_ORIGIN="${2:?}"; shift 2 ;;
+    --machine-identity-file) MACHINE_IDENTITY_FILE="${2:?}"; shift 2 ;;
     --backup-classification) BACKUP_CLASSIFICATION="${2:?}"; shift 2 ;;
     --backup-profile) BACKUP_PROFILE="${2:?}"; shift 2 ;;
     --backup-admission-state) BACKUP_ADMISSION_STATE="${2:?}"; shift 2 ;;
@@ -166,6 +175,7 @@ done
 [[ "$BACKUP_CLASSIFICATION" =~ ^(critical|important|rebuildable)$ ]] || fail "invalid --backup-classification"
 [[ "$BACKUP_ADMISSION_STATE" =~ ^(planned|production_ready)$ ]] || fail "invalid --backup-admission-state"
 [[ "$HAS_DOCKER" =~ ^(true|false)$ ]] || fail "--has-docker must be true|false"
+[[ "$MACHINE_AUTH_ORIGIN" =~ ^(explicit|ambient)$ ]] || fail "--machine-auth-origin must be explicit|ambient"
 
 for dep in yq python3; do
   command -v "$dep" >/dev/null 2>&1 || fail "missing dependency: $dep"
@@ -239,13 +249,16 @@ if [[ "$EXECUTE" -eq 0 ]]; then
   echo "destination_lane: $DEST_LANE"
   echo "target_enabled: $TARGET_ENABLED"
   echo "ssh_host: $SSH_HOST"
+  [[ -n "$PROBE_VIA" ]] && echo "probe_via: $PROBE_VIA"
+  echo "machine_auth_origin: $MACHINE_AUTH_ORIGIN"
+  [[ "$MACHINE_AUTH_ORIGIN" == "explicit" ]] && echo "machine_identity_file: $MACHINE_IDENTITY_FILE"
   echo "reconcile: vm.lifecycle.derived + platform.control.surfaces + workbench.ssh"
   echo "authority_followup: update the runtime service surfaces when service/stack truth is known"
   echo "apply: rerun with --execute"
   exit 0
 fi
 
-export VMID HOSTNAME ROLE SITE_SCOPE PROXMOX_HOST STATUS OWNER SSH_USER LAN_IP TAILSCALE_IP BACKUP_TARGET HAS_DOCKER BACKUP_PROFILE BACKUP_ADMISSION_STATE DEST_LANE STALE_HOURS SCHEDULE_CLASS RESTORE_CLASS BACKUP_BASE BACKUP_CLASSIFICATION TARGET_ENABLED SSH_HOST
+export VMID HOSTNAME ROLE SITE_SCOPE PROXMOX_HOST STATUS OWNER SSH_USER LAN_IP TAILSCALE_IP PROBE_VIA MACHINE_AUTH_ORIGIN MACHINE_IDENTITY_FILE BACKUP_TARGET HAS_DOCKER BACKUP_PROFILE BACKUP_ADMISSION_STATE DEST_LANE STALE_HOURS SCHEDULE_CLASS RESTORE_CLASS BACKUP_BASE BACKUP_CLASSIFICATION TARGET_ENABLED SSH_HOST
 
 TX_TMPDIR="$(mktemp -d)"
 backup_file "$VM_LIFECYCLE"
@@ -315,6 +328,12 @@ ssh_payload = {
     "description": "Scaffolded VM target; verify IP/user before promotion to active.",
     "tags": ["vm", "scaffold", os.environ["SITE_SCOPE"]],
 }
+if os.environ["PROBE_VIA"]:
+    ssh_payload["probe_via"] = os.environ["PROBE_VIA"]
+if os.environ["MACHINE_AUTH_ORIGIN"]:
+    ssh_payload["machine_auth_origin"] = os.environ["MACHINE_AUTH_ORIGIN"]
+if os.environ["MACHINE_AUTH_ORIGIN"] == "explicit" and os.environ["MACHINE_IDENTITY_FILE"]:
+    ssh_payload["machine_identity_file"] = os.environ["MACHINE_IDENTITY_FILE"]
 
 backup_runtime_payload = {
     "unit_id": f"vm-{os.environ['VMID']}-{os.environ['HOSTNAME']}",
