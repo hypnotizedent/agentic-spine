@@ -1,0 +1,208 @@
+---
+status: authoritative
+owner: "@human-steward"
+scope: l2-courthouse-safe-readback
+version: 2
+updated_at: "2026-04-30"
+
+purpose: >
+  Read-only L2 contract for the courthouse/source-truth and safe/secret-custody
+  boundary. It names where agents may read references and custody posture
+  without reading, printing, rotating, or moving secret values.
+
+authority_reconciliation:
+  governing_sources:
+    - AGENTS.md
+    - NORTH_STAR.md
+    - docs/governance/SPINE.md
+    - docs/governance/SESSION_PROTOCOL.md
+    - ops/bindings/root.authority.contract.yaml
+  human_intent_source: state/domain-state/spine/L2-FIRST-CLASS-FOUNDATION-HUMAN-QA-ANSWERS-20260430.md
+  human_intent_id: HI-20260430-044709-0579
+  repo_truth: >
+    NORTH_STAR.md Distribution Authority says Gitea at git.ronny.works is
+    canonical and GitHub is read-only distribution/publication. Human intent
+    artifacts must be interpreted through that governance before they become
+    implementation truth.
+  resolved_model: "Gitea is canonical source/courthouse; GitHub is publication/distribution."
+  uncertainty_rule: "If operator intent and governance appear to conflict, stop and ask the human steward instead of inventing a new class."
+
+boundary:
+  courthouse_holds: "source truth, review/merge history, issue references, runner references, and secret references"
+  safe_holds: "secret values, token values, and machine credentials"
+  allowed_readback: "metadata, paths, classes, custody posture, and sanctioned injection wrappers"
+  forbidden_readback:
+    - secret values
+    - token values
+    - live credential dumps
+    - mutation, rotation, deletion, or project migration
+
+courthouse_classes:
+  gitea-self-hosted:
+    class: courthouse
+    runtime_surface: gitea
+    runtime_node: dev-tools
+    canonical_routes:
+      - https://git.ronny.works
+    source_examples:
+      - dev-tools VM 206 Gitea
+
+publication_classes:
+  github-cloud-publication-public:
+    class: publication
+    canonical_source_class: gitea-self-hosted
+    runtime_surface: github.com
+    runtime_node: github-cloud
+    publication_routes:
+      - https://github.com/hypnotizedent/mint-modules
+    source_examples:
+      - public spine mirror
+      - public product repos
+  github-cloud-publication-private:
+    class: publication
+    canonical_source_class: gitea-self-hosted
+    runtime_surface: github.com
+    runtime_node: github-cloud
+    publication_routes:
+      - github private orgs and workbench remotes
+    source_examples:
+      - workbench
+      - private operator repos
+
+domains:
+  forge:
+    class: courthouse
+    courthouse_class: gitea-self-hosted
+    source_body: dev-tools/gitea
+    runtime_surface: gitea
+    runtime_node: dev-tools
+    canonical_routes:
+      - https://git.ronny.works
+    secret_namespaces:
+      - /spine/vm-infra/gitea
+      - /spine/platform/security
+    token_classes:
+      - TOKEN
+      - API_KEY
+      - CLIENT_SECRET
+      - RUNNER_TOKEN
+      - WEBHOOK_SECRET
+      - DEPLOY_KEY
+    backup_targets:
+      - app-gitea
+      - app-gitea-export
+    restore_proof_age: unknown
+    observability_probe: declared_elsewhere
+    runtime_node_placement: dev-tools
+    courthouse_stores: "git repositories, governance refs, issue refs, runner refs, and secret references"
+    safe_stores: "GITEA_*, GITHUB_* token values, runner tokens, OAuth client secrets"
+    source_bindings:
+      - ops/bindings/platform.control.surface.contract.yaml
+      - ops/bindings/secrets.namespace.policy.yaml
+      - ops/bindings/secrets.runway.contract.yaml
+  github-public:
+    class: publication
+    courthouse_class: gitea-self-hosted
+    publication_class: github-cloud-publication-public
+    source_body: git.ronny.works canonical source published to github.com public repositories
+    runtime_surface: github.com
+    runtime_node: github-cloud
+    canonical_source_routes:
+      - https://git.ronny.works
+    publication_routes:
+      - https://github.com/hypnotizedent/mint-modules
+    secret_namespaces:
+      - /spine/platform/security
+    token_classes:
+      - API_KEY
+      - CLIENT_SECRET
+      - RUNNER_TOKEN
+      - WEBHOOK_SECRET
+      - DEPLOY_KEY
+    backup_targets: []
+    restore_proof_age: unknown
+    observability_probe: not_in_phase_0
+    runtime_node_placement: external_cloud
+    courthouse_stores: "canonical source truth remains in Gitea; GitHub stores publication copies and GitHub Actions references"
+    safe_stores: "GitHub token values and deploy keys"
+    source_bindings:
+      - ops/bindings/secrets.namespace.policy.yaml
+  github-private:
+    class: publication
+    courthouse_class: gitea-self-hosted
+    publication_class: github-cloud-publication-private
+    source_body: git.ronny.works canonical source published to github.com private repositories when declared
+    runtime_surface: github.com
+    runtime_node: github-cloud
+    canonical_source_routes:
+      - https://git.ronny.works
+    publication_routes:
+      - github private orgs and workbench remotes
+    secret_namespaces:
+      - /spine/platform/security
+    token_classes:
+      - API_KEY
+      - CLIENT_SECRET
+      - RUNNER_TOKEN
+      - WEBHOOK_SECRET
+      - DEPLOY_KEY
+    backup_targets: []
+    restore_proof_age: unknown
+    observability_probe: not_in_phase_0
+    runtime_node_placement: external_cloud
+    courthouse_stores: "canonical source truth remains in Gitea; GitHub stores private publication copies and GitHub Actions references"
+    safe_stores: "GitHub token values and deploy keys"
+    source_bindings:
+      - ops/bindings/secrets.namespace.policy.yaml
+  safe:
+    class: safe
+    courthouse_class: safe-not-courthouse
+    source_body: infra-core/infisical
+    runtime_surface: infisical
+    runtime_node: infra-core
+    canonical_routes:
+      - https://secrets.ronny.works
+    backend_routes:
+      - http://100.92.91.128:8088
+    secret_namespaces:
+      - /spine/platform/security
+      - /spine/network/edge
+      - /spine/services
+      - /spine/vm-infra
+    token_classes:
+      - TOKEN
+      - API_KEY
+      - CLIENT_SECRET
+      - WEBHOOK_SECRET
+      - RUNNER_TOKEN
+      - DEPLOY_KEY
+    backup_targets:
+      - app-infisical
+    restore_proof_age: unknown
+    observability_probe: declared_elsewhere
+    runtime_node_placement: infra-core
+    courthouse_stores: "safe service source/control references only"
+    safe_stores: "machine secret values, token values, service credential values"
+    source_bindings:
+      - ops/bindings/secrets.inventory.yaml
+      - ops/bindings/secrets.namespace.policy.yaml
+      - ops/bindings/secrets.runway.contract.yaml
+
+readbacks:
+  secret_references: secret.reference.status
+  token_custody: token.custody.status
+  secret_injection: secret.injection.status
+  domain_core: domain.core.status
+  boundary: courthouse.safe.status
+
+phase_1_pointer:
+  note: "Non-forge/non-safe L3 domain fan-out belongs to the next L2 phase; Phase 0 only installs the readback eyes."
+  source: state/domain-state/spine/L2-FIRST-CLASS-FOUNDATION-BUILD-ORDER-20260430.md
+
+stop_lines:
+  - no runtime movement
+  - no Gitea mutation
+  - no GitHub mutation
+  - no Infisical mutation
+  - no DNS, SSO, or token mutation
+  - no secret value output
