@@ -8,7 +8,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 
 # Estate Boringness Scorecard
 
-- Generated: `2026-04-30T14:38:04Z`
+- Generated: `2026-04-30T19:53:21Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Repo surfaces tracked: `2`
 - Ghosts: `10`
@@ -21,7 +21,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | Repo | Boring Enough | Purpose | Exact Blocker |
 | --- | --- | --- | --- |
 | mint-modules | yes | Mint Prints implementation repo for active modules plus future, blocked, deferred, and contract-only module roots. | none |
-| ronny-products | yes | Parked product-orchestration repo with one live integration surface and two intentionally non-deployed product lanes. | none |
+| ronny-products | yes | Canonical repo for standalone personal products; owns product code, contracts, and non-runtime v1 product bases. | none |
 
 ## Environment Closure
 
@@ -101,6 +101,6 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | safe_to_delete | Synology mint-os legacy residue | candidate | Residue is reviewed, non-canonical, and now tombstoned under /volume1/backups/_legacy_tombstones/retired-20260319-mint-os-home-residue. Delete only in a deliberate cleanup wave. |
 | safe_to_migrate | Synology stale backup lanes into /volume1/backups/_legacy_tombstones | done | Historical shop exact-offsite residue plus stale mint-os, home-assistant, finance, and media backup lanes were renamed into one explicit tombstone subtree on 2026-03-19 so they no longer look canonical. |
 | safe_to_migrate | mint-modules future, blocked, and deferred roots | ready | Spine lifecycle authority already declares these roots non-runtime; moving them behind explicit lifecycle boundaries will not change live runtime behavior. |
-| safe_to_migrate | ronny-products parked app contracts | done | app.contract runtime status now matches the execution board: parked products are no longer marked active. |
+| safe_to_migrate | ronny-products app contracts and v1 bases | done | Standalone product contracts and new L3 proof bases are canonical under /Users/ronnyworks/code/ronny-products; ronny-projects is not a second authority. |
 | safe_to_change_drives | shop rack hot/warm/cold storage | blocked | VM200 hot LV is gone, but media remains at 99% usage, downloads still contribute about 2.61TiB of regenerable pressure, and the retained forensic snapshot prevents warm-lane deletions from reclaiming space immediately. |
 | safe_to_change_drives | proxmox-home and Synology drives | blocked | Runtime backups exist on Synology, but the same enclosure remains canonical for home personal data and there is no declared second cold plane. |
