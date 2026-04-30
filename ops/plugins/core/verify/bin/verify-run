@@ -380,6 +380,7 @@ run_spine_scope() {
   local helper_json declared_json executed_json already_json missing_json stale_json out_json helper_exec_paths_json component_json
   local overall_rc=0
   local engine_rc=0 gate_rc=0
+  local spine_surfaces=()
 
   helper_json="$(load_spine_helper_json)"
   declared_json="$(jq -c '.declared_core_gate_ids' <<<"$helper_json")"
@@ -421,7 +422,9 @@ run_spine_scope() {
     '[.executable_surfaces[] | select(.warn_only == true) | (.path // .check_script) | if startswith("/") then . else ($root + "/" + .) end] | .[]' \
     <<<"$helper_json")"
 
-  while IFS= read -r surface; do
+  mapfile -t spine_surfaces < <(jq -r '.[]' <<<"$helper_exec_paths_json")
+
+  for surface in "${spine_surfaces[@]}"; do
     [[ -n "$surface" ]] || continue
     if [[ ! -x "$surface" ]]; then
       echo "verify.run spine FAIL: non-executable surface: $surface" >&2
@@ -431,12 +434,12 @@ run_spine_scope() {
 
     if [[ "$json_mode" -eq 1 ]]; then
       set +e
-      "$surface" >/dev/null 2>&1
+      "$surface" </dev/null >/dev/null 2>&1
       gate_rc=$?
       set -e
     else
       set +e
-      "$surface"
+      "$surface" </dev/null
       gate_rc=$?
       set -e
     fi
@@ -448,7 +451,7 @@ run_spine_scope() {
         overall_rc=1
       fi
     fi
-  done < <(jq -r '.[]' <<<"$helper_exec_paths_json")
+  done
 
   if [[ "$json_mode" -eq 1 ]]; then
     jq -n \
