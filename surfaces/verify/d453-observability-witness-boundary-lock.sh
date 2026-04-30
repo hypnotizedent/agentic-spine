@@ -123,6 +123,15 @@ if sorted(mutation.get("allowed_targets") or []) != ["download-stack", "streamin
 dashy_mutation = ((contract.get("governed_mutation") or {}).get("dashy_residue") or {})
 if dashy_mutation.get("capability") != "observability.dashy.residue.retire":
     fail("dashy residue mutation must use governed retire capability")
+runtime = contract.get("runtime") or {}
+current_runtime = runtime.get("current") or {}
+previous_runtime = runtime.get("previous") or {}
+if current_runtime.get("node_id") != "observability-r620" or int(current_runtime.get("vmid") or 0) != 216:
+    fail("observability current runtime must remain observability-r620 VM 216")
+if previous_runtime.get("node_id") != "observability" or int(previous_runtime.get("vmid") or 0) != 205:
+    fail("observability previous runtime must remain VM 205 retirement hold")
+if "retirement_hold" not in str(previous_runtime.get("state") or ""):
+    fail("observability previous runtime must be retirement hold, not current")
 
 doc = doc_path.read_text(encoding="utf-8")
 for phrase in [
@@ -157,17 +166,25 @@ for required in ["verify_dashy_stopped", "refusing to remove running dashy conta
 
 vm_lifecycle = load_yaml(vm_lifecycle_path)
 observability = next(
-    (row for row in (vm_lifecycle.get("vms") or []) if isinstance(row, dict) and row.get("hostname") == "observability"),
+    (row for row in (vm_lifecycle.get("vms") or []) if isinstance(row, dict) and row.get("hostname") == "observability-r620"),
     None,
 )
 if not isinstance(observability, dict):
-    fail("vm.lifecycle missing observability row")
+    fail("vm.lifecycle missing observability-r620 row")
+if int(observability.get("id") or 0) != 216 or observability.get("status") != "active":
+    fail("observability-r620 VM 216 must remain active in vm.lifecycle")
 if "dashy" in (observability.get("services") or []):
-    fail("dashy must not be active service in observability VM lifecycle")
+    fail("dashy must not be active service in observability-r620 VM lifecycle")
 if "dashy" in (observability.get("stacks") or []):
-    fail("dashy must not be active stack in observability VM lifecycle")
-if "dashy" not in (observability.get("parked_services") or []):
-    fail("dashy must remain classified as parked service")
+    fail("dashy must not be active stack in observability-r620 VM lifecycle")
+legacy_observability = next(
+    (row for row in (vm_lifecycle.get("vms") or []) if isinstance(row, dict) and row.get("hostname") == "observability"),
+    None,
+)
+if not isinstance(legacy_observability, dict) or legacy_observability.get("status") != "retirement_hold":
+    fail("legacy observability VM 205 must remain retirement_hold until decommission closeout")
+if "dashy" not in (legacy_observability.get("parked_services") or []):
+    fail("legacy dashy must remain classified as parked service")
 
 print("D453 PASS: observability witness lane is registered, read-only by default, fallback-aware, and authority-bounded")
 PY

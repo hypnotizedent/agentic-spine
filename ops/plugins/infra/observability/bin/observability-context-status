@@ -17,7 +17,7 @@ SERVICES_HEALTH = ROOT / "ops" / "bindings" / "services.health.yaml"
 BACKUP_INVENTORY = ROOT / "ops" / "bindings" / "domains" / "backup" / "backup.inventory.yaml"
 STACK_SCRIPT = ROOT / "ops" / "plugins" / "infra" / "observability" / "bin" / "observability-stack-status"
 TARGETS_SCRIPT = ROOT / "ops" / "plugins" / "infra" / "observability" / "bin" / "prometheus-targets-status"
-WATCHER_STATE = ROOT.parent / ".runtime" / "spine" / "logs" / "watcher-cycle-state.json"
+WATCHER_HEALTH_SCRIPT = ROOT / "ops" / "plugins" / "core" / "bin" / "watcher-health"
 
 
 def fail(message: str) -> None:
@@ -56,14 +56,19 @@ def service_count() -> int:
     return sum(1 for row in endpoints if isinstance(row, dict) and row.get("host") == "observability")
 
 
-def backup_posture() -> dict[str, Any]:
+def backup_posture(runtime: dict[str, Any]) -> dict[str, Any]:
     if not BACKUP_INVENTORY.is_file():
         return {"status": "unknown", "reason": "backup inventory missing"}
     data = load_yaml(BACKUP_INVENTORY)
+    current = runtime.get("current") or {}
+    vmid = str(current.get("vmid") or "216")
+    node_id = str(current.get("node_id") or "observability")
+    unit_id = f"vm-{vmid}-{node_id}"
+    target_name = f"vm-{vmid}-{node_id}-primary"
     runtime_units = data.get("runtime_units") or []
     targets = data.get("targets") or []
-    unit = next((row for row in runtime_units if isinstance(row, dict) and row.get("unit_id") == "vm-205-observability"), {})
-    target = next((row for row in targets if isinstance(row, dict) and row.get("name") == "vm-205-observability-primary"), {})
+    unit = next((row for row in runtime_units if isinstance(row, dict) and row.get("unit_id") == unit_id), {})
+    target = next((row for row in targets if isinstance(row, dict) and row.get("name") == target_name), {})
     return {
         "status": "declared" if unit or target else "missing",
         "runtime_unit": unit.get("unit_id"),
@@ -75,12 +80,16 @@ def backup_posture() -> dict[str, Any]:
 
 
 def watcher_summary() -> dict[str, Any]:
-    if not WATCHER_STATE.is_file():
-        return {"status": "unknown", "reason": "watcher state file missing"}
-    try:
-        data = json.loads(WATCHER_STATE.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return {"status": "unknown", "reason": f"watcher state parse failed: {exc}"}
+    if not WATCHER_HEALTH_SCRIPT.is_file():
+        return {"status": "unknown", "reason": "watcher.health script missing"}
+    result = run([str(WATCHER_HEALTH_SCRIPT), "--json"])
+    data = result.get("json") if isinstance(result.get("json"), dict) else {}
+    if result.get("exit") != 0 or not data:
+        return {
+            "status": "unknown",
+            "reason": "watcher.health readback failed",
+            "exit": result.get("exit"),
+        }
     projection = data.get("watcher_input_projection") or {}
     return {
         "status": data.get("health") or data.get("status") or "unknown",
@@ -88,6 +97,8 @@ def watcher_summary() -> dict[str, Any]:
         "last_success_at": data.get("last_success_at"),
         "input_projection_status": projection.get("status"),
         "input_count": projection.get("input_count"),
+        "read_source": data.get("read_source"),
+        "source_node": data.get("source_node"),
     }
 
 
@@ -110,42 +121,33 @@ def main() -> None:
         print("observability.context.status self-check: OK")
         return
 
-    stack = run([str(STACK_SCRIPT)])
-    targets = run([str(TARGETS_SCRIPT), "--json"])
-    runtime_target = (contract.get("runtime") or {}).get("target") or {}
-    target_guest = runtime_target.get("guest_node_id")
-    target_stack = run([str(STACK_SCRIPT), "--target", str(target_guest)]) if target_guest else {}
-    target_targets = run([str(TARGETS_SCRIPT), "--json", "--target", str(target_guest)]) if target_guest else {}
+    runtime = contract.get("runtime") or {}
+    runtime_current = runtime.get("current") or {}
+    current_target = str(runtime_current.get("node_id") or "observability")
+    previous_runtime = runtime.get("previous") or {}
+    stack = run([str(STACK_SCRIPT), "--target", current_target])
+    targets = run([str(TARGETS_SCRIPT), "--json", "--target", current_target])
+    previous_node = previous_runtime.get("node_id")
     targets_json = targets.get("json") if isinstance(targets.get("json"), dict) else {}
-    target_targets_json = target_targets.get("json") if isinstance(target_targets.get("json"), dict) else {}
     stack_status = "ok" if stack["exit"] == 0 else "degraded"
     targets_status = str(targets_json.get("status") or ("ok" if targets["exit"] == 0 else "degraded"))
-    target_stack_status = "ok" if target_stack and target_stack.get("exit") == 0 else ("not_configured" if not target_guest else "degraded")
-    target_targets_status = (
-        str(target_targets_json.get("status") or ("ok" if target_targets and target_targets.get("exit") == 0 else "degraded"))
-        if target_guest
-        else "not_configured"
-    )
-    status = "ok" if stack_status == "ok" and targets_status == "ok" and target_stack_status in {"ok", "not_configured"} and target_targets_status in {"ok", "not_configured"} else "degraded"
+    status = "ok" if stack_status == "ok" and targets_status == "ok" else "degraded"
 
     payload = {
         "capability": "observability.context.status",
         "status": status,
         "authority_boundary": boundary,
         "statement": (contract.get("authority_boundary") or {}).get("statement"),
-        "runtime": contract.get("runtime"),
+        "runtime": runtime,
         "agent_context": contract.get("agent_context"),
         "service_endpoint_count": service_count(),
         "stack": {
+            "target": current_target,
             "status": stack_status,
             "exit": stack["exit"],
         },
-        "target_stack": {
-            "target": target_guest,
-            "status": target_stack_status,
-            "exit": target_stack.get("exit") if target_stack else None,
-        },
         "prometheus_targets": {
+            "target": current_target,
             "status": targets_status,
             "exit": targets["exit"],
             "endpoint": targets_json.get("endpoint"),
@@ -155,19 +157,9 @@ def main() -> None:
             "targets_total": targets_json.get("targets_total"),
             "down_targets": targets_json.get("down_targets") or [],
         },
-        "target_prometheus_targets": {
-            "target": target_guest,
-            "status": target_targets_status,
-            "exit": target_targets.get("exit") if target_targets else None,
-            "endpoint": target_targets_json.get("endpoint"),
-            "path": target_targets_json.get("path"),
-            "targets_up": target_targets_json.get("targets_up"),
-            "targets_down": target_targets_json.get("targets_down"),
-            "targets_total": target_targets_json.get("targets_total"),
-            "down_targets": target_targets_json.get("down_targets") or [],
-        },
+        "previous_runtime": previous_runtime,
         "watcher": watcher_summary(),
-        "backup_posture": backup_posture(),
+        "backup_posture": backup_posture(runtime),
         "stop_lines": (contract.get("agent_context") or {}).get("stop_lines") or [],
         "subtraction_policy": contract.get("subtraction_policy"),
     }
@@ -178,24 +170,16 @@ def main() -> None:
         print("observability.context.status")
         print(f"status: {status.upper()}")
         print(f"authority_boundary: {boundary}")
-        print(f"runtime_current: {((contract.get('runtime') or {}).get('current') or {}).get('node_id')} vmid={((contract.get('runtime') or {}).get('current') or {}).get('vmid')}")
-        print(f"runtime_target: {((contract.get('runtime') or {}).get('target') or {}).get('node_id')} state={((contract.get('runtime') or {}).get('target') or {}).get('state')}")
-        print(f"stack: {stack_status.upper()}")
-        if target_guest:
-            print(f"target_stack: {target_guest} {target_stack_status.upper()}")
+        print(f"runtime_current: {runtime_current.get('node_id')} vmid={runtime_current.get('vmid')}")
+        if previous_node:
+            print(f"runtime_previous: {previous_node} vmid={previous_runtime.get('vmid')} state={previous_runtime.get('state')}")
+        print(f"stack: {current_target} {stack_status.upper()}")
         print(
             "prometheus_targets: "
             f"{targets_status.upper()} "
             f"({targets_json.get('targets_up')}/{targets_json.get('targets_total')} up, "
             f"{targets_json.get('targets_down')} down, path={targets_json.get('path')})"
         )
-        if target_guest:
-            print(
-                "target_prometheus_targets: "
-                f"{target_targets_status.upper()} "
-                f"({target_targets_json.get('targets_up')}/{target_targets_json.get('targets_total')} up, "
-                f"{target_targets_json.get('targets_down')} down, path={target_targets_json.get('path')})"
-            )
         print(f"watcher: {payload['watcher'].get('status')} input_projection={payload['watcher'].get('input_projection_status')}")
         print(f"backup_posture: {payload['backup_posture'].get('status')} target={payload['backup_posture'].get('target')}")
         print("stop_lines: no mutation, no backups, no restore drills, no VM cutover/decommission")

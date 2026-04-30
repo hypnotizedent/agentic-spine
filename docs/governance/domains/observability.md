@@ -18,6 +18,10 @@ The first-class agent context entrypoint is:
 ./bin/ops cap run observability.context.status
 ```
 
+Current canonical runtime: `observability-r620` / VM 216 on `pve-r620`.
+Legacy VM 205 is retirement-hold only and must not be treated as a second
+canonical observability runtime.
+
 That readback may compose stack health, Prometheus scrape targets, watcher
 summary, and backup posture. It must stay read-only: no backup jobs, restore
 drills, service restarts, VM cutover, decommission, placement mutation, or

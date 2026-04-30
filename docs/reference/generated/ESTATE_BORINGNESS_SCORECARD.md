@@ -8,7 +8,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 
 # Estate Boringness Scorecard
 
-- Generated: `2026-04-30T02:48:56Z`
+- Generated: `2026-04-30T12:27:39Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Repo surfaces tracked: `2`
 - Ghosts: `10`

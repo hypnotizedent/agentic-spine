@@ -1877,10 +1877,15 @@ if mode == "--brief":
         _sp_healthy = int(_sp_summary.get("healthy", 0) or 0)
         _sp_degraded = sum(int(_sp_summary.get(key, 0) or 0) for key in ("stale", "failed", "unreachable", "never_run", "unknown"))
         parts.append(f"Standing: {_sp_healthy} healthy / {_sp_degraded} drift")
-    _watcher_summary = watcher_input_projection.get("summary") if isinstance(watcher_input_projection.get("summary"), dict) else {}
     _watcher_total = int(watcher_input_projection.get("input_count", 0) or 0)
+    _watcher_inputs = watcher_input_projection.get("inputs") if isinstance(watcher_input_projection.get("inputs"), list) else []
     if _watcher_total:
-        _watcher_attention = sum(int(_watcher_summary.get(key, 0) or 0) for key in ("degraded", "failed", "unsupported", "unknown"))
+        _watcher_attention = sum(
+            1
+            for item in _watcher_inputs
+            if str(item.get("status") or "") in {"degraded", "failed", "unsupported", "unknown"}
+            and str(item.get("action_level") or "") != "status_only"
+        )
         parts.append(f"Watcher inputs: {_watcher_total - _watcher_attention} ok / {_watcher_attention} attention")
     _wt_cleanable = int(worktree_cleanup_state.get("cleanable_worktrees", 0) or 0)
     _wt_dirty = int(worktree_cleanup_state.get("dirty_blocked_worktrees", 0) or 0)
@@ -1904,10 +1909,19 @@ if mode != "--expert":
     )
     _watcher_summary = watcher_input_projection.get("summary") if isinstance(watcher_input_projection.get("summary"), dict) else {}
     _watcher_inputs_total = int(watcher_input_projection.get("input_count", 0) or 0)
+    _watcher_inputs = watcher_input_projection.get("inputs") if isinstance(watcher_input_projection.get("inputs"), list) else []
     _watcher_inputs_ok = int(_watcher_summary.get("ok", 0) or 0)
     _watcher_inputs_attention = sum(
-        int(_watcher_summary.get(key, 0) or 0)
-        for key in ("degraded", "failed", "unsupported", "unknown")
+        1
+        for item in _watcher_inputs
+        if str(item.get("status") or "") in {"degraded", "failed", "unsupported", "unknown"}
+        and str(item.get("action_level") or "") != "status_only"
+    )
+    _watcher_inputs_status_only = sum(
+        1
+        for item in _watcher_inputs
+        if str(item.get("status") or "") in {"degraded", "failed", "unsupported", "unknown"}
+        and str(item.get("action_level") or "") == "status_only"
     )
     _wt_cleanable = int(worktree_cleanup_state.get("cleanable_worktrees", 0) or 0)
     _wt_dirty_blocked = int(worktree_cleanup_state.get("dirty_blocked_worktrees", 0) or 0)
@@ -2002,7 +2016,10 @@ if mode != "--expert":
     print("AUTOMATION")
     print("-" * 72)
     if _watcher_inputs_total:
-        print(f"  watcher inputs:    {_watcher_inputs_total} total, {_watcher_inputs_ok} ok, {_watcher_inputs_attention} attention")
+        if _watcher_inputs_status_only:
+            print(f"  watcher inputs:    {_watcher_inputs_total} total, {_watcher_inputs_ok} ok, {_watcher_inputs_status_only} status-only, {_watcher_inputs_attention} attention")
+        else:
+            print(f"  watcher inputs:    {_watcher_inputs_total} total, {_watcher_inputs_ok} ok, {_watcher_inputs_attention} attention")
     else:
         print("  watcher inputs:    unavailable")
     if _sp_total:
