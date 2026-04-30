@@ -78,6 +78,20 @@ for forbidden in ["V1 scope", "pve (power_status", "pve-r620 (power_status"]:
     if forbidden in invoke_desc:
         fail(f"node.recovery.invoke description still teaches hard-coded scope: {forbidden}")
 
+status_desc = str(status_cap.get("description") or "")
+for phrase in [
+    "Reachability is evidence",
+    "Power authority comes only from admitted recovery control",
+    "node.recovery.status is the readback",
+    "node.recovery.invoke is the only mutation path",
+]:
+    if phrase not in status_desc:
+        fail(f"node.recovery.status description missing dominance phrase: {phrase}")
+
+for phrase in ["only governed mutation path", "cannot grant power-action permission"]:
+    if phrase not in invoke_desc:
+        fail(f"node.recovery.invoke description missing sole-mutation-path phrase: {phrase}")
+
 operator_rows = load_yaml(op_hw_path).get("machines") or []
 required_operator_rows = [
     "macbook-primary",
@@ -135,5 +149,5 @@ mac_limits = {entry.get("id") for entry in ((mac.get("control_modes") or {}).get
 if "manual_power_required" not in mac_limits:
     fail("macbook-primary must surface manual power limit")
 
-print("D454 PASS: node recovery control is status-derived, first-class, and honest about manual limits")
+print("D454 PASS: node recovery control is status-derived, first-class, honest about manual limits, and teaches the dominance edge in normal readback")
 PY
