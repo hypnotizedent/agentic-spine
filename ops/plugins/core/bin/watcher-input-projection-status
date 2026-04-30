@@ -238,6 +238,20 @@ PY
       fi
       summary="endpoints=${total} ok=${ok} skipped=${skip} unhealthy=${unhealthy}"
       ;;
+    execution.pickup.status)
+      set +e
+      run_readback_capture "$out_file" "$err_file" "$ROOT/ops/plugins/core/lifecycle/bin/execution-pickup-status" --json
+      rc=$?
+      set -e
+      if [[ "$rc" -eq 0 ]] && jq -e '.summary.stale == 0' "$out_file" >/dev/null 2>&1; then
+        status="ok"
+      elif [[ "$rc" -eq 0 ]]; then
+        status="degraded"
+      else
+        status="$(status_from_rc "$rc")"
+      fi
+      summary="$(jq -r '"requests=\(.summary.requests_total // 0) not_claimed=\(.summary.not_claimed // 0) claimed=\(.summary.claimed_or_running // 0) stale=\(.summary.stale // 0) worker_fresh=\(.worker.fresh // false) bridge=\(.summary.ai_agent_bridge // "unknown")"' "$out_file" 2>/dev/null || true)"
+      ;;
     *)
       rc=2
       status="unsupported"
