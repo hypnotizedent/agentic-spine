@@ -36,13 +36,17 @@ main_launch_output="$("$OPS_BIN" terminal launch --role solo --tool claude --ter
 main_launch_rc=$?
 set -e
 
-if [[ "$main_launch_rc" -eq 0 ]]; then
-  fail "mutating terminal launch on primary checkout succeeded; main must stay clean"
+if [[ "$main_launch_rc" -ne 0 ]]; then
+  fail "first-class terminal launch was blocked: $main_launch_output"
 fi
 
-if [[ "$main_launch_output" != *"Main must remain clean"* ]]; then
-  fail "mutating terminal launch denial did not name the clean-main invariant"
+if [[ "$main_launch_output" != *"# Launch cwd: $SPINE_CODE"* ]]; then
+  fail "terminal launch no longer births on the canonical primary checkout"
 fi
 
-echo "D437 PASS: admission binding truth is explicit and mutating terminal entry cannot default to main"
+if [[ "$main_launch_output" == *"worktree"* && "$main_launch_output" != *"SPINE_WORKTREE"* ]]; then
+  fail "terminal launch emitted ambiguous worktree routing text"
+fi
+
+echo "D437 PASS: admission binding truth is explicit and first-class terminal entry is not blocked"
 exit 0

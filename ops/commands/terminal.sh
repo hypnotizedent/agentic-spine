@@ -111,13 +111,6 @@ resolve_launch_mode() {
 
 LAUNCH_MODE="$(resolve_launch_mode "$LAUNCH_MODE")"
 
-tool_mutates_repo() {
-    case "${1:-}" in
-        claude|codex|opencode) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 # ── Resolve execution class from contract ─────────────────────────────────
 # Reads terminal.role.contract.yaml to map terminal name → type → execution class.
 # Falls back to "researcher" (read-only) if no terminal or contract missing.
@@ -309,7 +302,12 @@ PY
 LAUNCH_CWD="$SPINE_ROOT"
 LAUNCH_WAVE_ID=""
 LAUNCH_BRANCH=""
-if [[ "$TOOL" != "verify" && -n "$LOOP_ID" ]]; then
+
+# Terminal birth is the first-class human/operator entry surface.  It must not
+# block the hotkey or silently move the operator into a worktree.  Worktree
+# routing remains available only as an explicit compatibility opt-in; mutation
+# discipline is enforced by commit/landing gates, not by preventing entry.
+if [[ "${SPINE_TERMINAL_USE_LOOP_WORKTREE:-0}" == "1" && "$TOOL" != "verify" && -n "$LOOP_ID" ]]; then
     mapfile -t _WORKTREE_RESOLUTION < <(resolve_loop_workspace_for_repo "$LOOP_ID" "$SPINE_ROOT" || true)
     _resolution_status="${_WORKTREE_RESOLUTION[0]:-}"
     case "$_resolution_status" in
@@ -327,10 +325,6 @@ if [[ "$TOOL" != "verify" && -n "$LOOP_ID" ]]; then
         *)
             ;;
     esac
-fi
-
-if tool_mutates_repo "$TOOL" && [[ "$LAUNCH_CWD" == "$SPINE_ROOT" ]]; then
-    fail "mutating terminal launch would start on the primary checkout. Main must remain clean; pass --loop for a loop with an active governed worktree, or start/rehydrate a wave worktree first."
 fi
 
 # ── Build the in-terminal command ────────────────────────────────────────
