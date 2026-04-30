@@ -1,24 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# node-recovery-invoke — First-class bounded recovery invoke surface (v1)
+# node-recovery-invoke — First-class bounded recovery invoke surface.
 #
-# V1 scope: admitted specimen nodes only. Default posture: refusal.
-# Default posture: REFUSAL. Only explicitly admitted node+mode pairs pass.
-# Dry-run by default. Pass --execute to mutate.
-#
-# Usage:
-#   node-recovery-invoke --node <id> --mode <mode> [--execute] [--json]
-#   node-recovery-invoke --list-modes
-#
-# Refusal rules (evaluation order):
-#   R1: node not in allowlist
-#   R2: mode not in allowlist for node
-#   R3: recovery substrate unproven (warn for read-only, info for SSH modes)
-#   R4: physical prerequisite blocking (warn for OOB modes)
-#   R5: OOB path unreachable at runtime (warn for OOB modes)
-#   R6: site mismatch without cross-site recovery
-#   G1: dry-run default (no --execute)
+# Refusal-first. Allowed modes are derived from node.recovery.status so machine
+# control follows governed identity/network/power/console truth instead of a
+# hand-maintained per-machine allowlist.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
@@ -26,51 +13,29 @@ STATUS_SCRIPT="$SPINE_ROOT/ops/plugins/infra/bin/node-recovery-status"
 POWER_CONTROL="$SPINE_ROOT/ops/plugins/infra/bin/infra-proxmox-power-control"
 HOST_CONTROL="$SPINE_ROOT/ops/plugins/infra/bin/infra-proxmox-host-control"
 
-# ─── V1 Allowlist ───────────────────────────────────────────────────────
-# This is intentionally small. Widen only by explicit admission.
-V1_NODES="pve pve-r620"
-
-allowed_modes_for_node() {
-  case "$1" in
-    pve)
-      printf '%s\n' "power_status power_on power_off power_cycle host_shutdown host_startup"
-      ;;
-    pve-r620)
-      printf '%s\n' "power_status power_on power_cycle"
-      ;;
-    *)
-      printf '%s\n' ""
-      ;;
-  esac
-}
-
 usage() {
   cat <<'EOF'
-node-recovery-invoke — Bounded recovery invoke (v1)
+node-recovery-invoke — Bounded recovery invoke
 
 Usage:
   node-recovery-invoke --node <id> --mode <mode> [--execute] [--json]
-  node-recovery-invoke --list-modes
+  node-recovery-invoke --node <id> --list-modes [--json]
+  node-recovery-invoke --list-nodes
 
 Options:
-  --node <id>      Target node (v1: admitted specimen nodes only)
-  --mode <mode>    Recovery mode for the admitted node
-  --execute        Actually perform the action (dry-run without this)
-  --json           Machine-readable JSON output
-  --list-modes     Show admitted node/mode pairs
-
-V1 scope:
-  - pve: power_status, power_on, power_off, power_cycle, host_shutdown, host_startup
-  - pve-r620: power_status, power_on, power_cycle
-  - Default: refusal + dry-run
-  - All other node/mode pairs are explicitly refused
+  --node <id>      Target node/appliance/device ID.
+  --mode <mode>    Recovery mode from node.recovery.status control_modes.invoke.
+  --execute        Actually perform the action (dry-run without this).
+  --json           Machine-readable JSON output.
+  --list-modes     Show modes currently admitted for the selected node.
+  --list-nodes     Show known node IDs from node.recovery.status.
 
 Explicit non-goals:
   - No generic identity reset
   - No generic console launch
   - No generic network repair
   - No multi-node orchestration
-  - No mutation where recoverability is unproven
+  - No mutation where node.recovery.status refuses safe control
 EOF
 }
 
@@ -80,7 +45,8 @@ NODE_ID=""
 MODE=""
 EXECUTE=false
 JSON_MODE=false
-LIST_MODE=false
+LIST_MODES=false
+LIST_NODES=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -88,202 +54,136 @@ while [[ $# -gt 0 ]]; do
     --mode) MODE="${2:-}"; shift 2 ;;
     --execute) EXECUTE=true; shift ;;
     --json) JSON_MODE=true; shift ;;
-    --list-modes) LIST_MODE=true; shift ;;
+    --list-modes) LIST_MODES=true; shift ;;
+    --list-nodes) LIST_NODES=true; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
-if $LIST_MODE; then
-  echo "node.recovery.invoke v1 — admitted node/mode pairs:"
-  echo ""
-  echo "  pve:"
-  echo "    - power_status   (read-only IPMI power query via infra.proxmox.power.control)"
-  echo "    - power_on       (OOB iDRAC power on via infra.proxmox.power.control)"
-  echo "    - power_off      (OOB iDRAC hard power off via infra.proxmox.power.control)"
-  echo "    - power_cycle    (OOB iDRAC power cycle via infra.proxmox.power.control)"
-  echo "    - host_shutdown  (graceful PVE shutdown via infra.proxmox.host.control)"
-  echo "    - host_startup   (PVE guest startup via infra.proxmox.host.control)"
-  echo ""
-  echo "  pve-r620:"
-  echo "    - power_status   (read-only IPMI power query via infra.proxmox.power.control)"
-  echo "    - power_on       (OOB iDRAC power on via infra.proxmox.power.control)"
-  echo "    - power_cycle    (OOB iDRAC power cycle via infra.proxmox.power.control)"
-  echo ""
-  echo "All other node/mode pairs are refused."
+[[ -x "$STATUS_SCRIPT" ]] || fail "node-recovery-status not found at $STATUS_SCRIPT"
+command -v jq >/dev/null 2>&1 || fail "missing dependency: jq"
+
+if $LIST_NODES; then
+  bash "$STATUS_SCRIPT" --list
   exit 0
 fi
 
 [[ -n "$NODE_ID" ]] || { usage >&2; fail "R0: --node is required"; }
-[[ -n "$MODE" ]] || { usage >&2; fail "R0: --mode is required"; }
-
-# ─── R1: Node not in allowlist ──────────────────────────────────────────
-node_admitted=false
-for n in $V1_NODES; do
-  [[ "$n" == "$NODE_ID" ]] && node_admitted=true
-done
-
-if ! $node_admitted; then
-  msg="R1: Node '$NODE_ID' is not admitted in node.recovery.invoke v1. V1 allowlist: $V1_NODES. Recovery invoke is not available for this node — the recovery path has not been proven and admitted."
-  if $JSON_MODE; then
-    jq -n --arg node "$NODE_ID" --arg mode "$MODE" --arg rule "R1" --arg reason "$msg" \
-      '{node:$node, mode:$mode, decision:"refused", rule:$rule, reason:$reason, next_action:"File a gap for formal admission if recovery for this node is needed."}'
-  else
-    echo "$msg"
-    echo "Next action: file a gap for formal admission if recovery for this node is needed."
-  fi
-  exit 1
-fi
-
-# ─── R2: Mode not in allowlist ──────────────────────────────────────────
-mode_admitted=false
-allowed_modes="$(allowed_modes_for_node "$NODE_ID")"
-
-for m in $allowed_modes; do
-  [[ "$m" == "$MODE" ]] && mode_admitted=true
-done
-
-if ! $mode_admitted; then
-  msg="R2: Mode '$MODE' is not admitted for node '$NODE_ID' in v1. Admitted modes: $allowed_modes"
-  if $JSON_MODE; then
-    jq -n --arg node "$NODE_ID" --arg mode "$MODE" --arg rule "R2" --arg reason "$msg" --arg admitted "$allowed_modes" \
-      '{node:$node, mode:$mode, decision:"refused", rule:$rule, reason:$reason, admitted_modes:$admitted, next_action:"Verify mode against admitted set."}'
-  else
-    echo "$msg"
-    echo "Next action: verify mode against the admitted set."
-  fi
-  exit 1
-fi
-
-# ─── Query recovery truth from node.recovery.status ─────────────────────
-if [[ ! -x "$STATUS_SCRIPT" ]]; then
-  fail "R0: node-recovery-status not found at $STATUS_SCRIPT"
-fi
 
 recovery_json="$(bash "$STATUS_SCRIPT" --node "$NODE_ID" --json 2>/dev/null || true)"
 if [[ -z "$recovery_json" || "$recovery_json" == "null" ]]; then
   fail "R0: node.recovery.status returned no data for '$NODE_ID'"
 fi
 
-recoverable_truth="$(jq -r '.control_plane_truth.recoverable // "unknown"' <<<"$recovery_json")"
-safe_to_mutate="$(jq -r '.control_plane_truth.safe_to_mutate // "false"' <<<"$recovery_json")"
-physical_action="$(jq -r '.recovery_links.physical_action_required // ""' <<<"$recovery_json")"
-power_plane="$(jq -r '.recovery_planes.power // "missing"' <<<"$recovery_json")"
-node_site="$(jq -r '.node_site // "unknown"' <<<"$recovery_json")"
-operator_site="$(jq -r '.operator_context.operator_site // "unknown"' <<<"$recovery_json")"
+allowed_modes_json="$(jq -c '.control_modes.invoke // []' <<<"$recovery_json")"
+manual_limits_json="$(jq -c '.control_modes.manual_limits // []' <<<"$recovery_json")"
 
-# Classify mode dependency
-mode_needs_oob=false
-mode_needs_ssh=false
-case "$MODE" in
-  power_status|power_on|power_off|power_cycle) mode_needs_oob=true ;;
-  host_shutdown|host_startup) mode_needs_ssh=true ;;
-esac
-
-# ─── R6: Site mismatch (check before substrate for SSH modes) ───────────
-# SSH modes via Tailscale are cross-site capable for pve (access_policy: tailscale_required)
-# OOB modes are LAN-only and blocked cross-site
-if $mode_needs_oob && [[ "$operator_site" != "unknown" && "$node_site" != "unknown" && "$operator_site" != "$node_site" ]]; then
-  cross_site="$(jq -r '.source_surfaces.hardware_machine.recovery_substrate.cross_site_recovery // "false"' <<<"$recovery_json")"
-  if [[ "$cross_site" != "true" ]]; then
-    msg="R6: Operator site ($operator_site) != node site ($node_site) and cross-site recovery is not provisioned. OOB power actions require same-site access."
-    if $JSON_MODE; then
-      jq -n --arg node "$NODE_ID" --arg mode "$MODE" --arg rule "R6" --arg reason "$msg" \
-        '{node:$node, mode:$mode, decision:"refused", rule:$rule, reason:$reason, next_action:"Invoke from the same site as the node."}'
+if $LIST_MODES; then
+  if $JSON_MODE; then
+    jq -n \
+      --arg node "$NODE_ID" \
+      --argjson modes "$allowed_modes_json" \
+      --argjson manual_limits "$manual_limits_json" \
+      '{node:$node, admitted_modes:$modes, manual_limits:$manual_limits}'
+  else
+    echo "node.recovery.invoke — admitted modes for $NODE_ID"
+    if [[ "$(jq 'length' <<<"$allowed_modes_json")" -gt 0 ]]; then
+      jq -r '.[] | "  - \(.mode) [\(.capability)] — \(.description)"' <<<"$allowed_modes_json"
     else
-      echo "$msg"
-      echo "Next action: invoke from the same site as the node."
+      echo "  none"
     fi
-    exit 1
+    if [[ "$(jq 'length' <<<"$manual_limits_json")" -gt 0 ]]; then
+      echo ""
+      echo "manual limits:"
+      jq -r '.[] | "  - \(.id): \(.description)"' <<<"$manual_limits_json"
+    fi
   fi
+  exit 0
 fi
 
-# ─── R3/R4/R5: Substrate and physical warnings ─────────────────────────
-# These are warnings for v1 admitted modes, not hard refusals
-# (power_status is read-only and fails safely; SSH modes don't need OOB)
-warnings=""
+[[ -n "$MODE" ]] || { usage >&2; fail "R0: --mode is required"; }
 
-if $mode_needs_oob; then
-  if [[ "$recoverable_truth" != "known_and_reachable" && "$recoverable_truth" != "proved" ]]; then
-    warnings="${warnings}WARN [R3]: Recovery substrate for '$NODE_ID' is '$recoverable_truth'. IPMI query may fail.\n"
+mode_json="$(jq -c --arg mode "$MODE" '.control_modes.invoke[]? | select(.mode == $mode)' <<<"$recovery_json" | head -n1)"
+if [[ -z "$mode_json" || "$mode_json" == "null" ]]; then
+  if $JSON_MODE; then
+    jq -n \
+      --arg node "$NODE_ID" \
+      --arg mode "$MODE" \
+      --arg rule "R2" \
+      --argjson admitted_modes "$allowed_modes_json" \
+      --argjson manual_limits "$manual_limits_json" \
+      '{node:$node, mode:$mode, decision:"refused", rule:$rule, reason:"mode is not admitted by node.recovery.status", admitted_modes:$admitted_modes, manual_limits:$manual_limits}'
+  else
+    echo "R2: Mode '$MODE' is not admitted for node '$NODE_ID' by node.recovery.status."
+    echo "Admitted modes:"
+    if [[ "$(jq 'length' <<<"$allowed_modes_json")" -gt 0 ]]; then
+      jq -r '.[] | "  - \(.mode)"' <<<"$allowed_modes_json"
+    else
+      echo "  none"
+    fi
+    if [[ "$(jq 'length' <<<"$manual_limits_json")" -gt 0 ]]; then
+      echo "Manual limits:"
+      jq -r '.[] | "  - \(.id): \(.description)"' <<<"$manual_limits_json"
+    fi
   fi
-  if [[ -n "$physical_action" ]]; then
-    warnings="${warnings}WARN [R4]: Physical action required: $physical_action\n"
-  fi
+  exit 1
 fi
 
-# ─── Map mode to underlying primitive ───────────────────────────────────
-underlying_capability=""
+safe_to_mutate="$(jq -r '.control_plane_truth.safe_to_mutate // "false"' <<<"$recovery_json")"
+recoverable_truth="$(jq -r '.control_plane_truth.recoverable // "unknown"' <<<"$recovery_json")"
+physical_action="$(jq -r '.recovery_links.physical_action_required // ""' <<<"$recovery_json")"
+underlying_capability="$(jq -r '.capability' <<<"$mode_json")"
+
 underlying_action=""
 underlying_script=""
 underlying_args=""
 
 case "$MODE" in
   power_status)
-    underlying_capability="infra.proxmox.power.control"
     underlying_action="status"
     underlying_script="$POWER_CONTROL"
-    underlying_args="status --host-id $NODE_ID"
+    underlying_args=(status --host-id "$NODE_ID")
     ;;
   power_on)
-    underlying_capability="infra.proxmox.power.control"
     underlying_action="on"
     underlying_script="$POWER_CONTROL"
-    if $EXECUTE; then
-      underlying_args="on --host-id $NODE_ID --execute"
-    else
-      underlying_args="on --host-id $NODE_ID"
-    fi
+    underlying_args=(on --host-id "$NODE_ID")
+    $EXECUTE && underlying_args+=(--execute)
     ;;
   power_off)
-    underlying_capability="infra.proxmox.power.control"
     underlying_action="off"
     underlying_script="$POWER_CONTROL"
-    if $EXECUTE; then
-      underlying_args="off --host-id $NODE_ID --execute"
-    else
-      underlying_args="off --host-id $NODE_ID"
-    fi
+    underlying_args=(off --host-id "$NODE_ID")
+    $EXECUTE && underlying_args+=(--execute)
     ;;
   power_cycle)
-    underlying_capability="infra.proxmox.power.control"
     underlying_action="cycle"
     underlying_script="$POWER_CONTROL"
-    if $EXECUTE; then
-      underlying_args="cycle --host-id $NODE_ID --execute"
-    else
-      underlying_args="cycle --host-id $NODE_ID"
-    fi
+    underlying_args=(cycle --host-id "$NODE_ID")
+    $EXECUTE && underlying_args+=(--execute)
     ;;
   host_shutdown)
-    underlying_capability="infra.proxmox.host.control"
     underlying_action="shutdown"
     underlying_script="$HOST_CONTROL"
-    if $EXECUTE; then
-      underlying_args="shutdown --host-id $NODE_ID --execute"
-    else
-      underlying_args="shutdown --host-id $NODE_ID"
-    fi
+    underlying_args=(shutdown --host-id "$NODE_ID")
+    $EXECUTE && underlying_args+=(--execute)
     ;;
   host_startup)
-    underlying_capability="infra.proxmox.host.control"
     underlying_action="startup"
     underlying_script="$HOST_CONTROL"
-    if $EXECUTE; then
-      underlying_args="startup --host-id $NODE_ID --execute"
-    else
-      underlying_args="startup --host-id $NODE_ID"
-    fi
+    underlying_args=(startup --host-id "$NODE_ID")
+    $EXECUTE && underlying_args+=(--execute)
+    ;;
+  *)
+    fail "mode '$MODE' is admitted but no underlying primitive mapping exists"
     ;;
 esac
 
-# ─── Build result ───────────────────────────────────────────────────────
-executed=false
 dry_run=true
-
+executed=false
 if [[ "$MODE" == "power_status" ]]; then
-  # power_status is always read-only, no --execute needed
   dry_run=false
   executed=true
 elif $EXECUTE; then
@@ -291,7 +191,6 @@ elif $EXECUTE; then
   executed=true
 fi
 
-# ─── Output ─────────────────────────────────────────────────────────────
 if $JSON_MODE; then
   result="$(jq -n \
     --arg node "$NODE_ID" \
@@ -305,30 +204,23 @@ if $JSON_MODE; then
     --argjson dry_run "$dry_run" \
     --argjson executed "$executed" \
     '{
-      node: $node,
-      mode: $mode,
-      decision: $decision,
-      underlying_capability: $underlying_capability,
-      underlying_action: $underlying_action,
-      recovery_truth: {
-        recoverable: $recoverable_truth,
-        safe_to_mutate: $safe_to_mutate,
-        physical_action_required: $physical_action
+      node:$node,
+      mode:$mode,
+      decision:$decision,
+      underlying_capability:$underlying_capability,
+      underlying_action:$underlying_action,
+      recovery_truth:{
+        recoverable:$recoverable_truth,
+        safe_to_mutate:$safe_to_mutate,
+        physical_action_required:$physical_action
       },
-      dry_run: $dry_run,
-      executed: $executed
+      dry_run:$dry_run,
+      executed:$executed
     }')"
-
-  if $dry_run && [[ "$MODE" != "power_status" ]]; then
-    result="$(jq --arg note "DRY-RUN: No mutation performed. Re-run with --execute to proceed." '. + {note: $note}' <<<"$result")"
+  if $dry_run; then
+    result="$(jq --arg note "DRY-RUN: No mutation performed. Re-run with --execute to proceed." '. + {note:$note}' <<<"$result")"
   fi
-
   printf '%s\n' "$result"
-
-  if $executed || ! $dry_run; then
-    echo "--- underlying primitive output ---" >&2
-    bash "$underlying_script" $underlying_args 2>&1 || true
-  fi
 else
   echo "============================================================"
   echo "  node.recovery.invoke"
@@ -337,7 +229,7 @@ else
   echo "REQUEST"
   echo "  node:        $NODE_ID"
   echo "  mode:        $MODE"
-  echo "  decision:    admitted"
+  echo "  decision:    admitted by node.recovery.status"
   echo ""
   echo "RECOVERY CONTEXT"
   echo "  capability:  $underlying_capability"
@@ -346,47 +238,22 @@ else
   echo "  safe_to_mutate: $safe_to_mutate"
   [[ -n "$physical_action" ]] && echo "  physical_action_required: $physical_action"
   echo ""
+fi
 
-  if [[ -n "$warnings" ]]; then
-    echo "WARNINGS"
-    printf '%b' "$warnings"
-    echo ""
-  fi
-
-  if $dry_run && [[ "$MODE" != "power_status" ]]; then
+if $dry_run; then
+  if ! $JSON_MODE; then
     echo "------------------------------------------------------------"
     echo "  DRY-RUN: No mutation performed."
     echo "  Would execute: $underlying_capability $underlying_action"
     echo "------------------------------------------------------------"
     echo ""
     echo "--- dry-run output from underlying primitive ---"
-    bash "$underlying_script" $underlying_args 2>&1 || true
-    echo ""
-    echo "NEXT STEPS"
-    echo "  1. Review output above — confirm this is the intended action"
-    echo "  2. Execute for real:  node-recovery-invoke --node $NODE_ID --mode $MODE --execute"
-    echo "  3. After execution: verify with node-recovery-status --node $NODE_ID"
-  else
-    echo "--- executing underlying primitive ---"
-    primitive_output="$(bash "$underlying_script" $underlying_args 2>&1 || true)"
-    echo "$primitive_output"
-    echo ""
-    echo "------------------------------------------------------------"
-    if [[ "$MODE" == "power_status" ]]; then
-      echo "  RESULT: Read-only query complete (no mutation)"
-    else
-      echo "  RESULT: $underlying_action executed on $NODE_ID"
-    fi
-    echo "------------------------------------------------------------"
-    echo ""
-    echo "NEXT STEPS"
-    echo "  1. Verify result:  node-recovery-status --node $NODE_ID"
-    if [[ "$MODE" == "power_on" || "$MODE" == "power_cycle" ]]; then
-      echo "  2. Wait for host to boot, then check SSH reachability"
-    elif [[ "$MODE" == "power_off" || "$MODE" == "host_shutdown" ]]; then
-      echo "  2. Confirm host is down before proceeding with maintenance"
-    elif [[ "$MODE" == "power_status" ]]; then
-      echo "  2. If host is off, use: node-recovery-invoke --node $NODE_ID --mode power_on --execute"
-    fi
+    bash "$underlying_script" "${underlying_args[@]}" 2>&1 || true
   fi
+  exit 0
 fi
+
+if ! $JSON_MODE; then
+  echo "--- executing underlying primitive ---"
+fi
+bash "$underlying_script" "${underlying_args[@]}"
