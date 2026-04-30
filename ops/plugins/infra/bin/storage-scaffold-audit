@@ -146,18 +146,18 @@ def main() -> None:
             )
 
     required_rows = [
-        ("pve", "/md1400/backup-cold"),
+        ("pve", "/md1400/backups"),
         ("pve", "/md1400/archive"),
         ("pve", "/md1400/stage"),
         ("pve", "/md1400/tombstones"),
         ("pve", "/media"),
-        ("synology918", "/volume1/backups/proxmox_backups/dump"),
-        ("synology918", "/volume1/backups/apps/media-config"),
-        ("synology918", "/volume1/backups/_legacy_tombstones"),
-        ("synology918", "/volume1/media-staging"),
-        ("synology918", "/volume1/media-holds"),
-        ("synology918", "/volume1/documents"),
-        ("synology918", "/volume1/homelab"),
+        ("nas", "/volume1/backups/proxmox_backups/dump"),
+        ("nas", "/volume1/backups/apps/media-config"),
+        ("nas", "/volume1/backups/_legacy_tombstones"),
+        ("nas", "/volume1/media-staging"),
+        ("nas", "/volume1/media-holds"),
+        ("nas", "/volume1/documents"),
+        ("nas", "/volume1/homelab"),
     ]
     for device, path in required_rows:
         if (device, path) not in surface_index:
@@ -185,11 +185,11 @@ def main() -> None:
         if expected not in review_paths:
             add_issue(issues, issue_id="missing_review_pending", detail=f"{expected} is not declared review_pending in synology manifest")
 
-    docs_row = surface_index.get(("synology918", "/volume1/documents"), {})
+    docs_row = surface_index.get(("nas", "/volume1/documents"), {})
     if str(docs_row.get("scaffold_class") or "") != "drained_retired":
         add_issue(issues, issue_id="documents_not_drained", detail="/volume1/documents is not classified as drained_retired")
 
-    tombstones_row = surface_index.get(("synology918", "/volume1/backups/_legacy_tombstones"), {})
+    tombstones_row = surface_index.get(("nas", "/volume1/backups/_legacy_tombstones"), {})
     if str(tombstones_row.get("scaffold_class") or "") != "tombstone_retained":
         add_issue(issues, issue_id="tombstones_not_retained", detail="/volume1/backups/_legacy_tombstones is not classified as tombstone_retained")
 
@@ -210,7 +210,7 @@ def main() -> None:
             add_issue(issues, issue_id="home_map_missing_scaffold_status", detail=f"{expected} missing from home.storage.map storage_scaffold_status")
 
     shop_scaffold_paths = list_paths([ensure_dict(row) for row in ensure_list(shop_map.get("storage_scaffold_status"))])
-    for expected in ("/md1400/backup-cold", "/md1400/archive", "/md1400/stage", "/md1400/tombstones", "/media"):
+    for expected in ("/md1400/backups", "/md1400/archive", "/md1400/stage", "/md1400/tombstones", "/media"):
         if expected not in shop_scaffold_paths:
             add_issue(issues, issue_id="shop_map_missing_scaffold_status", detail=f"{expected} missing from shop.storage.map storage_scaffold_status")
 
@@ -226,7 +226,7 @@ def main() -> None:
         matches = [
             row
             for row in surfaces
-            if str(row.get("device") or "") == "synology918"
+            if str(row.get("device") or "") == "nas"
             and base_path.startswith(str(row.get("path") or "").rstrip("/"))
         ]
         if not any(str(row.get("scaffold_class") or "") in {"backup_primary", "backup_secondary"} for row in matches):
@@ -238,7 +238,7 @@ def main() -> None:
         for row in ensure_list(media_service.get("canonical_live_roots"))
     }
     if "nas:/volume1/media-staging" in media_canonical:
-        media_row = surface_index.get(("synology918", "/volume1/media-staging"), {})
+        media_row = surface_index.get(("nas", "/volume1/media-staging"), {})
         if str(media_row.get("scaffold_class") or "") != "personal_live":
             add_issue(issues, issue_id="media_staging_scaffold_drift", detail="/volume1/media-staging is canonical in lifecycle registry but not classified as personal_live")
 
@@ -247,7 +247,7 @@ def main() -> None:
         for row in ensure_list(media_service.get("export_archive_lanes"))
     }
     if "nas:/volume1/backups/apps/media-config" in media_exports:
-        media_backup_row = surface_index.get(("synology918", "/volume1/backups/apps/media-config"), {})
+        media_backup_row = surface_index.get(("nas", "/volume1/backups/apps/media-config"), {})
         if str(media_backup_row.get("scaffold_class") or "") != "backup_primary":
             add_issue(issues, issue_id="media_config_backup_scaffold_drift", detail="/volume1/backups/apps/media-config is canonical in lifecycle registry but not classified as backup_primary")
 

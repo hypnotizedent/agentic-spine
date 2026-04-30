@@ -22,6 +22,9 @@ PATHS = {
 }
 
 
+NAS_DEVICE_ALIASES = {"nas", "synology918"}
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -120,7 +123,7 @@ def deletion_guard(surface: dict[str, Any]) -> dict[str, Any]:
 
 
 def capacity_signal(surface: dict[str, Any], capacity: dict[str, Any]) -> dict[str, Any]:
-    if surface.get("device") == "synology918" and surface.get("path") == "/volume1/media-staging":
+    if surface.get("device") in NAS_DEVICE_ALIASES and surface.get("path") == "/volume1/media-staging":
         pool = capacity.get("pool") or {}
         return {
             "status": capacity.get("runway_status") or "unknown",
@@ -179,12 +182,13 @@ def build_row(
     generated: dict[str, str],
     synology_paths: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    device = str(surface.get("device") or "unknown")
+    source_device = str(surface.get("device") or "unknown")
+    device = "nas" if source_device in NAS_DEVICE_ALIASES else source_device
     path = str(surface.get("path") or "unknown")
-    site = "shop" if device == "pve" else "home" if device == "synology918" else "unknown"
+    site = "shop" if device == "pve" else "home" if device == "nas" else "unknown"
     state = str(surface.get("authority_state") or "unknown")
     canonicality = str(surface.get("canonicality") or "unknown")
-    manifest_row = synology_paths.get(path.rstrip("/")) if device == "synology918" else None
+    manifest_row = synology_paths.get(path.rstrip("/")) if device == "nas" else None
     present = True
     if manifest_row is not None:
         present = bool(manifest_row.get("exists"))
@@ -200,13 +204,14 @@ def build_row(
         "subject_kind": "storage_plane" if path.count("/") <= 2 else "path_family",
         "site": site,
         "owner_node_id": device,
-        "owning_appliance_role": "hypervisor" if device == "pve" else "nas" if device == "synology918" else "unknown",
-        "presence_state": "present" if present and device in {"pve", "synology918"} else "missing" if device == "synology918" else "unknown",
-        "presence_proof_ref": f"site.presence.status:{device}" if device in {"pve", "synology918"} else None,
+        "owning_appliance_role": "hypervisor" if device == "pve" else "home_storage_node" if device == "nas" else "unknown",
+        "legacy_owner_aliases": ["synology918"] if source_device == "synology918" or device == "nas" else [],
+        "presence_state": "present" if present and device in {"pve", "nas"} else "missing" if device == "nas" else "unknown",
+        "presence_proof_ref": f"site.presence.status:{device}" if device in {"pve", "nas"} else None,
         "surface_ref": {
             "device": device,
             "path": path,
-            "mount_or_export": "local" if device == "pve" else "smb",
+            "mount_or_export": "local" if device == "pve" else "nfs_or_smb",
         },
         "scaffold_class": surface.get("scaffold_class") or "unknown",
         "custody_state": state,

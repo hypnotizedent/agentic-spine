@@ -131,25 +131,35 @@ for custody_id in [
     "pve:/md1400/stage",
     "pve:/md1400/tombstones",
     "pve:/media",
-    "synology918:/volume1/media-staging",
-    "synology918:/volume1/media-holds",
-    "synology918:/volume1/backups/proxmox_backups/dump",
-    "synology918:/volume1/backups/apps/media-config",
-    "synology918:/volume1/backups/_legacy_tombstones",
-    "synology918:/volume1/documents",
-    "synology918:/volume1/homelab",
+    "nas:/volume1/media-staging",
+    "nas:/volume1/media-holds",
+    "nas:/volume1/backups/proxmox_backups/dump",
+    "nas:/volume1/backups/apps/media-config",
+    "nas:/volume1/backups/_legacy_tombstones",
+    "nas:/volume1/documents",
+    "nas:/volume1/homelab",
 ]:
     if custody_id not in by_custody:
         fail(f"payload.custody.status missing required custody row {custody_id}")
+if any(str(row.get("custody_id", "")).startswith("synology918:") for row in rows):
+    fail("payload.custody.status must not emit synology918 as a peer custody identity")
+for custody_id in [
+    "nas:/volume1/media-staging",
+    "nas:/volume1/backups/proxmox_backups/dump",
+]:
+    if by_custody[custody_id].get("owner_node_id") != "nas":
+        fail(f"{custody_id} must use nas as canonical owner_node_id")
+    if by_custody[custody_id].get("presence_proof_ref") != "site.presence.status:nas":
+        fail(f"{custody_id} must join presence through canonical nas identity")
 if by_custody["pve:/media"].get("canonicality") == "canonical":
     fail("pve:/media must not be canonical long-term shop payload truth")
 if by_custody["pve:/media"].get("deletion_guard", {}).get("state") != "delete_blocked":
     fail("pve:/media deletion must remain blocked until replacement proof/cutover")
 for custody_id in [
-    "synology918:/volume1/media-holds",
-    "synology918:/volume1/backups/_legacy_tombstones",
-    "synology918:/volume1/documents",
-    "synology918:/volume1/homelab",
+    "nas:/volume1/media-holds",
+    "nas:/volume1/backups/_legacy_tombstones",
+    "nas:/volume1/documents",
+    "nas:/volume1/homelab",
 ]:
     if by_custody[custody_id].get("presence_state") != "missing":
         fail(f"{custody_id} must preserve declared custody intent but show missing presence from NAS manifest")
