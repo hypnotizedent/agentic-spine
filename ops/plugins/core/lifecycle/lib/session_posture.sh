@@ -326,7 +326,7 @@ session_posture_emit_env() {
     printf 'export SPINE_SAFE_TO_MUTATE=%q\n' "${__SP_SAFE_TO_MUTATE:-false}"
     printf 'export SPINE_SITE_DETECTION_BASIS=%q\n' "${__SP_SITE_DETECTION_BASIS:-unavailable}"
 
-    printf 'export SPINE_DEFAULT_VERIFY_CMD=%q\n' "./bin/ops verify --spine-lite"
+    printf 'export SPINE_DEFAULT_VERIFY_CMD=%q\n' "./bin/ops cap run verify.engine.run && ./bin/ops cap run spine.verify"
     printf 'export SPINE_DEFAULT_CONTROL_LOOP_CMD=%q\n' "./bin/ops status --control-loop"
 
     if [ -n "${SPINE_STATE:-}" ]; then

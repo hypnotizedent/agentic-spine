@@ -5,10 +5,11 @@
 #
 # Shows current spine work first, with inbox/comms side surfaces rendered
 # separately so historical residue does not read as controller todo.
-# This is the canonical agent entry point — replaces `ops loops list --open`.
+# This is the canonical agent entry point for public work readback.
 #
 # Usage:
-#   ops status              Full status view
+#   ops status              Public read model
+#   ops status --expert     Expert/drilldown status view
 #   ops status --json       Machine-readable JSON output
 #   ops status --brief      Counts only (for hooks/banners)
 #   ops status --strict     Exit nonzero when anomalies exist
@@ -28,17 +29,20 @@ ops status
 Canonical cold-start read surface for current spine work.
 
 Usage:
-  ops status [--brief|--json|--context|--control-loop] [--strict]
+  ops status [--brief|--json|--context|--control-loop|--expert] [--strict]
 
 Flags:
   --brief        Counts-only output for hooks/banners
   --json         Machine-readable output
   --context      L1 visibility view (terminal identity, runtime paths, coherence)
   --control-loop Bounded local-only probe for agent control-loop polling
+  --expert       Expert/drilldown view over workflow machinery
   --strict       Exit nonzero when anomalies exist
   -h, --help     Show this help
 
 Default behavior:
+  Human-facing output is the public read model:
+    work, risk, automation, health, and attention.
   Human-facing output succeeds even when anomalies exist.
   Use --strict when you explicitly want anomaly-sensitive exit codes.
 EOF
@@ -48,7 +52,7 @@ MODE=""
 STRICT="0"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --brief|--json|--context|--control-loop)
+    --brief|--json|--context|--control-loop|--expert)
       MODE="$1"
       shift
       ;;
@@ -1064,17 +1068,17 @@ if joined_state_summary.get("coherence_attention"):
 
 if terminal_telemetry_status == "degraded":
     anomalies.append(
-        "LOOP CUSTODY TELEMETRY DEGRADED:"
+        "WORK CUSTODY TELEMETRY DEGRADED:"
         f" {len(fresh_terminals)} fresh terminal heartbeat(s),"
         f" {len(fresh_custody_terminals)} fresh custody record(s),"
-        f" 0/{len(open_loops)} open loops mapped"
+        f" 0/{len(open_loops)} open work item(s) mapped"
     )
 elif terminal_telemetry_status == "unattended":
     anomalies.append(
-        "LOOP CUSTODY UNATTENDED:"
-        f" {len(open_loops)} open loop(s),"
+        "WORK CUSTODY UNATTENDED:"
+        f" {len(open_loops)} open work item(s),"
         f" {len(fresh_terminals)} fresh terminal heartbeat(s),"
-        " no fresh custody claim for a live open loop"
+        " no fresh custody claim for live open work"
     )
 
 # Check background loop heartbeat freshness
@@ -1645,9 +1649,118 @@ if mode == "--brief":
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
 
-# Full output
+sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "-": 4, "unknown": 5}
+
+# Default public read model. Keep workflow machinery behind --expert unless an
+# attention item needs to name the drilldown surface.
+if mode != "--expert":
+    _sp_summary = standing_program_health.get("summary") if isinstance(standing_program_health.get("summary"), dict) else {}
+    _sp_total = int(_sp_summary.get("total", 0) or 0)
+    _sp_healthy = int(_sp_summary.get("healthy", 0) or 0)
+    _sp_degraded = sum(
+        int(_sp_summary.get(key, 0) or 0)
+        for key in ("stale", "failed", "unreachable", "never_run", "unknown")
+    )
+    _blocked_loops = [
+        loop for loop in open_loops
+        if loop.get("execution_readiness", "runnable") == "blocked"
+        or (loop.get("blocked_by") and loop.get("blocked_by") != "none")
+    ]
+    _now_runnable = [
+        loop for loop in open_loops
+        if loop.get("horizon", "now") == "now"
+        and loop.get("execution_readiness", "runnable") == "runnable"
+    ]
+    _deferred_loops = [loop for loop in open_loops if loop not in _now_runnable]
+    _attention = []
+    _attention.extend(anomalies)
+    if not gaps_available:
+        _attention.append(f"GAP AUTHORITY DEGRADED: {gap_state.get('message') or 'open gap count unavailable'}")
+    elif open_gap_count:
+        _attention.append(f"OPEN RISK: {open_gap_count} open gap(s)")
+    if _blocked_loops:
+        _attention.append(f"BLOCKED WORK: {len(_blocked_loops)} work item(s) blocked or not runnable")
+    if _sp_degraded:
+        _attention.append(f"AUTOMATION DRIFT: {_sp_degraded} standing program(s) degraded")
+    if joined_state_summary.get("coherence_attention"):
+        _attention.append("HEALTH DRIFT: engine coherence needs attention")
+    if inbox_actionable:
+        _attention.append(f"INBOX ATTENTION: {inbox_actionable} actionable inbox item(s)")
+    if int(delegation_summary.get("active", 0) or 0):
+        _attention.append(f"EXECUTION ATTENTION: {int(delegation_summary.get('active', 0) or 0)} active delegation(s)")
+
+    print("=" * 72)
+    print("  OPS STATUS")
+    print("=" * 72)
+    print()
+
+    print("WORK")
+    print("-" * 72)
+    print(f"  open:              {len(open_loops)} work item(s)")
+    print(f"  runnable now:      {len(_now_runnable)}")
+    print(f"  deferred/blocked:  {len(_deferred_loops)}")
+    for loop in sorted(open_loops, key=lambda x: sev_order.get(x["severity"], 9))[:5]:
+        tags = []
+        if loop.get("horizon", "now") != "now":
+            tags.append(str(loop.get("horizon")))
+        if loop.get("execution_readiness", "runnable") == "blocked":
+            tags.append("blocked")
+        tag_text = f" [{' '.join(tags)}]" if tags else ""
+        print(f"  - {loop.get('loop_id', '?')}{tag_text}")
+    if len(open_loops) > 5:
+        print(f"  - ... {len(open_loops) - 5} more")
+    print()
+
+    print("RISK")
+    print("-" * 72)
+    if gaps_available:
+        print(f"  open gaps:         {open_gap_count}")
+        print(f"  unlinked gaps:     {unlinked_gap_count}")
+    else:
+        print("  open gaps:         unknown")
+        print(f"  authority:         {gap_state.get('status', 'degraded')}")
+    print(f"  blocked work:      {len(_blocked_loops)}")
+    print(f"  custody:           {terminal_telemetry_status} ({mapped_open_loops}/{len(open_loops)} open work item(s) mapped)")
+    print()
+
+    print("AUTOMATION")
+    print("-" * 72)
+    if _sp_total:
+        print(f"  standing programs: {_sp_total} total, {_sp_healthy} healthy, {_sp_degraded} degraded")
+    else:
+        print("  standing programs: unavailable")
+    print("  mailroom lane:     capability-backed")
+    print("  AI agent lane:     not delivered")
+    print("  interactive lane:  explicit worker pickup required")
+    print()
+
+    print("HEALTH")
+    print("-" * 72)
+    print(f"  engine verify:     {joined_state_summary.get('engine_verify_status', 'unknown')}")
+    print(f"  spine verify:      {joined_state_summary.get('spine_verify_status', 'unknown')}")
+    print(f"  secondary verify:  {joined_state_summary.get('secondary_verify_status', 'unknown')} (scoped)")
+    print(f"  coherence:         {'attention' if joined_state_summary.get('coherence_attention') else 'ok'}")
+    print()
+
+    print("ATTENTION")
+    print("-" * 72)
+    if not _attention:
+        print("  none")
+    else:
+        seen = set()
+        for item in _attention:
+            if item in seen:
+                continue
+            seen.add(item)
+            print(f"  ! {item}")
+    print()
+    print("Drilldown: ops status --expert")
+    print("=" * 72)
+    sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
+
+# Expert/drilldown output
 print("=" * 72)
-print("  SPINE STATUS")
+print("  SPINE STATUS -- EXPERT")
 print("=" * 72)
 print()
 
@@ -1732,7 +1845,6 @@ if _sp_total:
     print()
 
 # ── Open Loops ──
-sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "-": 4, "unknown": 5}
 sorted_loops = sorted(open_loops, key=lambda x: sev_order.get(x["severity"], 9))
 
 # Partition into eligible (now+runnable) vs deferred

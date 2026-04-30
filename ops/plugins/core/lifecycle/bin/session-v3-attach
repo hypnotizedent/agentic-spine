@@ -3,7 +3,7 @@
 # session.v3.attach - Read-only orientation surface (NOT admission)
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Renders session context and work summary for orientation.
+# Renders the public session entry read model by default.
 # This is a READ-ONLY surface. It does NOT constitute governed admission.
 #
 # Admission surface: ops terminal launch
@@ -16,8 +16,12 @@
 #   - Mutate state
 #   - Attach loops (use --loop on terminal launch for that)
 #   - Constitute governed session start
-#   - Run verify (ops verify is a separate health surface)
-#   - Dispatch work (ops dispatch local is a separate work surface)
+#   - Run verify (foundational verify is a separate health surface)
+#   - Dispatch work (dispatch is a separate work surface)
+#
+# Expert workflow machinery is available with --expert. The default banner must
+# stay lean so terminal birth teaches the public operator language, not every
+# internal work object.
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -33,8 +37,17 @@ fi
 # ── Flag parsing (bounded, forward-compatible) ─────────────────────────────
 EMIT_ENV=0
 EMIT_ASSIGNMENT=0
+EXPERT=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --expert)
+            EXPERT=1
+            shift
+            ;;
+        --public)
+            EXPERT=0
+            shift
+            ;;
         --emit-env)
             EMIT_ENV=1
             shift
@@ -48,7 +61,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "usage: session-v3-attach [--emit-env] [--emit-assignment] [--allow-no-loop] [-h|--help]"
+            echo "usage: session-v3-attach [--public|--expert] [--emit-env] [--emit-assignment] [--allow-no-loop] [-h|--help]"
             exit 0
             ;;
         *)
@@ -87,6 +100,15 @@ else
     echo "  note:            use 'ops terminal launch' for governed session start"
 fi
 echo ""
+
+if [[ "$EXPERT" -eq 0 && "$EMIT_ENV" -eq 0 && "$EMIT_ASSIGNMENT" -eq 0 ]]; then
+    echo "── ops status ─────────────────────────────────────────────────"
+    "$SPINE_ROOT/bin/ops" status 2>/dev/null || true
+    echo ""
+    echo "Drilldown: ./bin/ops cap run session.v3.attach -- --expert"
+    echo "Verify:    ./bin/ops cap run verify.engine.run && ./bin/ops cap run spine.verify"
+    exit 0
+fi
 
 # ── Context banner ─────────────────────────────────────────────────────────
 # Best-effort: never block terminal birth
@@ -234,7 +256,7 @@ if command -v session_posture_resolve >/dev/null 2>&1; then
         echo "  session posture: ${__SP_POSTURE:-unknown}"
         echo "  posture source:  ${__SP_SOURCE:-unknown}"
         echo "  execution class: ${EXECUTION_CLASS:-unset}"
-        echo "  verify cmd:      ./bin/ops verify --spine-lite"
+        echo "  verify cmd:      ./bin/ops cap run verify.engine.run && ./bin/ops cap run spine.verify"
         echo "  control loop:    ./bin/ops status --control-loop"
         echo ""
 

@@ -17,14 +17,13 @@ current aperture and operator entry rules.
 ```bash
 cd ~/code/agentic-spine
 ./bin/ops terminal launch --tool <tool> --terminal <name>
-./bin/ops status --json
+./bin/ops status
 ./bin/ops cap run verify.engine.run
 ./bin/ops cap run spine.verify
-./bin/ops cap list
 ```
 
 If you are already inside a governed terminal-launch session and only need the
-orientation banner again, use:
+orientation banner again, use the read-only orientation surface:
 
 ```bash
 ./bin/ops cap run session.v3.attach
@@ -37,17 +36,45 @@ orientation banner again, use:
 - Read [SESSION_PROTOCOL.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SESSION_PROTOCOL.md) for environment behavior.
 - Read [NODE_PROMOTION_LADDER.md](/Users/ronnyworks/code/agentic-spine/docs/governance/NODE_PROMOTION_LADDER.md) when the question is how node roles become real.
 - Use `./bin/ops cap run <capability> -- ...` when a capability exists.
+- Use `./bin/ops status` as the public readback surface.
+- Use `./bin/ops status --expert` only when public status gives a reason for
+  drilldown.
 - Use foundational verification for entry and truth checks:
   `./bin/ops cap run verify.engine.run` and `./bin/ops cap run spine.verify`.
+
 ## Principle
 
 If an agent cannot understand how to work here by reading the entry surface,
-the doctrine docs, and running the three commands above, the entry surface is
+the doctrine docs, and running the startup commands above, the entry surface is
 too complex.
 
 If the entry surface causes human-steward guidance to be parked, renamed, or
 reprocessed instead of carried forward by the engine, the entry surface is wrong
 and must be reconciled before more workflow ceremony is added.
+
+## Public Read Model
+
+The default operator read model is `ops status`.
+
+It answers five questions:
+
+- What work is open?
+- What is blocked or risky?
+- What automation is running?
+- Is the system healthy?
+- What needs attention now?
+
+This is a subtraction rule, not a new subsystem. `ops status` reads existing
+canonical authorities and presents one public operational model. Loops, gaps,
+verify/readback, standing-program health, execution-lane truth, and governed
+receipts remain canonical inputs. Waves, handoffs, delegations, packets,
+dispatch envelopes, raw receipts, direct SQLite inspection, and runtime path
+inspection remain valid engine or expert drilldown surfaces, but they must not
+be taught as peer public operator grammar.
+
+Use `ops status --expert`, `ops wave`, `ops loops`, `delegation.status`,
+`orchestration.wave.status`, and direct evidence reads only when the public
+readback points to a reason for drilldown.
 
 ## First-Class Change Closure
 

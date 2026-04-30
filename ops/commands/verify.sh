@@ -8,21 +8,24 @@ VERIFY_RUN="$SPINE_ROOT/ops/plugins/core/verify/bin/verify-run"
 
 usage() {
   cat <<'EOF'
-Usage: ops verify [OPTION]
+Usage: ops verify [OPTION]  # compatibility / expert wrapper
 
-Health surfaces:
-  ops verify                   Spine coherence front-door authority [default]
-  ops verify --infra           Preferred estate/workload health baseline (17 gates)
-  ops verify --engine-smoke    Engine plumbing smoke test
-  ops verify --engine-honesty  Engine orchestration proof (dispatch, wave, telemetry)
-  ops verify --spine           Same as default (explicit alias)
-  ops verify --spine-lite      Engine smoke + honesty union
-  ops verify --binding-coherence  Capability references in bindings vs registry
-  ops verify --full            Readiness: status + infra baseline + secrets
-  ops verify --preflight       Governance banner + git health + gate domains
-  ops verify --all             All checks combined
+First-class verify:
+  ops cap run verify.engine.run    Foundational engine smoke
+  ops cap run spine.verify         Foundational spine/control-plane truth
 
-Runtime backbone (for scripts and automation):
+Compatibility / expert health wrapper:
+  compatibility: ops verify                       Wrapper for spine verify [default]
+  expert:        ops verify --infra               Scoped estate/workload health baseline
+  expert:        ops verify --engine-smoke        Engine plumbing smoke test
+  expert:        ops verify --engine-honesty      Engine orchestration proof (dispatch, wave, telemetry)
+  compatibility: ops verify --spine               Explicit alias for spine verify
+  expert:        ops verify --binding-coherence   Capability references in bindings vs registry
+  expert:        ops verify --full                Readiness: status + infra baseline + secrets
+  expert:        ops verify --preflight           Governance banner + git health + gate domains
+  expert:        ops verify --all                 All checks combined
+
+Runtime backbone:
   ops cap run verify.run -- <scope>
   Scopes: infra | engine | honesty | spine | domain <id> | release
 EOF
@@ -72,7 +75,7 @@ _verify_full() {
     echo "  source \"\$HOME/.config/infisical/credentials\""
     echo
     echo "Then rerun:"
-    echo "  ./bin/ops verify --full"
+    echo "  ./bin/ops verify --full  # compatibility / expert readiness wrapper"
     exit 2
   else
     echo
@@ -402,7 +405,7 @@ case "${1:-}" in
     _verify_all
     ;;
   *)
-    echo "ops verify: unknown argument '$1'" >&2
+    echo "ops verify compatibility wrapper: unknown argument '$1'" >&2
     echo >&2
     usage >&2
     exit 2

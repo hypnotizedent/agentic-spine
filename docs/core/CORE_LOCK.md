@@ -44,10 +44,11 @@ This key is used everywhere:
 | Entry | Path | Purpose |
 |-------|------|---------|
 | CLI | `bin/ops` | Canonical operator and agent entrypoint |
-| Startup status | `./bin/ops status --json` | Canonical state snapshot at session start |
-| Startup verify | `./bin/ops verify` | Canonical spine/object truth snapshot at session start |
-| Capability surface | `./bin/ops cap list` | Canonical capability discovery surface |
-| Spine verify | `./bin/ops cap run spine.verify` | Canonical spine/object truth verify entrypoint |
+| Session admission | `./bin/ops terminal launch --tool <tool> --terminal <name>` | Canonical governed session admission |
+| Public status | `./bin/ops status` | Canonical public state readback |
+| Expert status | `./bin/ops status --expert` | Drilldown only when public status gives a reason |
+| Engine verify | `./bin/ops cap run verify.engine.run` | Foundational engine smoke verify |
+| Spine verify | `./bin/ops cap run spine.verify` | Foundational local spine/control-plane verify |
 | Estate verify | `./bin/ops cap run verify.infra.run` | Canonical estate/workload health verify entrypoint |
 | Worktree lifecycle | `ops/plugins/core/lifecycle/bin/worktree-lifecycle-*` | Workspace/worktree control surfaces |
 | Repo bootstrap | `ops/plugins/core/authority/bin/project-governance-bootstrap` | API-first Gitea repo ensure + remote alignment |
@@ -60,7 +61,7 @@ All must PASS for core to be healthy.
 |------|----------|
 | D1 | Top-level dirs bounded (allowlist enforced) |
 | D2 | No `runs/` directory |
-| D3 | Entrypoint smoke (`bin/ops` + `cap list`) |
+| D3 | Internal entrypoint smoke (`bin/ops` + capability registry parse) |
 | D4 | Watcher running (warn only) |
 | D5 | No legacy coupling (`~/agent`, `ronny-ops`) |
 | D6 | Receipts exist for recent sessions |

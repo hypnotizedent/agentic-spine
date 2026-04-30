@@ -39,10 +39,9 @@ Agent entry is simple:
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops status --json
+./bin/ops status
 ./bin/ops cap run verify.engine.run
 ./bin/ops cap run spine.verify
-./bin/ops cap list
 ```
 
 5. Work through `./bin/ops cap run <capability> -- ...`
@@ -71,6 +70,21 @@ which loop you are in, stop and ask.
 These are control-plane truth objects and expert/drilldown grammar. Default
 operator surfaces should center on intent, progress, blockers, acceptance, and
 verify truth rather than lead with these nouns.
+
+The public operator read model is `ops status`. It must answer:
+
+- What work is open?
+- What is blocked or risky?
+- What automation is running?
+- Is the system healthy?
+- What needs attention now?
+
+The workflow objects below remain canonical inputs and recovery/debug surfaces.
+They are not a second public work system. Default operator readback should show
+their meaning, not require the human steward to reason through machinery names.
+Use `ops status --expert` when raw workflow-object counts, terminal telemetry,
+delegation state, wave state, or other control-plane internals are needed, and
+only when public status gives a reason for drilldown.
 
 ### Loop
 
@@ -358,7 +372,8 @@ These seams were previously absent and have been addressed.
 - Use the CLI directly.
 - Read only the files needed for the current task.
 - Prefer `ops cap run` over ad hoc shell when a capability exists.
-- Re-run `./bin/ops verify` after meaningful mutations.
+- Re-run `./bin/ops cap run verify.engine.run` and
+  `./bin/ops cap run spine.verify` after meaningful mutations.
 
 ## Remote Or Mobile
 
@@ -369,4 +384,4 @@ These seams were previously absent and have been addressed.
 ## Unknown Environment
 
 - Do not mutate anything until you know whether the repo and CLI are available.
-- Ask for `ops status --json` output or establish the repo context first.
+- Ask for `ops status` output or establish the repo context first.

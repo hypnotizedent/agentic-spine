@@ -380,8 +380,10 @@ POSTURE_EOF
         parts+=("export SPINE_WORKTREE=$(printf '%q' "$launch_cwd")")
     fi
 
-    # Session attach at terminal birth (best-effort, never blocks)
-    parts+=("{ ./bin/ops cap run session.v3.attach || true; }")
+    # Public session entry at terminal birth (best-effort, never blocks).
+    # Expert attach remains available through:
+    #   ./bin/ops cap run session.v3.attach -- --expert
+    parts+=("{ $(printf '%q' "$SPINE_ROOT/ops/plugins/core/lifecycle/bin/session-v3-attach") --public || true; }")
 
     case "$tool" in
         claude)  parts+=("claude --dangerously-skip-permissions") ;;

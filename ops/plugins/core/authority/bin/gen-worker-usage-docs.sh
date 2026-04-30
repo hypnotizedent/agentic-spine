@@ -36,8 +36,8 @@ command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 status="$(yq e -r '.generator.status // ""' "$CONTRACT")"
 [[ "$status" == "retired" ]] || fail "terminal worker generator is not retired in contract"
 
-if [[ -d "$TARGET" ]]; then
-  echo "gen-worker-usage-docs PASS: retired surface left as historical docs at ${TARGET#$ROOT/}"
+if [[ -d "$TARGET" ]] && find "$TARGET" -type f -name '*.md' -print -quit | grep -q .; then
+  fail "retired worker usage docs still exist at ${TARGET#$ROOT/}; remove or archive outside generated public reference"
 else
-  echo "gen-worker-usage-docs PASS: retired surface absent (${MODE})"
+  echo "gen-worker-usage-docs PASS: retired worker usage public docs absent (${MODE})"
 fi

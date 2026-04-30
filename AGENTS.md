@@ -132,7 +132,11 @@ Non-promoted work, synthesis artifacts, and parked material belong in
 New repo docs require deliberate promotion and human-steward co-sign.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
-Governed session start: `ops terminal launch --tool <tool> --terminal <name>`
+Governed session start/admission:
+`ops terminal launch --tool <tool> --terminal <name>`
+Public readback: `./bin/ops status`
+Expert drilldown: `./bin/ops status --expert` only when public status gives a
+reason for drilldown.
 Orientation (read-only, not admission): `./bin/ops cap run session.v3.attach`
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 

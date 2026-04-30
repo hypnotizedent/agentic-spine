@@ -23,7 +23,7 @@ Everything the operator touches lives here or under `~/.codex`.
 | `ronny-products/` | Product repos | Main checkout stays on `main`. |
 | ~~`agentic-foundation/`~~ | Archived — merged into workbench (2026-04-09) | Tombstoned to `.backups/foundation/repo-tombstones/` |
 
-**Rule**: `agentic-spine` primary checkout must be on `main` and clean for daily operation. All wave/feature work happens in managed worktrees, and agent startup is doc-first plus CLI-first: read `NORTH_STAR.md`, `docs/governance/SPINE.md`, `docs/governance/SESSION_PROTOCOL.md`, then run `./bin/ops status --json`, `./bin/ops verify`, and `./bin/ops cap list`.
+**Rule**: `agentic-spine` primary checkout must be on `main` and clean for daily operation. All wave/feature work happens in managed worktrees, and agent startup is doc-first plus CLI-first: read `NORTH_STAR.md`, `docs/governance/SPINE.md`, `docs/governance/SESSION_PROTOCOL.md`, then admit through `./bin/ops terminal launch --tool <tool> --terminal <name>`, read public state with `./bin/ops status`, and run foundational verify with `./bin/ops cap run verify.engine.run` and `./bin/ops cap run spine.verify`.
 
 ### Non-Source Roots
 
@@ -103,9 +103,10 @@ Naming: directory name matches the branch name with `/` replaced by `-`.
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops status --json
-./bin/ops verify
-./bin/ops cap list
+./bin/ops terminal launch --tool <tool> --terminal <name>
+./bin/ops status
+./bin/ops cap run verify.engine.run
+./bin/ops cap run spine.verify
 ```
 
 - Keep path references lowercase under `~/code/...`.

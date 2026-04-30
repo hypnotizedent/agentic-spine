@@ -19,6 +19,7 @@
 #   E13 cap.sh no silent widen-by-fallback to worker on missing SPINE_RUNTIME_ROLE
 #   E14 researcher→worker bridge continuity (warn): active loops have delegation, packet, or handoff
 #   E15 status open-loop count anchored to SQLite authority
+#   E16 public entry grammar lock
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -556,6 +557,9 @@ active_loops = set()
 for r in rows:
     active_loops.add(r["loop_id"])
 
+def clean_scalar(value):
+    return value.strip().strip(chr(34) + chr(39))
+
 # Check which loops have at least one packet
 loops_with_packet = set()
 if prompts_dir.is_dir():
@@ -564,7 +568,7 @@ if prompts_dir.is_dir():
             text = p.read_text(encoding="utf-8", errors="ignore")
             for line in text.splitlines()[:30]:
                 if line.startswith("loop_id:"):
-                    lid = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    lid = clean_scalar(line.split(":", 1)[1])
                     if lid in active_loops:
                         loops_with_packet.add(lid)
                     break
@@ -581,7 +585,7 @@ if handoffs_dir.is_dir():
             in_loops = False
             for line in text.splitlines():
                 if line.startswith("state:"):
-                    s = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    s = clean_scalar(line.split(":", 1)[1])
                     if s not in valid_states:
                         break
                 if line.strip() == "loops:":
@@ -589,7 +593,7 @@ if handoffs_dir.is_dir():
                     continue
                 if in_loops:
                     if line.startswith("  - ") or line.startswith("- "):
-                        lid = line.strip().lstrip("- ").strip('"').strip("'")
+                        lid = clean_scalar(line.strip().lstrip("- "))
                         if lid in active_loops:
                             loops_with_handoff.add(lid)
                     else:
@@ -607,11 +611,11 @@ if delegations_dir.is_dir():
             text = d.read_text(encoding="utf-8", errors="ignore")
             for line in text.splitlines():
                 if line.startswith("delegation_state:"):
-                    ds = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    ds = clean_scalar(line.split(":", 1)[1])
                     if ds in terminal_states:
                         break
                 if line.startswith("loop_id:"):
-                    lid = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    lid = clean_scalar(line.split(":", 1)[1])
                     if lid in active_loops:
                         loops_with_delegation.add(lid)
                     break
@@ -678,6 +682,151 @@ except json.JSONDecodeError as exc:
 status_open = int(((payload.get("counts") or {}).get("open_loops", 0)) or 0)
 if status_open != sqlite_open:
     print(f"open loop count mismatch: sqlite={sqlite_open} status={status_open}")
+    raise SystemExit(1)
+PY
+'
+
+check E16 "public entry grammar lock" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+home = Path.home()
+
+# Public/operator-facing surfaces only. Engine internals, archive, runtime
+# evidence, and expert command implementations are intentionally outside this
+# grammar lock.
+files = [
+    root / "AGENTS.md",
+    root / "NORTH_STAR.md",
+    root / "docs/governance/SPINE.md",
+    root / "docs/governance/SESSION_PROTOCOL.md",
+    root / "docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md",
+    root / "docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md",
+    root / "docs/core/CORE_LOCK.md",
+    root / "bin/ops",
+    root / "ops/commands/status.sh",
+    root / "ops/commands/verify.sh",
+    root / "ops/capabilities.yaml",
+    home / ".claude/CLAUDE.md",
+    home / ".config/opencode/OPENCODE.md",
+    root.parent / "workbench/dotfiles/opencode/OPENCODE.md",
+    root.parent / "workbench/dotfiles/macbook/README.md",
+    root.parent / "workbench/dotfiles/hammerspoon/.hammerspoon/init.lua",
+]
+
+generated_worker_usage = root / "docs/reference/generated/worker-usage"
+if generated_worker_usage.exists():
+    files.extend(sorted(generated_worker_usage.glob("*.md")))
+boot_entry = root / "docs/reference/generated/BOOT_ENTRY_SURFACE.md"
+if boot_entry.exists():
+    files.append(boot_entry)
+
+raycast_dir = root.parent / "workbench/dotfiles/raycast"
+if raycast_dir.exists():
+    files.extend(sorted(raycast_dir.glob("*.sh")))
+
+opencode_commands = root.parent / "workbench/dotfiles/opencode/commands"
+if opencode_commands.exists():
+    files.extend(sorted(opencode_commands.glob("*.md")))
+
+def classify_context(line: str) -> str:
+    lower = line.lower()
+    expert_terms = (
+        "expert",
+        "surgery",
+        "drilldown",
+        "drill down",
+        "internal",
+        "orientation",
+        "read-only",
+        "not admission",
+        "compat",
+        "deprecated",
+        "historical",
+        "retired",
+        "machine-readable",
+        "json output",
+        "capability discovery",
+        "unknown capability",
+        "use --expert",
+    )
+    if any(term in lower for term in expert_terms):
+        return "allowed"
+    return "public"
+
+rules = [
+    (
+        "startup_status_json",
+        re.compile(r"ops status --json|status --json"),
+        "Public startup/readback must teach ops status, not ops status --json.",
+    ),
+    (
+        "startup_cap_list",
+        re.compile(r"ops cap list|cap list"),
+        "Public startup must not require capability listing.",
+    ),
+    (
+        "ops_verify_public",
+        re.compile(r"ops verify(?!\\.engine\\.run)"),
+        "Public verify must teach verify.engine.run + spine.verify, not ops verify.",
+    ),
+    (
+        "attach_as_entry",
+        re.compile(r"(canonical session entry|session attach|session entry).*session\\.v3\\.attach|session\\.v3\\.attach.*(canonical session entry|session attach|session entry)"),
+        "session.v3.attach may be orientation/expert only, not canonical entry.",
+    ),
+    (
+        "normal_wave_loops_delegation",
+        re.compile(r"ops wave|ops loops|delegation\\.status|orchestration\\.wave\\.status"),
+        "Wave/loops/delegation surfaces must be expert/drilldown language only.",
+    ),
+    (
+        "character_picker",
+        re.compile(r"terminal character|character picker|choose terminal character"),
+        "Public human entry must not teach terminal-character picking.",
+    ),
+    (
+        "retired_hotkeys",
+        re.compile(r"mailroom hotkey|handoff hotkey|friction hotkey|Ctrl\\+Shift\\+T|Ctrl\\+Shift\\+E|Ctrl\\+Shift\\+R"),
+        "Mailroom/handoff/friction hotkeys must not be public entry grammar.",
+    ),
+]
+
+violations = []
+seen = set()
+for path in files:
+    if not path.is_file():
+        continue
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        continue
+    for lineno, line in enumerate(lines, 1):
+        if classify_context(line) == "allowed":
+            continue
+        for rule_id, pattern, message in rules:
+            if not pattern.search(line):
+                continue
+            key = (str(path), lineno, rule_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                rel = str(path.relative_to(root))
+            except ValueError:
+                rel = str(path)
+            violations.append(f"{rel}:{lineno}: {rule_id}: {message} :: {line.strip()[:180]}")
+
+if violations:
+    print("public entry grammar drift:")
+    for item in violations[:80]:
+        print("  " + item)
+    remaining = len(violations) - 80
+    if remaining > 0:
+        print(f"  ... {remaining} more")
     raise SystemExit(1)
 PY
 '
