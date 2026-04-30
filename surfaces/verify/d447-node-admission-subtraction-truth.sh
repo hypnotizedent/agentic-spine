@@ -37,6 +37,7 @@ caps_path = Path(sys.argv[1])
 snapshot_path = Path(sys.argv[2])
 master_path = Path(sys.argv[3])
 node_admission = Path(sys.argv[4])
+root = caps_path.parent.parent
 
 
 def fail(message: str) -> None:
@@ -60,6 +61,37 @@ if cap.get("safety") != "read-only":
     fail("node.admission.status must be read-only")
 if cap.get("script_path") != "./ops/plugins/infra/bin/node-admission-status":
     fail("node.admission.status script_path must point at node-admission-status")
+
+operator_inventory = load_yaml(root / "ops/bindings/operator.hardware.inventory.yaml")
+appliance_identity = load_yaml(root / "ops/bindings/appliance.identity.contract.yaml")
+allowed_role_candidacy = set(operator_inventory.get("role_candidacy_values") or [])
+if not allowed_role_candidacy:
+    fail("operator.hardware.inventory.yaml must declare role_candidacy_values")
+appliance_classes = {
+    str(row.get("class"))
+    for row in appliance_identity.get("appliances") or []
+    if isinstance(row, dict) and row.get("class")
+}
+for machine in operator_inventory.get("machines") or []:
+    if not isinstance(machine, dict):
+        continue
+    device_id = machine.get("device_id") or "<unknown>"
+    roles = [str(value) for value in machine.get("role_candidacy") or []]
+    invalid = sorted(value for value in roles if value not in allowed_role_candidacy)
+    if invalid:
+        fail(f"{device_id}: operator role_candidacy outside declared vocabulary: {', '.join(invalid)}")
+    collisions = sorted(value for value in roles if value in appliance_classes)
+    if collisions:
+        fail(f"{device_id}: operator role_candidacy must not use appliance class names: {', '.join(collisions)}")
+node_admission_text = node_admission.read_text(encoding="utf-8")
+for required_snippet in [
+    "operator_role_candidacy_values",
+    "appliance_class_values",
+    "validate_operator_role_candidacy",
+    "operator role_candidacy contains appliance class name",
+]:
+    if required_snippet not in node_admission_text:
+        fail(f"node.admission.status must enforce role_candidacy vocabulary in the canonical reader: missing {required_snippet}")
 
 snapshot = load_yaml(snapshot_path)
 surfaces = ((snapshot.get("data_heartbeat") or {}).get("surfaces") or [])
@@ -112,7 +144,7 @@ for path in [
     Path("ops/bindings/internet.asset.registry.yaml"),
     Path("ops/bindings/home.hardware.inventory.yaml"),
 ]:
-    text = (caps_path.parent.parent / path).read_text(encoding="utf-8")
+    text = (root / path).read_text(encoding="utf-8")
     if "node.admission.status" not in text:
         fail(f"{path} must name node.admission.status as replacement")
     if path.name == "internet.asset.registry.yaml" and "authority_state: compatibility_evidence" not in text:

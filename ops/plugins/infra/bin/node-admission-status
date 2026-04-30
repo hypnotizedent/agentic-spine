@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,8 @@ NODE_RECOVERY_STATUS = ROOT / "ops/plugins/infra/bin/node-recovery-status"
 LAUNCHD_SCHEDULER_REGISTRY = ROOT / "ops/bindings/launchd.scheduler.registry.yaml"
 NODE_ROLE_CONTRACT = ROOT / "ops/bindings/node.role.contract.yaml"
 ALERTING_RULES = ROOT / "ops/bindings/alerting.rules.yaml"
+OPERATOR_HARDWARE_INVENTORY = ROOT / "ops/bindings/operator.hardware.inventory.yaml"
+APPLIANCE_IDENTITY_CONTRACT = ROOT / "ops/bindings/appliance.identity.contract.yaml"
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -24,7 +27,8 @@ def fail(message: str, code: int = 1) -> None:
 
 
 def run_json(args: list[str]) -> Any:
-    proc = subprocess.run(args, text=True, capture_output=True)
+    env = {**os.environ, "SPINE_ROOT": str(ROOT)}
+    proc = subprocess.run(args, text=True, capture_output=True, env=env)
     if proc.returncode != 0:
         fail(proc.stderr.strip() or proc.stdout.strip() or f"command failed: {' '.join(args)}")
     try:
@@ -34,7 +38,8 @@ def run_json(args: list[str]) -> Any:
 
 
 def run_lines(args: list[str]) -> list[str]:
-    proc = subprocess.run(args, text=True, capture_output=True)
+    env = {**os.environ, "SPINE_ROOT": str(ROOT)}
+    proc = subprocess.run(args, text=True, capture_output=True, env=env)
     if proc.returncode != 0:
         fail(proc.stderr.strip() or proc.stdout.strip() or f"command failed: {' '.join(args)}")
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
@@ -63,6 +68,50 @@ def as_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     return [value]
+
+
+def operator_role_candidacy_values() -> set[str]:
+    data = load_yaml(OPERATOR_HARDWARE_INVENTORY)
+    return {str(value) for value in as_list(data.get("role_candidacy_values")) if str(value)}
+
+
+def appliance_class_values() -> set[str]:
+    data = load_yaml(APPLIANCE_IDENTITY_CONTRACT)
+    values: set[str] = set()
+    for appliance in data.get("appliances") or []:
+        if not isinstance(appliance, dict):
+            continue
+        appliance_class = str(appliance.get("class") or "").strip()
+        if appliance_class:
+            values.add(appliance_class)
+    return values
+
+
+def validate_operator_role_candidacy(node_id: str, operator: dict[str, Any]) -> None:
+    if not operator:
+        return
+    candidacy = [str(value) for value in as_list(operator.get("role_candidacy")) if str(value)]
+    if not candidacy:
+        return
+
+    allowed = operator_role_candidacy_values()
+    if not allowed:
+        fail("operator.hardware.inventory.yaml role_candidacy_values is empty")
+
+    appliance_classes = appliance_class_values()
+    collisions = sorted(value for value in candidacy if value in appliance_classes)
+    if collisions:
+        fail(
+            f"{node_id}: operator role_candidacy contains appliance class name(s), "
+            f"not node-role candidacy values: {', '.join(collisions)}"
+        )
+
+    invalid = sorted(value for value in candidacy if value not in allowed)
+    if invalid:
+        fail(
+            f"{node_id}: operator role_candidacy contains value(s) outside "
+            f"operator.hardware.inventory.yaml role_candidacy_values: {', '.join(invalid)}"
+        )
 
 
 def source_ref(path: str, role: str) -> dict[str, str]:
@@ -281,6 +330,7 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     runtime_truth = runtime_role_truth_for(str(recovery.get("node_id") or ""))
     recovery["__runtime_role_truth"] = runtime_truth
 
+    validate_operator_role_candidacy(str(recovery.get("node_id") or "unknown"), operator)
     role_candidacy = as_list(operator.get("role_candidacy"))
     if not role_candidacy:
         role_candidacy = as_list(appliance.get("class"))
