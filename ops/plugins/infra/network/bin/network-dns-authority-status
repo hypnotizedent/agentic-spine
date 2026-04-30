@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # network.dns.authority.status
-# Read-only: verify DNS authority stack health on Pi-hole LXC 105.
-# Checks Unbound, cloudflared, Pi-hole upstream config, and DNSSEC.
+# Read-only: verify DNS authority stack health on canonical home Pi-hole.
+# Checks Unbound, Pi-hole upstream config, and DNSSEC.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
@@ -11,8 +11,11 @@ SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
 source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
 PIHOLE_HOST="${PIHOLE_HOME_HOST:-$(ssh_resolve_ssh_host_with_fallback pihole-home 2>/dev/null | awk '{print $1}')}"
+PIHOLE_USER="${PIHOLE_HOME_USER:-$(ssh_resolve_user pihole-home 2>/dev/null || true)}"
 SSH_OPTS="-o ConnectTimeout=15 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 [[ -n "$PIHOLE_HOST" ]] || { echo "ERROR: cannot resolve pihole-home SSH host" >&2; exit 1; }
+[[ -n "$PIHOLE_USER" ]] || PIHOLE_USER="ubuntu"
+PIHOLE_SSH_REF="${PIHOLE_USER}@${PIHOLE_HOST}"
 
 pass=0
 fail=0
@@ -32,12 +35,12 @@ check() {
 }
 
 echo "network.dns.authority.status"
-echo "target: pihole-home ($PIHOLE_HOST)"
+echo "target: pihole-home ($PIHOLE_SSH_REF)"
 echo
 
 # ── 1. SSH reachability ──────────────────────────────────────────────────
-if ! ssh $SSH_OPTS root@"$PIHOLE_HOST" 'echo ok' >/dev/null 2>&1; then
-  echo "  FAIL: SSH unreachable at $PIHOLE_HOST"
+if ! ssh $SSH_OPTS "$PIHOLE_SSH_REF" 'echo ok' >/dev/null 2>&1; then
+  echo "  FAIL: SSH unreachable at $PIHOLE_SSH_REF"
   echo
   echo "summary: 0/1 checks passed (SSH unreachable)"
   echo "status: FAIL"
@@ -45,7 +48,7 @@ if ! ssh $SSH_OPTS root@"$PIHOLE_HOST" 'echo ok' >/dev/null 2>&1; then
 fi
 
 # ── 2. Unbound service status ───────────────────────────────────────────
-UNBOUND_STATUS="$(ssh $SSH_OPTS root@"$PIHOLE_HOST" 'systemctl is-active unbound 2>/dev/null' || echo 'inactive')"
+UNBOUND_STATUS="$(ssh $SSH_OPTS "$PIHOLE_SSH_REF" 'systemctl is-active unbound 2>/dev/null' || echo 'inactive')"
 if [[ "$UNBOUND_STATUS" == "active" ]]; then
   check "unbound service active" "PASS" ""
 else
@@ -53,38 +56,22 @@ else
 fi
 
 # ── 3. Unbound responds to dig on port 5335 ─────────────────────────────
-UNBOUND_DIG="$(ssh $SSH_OPTS root@"$PIHOLE_HOST" 'dig @127.0.0.1 -p 5335 cloudflare.com +short +time=5 2>/dev/null' || true)"
+UNBOUND_DIG="$(ssh $SSH_OPTS "$PIHOLE_SSH_REF" 'dig @127.0.0.1 -p 5335 cloudflare.com +short +time=5 2>/dev/null' || true)"
 if [[ -n "$UNBOUND_DIG" && "$UNBOUND_DIG" != *"timed out"* && "$UNBOUND_DIG" != *"SERVFAIL"* ]]; then
   check "unbound responds on port 5335" "PASS" ""
 else
   check "unbound responds on port 5335" "FAIL" "response='$UNBOUND_DIG'"
 fi
 
-# ── 4. cloudflared service status ────────────────────────────────────────
-CF_STATUS="$(ssh $SSH_OPTS root@"$PIHOLE_HOST" 'systemctl is-active cloudflared-dns 2>/dev/null' || echo 'inactive')"
-if [[ "$CF_STATUS" == "active" ]]; then
-  check "cloudflared-dns service active" "PASS" ""
-else
-  check "cloudflared-dns service active" "FAIL" "status=$CF_STATUS"
-fi
-
-# ── 5. cloudflared responds on port 5053 ─────────────────────────────────
-CF_DIG="$(ssh $SSH_OPTS root@"$PIHOLE_HOST" 'dig @127.0.0.1 -p 5053 cloudflare.com +short +time=5 2>/dev/null' || true)"
-if [[ -n "$CF_DIG" && "$CF_DIG" != *"timed out"* && "$CF_DIG" != *"refused"* ]]; then
-  check "cloudflared responds on port 5053" "PASS" ""
-else
-  check "cloudflared responds on port 5053" "FAIL" "response='$CF_DIG'"
-fi
-
-# ── 6. Pi-hole upstream points to Unbound ────────────────────────────────
-UPSTREAMS="$(ssh $SSH_OPTS root@"$PIHOLE_HOST" 'grep -A6 "upstreams = \[" /etc/pihole/pihole.toml 2>/dev/null' || true)"
+# ── 4. Pi-hole upstream points to Unbound ────────────────────────────────
+UPSTREAMS="$(ssh $SSH_OPTS "$PIHOLE_SSH_REF" 'sudo grep -A6 "upstreams = \[" /etc/pihole/pihole.toml 2>/dev/null' || true)"
 if echo "$UPSTREAMS" | grep -q '127.0.0.1#5335'; then
   check "Pi-hole upstream includes Unbound (127.0.0.1#5335)" "PASS" ""
 else
   check "Pi-hole upstream includes Unbound (127.0.0.1#5335)" "FAIL" "upstreams do not include Unbound"
 fi
 
-# ── 7. Pi-hole upstream does NOT include public DNS ──────────────────────
+# ── 5. Pi-hole upstream does NOT include public DNS ──────────────────────
 HAS_PUBLIC="$(echo "$UPSTREAMS" | grep -E '"(1\.1\.1\.1|1\.0\.0\.1|8\.8\.8\.8|8\.8\.4\.4|9\.9\.9\.9)"' || true)"
 if [[ -z "$HAS_PUBLIC" ]]; then
   check "Pi-hole upstream has no public DNS servers" "PASS" ""
@@ -92,25 +79,25 @@ else
   check "Pi-hole upstream has no public DNS servers" "FAIL" "found public upstream: $HAS_PUBLIC"
 fi
 
-# ── 8. DNSSEC validation ────────────────────────────────────────────────
+# ── 6. DNSSEC validation ────────────────────────────────────────────────
 # sigok.verteiltesysteme.net should resolve; sigfail should not
-SIGOK="$(ssh $SSH_OPTS root@"$PIHOLE_HOST" 'dig @127.0.0.1 -p 5335 sigok.verteiltesysteme.net +short +time=5 2>/dev/null' || true)"
-if [[ -n "$SIGOK" && "$SIGOK" != *"SERVFAIL"* && "$SIGOK" != *"timed out"* ]]; then
+SIGOK="$(ssh $SSH_OPTS "$PIHOLE_SSH_REF" 'dig @127.0.0.1 -p 5335 sigok.verteiltesysteme.net +short +time=5 +tries=2 2>/dev/null | grep -E "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" | tail -1' || true)"
+if [[ -n "$SIGOK" ]]; then
   check "DNSSEC sigok resolves" "PASS" ""
 else
   check "DNSSEC sigok resolves" "FAIL" "response='$SIGOK'"
 fi
 
-# ── 9. Pi-hole FTL running ──────────────────────────────────────────────
-FTL_STATUS="$(ssh $SSH_OPTS root@"$PIHOLE_HOST" 'systemctl is-active pihole-FTL 2>/dev/null' || echo 'inactive')"
+# ── 7. Pi-hole FTL running ──────────────────────────────────────────────
+FTL_STATUS="$(ssh $SSH_OPTS "$PIHOLE_SSH_REF" 'systemctl is-active pihole-FTL 2>/dev/null' || echo 'inactive')"
 if [[ "$FTL_STATUS" == "active" ]]; then
   check "pihole-FTL service active" "PASS" ""
 else
   check "pihole-FTL service active" "FAIL" "status=$FTL_STATUS"
 fi
 
-# ── 10. Full chain test (Pi-hole → Unbound → root) ──────────────────────
-CHAIN_DIG="$(ssh $SSH_OPTS root@"$PIHOLE_HOST" 'dig @127.0.0.1 google.com +short +time=5 2>/dev/null' || true)"
+# ── 8. Full chain test (Pi-hole → Unbound → root) ──────────────────────
+CHAIN_DIG="$(ssh $SSH_OPTS "$PIHOLE_SSH_REF" 'dig @127.0.0.1 google.com +short +time=5 2>/dev/null' || true)"
 if [[ -n "$CHAIN_DIG" && "$CHAIN_DIG" != *"timed out"* && "$CHAIN_DIG" != *"SERVFAIL"* ]]; then
   check "full chain (Pi-hole → Unbound) resolves" "PASS" ""
 else

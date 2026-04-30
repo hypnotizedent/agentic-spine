@@ -30,8 +30,8 @@ usage() {
   cat <<'EOF'
 Usage: backup-home-restore-drill [--target <ssh-target>] [--include-ha] [--keep-artifacts]
 
-Runs a scratch restore of the latest canonical home backup artifacts (Pi-hole LXC 105,
-optionally HA VM 100) from Synology NAS to proxmox-home. Verifies scratch configs
+Runs a scratch restore of the latest canonical home backup artifacts
+(optionally HA VM 100) from Synology NAS to proxmox-home. Verifies scratch configs
 materialize, then cleans up and writes a single YAML receipt under
 mailroom/outbox/reports/restore-drills/.
 EOF
@@ -94,11 +94,7 @@ PY
 }
 
 BACKUP_SOURCE_BASE="/mnt/pve/synology-backups/dump"
-PIHOLE_GLOB="vzdump-lxc-105-*.tar.zst"
 HA_GLOB="vzdump-qemu-100-*.vma.zst"
-
-LATEST_PIHOLE_ARTIFACT="$(pve_ssh "find '$BACKUP_SOURCE_BASE' -maxdepth 1 -type f -name '$PIHOLE_GLOB' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" || true)"
-[[ -n "$LATEST_PIHOLE_ARTIFACT" ]] || fail "no Pi-hole artifact found matching $BACKUP_SOURCE_BASE/$PIHOLE_GLOB"
 
 LATEST_HA_ARTIFACT=""
 if [[ "$INCLUDE_HA" -eq 1 ]]; then
@@ -111,37 +107,12 @@ RUN_DAY="$(date -u +%Y%m%d)"
 mkdir -p "$RECEIPT_DIR"
 RECEIPT_PATH="$RECEIPT_DIR/backup-home-restore-drill-${RUN_DAY}.yaml"
 
-PIHOLE_SCRATCH_CTID=9105
 HA_SCRATCH_VMID=9100
-
-PIHOLE_RESTORE_RESULT="FAIL"
-PIHOLE_RESTORE_ERROR=""
-PIHOLE_RESTORE_DURATION=""
-PIHOLE_CONFIG_MATERIALIZED=false
 
 HA_RESTORE_RESULT="SKIP"
 HA_RESTORE_ERROR=""
 HA_RESTORE_DURATION=""
 HA_CONFIG_MATERIALIZED=false
-
-set +e
-PIHOLE_RESTORE_START="$(date +%s)"
-pve_ssh "pct restore $PIHOLE_SCRATCH_CTID '$LATEST_PIHOLE_ARTIFACT' --storage local-lvm --force 1" >/dev/null 2>&1
-PIHOLE_RESTORE_RC=$?
-PIHOLE_RESTORE_END="$(date +%s)"
-PIHOLE_RESTORE_DURATION="$((PIHOLE_RESTORE_END - PIHOLE_RESTORE_START))s"
-set -e
-
-if [[ $PIHOLE_RESTORE_RC -eq 0 ]]; then
-  if pve_ssh "pct status $PIHOLE_SCRATCH_CTID" >/dev/null 2>&1; then
-    PIHOLE_CONFIG_MATERIALIZED=true
-    PIHOLE_RESTORE_RESULT="PASS"
-  else
-    PIHOLE_RESTORE_ERROR="restore exit 0 but pct status $PIHOLE_SCRATCH_CTID failed"
-  fi
-else
-  PIHOLE_RESTORE_ERROR="restore command failed with exit code $PIHOLE_RESTORE_RC"
-fi
 
 if [[ "$INCLUDE_HA" -eq 1 ]]; then
   set +e
@@ -167,25 +138,17 @@ if [[ "$INCLUDE_HA" -eq 1 ]]; then
 fi
 
 if [[ "$KEEP_ARTIFACTS" -ne 1 ]]; then
-  if [[ "$PIHOLE_CONFIG_MATERIALIZED" == "true" ]]; then
-    pve_ssh "pct destroy $PIHOLE_SCRATCH_CTID" >/dev/null 2>&1 || true
-  fi
   if [[ "$HA_CONFIG_MATERIALIZED" == "true" ]]; then
     pve_ssh "qm destroy $HA_SCRATCH_VMID" >/dev/null 2>&1 || true
   fi
 fi
 
-OVERALL_RESULT="FAIL"
-if [[ "$PIHOLE_RESTORE_RESULT" == "PASS" ]]; then
-  if [[ "$INCLUDE_HA" -eq 1 ]]; then
-    if [[ "$HA_RESTORE_RESULT" == "PASS" ]]; then
-      OVERALL_RESULT="PASS"
-    fi
-  else
-    OVERALL_RESULT="PASS"
+OVERALL_RESULT="PASS"
+if [[ "$INCLUDE_HA" -eq 1 ]]; then
+  if [[ "$HA_RESTORE_RESULT" != "PASS" ]]; then
+    OVERALL_RESULT="FAIL"
   fi
 fi
-
 {
   echo "kind: backup_home_restore_drill"
   echo "version: 1"
@@ -196,7 +159,9 @@ fi
   echo "  ssh_ref: $(yaml_quote "$pve_ssh_ref")"
   echo "artifacts:"
   echo "  source_base: $(yaml_quote "$BACKUP_SOURCE_BASE")"
-  echo "  pihole_artifact: $(yaml_quote "$LATEST_PIHOLE_ARTIFACT")"
+  echo "  pihole_artifact: null"
+  echo "  pihole_retired: true"
+  echo "  pihole_retirement_note: \"LXC 105 Pi-hole restore drill retired after Raspberry Pi DNS appliance cutover on 2026-04-30.\""
   if [[ "$INCLUDE_HA" -eq 1 ]]; then
     echo "  ha_artifact: $(yaml_quote "$LATEST_HA_ARTIFACT")"
   else
@@ -206,15 +171,10 @@ fi
   echo "  mode: scratch_nonprod"
   echo "  keep_artifacts: $([[ "$KEEP_ARTIFACTS" -eq 1 ]] && echo true || echo false)"
   echo "  pihole:"
-  echo "    scratch_ctid: $PIHOLE_SCRATCH_CTID"
-  echo "    result: $PIHOLE_RESTORE_RESULT"
-  echo "    duration: $(yaml_quote "$PIHOLE_RESTORE_DURATION")"
-  echo "    config_materialized: $PIHOLE_CONFIG_MATERIALIZED"
-  if [[ -n "$PIHOLE_RESTORE_ERROR" ]]; then
-    echo "    error: $(yaml_quote "$PIHOLE_RESTORE_ERROR")"
-  else
-    echo "    error: null"
-  fi
+  echo "    result: RETIRED"
+  echo "    runtime: raspberry-pi-appliance"
+  echo "    legacy_lxc_105_restore: disabled"
+  echo "    error: null"
   if [[ "$INCLUDE_HA" -eq 1 ]]; then
     echo "  ha:"
     echo "    scratch_vmid: $HA_SCRATCH_VMID"
@@ -230,7 +190,8 @@ fi
     echo "  ha: null"
   fi
   echo "comparison:"
-  echo "  pihole_config_exists: $PIHOLE_CONFIG_MATERIALIZED"
+  echo "  pihole_config_exists: null"
+  echo "  pihole_legacy_restore_retired: true"
   if [[ "$INCLUDE_HA" -eq 1 ]]; then
     echo "  ha_config_exists: $HA_CONFIG_MATERIALIZED"
   else
@@ -242,7 +203,7 @@ echo "=== Home Restore Drill ==="
 echo "target: $TARGET_ID ($pve_ssh_ref)"
 echo "receipt: $RECEIPT_PATH"
 echo "result: $OVERALL_RESULT"
-echo "pihole: $PIHOLE_RESTORE_RESULT ($PIHOLE_RESTORE_DURATION)"
+echo "pihole: RETIRED (Raspberry Pi appliance is canonical)"
 if [[ "$INCLUDE_HA" -eq 1 ]]; then
   echo "ha: $HA_RESTORE_RESULT ($HA_RESTORE_DURATION)"
 fi

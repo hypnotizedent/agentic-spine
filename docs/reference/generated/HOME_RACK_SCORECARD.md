@@ -8,10 +8,10 @@ source_binding: ops/bindings/home.storage.map.yaml
 
 # Home Rack Scorecard
 
-- Generated: `2026-04-30T12:27:39Z`
+- Generated: `2026-04-30T14:38:04Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
-- Active runtimes: `3`
-- Tombstones: `3`
+- Active runtimes: `2`
+- Tombstones: `4`
 - Public routes: `5`
 
 ## Substrate
@@ -35,8 +35,7 @@ source_binding: ops/bindings/home.storage.map.yaml
 | VMID | Runtime | Kind | Startup | Tier | Durable State | Backup Lane | Ingress |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 100 | homeassistant | vm | auto | home-local-lvm | local-lvm:vm-100-disk-1, local-lvm:vm-100-disk-0 | nas-home-local-exception | ha.ronny.works |
-| 105 | pihole-home | lxc | auto | home-local-lvm | local-lvm:vm-105-disk-0 | nas-home-local-exception | private-only |
-| 106 | media-home | vm | auto | home-local-lvm | local-lvm:vm-105-disk-0 | nas-home-local-exception | private-only |
+| 106 | media-home | vm | auto | home-local-lvm | local-lvm:vm-106-disk-0 | nas-home-local-exception | private-only |
 
 ## Tombstones
 
@@ -45,6 +44,7 @@ source_binding: ops/bindings/home.storage.map.yaml
 | 101 | vm-101-immich-home | stopped | Historical home guest retained only as decommissioned inventory. |
 | 102 | vaultwarden | stopped | Legacy Vaultwarden (superseded by infra-core) |
 | 103 | lxc-103-download-home | stopped | Historical home guest retained only as decommissioned inventory. |
+| 105 | lxc-105-pihole-home | destroyed | Historical home guest retained only as decommissioned inventory. |
 
 ## Current Risks
 

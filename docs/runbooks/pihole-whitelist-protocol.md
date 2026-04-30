@@ -102,7 +102,7 @@ If any query returns NXDOMAIN, the blocklist update re-introduced the block. Re-
 | Site | Host | Tailscale IP | Notes |
 |------|------|-------------|-------|
 | Shop | infra-core | 100.92.91.128 | Docker container, port 8053, SSH user `ubuntu` |
-| Home | pihole-home | 100.105.148.96 | LXC 105, port 53, SSH user `root` |
+| Home | pihole-home | 100.114.207.32 | Raspberry Pi DNS appliance, port 53, SSH user `ubuntu` |
 
 ---
 

@@ -8,12 +8,12 @@ source_binding: ops/bindings/estate.surface.register.yaml
 
 # Estate Boringness Scorecard
 
-- Generated: `2026-04-30T12:27:39Z`
+- Generated: `2026-04-30T14:38:04Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Repo surfaces tracked: `2`
 - Ghosts: `10`
 - Compatibility holds: `20`
-- Tombstones: `7`
+- Tombstones: `8`
 - Unknowns: `1`
 
 ## Repo Closure
@@ -75,6 +75,7 @@ source_binding: ops/bindings/estate.surface.register.yaml
 | Surface | Environment | Kind | Note |
 | --- | --- | --- | --- |
 | lxc-103-download-home | home | guest | Historical stopped guest recorded in home.proxmox.inventory.yaml. |
+| lxc-105-pihole-home | home | guest | Historical stopped guest recorded in home.proxmox.inventory.yaml. |
 | vm-101-immich-home | home | guest | Historical stopped guest recorded in home.proxmox.inventory.yaml. |
 | vm-102-vaultwarden | home | vm | Legacy Vaultwarden (superseded by infra-core) |
 | vm-200-docker-host | shop | vm | TOMBSTONED 2026-03-06 after Mint data/control-plane retirement. Live 300G VM disk removed from hot storage on 2026-03-12; keep exactly one cold restore capsule on md1400 under the Mint legacy hold lane and do not return this guest to the runtime plane. Historically hosted mint-os, artwork-module, quote-page, minio, files-api, mint-os-postgres, and mint-os-redis on pre-spine Linux Mint. If recovery is needed, restore only into an isolated temporary sandbox identity with no legacy DNS/routes.

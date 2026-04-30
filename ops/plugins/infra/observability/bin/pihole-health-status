@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+TARGET_ID="${PIHOLE_TARGET_ID:-pihole-home}"
+HOST="$(ssh_resolve_ssh_host_with_fallback "$TARGET_ID" 2>/dev/null | awk '{print $1}')"
+USER="$(ssh_resolve_user "$TARGET_ID")"
+[[ -n "$HOST" ]] || { echo "FAIL: cannot resolve $TARGET_ID" >&2; exit 1; }
+[[ -n "$USER" ]] || USER=ubuntu
+
+remote_script='
+set -euo pipefail
+echo "hostname=$(hostname)"
+echo "pihole_ftl=$(systemctl is-active pihole-FTL 2>/dev/null || true)"
+echo "unbound=$(systemctl is-active unbound 2>/dev/null || true)"
+echo "cloudflared_dns=$(systemctl is-active cloudflared-dns.service 2>/dev/null || true)"
+echo "dns_google=$(dig @127.0.0.1 google.com +short +time=3 +tries=1 | head -1 || true)"
+echo "dns_local=$(dig @127.0.0.1 pihole-home.mint.local +short +time=3 +tries=1 | head -1 || true)"
+if curl -fsSI http://127.0.0.1/admin/ >/dev/null 2>&1; then
+  echo "web_admin=ok"
+else
+  echo "web_admin=fail"
+fi
+'
+
+out="$(ssh "${USER}@${HOST}" "$remote_script" 2>/dev/null || true)"
+echo "pihole.health.status"
+echo "target_id: $TARGET_ID"
+echo "resolved_host: $HOST"
+echo "$out"
+
+ftl="$(awk -F= '/^pihole_ftl=/{print $2; exit}' <<<"$out")"
+unbound="$(awk -F= '/^unbound=/{print $2; exit}' <<<"$out")"
+dns_google="$(awk -F= '/^dns_google=/{print $2; exit}' <<<"$out")"
+dns_local="$(awk -F= '/^dns_local=/{print $2; exit}' <<<"$out")"
+web_admin="$(awk -F= '/^web_admin=/{print $2; exit}' <<<"$out")"
+
+if [[ "$ftl" == "active" && "$unbound" == "active" && -n "$dns_google" && "$dns_local" == "10.0.0.57" && "$web_admin" == "ok" ]]; then
+  echo "status: OK"
+  exit 0
+fi
+
+echo "status: ATTENTION"
+exit 1
