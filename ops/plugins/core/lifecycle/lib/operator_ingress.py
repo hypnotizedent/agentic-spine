@@ -1077,7 +1077,7 @@ def _suggested_capability_id(
         if concern_class == "platform_architecture_or_governance":
             return "controller_prompt.create"
         if concern_class == "platform_workload":
-            return "mailroom.task.enqueue"
+            return "delegate.to.execution"
     if classification in {"bind_adjacent_to_existing_seam", "staged_only_runtime_input"}:
         return "bundle.review"
     return ""

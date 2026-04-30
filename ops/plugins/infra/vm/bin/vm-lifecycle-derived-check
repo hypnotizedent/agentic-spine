@@ -127,6 +127,9 @@ if [[ "$WRITE" -eq 1 ]]; then
   tmp="$(mktemp)"
   {
     echo "# Generated from vm.lifecycle.contract.yaml"
+    echo "authority_state: projection"
+    echo "projection_of: ops/bindings/vm.lifecycle.yaml"
+    echo "source_capability: vm-lifecycle-derived-check"
     echo "version: 1"
     echo "generated_at: \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
     echo "source: \"$LIFECYCLE_REL\""
@@ -135,6 +138,27 @@ if [[ "$WRITE" -eq 1 ]]; then
   } > "$tmp"
   mv "$tmp" "$DERIVED_PATH"
   echo "generated: $DERIVED_REL"
+else
+  tmp="$(mktemp)"
+  trap 'rm -f "$tmp"' EXIT
+  {
+    echo "# Generated from vm.lifecycle.contract.yaml"
+    echo "authority_state: projection"
+    echo "projection_of: ops/bindings/vm.lifecycle.yaml"
+    echo "source_capability: vm-lifecycle-derived-check"
+    echo "version: 1"
+    echo "generated_at: \"DRIFT_CHECK_IGNORE\""
+    echo "source: \"$LIFECYCLE_REL\""
+    echo "active_vms:"
+    yq e -r '.vms[] | select(.status == "active") | "  - id: \(.id // .vmid)\n    hostname: \(.hostname)\n    proxmox_host: \(.proxmox_host)\n    ssh_target: \(.ssh_target)\n    backup_target: \(.backup_target)"' "$LIFECYCLE" 2>/dev/null
+  } > "$tmp"
+  current_tmp="$(mktemp)"
+  sed -E 's/^generated_at: .*/generated_at: "DRIFT_CHECK_IGNORE"/' "$DERIVED_PATH" > "$current_tmp"
+  if ! diff -u "$tmp" "$current_tmp" >/dev/null; then
+    err "$DERIVED_REL is stale; run vm-lifecycle-derived-check --write"
+  fi
+  rm -f "$tmp" "$current_tmp"
+  trap - EXIT
 fi
 
 echo "vm.lifecycle.derived.check"

@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from pathlib import Path
+from typing import Any
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -26,6 +27,25 @@ ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 
 import operator_ingress as oi
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _operator_route(path: str) -> str:
+    contract = _load_yaml(ROOT / "ops/bindings/operator.cockpit.contract.yaml")
+    authority = contract.get("authority") if isinstance(contract.get("authority"), dict) else {}
+    base = os.environ.get("OPERATOR_COCKPIT_URL") or str(authority.get("public_operator_url") or "").strip()
+    if not base:
+        raise RuntimeError("operator cockpit URL missing; set OPERATOR_COCKPIT_URL or restore operator.cockpit.contract.yaml")
+    return base.rstrip("/") + "/" + path.lstrip("/")
 
 
 def main() -> int:
@@ -82,8 +102,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--remote-url",
-        default="https://spine.ronny.works/submit",
-        help="Canonical remote submit endpoint URL (default: https://spine.ronny.works/submit).",
+        default=None,
+        help="Canonical remote submit endpoint URL (default: operator.cockpit.contract.yaml public_operator_url + /submit).",
     )
     parser.add_argument(
         "--self-check",
@@ -155,8 +175,14 @@ def main() -> int:
             headers["CF-Access-Client-Id"] = cf_id
             headers["CF-Access-Client-Secret"] = cf_secret
 
+        try:
+            remote_url = args.remote_url or _operator_route("/submit")
+        except Exception as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
+
         req = urllib.request.Request(
-            args.remote_url,
+            remote_url,
             data=payload,
             headers=headers,
             method="POST",

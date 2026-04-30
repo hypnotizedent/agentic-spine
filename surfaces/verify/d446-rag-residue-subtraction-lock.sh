@@ -59,4 +59,11 @@ for cap in rag.direct.health rag.direct.quality rag.direct.retrieve rag.direct.q
   rg -q "^[[:space:]]*$cap:" "$ROOT/ops/capabilities.yaml" || fail "missing direct RAG capability: $cap"
 done
 
+if rg -n '100\.98\.70\.70:11434|100\.71\.17\.29:6333' "$ROOT/ops/plugins/infra/rag/bin" >/tmp/d446-rag-endpoint-residue.txt 2>/dev/null; then
+  cat /tmp/d446-rag-endpoint-residue.txt >&2
+  rm -f /tmp/d446-rag-endpoint-residue.txt
+  fail "RAG runtime scripts must derive Ollama/Qdrant endpoints from rag.workspace.contract.yaml or service catalogs, not hardcoded host literals"
+fi
+rm -f /tmp/d446-rag-endpoint-residue.txt
+
 echo "D446 PASS: retired AnythingLLM/remote-reindex RAG residue is absent from current agent grammar and direct RAG remains canonical"

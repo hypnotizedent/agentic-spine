@@ -620,13 +620,9 @@ fi
 
 # D107 removed — gate retired (download-stack/streaming-stack VMs decommissioned 2026-03-23).
 # Registry: gate.registry.yaml retired: true. Script deleted.
-CURRENT_GATE="D116"
-echo -n "D116 Mailroom bridge consumers registry... "
-if [[ -x "$SP/surfaces/verify/d116-mailroom-bridge-consumers-registry-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d116-mailroom-bridge-consumers-registry-lock.sh" "D116"
-else
-  warn "mailroom bridge consumers registry gate not present"
-fi
+# D116 retired — mailroom bridge consumer parity is compatibility-only and no
+# longer a public promotion/entry authority. Active execution pickup truth is
+# guarded by D452 and operational closeout truth by D440.
 CURRENT_GATE="D121"
 echo -n "D121 Fabric boundary lock... "
 if [[ -x "$SP/surfaces/verify/d121-fabric-boundary-lock.sh" ]]; then

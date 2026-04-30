@@ -234,9 +234,12 @@ operator intent
 If no worker will explicitly claim the delegation, do not assume execution will
 occur. `delegated` is not autonomous lane admission.
 
-### Operational Mailroom Task Lane
+### Expert/Internal Operational Task Lane
 
-Autonomous/headless execution lives on the mailroom task lane:
+Autonomous/headless execution is realized today by an internal operational task
+lane. This is expert control-plane machinery, not public operator grammar and
+not role-runtime promotion authority. Public readback should say `execution
+pickup`; use raw task capability names only for drilldown or worker debugging.
 
 ```
 operator or system intent
@@ -252,6 +255,8 @@ controller-prompt class is currently capability-backed rather than open-ended
 `agent_tool` execution. The worker claims the task, proves liveness, executes
 the allowlisted capability, then drives canonical packet/loop closeout through
 `mailroom.task.complete|mailroom.task.fail` plus `controller_prompt.close`.
+It does not decide node admission, runtime placement, backup authority,
+watcher/observability authority, or VM/service retirement.
 
 This is the node-architecture path for unattended work:
 

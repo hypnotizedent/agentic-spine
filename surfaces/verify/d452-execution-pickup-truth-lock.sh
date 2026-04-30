@@ -75,6 +75,10 @@ grep -q "Worker: claimed=" "$WAVE_SH" || fail "operational wave dispatch must ru
 if grep -q "deferred-agent-tool" "$WAVE_SH"; then
   fail "operational wave dispatch must not route through deferred agent-tool bridge"
 fi
+if grep -Eq 'Drilldown:.*mailroom\.task' "$STATUS_BIN"; then
+  fail "execution pickup human output must not teach raw mailroom.task.* drilldown"
+fi
+grep -q "internal task lifecycle" "$STATUS_BIN" || fail "execution pickup drilldown must keep task lifecycle internal"
 
 python3 - "$ROOT/ops/capabilities.yaml" "$ROOT/ops/bindings/mailroom.task.worker.contract.yaml" <<'PY'
 import sys
@@ -87,6 +91,15 @@ worker_contract_path = Path(sys.argv[2])
 
 capabilities = (yaml.safe_load(capabilities_path.read_text(encoding="utf-8")) or {}).get("capabilities") or {}
 worker_contract = yaml.safe_load(worker_contract_path.read_text(encoding="utf-8")) or {}
+boundary = worker_contract.get("authority_boundary") or {}
+if boundary.get("public_operator_language") != "execution.pickup.status":
+    raise SystemExit("D452 FAIL: mailroom worker contract must point public language to execution.pickup.status")
+if boundary.get("operator_grammar_status") != "expert_internal":
+    raise SystemExit("D452 FAIL: mailroom worker contract must be expert_internal")
+not_authority_for = set(boundary.get("not_authority_for") or [])
+for required in {"node_admission", "role_runtime_promotion", "runtime_placement", "backup_authority"}:
+    if required not in not_authority_for:
+        raise SystemExit(f"D452 FAIL: mailroom worker boundary missing not_authority_for={required}")
 allowlist = (
     ((worker_contract.get("task_execution") or {}).get("capability_allowlist"))
     or []

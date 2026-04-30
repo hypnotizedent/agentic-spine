@@ -7,11 +7,26 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 from urllib import error, request
 from urllib.parse import urljoin
 
 
-DEFAULT_URL = os.environ.get("OPERATOR_COCKPIT_URL", "http://100.71.17.29:8900/")
+ROOT = Path(__file__).resolve().parents[5]
+
+
+def _contract_operator_url() -> str:
+    try:
+        import yaml
+
+        data = yaml.safe_load((ROOT / "ops/bindings/operator.cockpit.contract.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:
+        return ""
+    authority = data.get("authority") if isinstance(data.get("authority"), dict) else {}
+    return str(authority.get("canonical_operator_url") or "").strip()
+
+
+DEFAULT_URL = os.environ.get("OPERATOR_COCKPIT_URL") or _contract_operator_url()
 DEFAULT_PATHS = ("/", "/submit", "/ingress", "/payload.json", "/mobile.json")
 
 
@@ -66,6 +81,9 @@ def main() -> int:
     parser.add_argument("--systemd-host", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    if not args.url:
+        print("operator.surface.status FAIL: operator URL missing; set OPERATOR_COCKPIT_URL or restore operator.cockpit.contract.yaml", file=sys.stderr)
+        return 1
 
     paths = args.paths or list(DEFAULT_PATHS)
     route_results = probe_url(args.url, paths, args.timeout)

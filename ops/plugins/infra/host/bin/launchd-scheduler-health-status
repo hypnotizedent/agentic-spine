@@ -34,7 +34,6 @@ WEEKDAY_NAMES = {
     7: "Sun",
 }
 
-REMOTE_EXECUTION_HOST_TARGET = "ai-consolidation"
 @dataclass
 class JobEvidence:
     timestamp: datetime | None
@@ -203,13 +202,13 @@ def label_to_systemd_unit(label: str) -> str:
     return f"spine-{name.replace('.', '-')}"
 
 
-def _remote_execution_host_connection(root: Path) -> tuple[str, str, list[str]] | None:
+def _remote_execution_host_connection(root: Path, target_id: str) -> tuple[str, str, list[str]] | None:
     resolver = root / "ops" / "lib" / "ssh-resolve.sh"
-    if not resolver.is_file():
+    if not resolver.is_file() or not target_id:
         return None
 
     resolved = shell_read(
-        f'source "{resolver}" && ssh_resolve_ssh_host_with_fallback "{REMOTE_EXECUTION_HOST_TARGET}" 3 || true'
+        f'source "{resolver}" && ssh_resolve_ssh_host_with_fallback "{target_id}" 3 || true'
     )
     if not resolved:
         return None
@@ -220,12 +219,12 @@ def _remote_execution_host_connection(root: Path) -> tuple[str, str, list[str]] 
     if not host or path_used == "unreachable":
         return None
 
-    user = shell_read(f'source "{resolver}" && ssh_resolve_user "{REMOTE_EXECUTION_HOST_TARGET}" "ubuntu"')
+    user = shell_read(f'source "{resolver}" && ssh_resolve_user "{target_id}" "ubuntu"')
     if not user:
         user = "ubuntu"
 
     identity_result = subprocess.run(
-        ["bash", "-lc", f'source "{resolver}" && ssh_resolve_machine_identity_opts "{REMOTE_EXECUTION_HOST_TARGET}"'],
+        ["bash", "-lc", f'source "{resolver}" && ssh_resolve_machine_identity_opts "{target_id}"'],
         capture_output=True,
         text=True,
         check=False,
@@ -234,16 +233,19 @@ def _remote_execution_host_connection(root: Path) -> tuple[str, str, list[str]] 
     return host, user, identity_opts
 
 
-def remote_systemd_probe(root: Path, label: str, unit: str = "", scope: str = "system") -> dict[str, Any] | None:
+def remote_systemd_probe(root: Path, label: str, unit: str = "", scope: str = "system", host: str = "") -> dict[str, Any] | None:
     if not unit and label not in {
         "com.ronny.domain-inventory-refresh-daily",
         "com.ronny.simplefin-daily-sync",
     }:
         return None
 
-    conn = _remote_execution_host_connection(root)
+    if not host:
+        return {"reachable": False, "error": "runtime_host_missing"}
+
+    conn = _remote_execution_host_connection(root, host)
     if conn is None:
-        return {"reachable": False, "error": "execution_host_unreachable"}
+        return {"reachable": False, "error": f"runtime_host_unreachable:{host}"}
 
     host, user, identity_opts = conn
     unit = unit.strip()
@@ -603,6 +605,7 @@ def build_payload(root: Path) -> dict[str, Any]:
         proof_channel_type = str(entry.get("proof_channel_type") or "").strip()
         proof_channel_unit = str(entry.get("proof_channel_unit") or "").strip()
         proof_channel_scope = str(entry.get("proof_channel_scope") or "system").strip() or "system"
+        proof_channel_host = str(entry.get("proof_channel_host") or "").strip()
         mode = str(entry.get("mode") or "").strip()
         remote_required = proof_channel_type == "systemd_journal" or label in {
             "com.ronny.domain-inventory-refresh-daily",
@@ -612,7 +615,7 @@ def build_payload(root: Path) -> dict[str, Any]:
         cadence_seconds, schedule = cadence_from_plist(plist_payload)
         job_name = label.replace("com.ronny.", "", 1)
 
-        remote_probe = remote_systemd_probe(root, label, proof_channel_unit, proof_channel_scope)
+        remote_probe = remote_systemd_probe(root, label, proof_channel_unit, proof_channel_scope, proof_channel_host)
         daemon_active = False
         if remote_probe and remote_probe.get("reachable"):
             daemon_active = (

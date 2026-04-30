@@ -9,6 +9,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INVENTORY="$ROOT/ops/bindings/domains/backup/backup.inventory.yaml"
 SCHEDULE="$ROOT/ops/bindings/domains/backup/backup.schedule.yaml"
 DOC="$ROOT/docs/governance/domains/backup.md"
+CAPS="$ROOT/ops/capabilities.yaml"
+READBACK="$ROOT/ops/plugins/core/bin/backup-readback-admission-status"
 FIRSTBOOT="$ROOT/ops/plugins/infra/host/bin/host-operator-hardware-firstboot-claim"
 NORMALIZE="$ROOT/ops/plugins/infra/host/bin/host-operator-hardware-post-boot-normalize"
 
@@ -18,10 +20,12 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -f "$INVENTORY" ]] || fail "missing backup inventory"
 [[ -f "$SCHEDULE" ]] || fail "missing backup schedule"
 [[ -f "$DOC" ]] || fail "missing backup domain doc"
+[[ -f "$CAPS" ]] || fail "missing capability registry"
+[[ -x "$READBACK" ]] || fail "missing legacy backup readback drilldown"
 [[ -x "$FIRSTBOOT" ]] || fail "missing firstboot claim script"
 [[ -x "$NORMALIZE" ]] || fail "missing post-boot normalize script"
 
-python3 - "$INVENTORY" "$SCHEDULE" "$DOC" "$FIRSTBOOT" "$NORMALIZE" <<'PY'
+python3 - "$INVENTORY" "$SCHEDULE" "$DOC" "$CAPS" "$READBACK" "$FIRSTBOOT" "$NORMALIZE" <<'PY'
 import sys
 from pathlib import Path
 
@@ -30,8 +34,10 @@ import yaml
 inventory_path = Path(sys.argv[1])
 schedule_path = Path(sys.argv[2])
 doc_path = Path(sys.argv[3])
-firstboot_path = Path(sys.argv[4])
-normalize_path = Path(sys.argv[5])
+caps_path = Path(sys.argv[4])
+readback_path = Path(sys.argv[5])
+firstboot_path = Path(sys.argv[6])
+normalize_path = Path(sys.argv[7])
 
 RULE = (
     "If the backup plane covers the workload, old app-local backups are debt "
@@ -67,7 +73,22 @@ def load_yaml(path: Path) -> dict:
 
 inventory = load_yaml(inventory_path)
 schedule = load_yaml(schedule_path)
+caps = load_yaml(caps_path)
 doc = doc_path.read_text(encoding="utf-8")
+
+capabilities = caps.get("capabilities") or {}
+legacy_readback = capabilities.get("backup.readback.admission.status") or {}
+if legacy_readback.get("lifecycle") == "ready":
+    fail("backup.readback.admission.status must not be lifecycle=ready")
+if legacy_readback.get("lifecycle") != "expert_diagnostic":
+    fail("backup.readback.admission.status must be lifecycle=expert_diagnostic")
+desc = str(legacy_readback.get("description") or "")
+if "backup.status" not in desc or "backup.estate.readback.status" not in desc:
+    fail("legacy backup readback description must name canonical readbacks")
+
+readback_text = readback_path.read_text(encoding="utf-8")
+if "authority_state" not in readback_text or "legacy_drilldown" not in readback_text:
+    fail("legacy backup readback output must label authority_state=legacy_drilldown")
 
 policy = (
     ((inventory.get("model") or {}).get("authority_policy") or {})

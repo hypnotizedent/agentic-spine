@@ -155,7 +155,13 @@ def build_status() -> dict[str, Any]:
             else row.get("imported_count_at_birth")
         )
         expected = int(expected_raw or 0)
-        ok = actual == expected and state in {"ok", "discovery_pending", "read_only_discovered"}
+        governance_level = str(row.get("governance_level") or "")
+        declared_only = governance_level == "declared_only"
+        ok = (
+            state == "ok"
+            if declared_only
+            else actual == expected and state in {"ok", "discovery_pending", "read_only_discovered"}
+        )
         if not ok:
             failures.append(f"{row.get('import_id')}: expected={expected} actual={actual} state={state}")
         rows.append(
@@ -166,8 +172,8 @@ def build_status() -> dict[str, Any]:
                 "expected_count": expected,
                 "actual_count": actual,
                 "state": state,
-                "parity": "pass" if ok else "fail",
-                "governance_level": row.get("governance_level"),
+                "parity": "observed" if ok and declared_only else "pass" if ok else "fail",
+                "governance_level": governance_level,
                 "final_disposition": row.get("final_disposition"),
             }
         )

@@ -10,6 +10,7 @@ import sys
 import urllib.request
 import urllib.error
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
@@ -69,6 +70,25 @@ def _print_operating_semantics() -> None:
         print(f"    - {line}")
 
 
+def _load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _operator_route(path: str) -> str:
+    contract = _load_yaml(ROOT / "ops/bindings/operator.cockpit.contract.yaml")
+    authority = contract.get("authority") if isinstance(contract.get("authority"), dict) else {}
+    base = os.environ.get("OPERATOR_COCKPIT_URL") or str(authority.get("public_operator_url") or "").strip()
+    if not base:
+        raise RuntimeError("operator cockpit URL missing; set OPERATOR_COCKPIT_URL or restore operator.cockpit.contract.yaml")
+    return base.rstrip("/") + "/" + path.lstrip("/")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="operator-ingress-status",
@@ -98,8 +118,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--remote-url",
-        default="https://spine.ronny.works/ingress.json",
-        help="Canonical remote readback URL.",
+        default=None,
+        help="Canonical remote readback URL (default: operator.cockpit.contract.yaml public_operator_url + /ingress.json).",
     )
     parser.add_argument(
         "--self-check",
@@ -154,7 +174,13 @@ def main() -> int:
             headers["CF-Access-Client-Id"] = cf_id
             headers["CF-Access-Client-Secret"] = cf_secret
 
-        req = urllib.request.Request(args.remote_url, headers=headers, method="GET")
+        try:
+            remote_url = args.remote_url or _operator_route("/ingress.json")
+        except Exception as exc:
+            print(f"operator.ingress.status FAIL (remote): {exc}", file=sys.stderr)
+            return 1
+
+        req = urllib.request.Request(remote_url, headers=headers, method="GET")
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 result = json.loads(resp.read().decode("utf-8"))

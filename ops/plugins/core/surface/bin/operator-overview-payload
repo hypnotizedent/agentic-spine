@@ -23,6 +23,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 REPO = Path(__file__).resolve().parents[5]
@@ -65,6 +66,22 @@ def _run(cmd: list[str]) -> tuple[str, bool]:
         return proc.stdout.strip(), proc.returncode == 0
     except Exception as e:
         return str(e), False
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _operator_cockpit_url() -> str:
+    contract = _load_yaml(COCKPIT_CONTRACT)
+    authority = contract.get("authority") if isinstance(contract.get("authority"), dict) else {}
+    return os.environ.get("OPERATOR_COCKPIT_URL") or str(authority.get("canonical_operator_url") or "").strip()
 
 
 def _run_json(cmd: list[str]) -> dict:
@@ -114,7 +131,7 @@ def collect_operator_cockpit_contract(generated_utc: str) -> dict:
         "contract_available": COCKPIT_CONTRACT.is_file(),
         "loop_id": "LOOP-HUMAN-AGENT-FLOW-CANONICAL-RECONCILIATION-20260428",
         "generated_utc": generated_utc,
-        "route_root": os.environ.get("OPERATOR_COCKPIT_URL", "http://100.71.17.29:8900/"),
+        "route_root": _operator_cockpit_url(),
         "static_snapshot_path": str(SURFACE_OUTPUT_DIR / "index.html"),
         "payload_path": str(SURFACE_OUTPUT_DIR / "payload.json"),
         "mobile_path": str(SURFACE_OUTPUT_DIR / "mobile.json"),

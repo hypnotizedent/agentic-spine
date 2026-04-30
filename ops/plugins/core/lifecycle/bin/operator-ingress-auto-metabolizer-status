@@ -19,8 +19,6 @@ sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 import operator_ingress as oi
 
 _LABEL = "com.ronny.operator-ingress-auto-metabolizer"
-_FALLBACK_EXEC_HOST_TARGET_ID = "ai-consolidation"
-_FALLBACK_EXEC_HOST_STATE_ROOT = "/home/ubuntu/code/.runtime/spine/state"
 _STALE_THRESHOLD_SECONDS = 300  # 5 minutes — local heartbeat older than this triggers remote probe
 
 
@@ -71,9 +69,8 @@ def _resolve_custody_metadata(local_state_root: str | None = None) -> dict:
     exec_host_id = str(entry.get("active_runtime_host") or proof.get("host") or "")
     exec_host_source = "launchd.scheduler.registry"
     if not exec_host_id:
-        exec_host_id = _FALLBACK_EXEC_HOST_TARGET_ID
-        exec_host_source = "hardcoded_fallback"
-        risks.append("execution_host_id fell back to hardcoded ai-consolidation")
+        exec_host_source = "missing"
+        risks.append("execution_host_id missing from launchd.scheduler.registry/proof_channel")
 
     exec_state_root = str(systemd_env.get("SPINE_STATE") or "")
     exec_state_source = "systemd_unit_environment" if exec_state_root else ""
@@ -81,9 +78,8 @@ def _resolve_custody_metadata(local_state_root: str | None = None) -> dict:
         exec_state_root = _derive_state_root_from_heartbeat(str(proof.get("path") or ""))
         exec_state_source = "launchd.scheduler.registry.proof_channel.path" if exec_state_root else ""
     if not exec_state_root:
-        exec_state_root = _FALLBACK_EXEC_HOST_STATE_ROOT
-        exec_state_source = "hardcoded_fallback"
-        risks.append("execution_host_runtime_path fell back to hardcoded state root")
+        exec_state_source = "missing"
+        risks.append("execution_host_runtime_path missing from systemd environment/proof_channel")
 
     local_runtime_path = local_state_root or os.environ.get("SPINE_STATE", "")
     local_heartbeat = (

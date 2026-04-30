@@ -55,11 +55,18 @@ def embedding_config(doc: dict[str, Any]) -> dict[str, Any]:
     policy = doc.get("index_policy") if isinstance(doc.get("index_policy"), dict) else {}
     sync_policy = doc.get("sync_policy") if isinstance(doc.get("sync_policy"), dict) else {}
     load_shaping = sync_policy.get("load_shaping") if isinstance(sync_policy.get("load_shaping"), dict) else {}
+    ollama_url = os.environ.get("OLLAMA_URL") or embedding.get("ollama_url")
+    qdrant_url = os.environ.get("QDRANT_URL") or embedding.get("qdrant_url")
+    if not ollama_url or not qdrant_url:
+        raise RuntimeError(
+            "RAG endpoint configuration missing; restore ops/bindings/domains/rag/rag.workspace.contract.yaml "
+            "or set OLLAMA_URL and QDRANT_URL"
+        )
     return {
         "model": os.environ.get("RAG_EMBED_MODEL") or embedding.get("model") or "mxbai-embed-large:latest",
         "dimensions": int(embedding.get("expected_dimensions") or 1024),
-        "ollama_url": os.environ.get("OLLAMA_URL") or embedding.get("ollama_url") or "http://100.98.70.70:11434",
-        "qdrant_url": os.environ.get("QDRANT_URL") or embedding.get("qdrant_url") or "http://100.71.17.29:6333",
+        "ollama_url": ollama_url,
+        "qdrant_url": qdrant_url,
         "collection": os.environ.get("RAG_QDRANT_COLLECTION") or policy.get("collection") or "spine-runtime-authority",
         "embed_timeout_sec": int(
             os.environ.get("RAG_EMBED_TIMEOUT_SEC")
