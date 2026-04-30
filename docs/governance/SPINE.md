@@ -87,6 +87,8 @@ complete only when the closure questions in
 [`first.class.change.closure.contract.yaml`](../../ops/bindings/first.class.change.closure.contract.yaml)
 are answered:
 
+- Which existing L1/L2 home owns this concern, and what cross-plane readback was
+  checked before mutation?
 - What is the one canonical authority after the change?
 - What old surface, field, wrapper, vocabulary, or readback did it replace?
 - What remains compatibility-only, projection-only, or expert drilldown?

@@ -1,11 +1,12 @@
 ---
-status: authoritative
+status: reference
 owner: "@ronny"
 type: derived-conclusion-note
 loop: LOOP-OPERATOR-INGRESS-TO-AGENT-WORK-20260425
 wave: WAVE-OPERATOR-INGRESS-TO-AGENT-WORK
 scope: design-only
 last_verified: "2026-04-25"
+authority_note: "Reference-only design note. Current human-intent authority lives in AGENTS.md, SESSION_PROTOCOL.md, actor.boundary.contract.yaml, operator ingress lifecycle, and intent-use receipts."
 ---
 
 # Operator Ingress to Agent Work -- Promotion Criteria

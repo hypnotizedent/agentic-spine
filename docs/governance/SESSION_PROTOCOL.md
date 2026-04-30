@@ -71,6 +71,12 @@ evidence or operator intent being carried, attach it to an existing loop when
 the fit is clear, and create a loop only when there is a bounded objective with
 acceptance and close criteria.
 
+Human intent is provenance and acceptance input, not standalone authority.
+Before mutation, resolve the owning canonical surface, confirm the request fits
+that surface, and treat examples or templates as illustrative unless the
+governed loop, packet, contract, or capability explicitly promotes them into
+objective, acceptance, exclusion, or close criteria.
+
 These are control-plane truth objects and expert/drilldown grammar. Default
 operator surfaces should center on intent, progress, blockers, acceptance, and
 verify truth rather than lead with these nouns.
@@ -195,6 +201,13 @@ demote or retire the old surface vocabulary, and make the normal readback teach
 the new canonical model. Do not leave "future cleanup/backfill" as a separate
 system unless the human steward explicitly promotes that system and names what
 it retires. Use the new canonical authority to reconcile old items.
+
+For node, appliance, service, or VM promotion work, do the cross-plane readback
+before mutation. The first read is the existing L1/L2 home and its related
+identity, runtime, storage, backup, watcher/observability, projection, and
+retirement surfaces. If those surfaces disagree, the work is a promotion
+closure problem, not a reason to build an adapter around the most recent
+example.
 
 ### Interactive Control-Surface Handoff
 

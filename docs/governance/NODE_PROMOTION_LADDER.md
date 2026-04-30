@@ -262,6 +262,64 @@ This is what "vertically aligned" means in the spine:
 
 all tell the same story.
 
+## Role Runtime Promotion Closure
+
+When a physical node, appliance, VM, or service takes over work from another
+runtime, treat the move as one role-runtime promotion closure. Do not begin with
+the most visible example word. Begin with the existing first-class homes and
+prove that every plane tells the same story.
+
+The one way of doing this is:
+
+1. **Bootstrap / first touch**
+   Use `fleet.admission.contract.yaml`,
+   `fleet.admission.classification.yaml`, and the governed bootstrap or
+   first-touch capability. Discovery, DHCP, SSH, BMC, Proxmox visibility, and
+   self-report are evidence only. They do not admit, place, or promote the
+   machine.
+2. **Admission / identity**
+   Read `node.admission.status`. Admission records what the machine is and what
+   evidence exists. It does not assign runtime duty by itself.
+3. **Role contract / workload ownership**
+   Use `node.role.contract.yaml` and this ladder. A workload moves because a
+   role owns it, not because a host happens to be reachable or spacious.
+4. **Runtime and placement**
+   Use `vm.lifecycle.yaml`, `infra.placement.policy.yaml`,
+   `infra.storage.placement.policy.yaml`, and
+   `relocation.closure.contract.yaml` for VM/service moves. A VM or appliance is
+   implementation detail once role/workload/runtime truth exists.
+5. **Storage and payload custody**
+   Use `service.data.lifecycle.registry.yaml`,
+   `storage.scaffold.authority.yaml`, and `payload.custody.status` for durable
+   paths, staging, archive, tombstone, and transfer truth.
+6. **Backup and recovery**
+   Use `backup.inventory.yaml`, `backup.locality.contract.yaml`,
+   `backup.status`, and `backup.estate.readback.status`. The new runtime is not
+   delivered until its restore or rebuild path is current and old backup truth is
+   demoted or retired.
+7. **Watcher / observability**
+   Use witness surfaces such as `watcher.health`,
+   `watcher.input.projection.status`, `observability.context.status`, and
+   `prometheus.targets.status` to prove visibility. Observability is witness
+   truth; it must not decide placement, admission, backup, or role authority.
+8. **Projection / operator readback**
+   Regenerate or verify generated projections only from living authorities. If a
+   stale generated file, design note, dashboard, or expert diagnostic can still
+   make the old runtime sound current, the promotion is not closed.
+9. **Retirement**
+   Use `lifecycle.closure.contract.yaml` and the relevant VM/service/appliance
+   controls to mark the old source as rollback hold, retired, tombstoned, or
+   purged. A destroyed VM, disabled service, or deleted backup is not closure
+   unless the authoritative state and readbacks say the same thing.
+
+This sequence is not a new subsystem. It is the closure behavior already
+required by the promotion ladder, first-class change closure, relocation
+closure, backup authority, storage custody, and witness-only observability.
+
+Examples such as Pi-hole, Frigate, observability, or a new Dell are test cases,
+not scope boundaries. Agents must identify the systemic promotion family first,
+then apply the existing homes above to the concrete example.
+
 ## Current Delivery Order
 
 For the current MVP, the delivery order is:

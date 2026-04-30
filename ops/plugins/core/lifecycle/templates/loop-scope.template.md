@@ -47,6 +47,7 @@ supersedes: []
 
 <!-- Authors: list what is explicitly OUT of scope and what prior work this loop replaces. -->
 <!-- Agents must not rediscover or re-audit excluded surfaces. -->
+<!-- Examples are illustrative only; they do not create scope or authority unless promoted into governed fields above. -->
 
 ### Exclusions
 <!-- Surfaces, seams, or prior work explicitly not in scope for this loop. -->

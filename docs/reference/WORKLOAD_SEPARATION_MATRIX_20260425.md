@@ -1,11 +1,12 @@
 ---
-status: authoritative
+status: reference
 owner: "@ronny"
 type: derived-conclusion-note
 loop: LOOP-WORKLOAD-SEPARATION-NORMALIZATION-20260425
 wave: WAVE-WORKLOAD-SEPARATION-NORMALIZATION
 scope: design-only
 last_verified: "2026-04-25"
+authority_note: "Reference-only design note. Current role/runtime authority lives in AGENTS.md, NORTH_STAR.md, NODE_PROMOTION_LADDER.md, node.role.contract.yaml, and live capability readbacks."
 ---
 
 # Workload Separation Matrix — Design Note

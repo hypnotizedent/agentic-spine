@@ -139,6 +139,22 @@ existing loop when the fit is clear; create a loop only when there is a bounded
 objective with acceptance and close criteria.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
+Human intent, examples, and packet prose are inputs to consider, not authority
+by themselves. They become actionable only when attached to the existing
+governed home that owns the concern. Examples and templates illustrate shape;
+they do not widen scope, create permission, or override contracts.
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md),
+[`SPINE.md`](docs/governance/SPINE.md))
+
+When the human steward names a concrete example such as a Pi, Frigate, a Dell,
+or a VM, do not collapse the request into that example if the surrounding
+language asks for a systemic pattern. First identify the L1/L2 family, the
+existing canonical home, and the old surfaces to subtract; only then touch the
+example-specific runtime.
+(Authority: [`NORTH_STAR.md`](NORTH_STAR.md),
+[`NODE_PROMOTION_LADDER.md`](docs/governance/NODE_PROMOTION_LADDER.md),
+[`first.class.change.closure.contract.yaml`](ops/bindings/first.class.change.closure.contract.yaml))
+
 The primary `agentic-spine` checkout must stay on `main` and clean. If repo
 mutation is needed, do the work in a managed worktree; do not use the primary
 checkout as a work lane.
