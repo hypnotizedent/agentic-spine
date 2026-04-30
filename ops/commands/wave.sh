@@ -5,7 +5,7 @@
 #
 # This is an expert/internal surface. Normal operator work flows through
 # governed capabilities (ops cap run wave.execute, delegate.to.execution).
-# Engine internals (wave-execute, orchestration-wave, dispatch.sh) call
+# Engine internals (wave-execute, orchestration-wave) call
 # this directly; operators should not need to.
 #
 # Usage:

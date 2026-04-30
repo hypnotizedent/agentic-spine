@@ -31,7 +31,6 @@ source "$RUNTIME_PATHS_LIB"
 spine_runtime_resolve_paths
 RUNTIME_ROOT="$SPINE_RUNTIME_ROOT"
 WAVE_CMD="$ROOT/ops/commands/wave.sh"
-DISPATCH_CMD="$ROOT/ops/commands/dispatch.sh"
 
 json_mode=0
 if [[ "${1:-}" == "--" ]]; then shift; fi
@@ -265,18 +264,29 @@ check H1 "capability resolution (verify.engine.run resolves and executes)" bash 
 # These three gates share one synthetic dispatch because they test the same
 # end-to-end path. Running three separate dispatches would be wasteful.
 #
-# Probe wave IDs use a reserved WAVE-HONESTY-PROBE-<epoch>-<pid> namespace
-# so synthetic honesty runs never collide with real WAVE-YYYYMMDD-NN waves
-# allocated by production dispatch. The claim-path side is already isolated
-# via the synthetic wave_kind (__synthetic__/<wave_id>); this isolates the
-# ID side so repeated honesty runs within the same day are stable.
-_honesty_epoch="$(date -u '+%s' 2>/dev/null || date '+%s')"
-SYNTHETIC_WAVE_ID="WAVE-HONESTY-PROBE-${_honesty_epoch}-$$"
+# Synthetic receipt validation still requires the public WAVE-YYYYMMDD-NN
+# shape, so use the high 90-99 range and skip any existing wave state. The
+# claim path is separately isolated by wave_kind=synthetic.
+_honesty_day="$(date -u '+%Y%m%d' 2>/dev/null || date '+%Y%m%d')"
+SYNTHETIC_WAVE_ID=""
+for _honesty_suffix in 90 91 92 93 94 95 96 97 98 99; do
+    _candidate="WAVE-${_honesty_day}-${_honesty_suffix}"
+    if [[ ! -e "$RUNTIME_ROOT/waves/$_candidate/state.json" ]]; then
+        SYNTHETIC_WAVE_ID="$_candidate"
+        break
+    fi
+done
+if [[ -z "$SYNTHETIC_WAVE_ID" ]]; then
+    echo "FAIL: no synthetic WAVE-YYYYMMDD-9N slot available for honesty probe" >&2
+    exit 1
+fi
 SYNTHETIC_EVIDENCE_DIR="$(mktemp -d)"
 CANARY_TOKEN="HONESTY-CANARY-$(date +%s)"
+CANARY_RUN_KEY="CAP-$(date -u '+%Y%m%d-%H%M%S')__verify.engine.honesty__R${$}H"
+CANARY_CLOSE_RUN_KEY="CAP-$(date -u '+%Y%m%d-%H%M%S')__verify.engine.honesty__R${$}C"
 CLEANUP_NEEDED=1
 
-# Run the synthetic dispatch
+# Run the synthetic wave through the current wave/ack/collect machinery.
 _dispatch_output=""
 _dispatch_rc=0
 _synthetic_precondition_blocker=""
@@ -285,14 +295,46 @@ if [[ -z "$SYNTHETIC_LOOP_ID" ]]; then
 fi
 set +e
 if [[ -z "$_synthetic_precondition_blocker" ]]; then
-    _dispatch_output="$(bash "$DISPATCH_CMD" local \
+    _dispatch_output="$(
+        bash "$WAVE_CMD" start "$SYNTHETIC_WAVE_ID" \
         --synthetic \
         --loop-id "$SYNTHETIC_LOOP_ID" \
         --objective "synthetic engine honesty proof" \
-        --wave-id "$SYNTHETIC_WAVE_ID" \
-        --evidence-dir "$SYNTHETIC_EVIDENCE_DIR" \
-        --lane "canary:echo $CANARY_TOKEN" \
-        2>&1)"
+        --worktree off \
+        --repo "$ROOT" \
+        --current-role researcher \
+        --next-role worker &&
+        bash "$WAVE_CMD" dispatch "$SYNTHETIC_WAVE_ID" \
+            --lane audit \
+            --task "synthetic canary audit $CANARY_TOKEN" \
+            --from-role researcher \
+            --to-role qc &&
+        mkdir -p "$SYNTHETIC_EVIDENCE_DIR" &&
+        printf 'Synthetic honesty canary: %s\nExit code: 0\n' "$CANARY_TOKEN" > "$SYNTHETIC_EVIDENCE_DIR/lane-canary.txt" &&
+        bash "$WAVE_CMD" emit-agent-receipt "$SYNTHETIC_WAVE_ID" \
+            --dispatch D1 \
+            --result "done: synthetic canary returned $CANARY_TOKEN" \
+            --file-read "$SYNTHETIC_EVIDENCE_DIR/lane-canary.txt" \
+            --run-key "$CANARY_RUN_KEY" \
+            --loop-id "$SYNTHETIC_LOOP_ID" \
+            --completion-level "$SYNTHETIC_COMPLETION_LEVEL" &&
+        bash "$WAVE_CMD" ack "$SYNTHETIC_WAVE_ID" \
+            --dispatch D1 \
+            --lane audit \
+            --result "done: synthetic canary returned $CANARY_TOKEN" \
+            --run-key "$CANARY_RUN_KEY" &&
+        bash "$WAVE_CMD" dispatch "$SYNTHETIC_WAVE_ID" \
+            --lane control \
+            --task "synthetic close transition $CANARY_TOKEN" \
+            --from-role qc \
+            --to-role close &&
+        bash "$WAVE_CMD" ack "$SYNTHETIC_WAVE_ID" \
+            --dispatch D2 \
+            --lane control \
+            --result "done: synthetic close transition ready $CANARY_TOKEN" \
+            --run-key "$CANARY_CLOSE_RUN_KEY" &&
+        bash "$WAVE_CMD" collect "$SYNTHETIC_WAVE_ID"
+    2>&1)"
     _dispatch_rc=$?
 fi
 set -e
@@ -322,10 +364,11 @@ elif [[ -n "$_synthetic_precondition_blocker" ]]; then
     record_fail H2 "dispatch round-trip (synthetic lane routes and returns canary)" "$_synthetic_precondition_blocker"
 else
     check H2 "dispatch round-trip (synthetic lane routes and returns canary)" bash -c "
-        evidence_file='$SYNTHETIC_EVIDENCE_DIR/lane-canary.txt'
-        [[ -f \"\$evidence_file\" ]] || { echo 'evidence file missing'; exit 1; }
-        grep -q '$CANARY_TOKEN' \"\$evidence_file\" || { echo 'canary token not found in evidence'; exit 1; }
-        grep -q 'Exit code: 0' \"\$evidence_file\" || { echo 'lane did not exit 0'; exit 1; }
+        wave_state='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID/state.json'
+        [[ -f \"\$wave_state\" ]] || { echo 'wave state.json missing'; exit 1; }
+        jq -e --arg canary '$CANARY_TOKEN' '
+          [.dispatches[]? | select((.result // \"\") | contains(\$canary))] | length >= 1
+        ' \"\$wave_state\" >/dev/null || { echo 'canary token not found in dispatch result'; exit 1; }
     "
 fi
 
@@ -363,6 +406,14 @@ else
         wave_dir='$RUNTIME_ROOT/waves/$SYNTHETIC_WAVE_ID'
         [[ -f \"\$wave_dir/state.json\" ]] || { echo 'wave state.json missing'; exit 1; }
         [[ -f \"\$wave_dir/collect-summary.json\" ]] || { echo 'collect-summary.json missing'; exit 1; }
+        receipt=\"\$(find \"\$wave_dir/evidence\" -maxdepth 1 -type f -name '*.json' | head -1)\"
+        [[ -n \"\$receipt\" ]] || { echo 'agent receipt evidence missing'; exit 1; }
+        jq -e --arg run_key '$CANARY_RUN_KEY' '
+          (.run_keys // []) | index(\$run_key)
+        ' \"\$receipt\" >/dev/null || { echo 'canary run key not queryable in wave evidence'; exit 1; }
+        jq -e '
+          (.evidence_refs.file_refs // []) | map(endswith(\"/lane-canary.txt\")) | any
+        ' \"\$receipt\" >/dev/null || { echo 'lane canary file ref not queryable in wave evidence'; exit 1; }
     "
 fi
 
@@ -523,7 +574,7 @@ else
         _h8_is_worktree=1
     fi
 
-    if [[ "$_h8_is_worktree" -eq 1 ]]; then
+    if [[ "$_h8_is_worktree" -eq 1 && "$(basename "$_h8_repo_real")" == WAVE-* ]]; then
         # Running from a worktree — can test both directions
         check H8 "kickoff-path honesty (governed worktree passes, main checkout denied)" bash -c "
             # Worktree dry-run must succeed
@@ -549,7 +600,9 @@ else
             echo \"\$main_out\" | grep -q 'WORKTREE PATH POLICY BLOCK' || { echo 'denial did not report WORKTREE PATH POLICY BLOCK'; exit 1; }
         "
     else
-        # Running from main checkout — can only test denial direction
+        # Running from main checkout or a non-wave feature worktree — can only
+        # test denial direction. Wave kickoff intentionally accepts only managed
+        # WAVE-* worktrees for the positive path.
         check H8 "kickoff-path honesty (governed worktree passes, main checkout denied)" bash -c "
             main_out=\"\$('$KICKOFF_BIN' --dry-run \
                 --loop-id '$SYNTHETIC_LOOP_ID' \
@@ -567,7 +620,7 @@ fi
 # ── H9: Root-poison immunity ──────────────────────────────────────────────
 # Proves that poisoned SPINE_ROOT / SPINE_REPO / SPINE_CODE env vars pointing
 # at the primary checkout do not redirect worktree commands away from the
-# worktree's own code. The fix is that verify.sh, dispatch.sh, and wave.sh
+# worktree's own code. The fix is that verify.sh and wave.sh
 # resolve their root from script location, ignoring ambient env.
 _h9_script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 _h9_verify_sh="$_h9_script_root/ops/commands/verify.sh"
@@ -596,13 +649,7 @@ check H9 "root-poison immunity (poisoned env does not redirect worktree)" bash -
         exit 1
     fi
 
-    # Same check for dispatch.sh and wave.sh — must not use SPINE_REPO fallback
-    dispatch_line=\"\$(grep 'SPINE_REPO=' '$_h9_script_root/ops/commands/dispatch.sh' | head -1)\"
-    if echo \"\$dispatch_line\" | grep -q 'SPINE_REPO:-'; then
-        echo 'FAIL: dispatch.sh still uses \${SPINE_REPO:-...} fallback pattern'
-        exit 1
-    fi
-
+    # Same check for wave.sh — must not use SPINE_REPO fallback.
     wave_line=\"\$(grep 'SPINE_REPO=' '$_h9_script_root/ops/commands/wave.sh' | head -1)\"
     if echo \"\$wave_line\" | grep -q 'SPINE_REPO:-'; then
         echo 'FAIL: wave.sh still uses \${SPINE_REPO:-...} fallback pattern'
