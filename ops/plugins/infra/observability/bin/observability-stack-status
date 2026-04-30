@@ -1,26 +1,41 @@
 #!/usr/bin/env bash
-# observability-stack-status - Unified health check for all observability services on VM 205
+# observability-stack-status - Unified health check for observability services
 #
 # Probes: Prometheus, Grafana, Loki, Uptime Kuma, Node Exporter
 # Source: services.health.yaml (host: observability)
 #
 # Usage:
 #   observability-stack-status
+#   observability-stack-status --target observability-r620
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
 BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
+TARGET="observability"
+SOURCE_HOST="observability"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target) TARGET="${2:?}"; shift 2 ;;
+    --source-host) SOURCE_HOST="${2:?}"; shift 2 ;;
+    -h|--help)
+      sed -n '1,12p' "$0"
+      exit 0
+      ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
 
 # Resolve host via binding with LAN→Tailscale fallback
 source "${SPINE_ROOT}/ops/lib/ssh-resolve.sh"
-_resolve_result="$(ssh_resolve_host_with_fallback "observability" 2)" || true
+_resolve_result="$(ssh_resolve_host_with_fallback "$TARGET" 2)" || true
 _RESOLVED_IP="$(echo "$_resolve_result" | awk '{print $1}')"
 _PATH_USED="$(echo "$_resolve_result" | awk '{print $2}')"
-_LAN_IP="$(ssh_resolve_host "observability")"
-
-stop(){ echo "STOP (2): $*" >&2; exit 2; }
+_LAN_IP="$(ssh_resolve_host "$SOURCE_HOST")"
 
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
@@ -32,7 +47,8 @@ DEF_MAX="$(yq -r '.defaults.max_time_sec // 10' "$BINDING")"
 COUNT="$(yq -r '.endpoints | length' "$BINDING" 2>/dev/null || echo 0)"
 
 echo "observability.stack.status"
-echo "host: observability (VM 205, ${_RESOLVED_IP}, path=${_PATH_USED})"
+echo "host: ${TARGET} (${_RESOLVED_IP}, path=${_PATH_USED})"
+echo "source_host: ${SOURCE_HOST}"
 echo
 
 pass=0
@@ -41,7 +57,7 @@ skip=0
 
 for i in $(seq 0 $((COUNT-1))); do
   host="$(yq -r ".endpoints[$i].host" "$BINDING")"
-  [[ "$host" == "observability" ]] || continue
+  [[ "$host" == "$SOURCE_HOST" ]] || continue
 
   id="$(yq -r ".endpoints[$i].id" "$BINDING")"
   url="$(yq -r ".endpoints[$i].url" "$BINDING")"

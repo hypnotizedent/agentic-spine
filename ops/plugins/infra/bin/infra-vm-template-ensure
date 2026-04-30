@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-vm-template-ensure
+# Ensure a Proxmox cloud-init template exists on a governed hypervisor.
+# Dry-run by default. When --execute is passed, this can copy the existing
+# source image from another governed host and create the template.
+
+SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
+PROFILES="${INFRA_VM_PROFILES:-$SPINE_REPO/ops/bindings/infra.vm.profiles.yaml}"
+
+usage() {
+  cat <<'EOF'
+infra-vm-template-ensure - Ensure a Proxmox cloud-init template exists
+
+Usage:
+  infra-vm-template-ensure --host-id <pve-host> [options] [--execute]
+
+Options:
+  --profile <profile>              Profile whose provisioning.template_vmid to use (default: spine-ready-v1)
+  --template-vmid <id>             Override template VMID
+  --template-name <name>           Template VM name (default: ubuntu-2404-cloudinit-template)
+  --source-host <pve-host>         Governed host to copy image from if target lacks it (default: pve)
+  --image-path <path>              Source/target image path (default: /var/lib/vz/template/iso/ubuntu-24.04-server-cloudimg-amd64.img)
+  --storage <storage>              Target storage (default from profile/defaults, usually local-lvm)
+  --bridge <bridge>                Target bridge (default from profile/defaults, usually vmbr0)
+  --dry-run                        Print plan only
+  --execute                        Apply template creation if missing
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+HOST_ID=""
+PROFILE="spine-ready-v1"
+TEMPLATE_VMID=""
+TEMPLATE_NAME="ubuntu-2404-cloudinit-template"
+SOURCE_HOST="pve"
+IMAGE_PATH="/var/lib/vz/template/iso/ubuntu-24.04-server-cloudimg-amd64.img"
+STORAGE=""
+BRIDGE=""
+EXECUTE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host-id) HOST_ID="${2:-}"; shift 2 ;;
+    --profile) PROFILE="${2:-}"; shift 2 ;;
+    --template-vmid) TEMPLATE_VMID="${2:-}"; shift 2 ;;
+    --template-name) TEMPLATE_NAME="${2:-}"; shift 2 ;;
+    --source-host) SOURCE_HOST="${2:-}"; shift 2 ;;
+    --image-path) IMAGE_PATH="${2:-}"; shift 2 ;;
+    --storage) STORAGE="${2:-}"; shift 2 ;;
+    --bridge) BRIDGE="${2:-}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    --dry-run) EXECUTE=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$HOST_ID" ]] || fail "--host-id is required"
+need yq
+need ssh
+[[ -f "$POLICY" ]] || fail "missing placement policy: $POLICY"
+[[ -f "$PROFILES" ]] || fail "missing VM profiles: $PROFILES"
+
+source "$SPINE_REPO/ops/lib/ssh-resolve.sh"
+
+profile_exists="$(yq e ".profiles.\"$PROFILE\" | type" "$PROFILES" 2>/dev/null || echo "null")"
+[[ "$profile_exists" == "!!map" ]] || fail "profile '$PROFILE' not found in $PROFILES"
+
+if [[ -z "$TEMPLATE_VMID" ]]; then
+  TEMPLATE_VMID="$(yq e ".profiles.\"$PROFILE\".provisioning.template_vmid // \"\"" "$PROFILES")"
+fi
+[[ "$TEMPLATE_VMID" =~ ^[0-9]+$ ]] || fail "template VMID must be numeric"
+
+[[ -n "$STORAGE" ]] || STORAGE="$(yq e ".profiles.\"$PROFILE\".provisioning.storage // .defaults.storage // \"local-lvm\"" "$PROFILES")"
+[[ -n "$BRIDGE" ]] || BRIDGE="$(yq e ".profiles.\"$PROFILE\".provisioning.bridge // .defaults.bridge // \"vmbr0\"" "$PROFILES")"
+
+host_kind="$(yq e ".hosts.\"$HOST_ID\".kind // \"\"" "$POLICY")"
+[[ "$host_kind" == "proxmox" ]] || fail "$HOST_ID is not a governed proxmox host in infra.placement.policy.yaml"
+source_kind="$(yq e ".hosts.\"$SOURCE_HOST\".kind // \"\"" "$POLICY")"
+[[ "$source_kind" == "proxmox" ]] || fail "$SOURCE_HOST is not a governed proxmox host in infra.placement.policy.yaml"
+
+host_addr="$(ssh_resolve_ssh_host_with_fallback "$HOST_ID" 2>/dev/null | awk '{print $1}')"
+host_user="$(ssh_resolve_user "$HOST_ID" "root")"
+source_addr="$(ssh_resolve_ssh_host_with_fallback "$SOURCE_HOST" 2>/dev/null | awk '{print $1}')"
+source_user="$(ssh_resolve_user "$SOURCE_HOST" "root")"
+[[ -n "$host_addr" && "$host_addr" != "unreachable" ]] || fail "cannot reach target host $HOST_ID"
+[[ -n "$source_addr" && "$source_addr" != "unreachable" ]] || fail "cannot reach source host $SOURCE_HOST"
+
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+expected_mid="$(yq e ".hosts.\"$HOST_ID\".machine_id // \"\"" "$POLICY" 2>/dev/null || echo "")"
+if [[ -n "$expected_mid" && "$expected_mid" != "null" ]]; then
+  actual_mid="$(ssh "${ssh_opts[@]}" "${host_user}@${host_addr}" 'cat /etc/machine-id 2>/dev/null' 2>/dev/null || true)"
+  [[ "$actual_mid" == "$expected_mid" ]] || fail "machine-id mismatch for $HOST_ID: expected $expected_mid got ${actual_mid:-unreachable}"
+fi
+
+source_expected_mid="$(yq e ".hosts.\"$SOURCE_HOST\".machine_id // \"\"" "$POLICY" 2>/dev/null || echo "")"
+if [[ -n "$source_expected_mid" && "$source_expected_mid" != "null" ]]; then
+  source_actual_mid="$(ssh "${ssh_opts[@]}" "${source_user}@${source_addr}" 'cat /etc/machine-id 2>/dev/null' 2>/dev/null || true)"
+  [[ "$source_actual_mid" == "$source_expected_mid" ]] || fail "machine-id mismatch for $SOURCE_HOST: expected $source_expected_mid got ${source_actual_mid:-unreachable}"
+fi
+
+template_state="$(ssh "${ssh_opts[@]}" "${host_user}@${host_addr}" "qm config '$TEMPLATE_VMID' >/dev/null 2>&1 && qm config '$TEMPLATE_VMID' | awk -F': ' '/^template:/ {print \$2}' || true")"
+image_present="$(ssh "${ssh_opts[@]}" "${host_user}@${host_addr}" "[[ -f '$IMAGE_PATH' ]] && echo yes || echo no")"
+source_image_present="$(ssh "${ssh_opts[@]}" "${source_user}@${source_addr}" "[[ -f '$IMAGE_PATH' ]] && echo yes || echo no")"
+
+echo "infra.vm.template.ensure"
+echo "mode: $([[ "$EXECUTE" -eq 1 ]] && echo execute || echo dry-run)"
+echo "host_id: $HOST_ID"
+echo "template_vmid: $TEMPLATE_VMID"
+echo "template_name: $TEMPLATE_NAME"
+echo "template_state: ${template_state:-missing}"
+echo "image_present: $image_present"
+echo "source_host: $SOURCE_HOST"
+echo "source_image_present: $source_image_present"
+echo "storage: $STORAGE"
+echo "bridge: $BRIDGE"
+echo
+
+if [[ "$template_state" == "1" ]]; then
+  echo "status: OK (template already exists)"
+  exit 0
+fi
+
+if ssh "${ssh_opts[@]}" "${host_user}@${host_addr}" "qm status '$TEMPLATE_VMID' >/dev/null 2>&1"; then
+  fail "VMID $TEMPLATE_VMID already exists on $HOST_ID but is not a template"
+fi
+[[ "$source_image_present" == "yes" || "$image_present" == "yes" ]] || fail "cloud image missing on source and target: $IMAGE_PATH"
+
+echo "planned:"
+[[ "$image_present" == "yes" ]] || echo "  copy image $SOURCE_HOST:$IMAGE_PATH -> $HOST_ID:$IMAGE_PATH"
+echo "  qm create $TEMPLATE_VMID --name $TEMPLATE_NAME --memory 2048 --cores 2 --net0 virtio,bridge=$BRIDGE"
+echo "  qm importdisk $TEMPLATE_VMID $IMAGE_PATH $STORAGE"
+echo "  qm set $TEMPLATE_VMID ... --ide2 ${STORAGE}:cloudinit --template 1"
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+  echo
+  echo "DRY-RUN: no changes applied."
+  exit 0
+fi
+
+if [[ "$image_present" != "yes" ]]; then
+  ssh "${ssh_opts[@]}" "${source_user}@${source_addr}" "cat '$IMAGE_PATH'" \
+    | ssh "${ssh_opts[@]}" "${host_user}@${host_addr}" "install -D -m 0644 /dev/stdin '$IMAGE_PATH'"
+fi
+
+remote_cmd='
+set -euo pipefail
+VMID="$1"
+NAME="$2"
+IMAGE="$3"
+STORAGE="$4"
+BRIDGE="$5"
+
+if qm status "$VMID" >/dev/null 2>&1; then
+  echo "ERROR: vmid $VMID already exists"
+  exit 1
+fi
+test -f "$IMAGE"
+qm create "$VMID" --name "$NAME" --memory 2048 --cores 2 --net0 "virtio,bridge=$BRIDGE" --ostype l26
+qm importdisk "$VMID" "$IMAGE" "$STORAGE"
+disk_ref="$(qm config "$VMID" | awk -F": " "/^unused0:/ {print \$2}")"
+[[ -n "$disk_ref" ]] || { echo "ERROR: imported disk not found as unused0"; exit 1; }
+qm set "$VMID" --scsihw virtio-scsi-single --scsi0 "$disk_ref"
+qm set "$VMID" --ide2 "${STORAGE}:cloudinit" --boot order=scsi0 --serial0 socket --vga serial0 --agent enabled=1
+qm template "$VMID"
+qm config "$VMID"
+'
+
+ssh "${ssh_opts[@]}" "${host_user}@${host_addr}" \
+  "bash -lc $(printf "%q" "$remote_cmd") -- $(printf "%q" "$TEMPLATE_VMID") $(printf "%q" "$TEMPLATE_NAME") $(printf "%q" "$IMAGE_PATH") $(printf "%q" "$STORAGE") $(printf "%q" "$BRIDGE")"
+
+echo
+echo "status: OK (template created)"

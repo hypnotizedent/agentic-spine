@@ -112,10 +112,21 @@ def main() -> None:
 
     stack = run([str(STACK_SCRIPT)])
     targets = run([str(TARGETS_SCRIPT), "--json"])
+    runtime_target = (contract.get("runtime") or {}).get("target") or {}
+    target_guest = runtime_target.get("guest_node_id")
+    target_stack = run([str(STACK_SCRIPT), "--target", str(target_guest)]) if target_guest else {}
+    target_targets = run([str(TARGETS_SCRIPT), "--json", "--target", str(target_guest)]) if target_guest else {}
     targets_json = targets.get("json") if isinstance(targets.get("json"), dict) else {}
+    target_targets_json = target_targets.get("json") if isinstance(target_targets.get("json"), dict) else {}
     stack_status = "ok" if stack["exit"] == 0 else "degraded"
     targets_status = str(targets_json.get("status") or ("ok" if targets["exit"] == 0 else "degraded"))
-    status = "ok" if stack_status == "ok" and targets_status == "ok" else "degraded"
+    target_stack_status = "ok" if target_stack and target_stack.get("exit") == 0 else ("not_configured" if not target_guest else "degraded")
+    target_targets_status = (
+        str(target_targets_json.get("status") or ("ok" if target_targets and target_targets.get("exit") == 0 else "degraded"))
+        if target_guest
+        else "not_configured"
+    )
+    status = "ok" if stack_status == "ok" and targets_status == "ok" and target_stack_status in {"ok", "not_configured"} and target_targets_status in {"ok", "not_configured"} else "degraded"
 
     payload = {
         "capability": "observability.context.status",
@@ -129,6 +140,11 @@ def main() -> None:
             "status": stack_status,
             "exit": stack["exit"],
         },
+        "target_stack": {
+            "target": target_guest,
+            "status": target_stack_status,
+            "exit": target_stack.get("exit") if target_stack else None,
+        },
         "prometheus_targets": {
             "status": targets_status,
             "exit": targets["exit"],
@@ -138,6 +154,17 @@ def main() -> None:
             "targets_down": targets_json.get("targets_down"),
             "targets_total": targets_json.get("targets_total"),
             "down_targets": targets_json.get("down_targets") or [],
+        },
+        "target_prometheus_targets": {
+            "target": target_guest,
+            "status": target_targets_status,
+            "exit": target_targets.get("exit") if target_targets else None,
+            "endpoint": target_targets_json.get("endpoint"),
+            "path": target_targets_json.get("path"),
+            "targets_up": target_targets_json.get("targets_up"),
+            "targets_down": target_targets_json.get("targets_down"),
+            "targets_total": target_targets_json.get("targets_total"),
+            "down_targets": target_targets_json.get("down_targets") or [],
         },
         "watcher": watcher_summary(),
         "backup_posture": backup_posture(),
@@ -154,12 +181,21 @@ def main() -> None:
         print(f"runtime_current: {((contract.get('runtime') or {}).get('current') or {}).get('node_id')} vmid={((contract.get('runtime') or {}).get('current') or {}).get('vmid')}")
         print(f"runtime_target: {((contract.get('runtime') or {}).get('target') or {}).get('node_id')} state={((contract.get('runtime') or {}).get('target') or {}).get('state')}")
         print(f"stack: {stack_status.upper()}")
+        if target_guest:
+            print(f"target_stack: {target_guest} {target_stack_status.upper()}")
         print(
             "prometheus_targets: "
             f"{targets_status.upper()} "
             f"({targets_json.get('targets_up')}/{targets_json.get('targets_total')} up, "
             f"{targets_json.get('targets_down')} down, path={targets_json.get('path')})"
         )
+        if target_guest:
+            print(
+                "target_prometheus_targets: "
+                f"{target_targets_status.upper()} "
+                f"({target_targets_json.get('targets_up')}/{target_targets_json.get('targets_total')} up, "
+                f"{target_targets_json.get('targets_down')} down, path={target_targets_json.get('path')})"
+            )
         print(f"watcher: {payload['watcher'].get('status')} input_projection={payload['watcher'].get('input_projection_status')}")
         print(f"backup_posture: {payload['backup_posture'].get('status')} target={payload['backup_posture'].get('target')}")
         print("stop_lines: no mutation, no backups, no restore drills, no VM cutover/decommission")

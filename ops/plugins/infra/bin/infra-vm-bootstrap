@@ -11,7 +11,7 @@ set -euo pipefail
 #   --profile <profile name>
 #   --vm-id <numeric vmid>
 
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
 PROFILES="${INFRA_VM_PROFILES:-$SPINE_REPO/ops/bindings/infra.vm.profiles.yaml}"
 SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
@@ -78,7 +78,12 @@ fi
 profile_exists="$(yq e ".profiles.\"$PROFILE\" | type" "$PROFILES" 2>/dev/null || echo "null")"
 [[ "$profile_exists" == "!!map" ]] || fail "profile '$PROFILE' not found in $PROFILES"
 
-ssh_host="$(ssh_resolve_host "$TARGET")"
+resolve_result="$(ssh_resolve_ssh_host_with_fallback "$TARGET" 5 2>/dev/null || true)"
+ssh_host="$(echo "$resolve_result" | awk '{print $1}')"
+ssh_path="$(echo "$resolve_result" | awk '{print $2}')"
+if [[ -z "$ssh_host" || "$ssh_host" == "null" ]]; then
+    ssh_host="$(ssh_resolve_host "$TARGET")"
+fi
 ssh_user="$(ssh_resolve_user "$TARGET" "root")"
 ssh_target_missing=0
 if [[ -z "$ssh_host" || "$ssh_host" == "null" ]]; then
@@ -103,7 +108,7 @@ ts_auth_secret_key="$(yq e ".profiles.\"$PROFILE\".bootstrap.tailscale_auth_secr
 
 echo "=== INFRA VM BOOTSTRAP ==="
 echo "Mode:       $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
-echo "Target:     $TARGET ($ssh_user@$ssh_host)"
+echo "Target:     $TARGET ($ssh_user@$ssh_host path=${ssh_path:-direct})"
 echo "Profile:    $PROFILE"
 echo "VM ID:      $VM_ID"
 echo "Packages:   ${packages:-none}"
@@ -194,6 +199,10 @@ fi
 
 if [[ "$REQ_DOCKER" == "true" ]]; then
   systemctl is-active --quiet docker || { echo "ERROR: docker service not running"; exit 1; }
+  current_user="$(id -un)"
+  if [[ "$current_user" != "root" ]] && getent group docker >/dev/null 2>&1; then
+    as_root usermod -aG docker "$current_user"
+  fi
 fi
 
 if [[ "$REQ_CRON" == "true" ]]; then
@@ -241,8 +250,18 @@ fi
 
 identity_opts="$(ssh_resolve_machine_identity_opts "$TARGET" 2>/dev/null)" || true
 # shellcheck disable=SC2206
-ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o ControlMaster=no -o ControlPath=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 [[ -n "$identity_opts" ]] && ssh_opts+=($identity_opts)
+if [[ "${ssh_path:-}" == "unreachable" ]]; then
+    proxy_target="$(ssh_resolve_probe_via "$TARGET")"
+    if [[ -n "$proxy_target" && "$proxy_target" != "null" ]]; then
+        proxy_ref="$(ssh_resolve_ref "$proxy_target")"
+        [[ -n "$proxy_ref" ]] || fail "probe_via target '$proxy_target' could not be resolved"
+        ssh_opts+=(-o "ProxyJump=${proxy_ref}")
+        ssh_host="$(ssh_resolve_host "$TARGET")"
+        echo "ProxyJump:  $proxy_target ($proxy_ref)"
+    fi
+fi
 ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
     "bash -lc $(printf "%q" "$remote_bootstrap") -- $(printf "%q" "$packages") $(printf "%q" "$services") $(printf "%q" "$require_tailscale") $(printf "%q" "$require_qemu") $(printf "%q" "$require_docker") $(printf "%q" "$require_cron") $(printf "%q" "$ts_auth_key") $(printf "%q" "$TARGET")"
 
