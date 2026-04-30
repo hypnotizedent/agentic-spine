@@ -1,0 +1,366 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-operator-hardware-post-boot-normalize
+# Normalize a reachable post-boot Linux host into the Stage 0 claim shape.
+# Delegates final claim validation/emission to host.operator-hardware.firstboot.claim.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+INVENTORY="${SPINE_REPO}/ops/bindings/operator.hardware.inventory.yaml"
+SSH_TARGETS="${SPINE_REPO}/ops/bindings/ssh.targets.yaml"
+FIRSTBOOT_CLAIM="${SPINE_REPO}/ops/plugins/infra/host/bin/host-operator-hardware-firstboot-claim"
+
+usage() {
+    cat <<'EOF'
+host-operator-hardware-post-boot-normalize - Normalize a reachable Linux host into Stage 0 claim shape
+
+Usage:
+  host-operator-hardware-post-boot-normalize --device <device_id> --ssh-proof-endpoint <host> [options] [--execute] [--json]
+
+Options:
+  --device <device_id>                 Device ID from operator.hardware.inventory.yaml
+  --ssh-proof-endpoint <host>          Reachable SSH endpoint for the booted host
+  --operator-user <user>               Operator user on target (default: inferred from ssh.targets.yaml, then ubuntu)
+  --hostname <name>                    Expected hostname (default: device id)
+  --source-platform <platform>         Source platform if inventory does not yet know it
+  --target-distro <name>               Target distro marker (default: ubuntu)
+  --target-distro-version <version>    Target distro version marker (default: 24.04)
+  --bootstrap-method <method>          usb_autoinstall | pxe | iventoy | manual_console_install (default: manual_console_install)
+  --installer-provenance <value>       Installer/rendering provenance string
+  --ssh-public-key-ref <path>          SSH public key reference (default: ~/.ssh/id_ed25519.pub)
+  --package-baseline-status <status>   present | partial | unknown (default: partial)
+  --package-baseline <csv>             Package baseline to put in claim
+  --entropy-marker <value>             Repeatable entropy marker
+  --claim-output <path>                Output path for generated firstboot claim
+  --sudo-password-stdin                Read sudo password from stdin for this run only
+  --execute                            Mutate the remote host and emit the claim
+  --json                               Machine-readable JSON output
+  --self-check                         Validate local dependencies and exit
+
+Default mode is dry-run. Dry-run probes SSH only and reports the planned remote mutations.
+This capability does not admit the node, assign roles, or update inventory/SSH/admission bindings.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+DEVICE=""
+SSH_PROOF_ENDPOINT=""
+OPERATOR_USER=""
+HOSTNAME=""
+SOURCE_PLATFORM=""
+TARGET_DISTRO="ubuntu"
+TARGET_DISTRO_VERSION="24.04"
+BOOTSTRAP_METHOD="manual_console_install"
+INSTALLER_PROVENANCE=""
+SSH_PUBLIC_KEY_REF="${HOME}/.ssh/id_ed25519.pub"
+PACKAGE_BASELINE_STATUS="partial"
+PACKAGE_BASELINE=""
+CLAIM_OUTPUT=""
+EXECUTE=false
+JSON_MODE=false
+SELF_CHECK=false
+SUDO_PASSWORD_STDIN=false
+SUDO_PASSWORD=""
+declare -a ENTROPY_MARKERS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device) DEVICE="${2:-}"; shift 2 ;;
+        --ssh-proof-endpoint) SSH_PROOF_ENDPOINT="${2:-}"; shift 2 ;;
+        --operator-user) OPERATOR_USER="${2:-}"; shift 2 ;;
+        --hostname) HOSTNAME="${2:-}"; shift 2 ;;
+        --source-platform) SOURCE_PLATFORM="${2:-}"; shift 2 ;;
+        --target-distro) TARGET_DISTRO="${2:-}"; shift 2 ;;
+        --target-distro-version) TARGET_DISTRO_VERSION="${2:-}"; shift 2 ;;
+        --bootstrap-method) BOOTSTRAP_METHOD="${2:-}"; shift 2 ;;
+        --installer-provenance) INSTALLER_PROVENANCE="${2:-}"; shift 2 ;;
+        --ssh-public-key-ref) SSH_PUBLIC_KEY_REF="${2:-}"; shift 2 ;;
+        --package-baseline-status) PACKAGE_BASELINE_STATUS="${2:-}"; shift 2 ;;
+        --package-baseline) PACKAGE_BASELINE="${2:-}"; shift 2 ;;
+        --entropy-marker) ENTROPY_MARKERS+=("${2:-}"); shift 2 ;;
+        --claim-output) CLAIM_OUTPUT="${2:-}"; shift 2 ;;
+        --sudo-password-stdin) SUDO_PASSWORD_STDIN=true; shift ;;
+        --execute) EXECUTE=true; shift ;;
+        --json) JSON_MODE=true; shift ;;
+        --self-check) SELF_CHECK=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+need yq
+need jq
+need ssh
+need timeout
+need date
+[[ -f "$INVENTORY" ]] || fail "inventory not found: $INVENTORY"
+[[ -x "$FIRSTBOOT_CLAIM" ]] || fail "firstboot claim capability not found: $FIRSTBOOT_CLAIM"
+
+if $SELF_CHECK; then
+    echo "host.operator-hardware.post-boot.normalize self-check ok"
+    exit 0
+fi
+
+[[ -n "$DEVICE" ]] || fail "--device is required"
+[[ -n "$SSH_PROOF_ENDPOINT" ]] || fail "--ssh-proof-endpoint is required"
+
+if $SUDO_PASSWORD_STDIN; then
+    IFS= read -r -s SUDO_PASSWORD || true
+    [[ -n "$SUDO_PASSWORD" ]] || fail "--sudo-password-stdin was set but no password was received on stdin"
+fi
+
+case "$BOOTSTRAP_METHOD" in
+    usb_autoinstall|pxe|iventoy|manual_console_install) ;;
+    *) fail "invalid bootstrap method: $BOOTSTRAP_METHOD" ;;
+esac
+
+case "$PACKAGE_BASELINE_STATUS" in
+    present|partial|unknown) ;;
+    *) fail "invalid package baseline status: $PACKAGE_BASELINE_STATUS" ;;
+esac
+
+device_json=$(yq e -o=json ".machines[] | select(.device_id == \"$DEVICE\")" "$INVENTORY" 2>/dev/null || true)
+if [[ -z "$device_json" || "$device_json" == "null" ]]; then
+    [[ -n "$SOURCE_PLATFORM" ]] || fail "device not found in inventory: $DEVICE (pass --source-platform for pre-admission normalize)"
+    device_json='{}'
+fi
+
+if [[ -z "$SOURCE_PLATFORM" ]]; then
+    SOURCE_PLATFORM="$(echo "$device_json" | jq -r '.platform // empty')"
+fi
+[[ -n "$SOURCE_PLATFORM" && "$SOURCE_PLATFORM" != "null" ]] || SOURCE_PLATFORM="unknown"
+
+if [[ -z "$HOSTNAME" ]]; then
+    HOSTNAME="$DEVICE"
+fi
+
+if [[ -z "$OPERATOR_USER" && -f "$SSH_TARGETS" ]]; then
+    OPERATOR_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$DEVICE\") | .user // \"\"" "$SSH_TARGETS" 2>/dev/null | head -1)"
+fi
+[[ -n "$OPERATOR_USER" && "$OPERATOR_USER" != "null" ]] || OPERATOR_USER="ubuntu"
+
+if [[ -z "$PACKAGE_BASELINE" ]]; then
+    PACKAGE_BASELINE="openssh-server,curl,tailscale"
+fi
+
+if [[ -z "$INSTALLER_PROVENANCE" ]]; then
+    INSTALLER_PROVENANCE="post-boot-normalize:${BOOTSTRAP_METHOD}:${TARGET_DISTRO}-${TARGET_DISTRO_VERSION}"
+fi
+
+normalize_id="post-boot-normalize-${DEVICE}-$(date -u +%Y%m%dT%H%M%SZ)"
+receipt_dir="${SPINE_STATE}/provision-receipts"
+receipt_path="${receipt_dir}/${normalize_id}.json"
+target_distro_marker="${TARGET_DISTRO} ${TARGET_DISTRO_VERSION}"
+
+remote_probe="$(
+    timeout 10 ssh \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -o ConnectTimeout=5 \
+        "${OPERATOR_USER}@${SSH_PROOF_ENDPOINT}" \
+        "sh -lc '
+            uname -s 2>/dev/null || echo unknown
+            hostname 2>/dev/null || echo unknown
+            whoami 2>/dev/null || echo unknown
+            if command -v tailscale >/dev/null 2>&1; then
+                tailscale ip -4 2>/dev/null | head -1 || true
+                tailscale status --self --json 2>/dev/null | jq -r \".Self.DNSName // .Self.HostName // empty\" 2>/dev/null || true
+            else
+                printf \"\n\n\"
+            fi
+            if [ -f /etc/spine/operator-hardware-device-id ]; then cat /etc/spine/operator-hardware-device-id; else printf \"\n\"; fi
+            if [ -f /etc/spine/bootstrap-method ]; then cat /etc/spine/bootstrap-method; else printf \"\n\"; fi
+            if [ -f /etc/spine/bootstrap-target-distro ]; then cat /etc/spine/bootstrap-target-distro; else printf \"\n\"; fi
+        '" 2>/dev/null
+)" || true
+
+[[ -n "$remote_probe" ]] || fail "ssh proof failed: non-interactive SSH did not succeed for ${OPERATOR_USER}@${SSH_PROOF_ENDPOINT}"
+
+mapfile -t remote_lines <<<"$remote_probe"
+remote_uname="${remote_lines[0]:-unknown}"
+remote_hostname="${remote_lines[1]:-unknown}"
+realized_operator_user="${remote_lines[2]:-unknown}"
+remote_tailscale_ip="${remote_lines[3]:-}"
+remote_tailscale_identity="${remote_lines[4]:-}"
+remote_tailscale_identity="${remote_tailscale_identity%.}"
+remote_tailscale_identity="${remote_tailscale_identity%%.*}"
+remote_device_marker="${remote_lines[5]:-}"
+remote_bootstrap_method="${remote_lines[6]:-}"
+remote_bootstrap_target_distro="${remote_lines[7]:-}"
+
+[[ "$remote_uname" == "Linux" ]] || fail "remote host reports uname=$remote_uname, expected Linux"
+
+tailscale_status="absent"
+if [[ -n "$remote_tailscale_ip" ]]; then
+    tailscale_status="enrolled"
+elif [[ -n "$remote_tailscale_identity" ]]; then
+    tailscale_status="pending"
+fi
+
+declare -a planned_changes=()
+[[ "$remote_hostname" == "$HOSTNAME" ]] || planned_changes+=("hostname:${remote_hostname}->${HOSTNAME}")
+[[ "$remote_device_marker" == "$DEVICE" ]] || planned_changes+=("/etc/spine/operator-hardware-device-id:${remote_device_marker:-missing}->${DEVICE}")
+[[ "$remote_bootstrap_method" == "$BOOTSTRAP_METHOD" ]] || planned_changes+=("/etc/spine/bootstrap-method:${remote_bootstrap_method:-missing}->${BOOTSTRAP_METHOD}")
+[[ "$remote_bootstrap_target_distro" == "$target_distro_marker" ]] || planned_changes+=("/etc/spine/bootstrap-target-distro:${remote_bootstrap_target_distro:-missing}->${target_distro_marker}")
+planned_changes+=("/etc/spine/post-boot-normalize-receipt:${normalize_id}")
+
+sudo_blocker=""
+
+if $EXECUTE; then
+    if $SUDO_PASSWORD_STDIN; then
+        sudo_prefix='sudo -S -p ""'
+    else
+        sudo_prefix='sudo -n'
+    fi
+    remote_script=$(cat <<EOF
+set -eu
+if [ "\$(hostname)" != "$HOSTNAME" ]; then
+  $sudo_prefix hostnamectl set-hostname "$HOSTNAME"
+fi
+$sudo_prefix install -d -m 0755 /etc/spine
+printf '%s\n' "$DEVICE" | $sudo_prefix tee /etc/spine/operator-hardware-device-id >/dev/null
+printf '%s\n' "$BOOTSTRAP_METHOD" | $sudo_prefix tee /etc/spine/bootstrap-method >/dev/null
+printf '%s\n' "$target_distro_marker" | $sudo_prefix tee /etc/spine/bootstrap-target-distro >/dev/null
+printf '%s\n' "$normalize_id" | $sudo_prefix tee /etc/spine/post-boot-normalize-receipt >/dev/null
+EOF
+)
+    if $SUDO_PASSWORD_STDIN; then
+        remote_execute_output="$(printf '%s\n' "$SUDO_PASSWORD" | timeout 20 ssh \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=5 \
+            "${OPERATOR_USER}@${SSH_PROOF_ENDPOINT}" \
+            "sh -lc $(printf '%q' "$remote_script")" 2>&1)"
+        remote_execute_status=$?
+    else
+        remote_execute_output="$(timeout 20 ssh \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=5 \
+            "${OPERATOR_USER}@${SSH_PROOF_ENDPOINT}" \
+            "sh -lc $(printf '%q' "$remote_script")" 2>&1)"
+        remote_execute_status=$?
+    fi
+    if [[ "$remote_execute_status" -eq 0 ]]; then
+        claim_args=(
+            --device "$DEVICE"
+            --hostname "$HOSTNAME"
+            --operator-user "$OPERATOR_USER"
+            --ssh-public-key-ref "$SSH_PUBLIC_KEY_REF"
+            --ssh-proof-endpoint "$SSH_PROOF_ENDPOINT"
+            --source-platform "$SOURCE_PLATFORM"
+            --target-platform linux
+            --tailscale-status "$tailscale_status"
+            --package-baseline-status "$PACKAGE_BASELINE_STATUS"
+            --package-baseline "$PACKAGE_BASELINE"
+            --key-seeding-status seeded
+            --bootstrap-method "$BOOTSTRAP_METHOD"
+            --installer-provenance "$INSTALLER_PROVENANCE"
+            --target-distro "$TARGET_DISTRO"
+            --target-distro-version "$TARGET_DISTRO_VERSION"
+            --entropy-marker "post-boot-normalize-receipt:${normalize_id}"
+            --json
+        )
+        [[ -n "$remote_tailscale_identity" ]] && claim_args+=(--tailscale-identity "$remote_tailscale_identity")
+        [[ -n "$remote_tailscale_ip" ]] && claim_args+=(--tailscale-ip "$remote_tailscale_ip")
+        for marker in "${ENTROPY_MARKERS[@]:-}"; do
+            claim_args+=(--entropy-marker "$marker")
+        done
+        [[ -n "$CLAIM_OUTPUT" ]] && claim_args+=(--output "$CLAIM_OUTPUT")
+
+        claim_json="$("$FIRSTBOOT_CLAIM" "${claim_args[@]}")"
+        claim_path="$(echo "$claim_json" | jq -r '.claim_object_path')"
+        result_status="normalized_claim_emitted"
+    else
+        claim_path=""
+        result_status="blocked_recovery_required"
+        sudo_blocker="sudo unavailable or insufficient for required normalize commands on ${OPERATOR_USER}@${SSH_PROOF_ENDPOINT}: ${remote_execute_output}"
+    fi
+else
+    claim_path=""
+    result_status="dry_run"
+fi
+
+mkdir -p "$receipt_dir"
+planned_json=$(printf '%s\n' "${planned_changes[@]:-}" | jq -R -s 'split("\n") | map(select(length > 0))')
+entropy_json=$(printf '%s\n' "${ENTROPY_MARKERS[@]:-}" | jq -R -s 'split("\n") | map(select(length > 0))')
+
+jq -n \
+    --arg capability "host.operator-hardware.post-boot.normalize" \
+    --arg normalize_id "$normalize_id" \
+    --arg device_id "$DEVICE" \
+    --arg status "$result_status" \
+    --arg mode "$($EXECUTE && echo execute || echo dry_run)" \
+    --arg endpoint "$SSH_PROOF_ENDPOINT" \
+    --arg operator_user "$OPERATOR_USER" \
+    --arg source_platform "$SOURCE_PLATFORM" \
+    --arg expected_hostname "$HOSTNAME" \
+    --arg observed_hostname "$remote_hostname" \
+    --arg realized_operator_user "$realized_operator_user" \
+    --arg bootstrap_method "$BOOTSTRAP_METHOD" \
+    --arg target_distro "$target_distro_marker" \
+    --arg tailscale_status "$tailscale_status" \
+    --arg tailscale_identity "$remote_tailscale_identity" \
+    --arg tailscale_ip "$remote_tailscale_ip" \
+    --arg claim_path "$claim_path" \
+    --arg installer_provenance "$INSTALLER_PROVENANCE" \
+    --arg sudo_blocker "$sudo_blocker" \
+    --argjson planned_changes "$planned_json" \
+    --argjson entropy_markers "$entropy_json" \
+    '{
+      capability: $capability,
+      normalize_id: $normalize_id,
+      device_id: $device_id,
+      status: $status,
+      mode: $mode,
+      control_path: {
+        kind: "ssh",
+        endpoint: $endpoint,
+        operator_user: $operator_user,
+        proof_status: "key_verified"
+      },
+      subject: {
+        source_platform: $source_platform,
+        target_platform_truth: "linux",
+        expected_hostname: $expected_hostname,
+        observed_hostname_before: $observed_hostname,
+        realized_operator_user: $realized_operator_user
+      },
+      bootstrap: {
+        method: $bootstrap_method,
+        target_distro: $target_distro,
+        installer_provenance: $installer_provenance,
+        entropy_markers: $entropy_markers
+      },
+      access: {
+        ssh_status: "reachable",
+        tailscale_status: $tailscale_status,
+        tailscale_identity: (if $tailscale_identity == "" then null else $tailscale_identity end),
+        tailscale_ip: (if $tailscale_ip == "" then null else $tailscale_ip end)
+      },
+      planned_changes: $planned_changes,
+      output: {
+        firstboot_claim_path: (if $claim_path == "" then null else $claim_path end)
+      },
+      failure_reason: (if $sudo_blocker == "" then null else $sudo_blocker end),
+      note: "Post-boot normalization only. No admission, role, placement, watcher, or backup mutation."
+    }' >"$receipt_path"
+
+if $JSON_MODE; then
+    jq --arg receipt_path "$receipt_path" '. + {receipt_path: $receipt_path}' "$receipt_path"
+else
+    echo "host.operator-hardware.post-boot.normalize"
+    echo "=========================================="
+    echo "device:       $DEVICE"
+    echo "status:       $result_status"
+    echo "mode:         $($EXECUTE && echo execute || echo dry_run)"
+    echo "endpoint:     $SSH_PROOF_ENDPOINT"
+    echo "receipt:      $receipt_path"
+    [[ -n "$claim_path" ]] && echo "claim:        $claim_path"
+    echo
+    echo "NOTE: No admission, role, placement, watcher, or backup mutation performed."
+fi

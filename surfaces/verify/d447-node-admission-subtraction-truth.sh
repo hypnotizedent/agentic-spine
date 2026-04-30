@@ -155,6 +155,48 @@ if missing:
     fail(f"node.admission.status row missing fields: {', '.join(missing)}")
 if "inventory" not in row.get("subtraction_caption", "") and "asset" not in row.get("subtraction_caption", ""):
     fail("node.admission.status row must carry subtraction caption")
+if row.get("lifecycle_state") != "admitted_runtime_present":
+    fail("pve-r620 must read back as admitted_runtime_present while watcher runtime is active")
+if "watcher_node" not in (row.get("role_candidacy") or []):
+    fail("pve-r620 must carry watcher_node role runtime truth")
+if row.get("promotion_stage") != "delivered":
+    fail("pve-r620 active watcher runtime must compose as delivered promotion stage")
+placement = row.get("placement_truth") or {}
+if placement.get("role_runtime_status") != "active":
+    fail("pve-r620 placement_truth must expose active role runtime status")
+source_paths = {item.get("path") for item in row.get("source_surfaces") or [] if isinstance(item, dict)}
+for required_source in {
+    "ops/bindings/launchd.scheduler.registry.yaml",
+    "ops/bindings/node.role.contract.yaml",
+    "ops/bindings/alerting.rules.yaml",
+}:
+    if required_source not in source_paths:
+        fail(f"pve-r620 readback must cite active runtime source: {required_source}")
 
-print("D447 PASS: node admission readback exists and old hardware/asset authority is demoted")
+proc = subprocess.run(
+    [str(node_admission), "--node", "docker-host", "--json"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    fail(proc.stderr.strip() or proc.stdout.strip() or "node.admission.status negative sample failed")
+payload = json.loads(proc.stdout)
+rows = payload.get("rows") or []
+if len(rows) != 1:
+    fail("node.admission.status --node docker-host must emit exactly one row")
+candidate = rows[0]
+if candidate.get("admission_state") == "admitted":
+    fail("ssh/inventory candidate evidence must not silently become admitted node authority")
+if candidate.get("promotion_stage") == "delivered":
+    fail("ssh/inventory candidate evidence must not silently become delivered runtime truth")
+if candidate.get("lifecycle_state") != "candidate_or_access_evidence_only":
+    fail("docker-host must remain candidate/access evidence only until admitted by fleet admission")
+if set(candidate.get("role_candidacy") or []) - {"none"}:
+    fail("candidate/access evidence must not assign a node role")
+if candidate.get("runtime_obligations", {}).get("active_runtime_labels"):
+    fail("candidate/access evidence must not create runtime obligations")
+if candidate.get("recovery_planes", {}).get("identity") != "ssh_identity_declared":
+    fail("ssh target may only provide access/identity evidence for candidate subjects")
+
+print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, active role runtime truth is composed, and candidate evidence cannot promote itself")
 PY

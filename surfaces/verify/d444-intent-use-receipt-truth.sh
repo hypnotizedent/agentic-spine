@@ -25,13 +25,17 @@ grep -q "intent_use_receipts" "$ROOT/ops/plugins/core/lifecycle/bin/planning-pla
 grep -q "intent_use" "$ROOT/ops/plugins/core/lifecycle/lib/operator_ingress.py" || fail "operator_ingress readback does not expose intent_use receipts"
 
 python3 - "$ROOT" <<'PY' || exit 1
+import shutil
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 root = Path(sys.argv[1])
 sys.path.insert(0, str(root / "ops/plugins/core/lifecycle/lib"))
 import intent_use_receipts as iur
+import operator_ingress as oi
+import yaml
 
 conn = sqlite3.connect(":memory:")
 conn.row_factory = sqlite3.Row
@@ -57,6 +61,56 @@ if len(rows) != 1:
 strongest = iur.strongest_receipt_for_intent(conn, "HI-VERIFY-SELF-CHECK")
 if not strongest or strongest["destination_ref"] != "LOOP-VERIFY-SELF-CHECK":
     raise SystemExit("strongest receipt lookup failed")
+
+tmp = Path(tempfile.mkdtemp(prefix="d444-oi-self-check-"))
+try:
+    result = oi.create_operator_ingress(
+        state_root=str(tmp),
+        raw_content=(
+            "Raw OI text may describe a role, backup, placement, or authority, "
+            "but raw text is provenance only until carried by a governed surface."
+        ),
+        content_type="note",
+        operator_hint="Verify raw OI text cannot become authority by itself.",
+        source_device="verify",
+        source_app="d444",
+        submitted_via="verify_self_check",
+    )
+    path = Path(result["path"])
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if doc.get("authority") != "non_authoritative":
+        raise SystemExit("created OI must be non_authoritative")
+    if doc.get("authority_level") != "none":
+        raise SystemExit("created OI must have authority_level none")
+    if doc.get("mutation_permitted") is not False:
+        raise SystemExit("created OI must forbid mutation")
+    if doc.get("raw_content") == doc.get("human_intent", {}).get("statement"):
+        raise SystemExit("raw content must remain provenance, not promoted statement authority")
+
+    oi.metabolize_operator_ingress(
+        state_root=str(tmp),
+        ingress_id=result["ingress_id"],
+        classification="adjacent_evidence",
+        disposition="deferred",
+        disposition_detail="Verify OI remains evidence unless a governed carrier uses it.",
+    )
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if doc.get("authority") != "non_authoritative" or doc.get("authority_level") != "none":
+        raise SystemExit("metabolized OI must preserve non-authoritative posture")
+    if doc.get("mutation_permitted") is not False:
+        raise SystemExit("metabolized OI must still forbid mutation")
+    forbidden = {
+        "admission_status",
+        "role_candidacy",
+        "placement_truth",
+        "watcher",
+        "backup_admission_state",
+        "runtime_obligations",
+    }
+    if forbidden & set(doc):
+        raise SystemExit("raw OI lifecycle leaked authority-shaped fields")
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
 PY
 
-echo "D444 PASS: intent-use receipt authority, capabilities, automatic capture hooks, projections, and readback seam are present"
+echo "D444 PASS: intent-use receipt authority, capture hooks, projections, readback seam, and raw OI non-authority are locked"

@@ -131,8 +131,23 @@ required = [
 missing = [field for field in required if field not in rows[0]]
 if missing:
     fail(f"site.presence.status row missing fields: {', '.join(missing)}")
-if rows[0].get("actions_allowed", {}).get("may_create_node") is not False:
-    fail("site.presence.status must not allow node creation")
+for row in rows:
+    presence_id = row.get("presence_id") or "<unknown>"
+    if row.get("actions_allowed", {}).get("may_create_node") is not False:
+        fail(f"{presence_id}: site.presence.status must not allow node creation")
+    subject = row.get("subject") or {}
+    admission_state = subject.get("node_admission_state", "not_node")
+    subject_kind = subject.get("subject_kind")
+    sources = row.get("source_surfaces") or []
+    source_paths = {item.get("path") for item in sources if isinstance(item, dict)}
+    if admission_state != "not_node" and "node.admission.status" not in source_paths:
+        fail(f"{presence_id}: non-not_node admission state must be joined from node.admission.status")
+    if subject_kind in {"candidate_node", "admitted_node"} and "node.admission.status" not in source_paths:
+        fail(f"{presence_id}: node-like subject_kind must be joined from node.admission.status")
+    if admission_state == "admitted" and subject_kind != "admitted_node":
+        fail(f"{presence_id}: admitted node admission state must read back as admitted_node")
+    if "network.unifi" in " ".join(str(path) for path in source_paths) and admission_state == "admitted" and "node.admission.status" not in source_paths:
+        fail(f"{presence_id}: network observation must not imply admitted node truth")
 
-print("D448 PASS: site presence readback exists and old network/device authority is demoted")
+print("D448 PASS: site presence readback exists, old network/device authority is demoted, and presence cannot create node admission")
 PY
