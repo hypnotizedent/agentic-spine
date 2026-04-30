@@ -299,9 +299,9 @@ if command -v jq >/dev/null 2>&1 && [[ -f "$SNAPSHOT_FILE" && -x "$RECOVERY_DISP
   done < <(jq -r '([.failing_gates[]?] + [.domains[]?.failing_gates[]?]) | unique | .[]?' "$SNAPSHOT_FILE" 2>/dev/null || true)
 fi
 
-echo "[alerting-probe-cycle] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
 # Write cycle receipt — success path
 _watcher_cycle_duration=$(( $(date +%s) - _watcher_cycle_start_epoch ))
 [[ "$_watcher_cycle_duration" =~ ^[0-9]+$ ]] || _watcher_cycle_duration=0
 _watcher_write_cycle_state "success" "$_watcher_cycle_duration"
+
+echo "[alerting-probe-cycle] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
