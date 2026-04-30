@@ -69,6 +69,45 @@ def _print_operating_semantics() -> None:
         print(f"    - {line}")
 
 
+def _compact_outcome_line(item: dict, chain: dict) -> str:
+    """Render existing OI/HI chain fields as the operator-facing outcome."""
+    current = chain.get("current_state", {}) if isinstance(chain.get("current_state"), dict) else {}
+    carrier = chain.get("downstream_carrier", {}) if isinstance(chain.get("downstream_carrier"), dict) else {}
+    materialized = (
+        chain.get("adoption_materialization", {})
+        if isinstance(chain.get("adoption_materialization"), dict)
+        else {}
+    )
+    proof = chain.get("proof_receipt", {}) if isinstance(chain.get("proof_receipt"), dict) else {}
+
+    hi = item.get("human_intent_id") or (chain.get("source", {}) or {}).get("human_intent_id") or "HI pending"
+    disposition = (
+        current.get("disposition")
+        or item.get("disposition")
+        or "awaiting_classification"
+    )
+    classification = current.get("classification") or item.get("classification") or ""
+    carrier_ref = carrier.get("ref") or item.get("next_stage") or ""
+    materialization_state = materialized.get("state") or item.get("adoption_state") or ""
+    materialization_ref = materialized.get("ref") or item.get("adoption_ref") or ""
+    proof_ref = proof.get("ref") or ""
+    missing = chain.get("next_missing_seam") or "unknown"
+
+    parts = [f"captured as {hi}", f"metabolized as {disposition}"]
+    if classification:
+        parts.append(f"classified {classification}")
+    if carrier_ref:
+        parts.append(f"carried by {carrier_ref}")
+    if materialization_state and materialization_ref:
+        parts.append(f"{materialization_state} at {materialization_ref}")
+    elif materialization_state:
+        parts.append(materialization_state)
+    if proof_ref:
+        parts.append(f"proved by {proof_ref}")
+    parts.append(f"missing {missing or 'none'}")
+    return " -> ".join(parts)
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     try:
         import yaml
@@ -142,6 +181,12 @@ def main() -> int:
             lifecycle = oi.build_intent_chain_readback(sample, state_root="/tmp")
             if lifecycle["source"]["human_intent_id"] != "HI-SELF-CHECK":
                 raise RuntimeError("OI/HI readback chain omitted human_intent_id")
+            outcome = _compact_outcome_line(
+                {"human_intent_id": "HI-SELF-CHECK", "disposition": "awaiting_classification"},
+                lifecycle,
+            )
+            if "captured as HI-SELF-CHECK" not in outcome or "missing classification" not in outcome:
+                raise RuntimeError("compact outcome line does not explain what became of input")
             if "capture_idea" not in {row["name"] for row in OPERATING_SEMANTICS["paths"]}:
                 raise RuntimeError("operator-ingress operating semantics omitted capture_idea path")
             print("operator.ingress.status self-check PASS")
@@ -219,6 +264,7 @@ def main() -> int:
                     if proof.get("ref") or missing:
                         proof_ref = proof.get("ref") or "n/a"
                         print(f"    proof: {proof_ref}  missing: {missing or 'none'}")
+                    print(f"    became: {_compact_outcome_line(item, chain)}")
         return 0
 
     # --- Local readback ---
@@ -262,6 +308,7 @@ def main() -> int:
                 if proof.get("ref") or missing:
                     proof_ref = proof.get("ref") or "n/a"
                     print(f"    proof: {proof_ref}  missing: {missing or 'none'}")
+                print(f"    became: {_compact_outcome_line(item, chain)}")
     return 0
 
 
