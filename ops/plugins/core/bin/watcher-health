@@ -70,18 +70,24 @@ done
 CYCLE_STATE="${SPINE_LOGS}/watcher-cycle-state.json"
 
 # --- Evidence source resolution ---
-# Try local file first (on-node fast path), then SSH remote fetch (cross-node governed path).
+# Use the local file only on the watcher node. Other hosts may carry stale
+# mirrored copies, so cross-node reads must fetch the declared watcher proof.
 READ_SOURCE="local"
 TRANSPORT_PATH=""
 SOURCE_NODE=""
 FETCHED_AT=""
+LOCAL_HOST_SHORT="$(hostname -s 2>/dev/null || echo local)"
+USE_LOCAL_FAST_PATH=0
+if [[ "$LOCAL_HOST_SHORT" == "$WATCHER_SSH_TARGET" ]]; then
+  USE_LOCAL_FAST_PATH=1
+fi
 
-if [[ -f "$CYCLE_STATE" ]]; then
+if [[ "$USE_LOCAL_FAST_PATH" -eq 1 && -f "$CYCLE_STATE" ]]; then
   state="$(jq -c '.' "$CYCLE_STATE" 2>/dev/null || echo '{}')"
-  SOURCE_NODE="$(hostname -s 2>/dev/null || echo "local")"
+  SOURCE_NODE="$LOCAL_HOST_SHORT"
   READ_SOURCE="local"
 else
-  # Local file missing — attempt SSH remote fetch from watcher node.
+  # Cross-node or local file missing — attempt SSH remote fetch from watcher node.
   # Inline (not a function) to avoid subshell variable loss.
   _resolve_result="$(ssh_resolve_ssh_host_with_fallback "$WATCHER_SSH_TARGET" 5 2>/dev/null)" || _resolve_result=""
   _resolved_ip="$(echo "$_resolve_result" | awk '{print $1}')"
