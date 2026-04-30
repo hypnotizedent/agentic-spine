@@ -40,7 +40,10 @@ row_json="$(yq e -o=json ".appliances[] | select(.appliance_id == \"$APPLIANCE_I
 [[ -n "$row_json" && "$row_json" != "null" ]] || fail "unknown portable storage appliance: $APPLIANCE_ID"
 
 class="$(jq -r '.class // ""' <<<"$row_json")"
-[[ "$class" == "portable_storage_appliance" ]] || fail "$APPLIANCE_ID is not class=portable_storage_appliance"
+case "$class" in
+  portable_storage_appliance|portable_bootstrap_media_appliance) ;;
+  *) fail "$APPLIANCE_ID is not a portable appliance class" ;;
+esac
 
 host_node_id="$(jq -r '.current_attachment.host_node_id // ""' <<<"$row_json")"
 by_id_path="$(jq -r '.current_attachment.by_id_path // ""' <<<"$row_json")"
@@ -96,7 +99,8 @@ fi
 fi
 
 if [[ "$attachment_status" == "attached" ]]; then
-  if [[ "$observed_serial" == "$expected_serial" && "$observed_label" == "$expected_label" && "$observed_uuid" == "$expected_uuid" ]]; then
+  expected_label_normalized="${expected_label// /_}"
+  if [[ "$observed_serial" == "$expected_serial" && ( "$observed_label" == "$expected_label" || "$observed_label" == "$expected_label_normalized" ) && "$observed_uuid" == "$expected_uuid" ]]; then
     filesystem_status="matches_declared_clean_filesystem"
   else
     filesystem_status="mismatch"
