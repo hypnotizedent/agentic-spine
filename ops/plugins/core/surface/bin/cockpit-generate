@@ -98,7 +98,7 @@ def engine_posture(payload: dict) -> str:
 
     if verify != "pass":
         color, label, css = "red", "Degraded", "red"
-    elif has_anomalies or not refs["github_ok"] or refs["is_dirty"]:
+    elif has_anomalies or refs["is_dirty"]:
         color, label, css = "yellow", "Mixed", "ylw"
     else:
         color, label, css = "green", "Healthy", "grn"
@@ -108,8 +108,6 @@ def engine_posture(payload: dict) -> str:
         reasons.append(f"verify: {verify}")
     if has_anomalies:
         reasons.append(f"{spine['anomaly_count']} anomal{'y' if spine['anomaly_count']==1 else 'ies'}")
-    if not refs["github_ok"]:
-        reasons.append("github mirror diverged/unavailable")
     if refs["is_dirty"]:
         reasons.append("repo dirty")
     if not reasons:
@@ -162,14 +160,14 @@ def board_section(payload: dict) -> str:
 
     engine_bits = f"verify {verify} \u00b7 {gaps} gaps \u00b7 {anomalies} anomalies"
 
-    # System status line (repo dirty, mirror diverged — not operator work)
+    # System status line (repo dirty plus publication mirror advisory)
     sys_parts = []
     if refs.get("is_dirty"):
         sys_parts.append("repo dirty")
     if not refs.get("github_ok"):
-        sys_parts.append("mirror unavailable")
+        sys_parts.append("publication mirror unavailable")
     elif refs.get("local_head") != refs.get("github_head") and refs.get("github_ok"):
-        sys_parts.append("mirror diverged")
+        sys_parts.append("publication mirror diverged")
     sys_line = ""
     if sys_parts:
         sys_line = f'<div class="engine-subtle-note">{_h(" \u00b7 ".join(sys_parts))}</div>'
@@ -347,7 +345,7 @@ def board_section(payload: dict) -> str:
         <a class="ribbon-badge {"ribbon-badge-active" if continuity_active else "ribbon-badge-ok"}" href="#changes-drilldown">{_h(continuity_text)}</a>
         <a class="ribbon-badge {"ribbon-badge-ok" if healthy_engine else "ribbon-badge-active"}" href="#infrastructure-drilldown">{"engine ok" if healthy_engine else "engine needs attention"}</a>
         <a class="ribbon-badge {"ribbon-badge-active" if refs.get("is_dirty") else "ribbon-badge-ok"}" href="#infrastructure-drilldown">{"repo dirty" if refs.get("is_dirty") else "repo clean"}</a>
-        <a class="ribbon-badge {"ribbon-badge-ok" if refs.get("local_full") == refs.get("origin_full") and refs.get("github_ok") and refs.get("local_head") == refs.get("github_head") else "ribbon-badge-active"}" href="#infrastructure-drilldown">{_h("origin synced" if refs.get("local_full") == refs.get("origin_full") else "origin diverged")} · {_h("mirror synced" if refs.get("github_ok") and refs.get("local_head") == refs.get("github_head") else ("mirror unavailable" if not refs.get("github_ok") else "mirror diverged"))}</a>
+        <a class="ribbon-badge {"ribbon-badge-ok" if refs.get("local_full") == refs.get("origin_full") else "ribbon-badge-active"}" href="#infrastructure-drilldown">{_h("origin synced" if refs.get("local_full") == refs.get("origin_full") else "origin diverged")} · {_h("publication mirror synced" if refs.get("github_ok") and refs.get("local_head") == refs.get("github_head") else ("publication mirror unavailable" if not refs.get("github_ok") else "publication mirror diverged"))}</a>
       </div>
     </div>'''
 
@@ -1107,7 +1105,7 @@ def release_posture(refs: dict) -> str:
     <div class="rel">
       <div class="rel-c"><div class="rel-l">Local HEAD</div><div class="rel-v" style="font-size:.55rem">{_h(refs['local_head'])}</div></div>
       <div class="rel-c"><div class="rel-l">Origin</div><div class="rel-v"><span class="sdot {origin_dot}"></span>{_h(origin_parity)}</div></div>
-      <div class="rel-c"><div class="rel-l">GitHub</div><div class="rel-v"><span class="sdot {github_dot}"></span>{_h(github_parity)}</div></div>
+      <div class="rel-c"><div class="rel-l">Publication Mirror</div><div class="rel-v"><span class="sdot {github_dot}"></span>{_h(github_parity)}</div></div>
       <div class="rel-c"><div class="rel-l">Tree</div><div class="rel-v"><span class="sdot {dirty_dot}"></span>{"dirty" if refs["is_dirty"] else "clean"}</div></div>
     </div>
     <div style="font-size:.5rem;color:var(--t);opacity:.4">Commits: {_h(refs['commit_count'])} · Baseline: {_h(refs['baseline'])} (from AGENTS.md)</div>"""
@@ -2082,7 +2080,7 @@ def generate(payload: dict | None = None) -> str:
         f"capabilities: {caps_data.get('count', 0)} caps",
         f"gates: {gates_data.get('total', 0)} gates",
         f"manifest: {'ok' if manifest_data.get('available') else 'unavailable'}",
-        f"github: {'ok' if p['git_refs']['github_ok'] else 'unavailable'}",
+        f"publication mirror: {'ok' if p['git_refs']['github_ok'] else 'unavailable'}",
         f"freshness: {p['projection_freshness']['freshness']}",
     ]
 
