@@ -18,8 +18,9 @@ machine.
 ## Canonical Model
 
 - `data/backups/vzdump/dump/` is the shop VM/LXC source backup generator plane only (migrated from tank 2026-03-23); it is not shop backup readiness authority.
-- `md1400/backups/vm-images/pve/` is the canonical shop VM/LXC restore lane. Non-home VM/LXC backup readback must prove this path, not only the generator path.
-- `md1400/backup-cold/...` is the shop cold backup plane for app/state and promoted shop VM/LXC copies.
+- `md1400/backups/vm-images/pve/` is the canonical shop VM/LXC restore lane. Non-home VM/LXC backup readback must prove this path, not the generator path.
+- Active non-home app/data backup lanes live under restore-intent paths in `md1400/backups/...` (`db-dumps`, `app-data`, `exports`, `configs`, and business file lanes).
+- `md1400/backup-cold/...` is legacy/residue unless a target explicitly declares it as retained historical evidence. It is not VM-image authority and not the active app/data target model.
 - Synology is the canonical home backup plane for Home Assistant VM `100` and home Pi-hole LXC `105`.
 - If the backup plane covers the workload, old app-local backups are debt unless they protect unique data not captured by the backup plane.
 - App-local backup scripts, folders, and stale rows are not backup authority by existence. They must be admitted in `backup.inventory.yaml` with a unique-data reason, or they are retired/demoted from readiness.

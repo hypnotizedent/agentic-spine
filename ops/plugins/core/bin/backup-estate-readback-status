@@ -387,17 +387,28 @@ elif any(g["severity"] == "high" for g in gaps):
 elif gaps or backup_status_degraded_targets:
     overall = "partial"
 
-subject_degraded_total = sum(1 for s in subjects if s["status"] == "degraded")
+subject_degraded_targets = {
+    s["backup_target"]
+    for s in subjects
+    if s["status"] == "degraded" and s.get("backup_target")
+}
 backup_status_degraded_total = len(backup_status_degraded_targets)
+backup_status_degraded_unattached_total = sum(
+    1
+    for row in backup_status_degraded_targets
+    if row.get("target") not in subject_degraded_targets
+)
+subject_degraded_total = sum(1 for s in subjects if s["status"] == "degraded")
 counts = {
     "subjects_total": len(subjects),
     "running_total": sum(1 for s in subjects if s["runtime_status"] == "running"),
     "stopped_total": sum(1 for s in subjects if s["runtime_status"] == "stopped"),
     "ok_total": sum(1 for s in subjects if s["status"] == "ok"),
     "partial_total": sum(1 for s in subjects if s["status"] == "partial"),
-    "degraded_total": subject_degraded_total + backup_status_degraded_total,
+    "degraded_total": subject_degraded_total + backup_status_degraded_unattached_total,
     "subject_degraded_total": subject_degraded_total,
     "backup_status_degraded_total": backup_status_degraded_total,
+    "backup_status_degraded_unattached_total": backup_status_degraded_unattached_total,
     "gap_total": sum(1 for s in subjects if s["status"] == "gap"),
     "residue_total": sum(1 for s in subjects if s["status"] == "residue"),
 }
