@@ -23,21 +23,46 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap, CommentedSeq
+try:
+    from ruamel.yaml import YAML
+    from ruamel.yaml.comments import CommentedMap, CommentedSeq
+
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    yaml.width = 4096
+    yaml.indent(mapping=2, sequence=4, offset=2)
+except ModuleNotFoundError:
+    import yaml as pyyaml
+
+    CommentedMap = dict
+    CommentedSeq = list
+
+    class YAML:
+        def load(self, stream: Any) -> Any:
+            return pyyaml.safe_load(stream)
+
+        def dump(self, data: Any, stream: Any) -> None:
+            pyyaml.safe_dump(data, stream, sort_keys=False)
+
+    yaml = YAML()
 
 
-yaml = YAML()
-yaml.preserve_quotes = True
-yaml.width = 4096
-yaml.indent(mapping=2, sequence=4, offset=2)
+if hasattr(yaml, "representer"):
+    def represent_null(representer: Any, data: Any) -> Any:
+        return representer.represent_scalar("tag:yaml.org,2002:null", "null")
+
+    yaml.representer.add_representer(type(None), represent_null)
 
 
-def represent_null(representer: Any, data: Any) -> Any:
-    return representer.represent_scalar("tag:yaml.org,2002:null", "null")
-
-
-yaml.representer.add_representer(type(None), represent_null)
+SHARED_BOOT_MEDIA_MARKERS = {
+    "shared_survey_boot_media",
+    "borrowed_boot_media",
+    "survey_boot_media",
+}
+SURVEY_FACT_SOURCE_MARKERS = {
+    "shared_boot_ssd_survey",
+    "chassis_survey_shared_boot_medium",
+}
 
 
 def spine_state() -> Path:
@@ -90,12 +115,58 @@ def cmap(items: dict[str, Any]) -> CommentedMap:
     return out
 
 
+def marker(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def is_shared_boot_marker(value: Any) -> bool:
+    return marker(value) in SHARED_BOOT_MEDIA_MARKERS
+
+
+def is_survey_fact_source(value: Any) -> bool:
+    return marker(value) in SURVEY_FACT_SOURCE_MARKERS
+
+
+def reject_shared_boot_survey(subject: str) -> None:
+    raise SystemExit(
+        f"ERROR: {subject} is marked as shared/survey boot media. "
+        "Record it as hardware inventory evidence only; full admission requires a stable OS identity."
+    )
+
+
+def assert_claim_can_be_admitted(claim: dict[str, Any]) -> None:
+    if claim.get("stable_os_identity_claimed") is False:
+        reject_shared_boot_survey("firstboot claim")
+    boot_identity = claim.get("boot_identity") if isinstance(claim.get("boot_identity"), dict) else {}
+    if boot_identity.get("stable_os_identity_claimed") is False:
+        reject_shared_boot_survey("firstboot claim boot_identity")
+    if is_shared_boot_marker(claim.get("boot_medium")) or is_shared_boot_marker(boot_identity.get("boot_medium")):
+        reject_shared_boot_survey("firstboot claim")
+    machine_facts = claim.get("machine_facts") if isinstance(claim.get("machine_facts"), dict) else {}
+    if is_survey_fact_source(machine_facts.get("source")):
+        reject_shared_boot_survey("firstboot claim machine_facts")
+
+
+def assert_inventory_row_can_be_admitted(row: dict[str, Any], device_id: str) -> None:
+    if row.get("stable_os_identity_claimed") is False:
+        reject_shared_boot_survey(f"operator inventory row {device_id}")
+    boot_identity = row.get("boot_identity") if isinstance(row.get("boot_identity"), dict) else {}
+    if boot_identity.get("stable_os_identity_claimed") is False:
+        reject_shared_boot_survey(f"operator inventory row {device_id} boot_identity")
+    if is_shared_boot_marker(row.get("boot_medium")) or is_shared_boot_marker(boot_identity.get("boot_medium")):
+        reject_shared_boot_survey(f"operator inventory row {device_id}")
+    machine_facts = row.get("machine_facts") if isinstance(row.get("machine_facts"), dict) else {}
+    if is_survey_fact_source(machine_facts.get("source")):
+        reject_shared_boot_survey(f"operator inventory row {device_id} machine_facts")
+
+
 def read_claim(path: Path) -> dict[str, Any]:
     try:
         with path.open(encoding="utf-8") as f:
             claim = json.load(f)
     except json.JSONDecodeError as exc:
         raise SystemExit(f"ERROR: invalid claim JSON {path}: {exc}") from exc
+    assert_claim_can_be_admitted(claim)
     required = [
         "device_id",
         "target_platform_truth",
@@ -176,6 +247,7 @@ def reconcile_inventory(data: CommentedMap, claim: dict[str, Any], args: argpars
         machines.append(machine)
         changes.append({"surface": "operator.hardware.inventory.yaml", "action": "create", "device_id": device_id})
     else:
+        assert_inventory_row_can_be_admitted(machine, device_id)
         set_if_changed(machine, "platform", "linux", changes, "operator.hardware.inventory.yaml")
         if args.model:
             set_if_changed(machine, "model", args.model, changes, "operator.hardware.inventory.yaml")

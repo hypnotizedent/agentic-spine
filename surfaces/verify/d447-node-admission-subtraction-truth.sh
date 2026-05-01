@@ -173,6 +173,10 @@ required_fields = [
     "eligibility_state",
     "admission_state",
     "first_touch_state",
+    "physical_identity",
+    "boot_identity",
+    "access_identity",
+    "admission_identity",
     "access_path",
     "placement_truth",
     "runtime_obligations",
@@ -193,6 +197,14 @@ if "watcher_node" not in (row.get("role_candidacy") or []):
     fail("pve-r620 must carry watcher_node role runtime truth")
 if row.get("promotion_stage") != "delivered":
     fail("pve-r620 active watcher runtime must compose as delivered promotion stage")
+if (row.get("physical_identity") or {}).get("source_surface") != "ops/bindings/hardware.inventory.yaml":
+    fail("pve-r620 physical identity must come from canonical hardware inventory")
+if (row.get("boot_identity") or {}).get("stable_os_identity_claimed") is not True:
+    fail("pve-r620 boot identity must read as a stable admitted OS identity")
+if (row.get("access_identity") or {}).get("admin_identity_declared") is not True:
+    fail("pve-r620 access identity must expose governed admin identity proof")
+if (row.get("admission_identity") or {}).get("source_surface") != "ops/bindings/fleet.admission.classification.yaml":
+    fail("pve-r620 admission identity must come from fleet admission classification")
 placement = row.get("placement_truth") or {}
 if placement.get("role_runtime_status") != "active":
     fail("pve-r620 placement_truth must expose active role runtime status")
@@ -223,11 +235,59 @@ if "known" not in spec or "source_ownership" not in spec or "missing_fields" not
 ownership = spec.get("source_ownership") or {}
 if ownership.get("machine_facts") != "firstboot claim machine_facts when present; otherwise canonical inventory fact fields":
     fail("machine-spec source ownership must point to bootstrap claim/canonical inventory, not a new subsystem")
+if (spec_row.get("physical_identity") or {}).get("source_surface") != "ops/bindings/operator.hardware.inventory.yaml":
+    fail("operator hardware machine-spec must expose operator inventory as physical identity evidence")
+if (spec_row.get("boot_identity") or {}).get("stable_os_identity_claimed") is not True:
+    fail("admitted operator hardware must expose stable OS identity in node admission readback")
+if (spec_row.get("access_identity") or {}).get("admin_identity_declared") is not True:
+    fail("admitted operator hardware must expose governed admin access identity")
+if (spec_row.get("admission_identity") or {}).get("role_promotion") != "none":
+    fail("admission identity must state that admission is not role promotion")
 if spec_row.get("role_suitability", {}).get("assignment_made") is not False:
     fail("machine-spec readback must not assign a role")
 setup = spec_row.get("setup_correctness") or {}
 if "activation_statement" not in setup:
     fail("machine-spec readback must state it is evidence only, not activation")
+
+proc = subprocess.run(
+    [str(node_admission), "--node", "linux-reprovision-1", "--machine-spec", "--json"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    fail(proc.stderr.strip() or proc.stdout.strip() or "node.admission.status inventory-only sample failed")
+payload = json.loads(proc.stdout)
+rows = payload.get("rows") or []
+if len(rows) != 1:
+    fail("inventory-only hardware sample must emit exactly one row")
+inventory_only = rows[0]
+if (inventory_only.get("physical_identity") or {}).get("source_surface") != "ops/bindings/operator.hardware.inventory.yaml":
+    fail("inventory-only hardware must still have canonical physical identity evidence")
+if (inventory_only.get("boot_identity") or {}).get("stable_os_identity_claimed") is not False:
+    fail("inventory-only hardware must not claim stable OS identity")
+if (inventory_only.get("access_identity") or {}).get("admin_identity_declared") is not False:
+    fail("inventory-only hardware must not claim governed admin access")
+if (inventory_only.get("access_identity") or {}).get("identity_plane") != "unproven":
+    fail("inventory-only hardware must not synthesize SSH identity")
+if (inventory_only.get("admission_identity") or {}).get("admission_state") != "unclassified":
+    fail("inventory-only hardware must remain unclassified until full admission")
+
+proc = subprocess.run(
+    [str(node_admission), "--node", "pve-r620", "--machine-spec", "--json"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    fail(proc.stderr.strip() or proc.stdout.strip() or "node.admission.status pve-r620 machine-spec sample failed")
+payload = json.loads(proc.stdout)
+rows = payload.get("rows") or []
+if len(rows) != 1:
+    fail("pve-r620 machine-spec sample must emit exactly one row")
+pve_known = ((rows[0].get("machine_spec") or {}).get("known") or {})
+if pve_known.get("lan_ip") != "192.168.1.126":
+    fail("pve-r620 machine-spec must keep LAN IP distinct from Tailscale host/access path")
+if pve_known.get("lan_ip") == pve_known.get("tailscale_ip"):
+    fail("machine-spec known.lan_ip must not mirror tailscale_ip")
 
 proc = subprocess.run(
     [str(node_admission), "--node", "pve-r620", "--golden-path", "--json"],

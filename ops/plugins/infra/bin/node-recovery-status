@@ -160,8 +160,12 @@ fi
 if [[ -z "$primary_host" && "$op_hw_json" != "{}" ]]; then
   primary_host="$(jq -r '.tailscale_ip // empty' <<<"$op_hw_json")"
   primary_tailscale_ip="$primary_host"
-  primary_user="$(jq -r '.default_user // "unknown"' <<<"$op_hw_json")"
-  primary_access_policy="tailscale_declared_if_admin_enabled"
+  primary_user="$(jq -r '.default_user // empty' <<<"$op_hw_json")"
+  if [[ -n "$primary_host" ]]; then
+    primary_access_policy="tailscale_declared_if_admin_enabled"
+  else
+    primary_access_policy=""
+  fi
   primary_access_method="operator_hardware_inventory"
   primary_description="$(jq -r '.notes // empty' <<<"$op_hw_json")"
 fi
@@ -170,7 +174,7 @@ if [[ -z "$primary_host" && "$appliance_json" != "{}" ]]; then
   primary_host="$(jq -r '.network_identities.tailscale_ip // .backed_by.tailscale_ip // empty' <<<"$appliance_json")"
   primary_tailscale_ip="$primary_host"
   primary_lan_ip="$(jq -r '.network_identities.lan_ip // .backed_by.lan_ip // empty' <<<"$appliance_json")"
-  primary_user="$(jq -r '.access_methods[0].user // "unknown"' <<<"$appliance_json")"
+  primary_user="$(jq -r '.access_methods[0].user // empty' <<<"$appliance_json")"
   primary_access_policy="appliance_declared_access"
   primary_access_method="$(jq -r '.access_methods[0].method // "appliance_readback"' <<<"$appliance_json")"
   primary_description="$(jq -r '.notes // .class // empty' <<<"$appliance_json")"
@@ -227,6 +231,8 @@ identity_plane="unproven"
 if [[ -n "$primary_host" ]]; then
   case "$primary_access_method" in
     lan_only) network_plane="lan_only_declared" ;;
+    operator_hardware_inventory) network_plane="tailscale_device_visible" ;;
+    appliance_readback) network_plane="appliance_path_declared" ;;
     *) network_plane="ssh_path_declared" ;;
   esac
 fi
@@ -245,8 +251,14 @@ elif [[ "$recovery_status" == "physical_presence_required" || "$recovery_status"
   console_plane="$recovery_status"
 fi
 
-if [[ -n "$primary_user" ]]; then
+operator_identity="$(jq -r '.recovery_control.identity // empty' <<<"$op_hw_json")"
+
+if [[ -n "$primary_host" && -n "$primary_user" && "$primary_user" != "unknown" && "$primary_access_method" == "ssh" ]]; then
   identity_plane="ssh_identity_declared"
+elif [[ -n "$operator_identity" ]]; then
+  identity_plane="$operator_identity"
+elif [[ "$appliance_json" != "{}" && -n "$primary_host" ]]; then
+  identity_plane="appliance_identity_declared"
 fi
 
 reachable_truth="declared_path_only"

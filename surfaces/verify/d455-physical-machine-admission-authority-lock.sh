@@ -115,6 +115,9 @@ for machine_id, payload in admissions.items():
     row = rows[0]
     if row.get("node_id") != machine_id:
         fail(f"{machine_id} node_id mismatch")
+    for block in ["physical_identity", "boot_identity", "access_identity", "admission_identity"]:
+        if not isinstance(row.get(block), dict):
+            fail(f"{machine_id} must expose {block} inside node admission readback")
     source_paths = {item.get("path") for item in row.get("source_surfaces") or [] if isinstance(item, dict)}
     missing = expected_sources[machine_id] - source_paths
     if missing:
@@ -132,6 +135,19 @@ for machine_id, payload in admissions.items():
             fail(f"{machine_id} must explicitly demote shop.device.registry in subtraction caption")
     if machine_id == "windows-mint" and row.get("object_kind") != "operator_hardware":
         fail("windows-mint must remain distinct operator hardware, not collapsed with shop production machines")
+    if machine_id == "windows-mint":
+        if (row.get("access_identity") or {}).get("admin_identity_declared") is not False:
+            fail("windows-mint must not synthesize an admin identity from tailnet visibility")
+        if (row.get("boot_identity") or {}).get("stable_os_identity_claimed") is not False:
+            fail("windows-mint must remain inventory/access evidence only until admitted")
+    if machine_id in {"dfs-laptop", "screenpro-lenovo"}:
+        if (row.get("physical_identity") or {}).get("source_surface") != "ops/bindings/shop.device.registry.yaml":
+            fail(f"{machine_id} physical identity must resolve as subordinate shop projection evidence")
+    if machine_id == "screenpro-lenovo":
+        if (row.get("boot_identity") or {}).get("stable_os_identity_claimed") is not True:
+            fail("screenpro-lenovo admitted shop machine must expose stable boot identity")
+        if (row.get("access_identity") or {}).get("admin_identity_declared") is not True:
+            fail("screenpro-lenovo admitted shop machine must expose governed admin access")
 
 for machine_id, recovery in recoveries.items():
     modes = ((recovery.get("control_modes") or {}).get("invoke") or [])
@@ -140,6 +156,11 @@ for machine_id, recovery in recoveries.items():
     limits = {entry.get("id") for entry in ((recovery.get("control_modes") or {}).get("manual_limits") or [])}
     if "manual_power_required" not in limits:
         fail(f"{machine_id} must expose manual_power_required")
+    if machine_id == "windows-mint":
+        if (recovery.get("recovery_planes") or {}).get("identity") == "ssh_identity_declared":
+            fail("windows-mint recovery must not treat tailnet visibility as SSH/admin identity")
+        if "admin_plane_unproved" not in limits:
+            fail("windows-mint must expose admin_plane_unproved")
     if machine_id in {"dfs-laptop", "screenpro-lenovo"}:
         sources = recovery.get("source_surfaces") or {}
         if not sources.get("shop_device"):

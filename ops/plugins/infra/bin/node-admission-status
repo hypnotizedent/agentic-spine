@@ -151,7 +151,7 @@ def durable_identifiers(recovery: dict[str, Any]) -> dict[str, Any]:
             "vendor": shop.get("vendor"),
             "platform": first_present(operator.get("platform"), "windows" if str(shop.get("os") or "").lower().startswith("windows") else None),
             "os": first_present(hardware.get("os"), appliance.get("appliance_os"), shop.get("os")),
-            "lan_ip": first_present(hardware.get("lan_ip"), ssh.get("lan_ip"), shop.get("ip")),
+            "lan_ip": declared_lan_ip(hardware, ssh, shop, appliance),
             "tailscale_ip": first_present(
                 hardware.get("tailscale_ip"),
                 operator.get("tailscale_ip"),
@@ -162,6 +162,224 @@ def durable_identifiers(recovery: dict[str, Any]) -> dict[str, Any]:
             "mac": first_present(ssh.get("mac"), shop.get("mac")),
             "ssh_target_id": ssh.get("id"),
             "shop_device_id": shop.get("id"),
+        }
+    )
+
+
+def looks_like_lan_ip(value: Any) -> bool:
+    text = str(value or "").strip()
+    if text.startswith("10.") or text.startswith("192.168."):
+        return True
+    if not text.startswith("172."):
+        return False
+    parts = text.split(".")
+    if len(parts) < 2:
+        return False
+    try:
+        second = int(parts[1])
+    except ValueError:
+        return False
+    return 16 <= second <= 31
+
+
+def declared_lan_ip(
+    hardware: dict[str, Any],
+    ssh: dict[str, Any],
+    shop: dict[str, Any],
+    appliance: dict[str, Any],
+) -> Any:
+    network = appliance.get("network_identities") or {}
+    backed_by = appliance.get("backed_by") or {}
+    ssh_host = ssh.get("host") if looks_like_lan_ip(ssh.get("host")) else None
+    return first_present(
+        hardware.get("lan_ip"),
+        ssh.get("lan_ip"),
+        shop.get("ip"),
+        network.get("lan_ip"),
+        backed_by.get("lan_ip"),
+        ssh_host,
+    )
+
+
+def physical_identity_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
+    sources = recovery.get("source_surfaces") or {}
+    hardware = sources.get("hardware_machine") or {}
+    operator = sources.get("operator_hardware") or {}
+    appliance = sources.get("appliance_identity") or {}
+    shop = sources.get("shop_device") or {}
+    ssh = sources.get("ssh_target") or {}
+
+    if hardware:
+        source_surface = "ops/bindings/hardware.inventory.yaml"
+        source_role = "infrastructure_hardware_inventory"
+    elif operator:
+        source_surface = "ops/bindings/operator.hardware.inventory.yaml"
+        source_role = "operator_hardware_inventory"
+    elif appliance:
+        source_surface = "ops/bindings/appliance.identity.contract.yaml"
+        source_role = "appliance_identity_inventory"
+    elif shop:
+        source_surface = "ops/bindings/shop.device.registry.yaml"
+        source_role = "shop_function_projection"
+    elif ssh:
+        source_surface = "ops/bindings/ssh.targets.yaml"
+        source_role = "access_path_only"
+    else:
+        source_surface = "node.recovery.status"
+        source_role = "recovery_evidence"
+
+    return compact_dict(
+        {
+            "physical_id": first_present(
+                hardware.get("machine_id"),
+                operator.get("device_id"),
+                appliance.get("appliance_id"),
+                shop.get("id"),
+                ssh.get("id"),
+                recovery.get("node_id"),
+            ),
+            "source_surface": source_surface,
+            "source_role": source_role,
+            "object_kind": recovery.get("node_kind"),
+            "site": recovery.get("node_site"),
+            "model": first_present(hardware.get("model"), operator.get("model"), appliance.get("model"), shop.get("model")),
+            "service_tag": hardware.get("service_tag"),
+            "vendor": shop.get("vendor"),
+            "inventory_known": bool(hardware or operator or appliance or shop),
+        }
+    )
+
+
+def boot_identity_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
+    sources = recovery.get("source_surfaces") or {}
+    hardware = sources.get("hardware_machine") or {}
+    operator = sources.get("operator_hardware") or {}
+    appliance = sources.get("appliance_identity") or {}
+    shop = sources.get("shop_device") or {}
+    ssh = sources.get("ssh_target") or {}
+    admission = sources.get("admission_record") or {}
+    object_truth = recovery.get("object_truth") or {}
+    proof = admission.get("proof") or {}
+    claim = load_json_file(proof.get("proof_ref"))
+    claim_facts = claim.get("machine_facts") if isinstance(claim.get("machine_facts"), dict) else {}
+    operator_facts = operator.get("machine_facts") if isinstance(operator.get("machine_facts"), dict) else {}
+    hardware_facts = hardware.get("machine_facts") if isinstance(hardware.get("machine_facts"), dict) else {}
+    appliance_facts = appliance.get("machine_facts") if isinstance(appliance.get("machine_facts"), dict) else {}
+
+    admission_state = object_truth.get("admission_state")
+    first_touch_state = object_truth.get("first_touch_state")
+    stable_os_identity_claimed = admission_state == "admitted" and first_touch_state not in (None, "", "unknown")
+    if proof and proof.get("identity_enrolled") is False:
+        stable_os_identity_claimed = False
+    if claim.get("stable_os_identity_claimed") is False:
+        stable_os_identity_claimed = False
+    boot_identity = claim.get("boot_identity") if isinstance(claim.get("boot_identity"), dict) else {}
+    if boot_identity.get("stable_os_identity_claimed") is False:
+        stable_os_identity_claimed = False
+
+    return compact_dict(
+        {
+            "hostname": first_present(claim.get("hostname"), hardware.get("hostname"), appliance.get("hostname"), shop.get("hostname"), ssh.get("id")),
+            "os": first_present(
+                claim_facts.get("os_pretty"),
+                operator_facts.get("os_pretty"),
+                hardware_facts.get("os_pretty"),
+                appliance_facts.get("os_pretty"),
+                hardware.get("os"),
+                appliance.get("appliance_os"),
+                shop.get("os"),
+            ),
+            "kernel": first_present(claim_facts.get("kernel"), operator_facts.get("kernel"), hardware_facts.get("kernel"), appliance_facts.get("kernel")),
+            "first_touch_state": first_touch_state,
+            "stable_os_identity_claimed": stable_os_identity_claimed,
+            "claim_state": "admitted_stable_os_identity" if stable_os_identity_claimed else "inventory_or_access_evidence_only",
+            "bootstrap_claim": proof.get("proof_ref"),
+            "boot_medium": first_present(claim.get("boot_medium"), boot_identity.get("boot_medium")),
+        }
+    )
+
+
+def access_identity_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
+    sources = recovery.get("source_surfaces") or {}
+    primary_access = recovery.get("primary_access") or {}
+    recovery_planes = recovery.get("recovery_planes") or {}
+    ssh = sources.get("ssh_target") or {}
+    hardware = sources.get("hardware_machine") or {}
+    operator = sources.get("operator_hardware") or {}
+    appliance = sources.get("appliance_identity") or {}
+    shop = sources.get("shop_device") or {}
+
+    user = primary_access.get("user")
+    admin_identity_declared = bool(
+        primary_access.get("host")
+        and user not in (None, "", "unknown")
+        and recovery_planes.get("identity") == "ssh_identity_declared"
+    )
+    if ssh:
+        source_surface = "ops/bindings/ssh.targets.yaml"
+    elif operator and operator.get("tailscale_ip"):
+        source_surface = "ops/bindings/operator.hardware.inventory.yaml"
+    elif appliance:
+        source_surface = "ops/bindings/appliance.identity.contract.yaml"
+    else:
+        source_surface = "none"
+
+    return compact_dict(
+        {
+            "host": primary_access.get("host"),
+            "user": None if user == "unknown" else user,
+            "access_method": primary_access.get("access_method"),
+            "access_policy": primary_access.get("access_policy"),
+            "lan_ip": first_present(primary_access.get("lan_ip"), declared_lan_ip(hardware, ssh, shop, appliance)),
+            "tailscale_ip": first_present(
+                primary_access.get("tailscale_ip"),
+                hardware.get("tailscale_ip"),
+                operator.get("tailscale_ip"),
+                (appliance.get("network_identities") or {}).get("tailscale_ip"),
+                shop.get("tailscale_ip"),
+            ),
+            "identity_plane": recovery_planes.get("identity"),
+            "network_plane": recovery_planes.get("network"),
+            "admin_identity_declared": admin_identity_declared,
+            "source_surface": source_surface,
+        }
+    )
+
+
+def admission_identity_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
+    sources = recovery.get("source_surfaces") or {}
+    admission = sources.get("admission_record") or {}
+    operator = sources.get("operator_hardware") or {}
+    appliance = sources.get("appliance_identity") or {}
+    proof = admission.get("proof") or {}
+    object_truth = recovery.get("object_truth") or {}
+
+    if admission:
+        source_surface = "ops/bindings/fleet.admission.classification.yaml"
+    elif appliance:
+        source_surface = "ops/bindings/appliance.identity.contract.yaml"
+    elif operator:
+        source_surface = "ops/bindings/operator.hardware.inventory.yaml"
+    else:
+        source_surface = "none"
+
+    return compact_dict(
+        {
+            "admission_state": object_truth.get("admission_state"),
+            "first_touch_state": object_truth.get("first_touch_state"),
+            "admitted_machine_id": first_present(admission.get("machine_id"), admission.get("appliance_id")),
+            "promotion_stage": first_present(operator.get("promotion_stage"), appliance.get("promotion_stage"), admission.get("promotion_stage")),
+            "proof_ref": proof.get("proof_ref"),
+            "proof": compact_dict(
+                {
+                    "ssh_access_proved": proof.get("ssh_access_proved"),
+                    "bmc_reachable": proof.get("bmc_reachable"),
+                    "identity_enrolled": proof.get("identity_enrolled"),
+                    "first_boot_claim": proof.get("first_boot_claim"),
+                }
+            ),
+            "source_surface": source_surface,
+            "role_promotion": "none",
         }
     )
 
@@ -384,6 +602,10 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         "eligibility_state": first_present(operator.get("eligibility_state"), default="not_applicable"),
         "admission_state": object_truth.get("admission_state"),
         "first_touch_state": object_truth.get("first_touch_state"),
+        "physical_identity": physical_identity_from_recovery(recovery),
+        "boot_identity": boot_identity_from_recovery(recovery),
+        "access_identity": access_identity_from_recovery(recovery),
+        "admission_identity": admission_identity_from_recovery(recovery),
         "access_path": compact_dict(
             {
                 "host": primary_access.get("host"),
@@ -458,7 +680,7 @@ def machine_facts_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
             "storage_summary": first_present(claim_facts.get("storage_summary"), inventory_facts.get("storage_summary")),
             "nic_summary": first_present(claim_facts.get("nic_summary"), inventory_facts.get("nic_summary")),
             "bios_version": first_present(claim_facts.get("bios_version"), inventory_facts.get("bios_version")),
-            "lan_ip": first_present(ssh.get("host"), hardware.get("lan_ip"), shop.get("ip")),
+            "lan_ip": declared_lan_ip(hardware, ssh, shop, appliance),
             "tailscale_ip": first_present(claim.get("tailscale_ip"), operator.get("tailscale_ip"), hardware.get("tailscale_ip"), ssh.get("tailscale_ip"), shop.get("tailscale_ip")),
             "mac": first_present(ssh.get("mac"), shop.get("mac")),
             "l3_role": shop.get("role"),
