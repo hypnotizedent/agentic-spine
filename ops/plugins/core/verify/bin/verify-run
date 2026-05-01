@@ -13,6 +13,14 @@ VERIFY_ENGINE_HONESTY="$ROOT/ops/plugins/core/verify/bin/verify-engine-honesty"
 VERIFY_SPINE_SCOPE_HELPER="$ROOT/ops/plugins/core/verify/lib/spine_scope_gate_set.py"
 RECOVERY_DISPATCH="$ROOT/ops/plugins/core/recovery/bin/recovery-dispatch"
 RAG_DIRECT="$ROOT/ops/plugins/infra/rag/bin/rag-direct"
+VERIFY_BASH_BIN="${SPINE_VERIFY_BASH_BIN:-}"
+if [[ -z "$VERIFY_BASH_BIN" ]]; then
+  if [[ -x /opt/homebrew/bin/bash ]]; then
+    VERIFY_BASH_BIN="/opt/homebrew/bin/bash"
+  else
+    VERIFY_BASH_BIN="$(command -v bash)"
+  fi
+fi
 
 fail() {
   echo "verify.run FAIL: $*" >&2
@@ -362,6 +370,203 @@ run_rag_domain_scope() {
   return "$overall_rc"
 }
 
+run_timed_shell() {
+  local timeout_sec="$1"
+  local cmd="$2"
+  local tmp="$3"
+  local elapsed=0
+  local pid rc
+
+  (
+    cd "$ROOT"
+    "$VERIFY_BASH_BIN" -lc "$cmd"
+  ) >"$tmp" 2>&1 &
+  pid=$!
+
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if [[ "$elapsed" -ge "$timeout_sec" ]]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  wait "$pid"
+  rc=$?
+  return "$rc"
+}
+
+json_array() {
+  if [[ "$#" -eq 0 ]]; then
+    printf '[]\n'
+    return 0
+  fi
+  printf '%s\n' "$@" | jq -R -s 'split("\n") | map(select(length > 0))'
+}
+
+estate_health_check_status() {
+  local check_id="$1"
+  local output_path="$2"
+  local rc="$3"
+
+  if [[ "$rc" -eq 124 ]]; then
+    echo "warn"
+    return 0
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    echo "warn"
+    return 0
+  fi
+
+  case "$check_id" in
+    backup-estate)
+      if grep -q '"status"[[:space:]]*:[[:space:]]*"partial"' "$output_path"; then
+        echo "warn"
+      else
+        echo "pass"
+      fi
+      ;;
+    payload-custody)
+      if grep -q '"stale_or_unproved"[[:space:]]*:[[:space:]]*[1-9]' "$output_path"; then
+        echo "warn"
+      else
+        echo "pass"
+      fi
+      ;;
+    *)
+      echo "pass"
+      ;;
+  esac
+}
+
+run_estate_health_scope() {
+  local mode="infra"
+  local timeout_sec="${SPINE_VERIFY_INFRA_TIMEOUT_SEC:-40}"
+  local tmpdir check_line check_id label cmd output_path rc status reason
+  local pass_count=0 warn_count=0 fail_count=0 total_count=0
+  local warning_ids=() failing_ids=()
+  local check_json_lines=()
+
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' RETURN
+
+  local checks=(
+    "node-recovery-pve-r620|node recovery and power control readback|./ops/plugins/infra/bin/node-recovery-status --node pve-r620 --json"
+    "payload-custody|storage/payload custody readback|./ops/plugins/infra/bin/payload-custody-status --json"
+    "backup-estate|backup estate readback|./ops/plugins/core/bin/backup-estate-readback-status --json"
+    "infra-core-slo|infra-core service SLO readback|$VERIFY_BASH_BIN ./ops/plugins/infra/observability/bin/infra-core-slo-status"
+    "services-health|service endpoint health readback|$VERIFY_BASH_BIN ./ops/plugins/infra/services/bin/services-health-status"
+    "secrets-auth|secrets auth presence readback|$VERIFY_BASH_BIN ./ops/plugins/infra/secrets/bin/secrets-auth-status"
+  )
+
+  if [[ "$json_mode" -eq 0 ]]; then
+    emit_alias_deprecation_note "$alias_source"
+    emit_scope_note "$mode"
+    echo "verify.infra.run"
+    echo "  scoped estate/workload health readback"
+    echo "  note: G1-G17 gate pack is retired; this surface composes first-class readbacks and does not answer spine truth"
+  fi
+
+  for check_line in "${checks[@]}"; do
+    IFS='|' read -r check_id label cmd <<<"$check_line"
+    output_path="$tmpdir/$check_id.out"
+    total_count=$((total_count + 1))
+
+    set +e
+    run_timed_shell "$timeout_sec" "$cmd" "$output_path"
+    rc=$?
+    set -e
+
+    status="$(estate_health_check_status "$check_id" "$output_path" "$rc")"
+    reason="ok"
+    if [[ "$rc" -eq 124 ]]; then
+      reason="timeout_after_${timeout_sec}s"
+    elif [[ "$rc" -ne 0 ]]; then
+      reason="nonzero_exit_${rc}"
+    elif [[ "$status" == "warn" ]]; then
+      reason="scoped_attention"
+    fi
+
+    case "$status" in
+      pass)
+        pass_count=$((pass_count + 1))
+        [[ "$json_mode" -eq 0 ]] && printf "  PASS  %-22s %s\n" "$check_id" "$label"
+        ;;
+      warn)
+        warn_count=$((warn_count + 1))
+        warning_ids+=("$check_id")
+        [[ "$json_mode" -eq 0 ]] && printf "  WARN  %-22s %s (%s)\n" "$check_id" "$label" "$reason"
+        ;;
+      *)
+        fail_count=$((fail_count + 1))
+        failing_ids+=("$check_id")
+        [[ "$json_mode" -eq 0 ]] && printf "  FAIL  %-22s %s (%s)\n" "$check_id" "$label" "$reason"
+        ;;
+    esac
+
+    check_json_lines+=("$(jq -n \
+      --arg id "$check_id" \
+      --arg label "$label" \
+      --arg status "$status" \
+      --arg reason "$reason" \
+      --argjson exit_code "$rc" \
+      '{id:$id,label:$label,status:$status,reason:$reason,exit_code:$exit_code}')")
+  done
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    local checks_json warnings_json failures_json
+    checks_json="$(printf '%s\n' "${check_json_lines[@]}" | jq -s '.')"
+    warnings_json="$(json_array "${warning_ids[@]}")"
+    failures_json="$(json_array "${failing_ids[@]}")"
+    jq -n \
+      --arg mode "$mode" \
+      --arg truth_plane "estate_health" \
+      --arg scope_reading "$(scope_reading "$mode")" \
+      --argjson may_block_spine_truth false \
+      --argjson total "$total_count" \
+      --argjson pass "$pass_count" \
+      --argjson warn "$warn_count" \
+      --argjson fail "$fail_count" \
+      --argjson warning_ids "$warnings_json" \
+      --argjson failing_ids "$failures_json" \
+      --argjson checks "$checks_json" \
+      '{
+        mode: $mode,
+        truth_plane: $truth_plane,
+        scope_reading: $scope_reading,
+        may_block_spine_truth: $may_block_spine_truth,
+        total: $total,
+        pass: $pass,
+        fail: $fail,
+        warn: $warn,
+        skipped_inline: 0,
+        skipped_retired: 17,
+        skipped_network: 0,
+        receipt_integrity_warnings: 0,
+        failing_ids: $failing_ids,
+        warning_ids: $warning_ids,
+        blocking_fail_ids: [],
+        non_blocking_fail_ids: ($warning_ids + $failing_ids),
+        retired_gate_family: "G1-G17",
+        checks: $checks
+      }'
+  else
+    echo
+    echo "Estate health classification:"
+    echo "  total: $total_count"
+    echo "  pass:  $pass_count"
+    echo "  warn:  $warn_count"
+    echo "  fail:  $fail_count"
+    echo "  retired gate family: G1-G17"
+    echo "  may block spine truth: false"
+  fi
+
+  # Estate health attention is intentionally non-blocking for spine truth.
+  return 0
+}
+
 load_spine_helper_json() {
   [[ -f "$VERIFY_SPINE_SCOPE_HELPER" ]] || fail "missing spine scope helper: $VERIFY_SPINE_SCOPE_HELPER"
 
@@ -499,7 +704,7 @@ case "$scope" in
   spine)   run_spine_scope ;;
   infra)
     [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
-    run_scope "infra" "$VERIFY_TOPOLOGY" core
+    run_estate_health_scope
     ;;
   domain)
     [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"

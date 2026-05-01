@@ -12,6 +12,8 @@ SCHEDULER_HEALTH="$ROOT/ops/plugins/infra/host/bin/launchd-scheduler-health-stat
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
 SCHEDULER_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
 GATE_TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
+GATE_REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+GATE_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
 VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
 PLACEMENT_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
 
@@ -23,13 +25,15 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -f "$CAPABILITIES" ]] || fail "missing ops/capabilities.yaml"
 [[ -f "$SCHEDULER_REGISTRY" ]] || fail "missing launchd.scheduler.registry.yaml"
 [[ -f "$GATE_TOPOLOGY" ]] || fail "missing gate.execution.topology.yaml"
+[[ -f "$GATE_REGISTRY" ]] || fail "missing gate.registry.yaml"
+[[ -f "$GATE_PROFILES" ]] || fail "missing gate.domain.profiles.yaml"
 [[ -f "$VM_LIFECYCLE" ]] || fail "missing vm.lifecycle.yaml"
 [[ -f "$PLACEMENT_POLICY" ]] || fail "missing infra.storage.placement.policy.yaml"
 
 bash -n "$RUNTIME_PLACEMENT"
 python3 -m py_compile "$SCHEDULER_HEALTH"
 
-python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CAPABILITIES" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" <<'PY'
+python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CAPABILITIES" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$GATE_REGISTRY" "$GATE_PROFILES" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" <<'PY'
 import sys
 from pathlib import Path
 
@@ -48,12 +52,14 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
-runtime_path, scheduler_path, caps_path, registry_path, topology_path, lifecycle_path, placement_path = map(Path, sys.argv[1:])
+runtime_path, scheduler_path, caps_path, scheduler_registry_path, topology_path, gate_registry_path, gate_profiles_path, lifecycle_path, placement_path = map(Path, sys.argv[1:])
 runtime_text = runtime_path.read_text(encoding="utf-8")
 scheduler_text = scheduler_path.read_text(encoding="utf-8")
 caps_text = caps_path.read_text(encoding="utf-8")
-registry = load_yaml(registry_path)
+scheduler_registry = load_yaml(scheduler_registry_path)
 topology = load_yaml(topology_path)
+gate_registry = load_yaml(gate_registry_path)
+gate_profiles = load_yaml(gate_profiles_path)
 lifecycle = load_yaml(lifecycle_path)
 placement = load_yaml(placement_path)
 
@@ -115,7 +121,43 @@ for phrase in [
     if phrase not in caps_text:
         fail(f"capability text must demote runtime placement to diagnostic evidence: missing {phrase!r}")
 
-labels = registry.get("labels") or []
+if "verify.infra.run:" not in caps_text:
+    fail("verify.infra.run capability missing")
+for phrase in [
+    "G1-G17 are retired as gate authority",
+    "composes first-class readbacks",
+    "never answers spine truth",
+    "command: ./ops/plugins/core/verify/bin/verify-run infra",
+]:
+    if phrase not in caps_text:
+        fail(f"verify.infra.run must teach scoped estate-health demotion: missing {phrase!r}")
+
+gates = gate_registry.get("gates") or []
+g_rows = [row for row in gates if isinstance(row, dict) and str(row.get("id") or "").startswith("G")]
+if len(g_rows) != 17:
+    fail(f"expected exactly 17 historical G gate rows, found {len(g_rows)}")
+for row in g_rows:
+    gid = row.get("id")
+    if row.get("retired") is not True:
+        fail(f"{gid} must be retired")
+    if row.get("superseded_by") != "verify.infra.run":
+        fail(f"{gid} must be superseded by verify.infra.run")
+    if row.get("mode") != "report":
+        fail(f"{gid} must be report-only historical residue, not enforce")
+
+core_ids = (((topology.get("core_mode") or {}).get("core_gate_ids")) or [])
+if any(str(gid).startswith("G") for gid in core_ids):
+    fail("core_mode.core_gate_ids must not include G estate-health gates")
+assignments = topology.get("gate_assignments") or []
+if any(str((row or {}).get("gate_id") or "").startswith("G") for row in assignments if isinstance(row, dict)):
+    fail("gate_assignments must not include G estate-health gates")
+profile_domains = (gate_profiles.get("domains") or {})
+for domain_id, profile in profile_domains.items():
+    gate_ids = (profile or {}).get("gate_ids") or []
+    if any(str(gid).startswith("G") for gid in gate_ids):
+        fail(f"gate.domain.profiles.yaml domain {domain_id} must not include G estate-health gates")
+
+labels = scheduler_registry.get("labels") or []
 operator_surface = next((item for item in labels if isinstance(item, dict) and item.get("label") == "com.ronny.operator-surface-server"), None)
 if not operator_surface:
     fail("operator surface standing-program label missing")
@@ -127,7 +169,6 @@ if proof.get("type") != "systemd_journal" or proof.get("scope") != "user" or pro
 if "execution_host" not in f"{operator_surface.get('purpose') or ''} {operator_surface.get('note') or ''}":
     fail("operator surface server purpose/note must name execution_host ownership")
 
-core_ids = (((topology.get("core_mode") or {}).get("core_gate_ids")) or [])
 if "D456" not in core_ids:
     fail("D456 must be part of spine core verify topology")
 
