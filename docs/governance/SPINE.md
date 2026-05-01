@@ -129,12 +129,29 @@ Persist this distinction or the shell will grow back:
 - **Public Readback**: status, `verify.engine.run`, `spine.verify`
 - **Spine Engine**: admission, capability execution, delegation, wave execution,
   internal closeout, scoped verify implementation
-- **Operational Packs**: secrets, recovery, control-cycle, service health, domain/runtime packs
+- **L2 Workbench Rails**: reusable agents, adapters, generators, validators,
+  and operator tools that multiple domains can depend on
+- **Operational Packs**: secrets, recovery, control-cycle, service health, and
+  scoped runtime packs that remain subordinate to spine authority
+- **L3 Project/Product Bodies**: workload-specific logic, health, product
+  behavior, app compose, product playbooks, and domain-local contracts
 - **Shelf**: cockpit proliferation, broker read shells, narrative/explanatory comfort layers
 
 `operator_console` admits and observes work.
 
 Governed nodes carry unattended runtime.
+
+Workbench is not a second spine and not a dumping ground. A surface living in
+Workbench is first-class only when its role is clear: shared L2 rail, unstable
+L3 project/domain body, stable product body, generated projection, or retired
+residue. Moving a file out of `agentic-spine` is not subtraction unless the old
+authority is removed, the replacement home is named, and the normal readback
+teaches the new ownership.
+
+Hand-maintained YAML is valid only when it is the contract itself. If a YAML
+file is a factual view of runtime, inventory, admission, storage, backup, or
+product state, it must either be generated from the living authority or demoted
+from canonical truth.
 
 ## Rebuild-Grade Core
 

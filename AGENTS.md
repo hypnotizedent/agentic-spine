@@ -44,6 +44,13 @@ Subtraction aperture discipline:
 - Parked/deferred is not closure. If a legacy surface cannot be subtracted yet,
   the live gap is the missing canonical replacement proof, not a new governance
   shelf.
+- Repo topology must not hide drift. `agentic-spine` owns the L1 kernel and
+  control-plane truth. Workbench may own L2 shared operational rails, adapters,
+  generators, validators, and reusable agent tools, but it must not become the
+  new dumping ground for L3/product bodies. L3 project/domain bodies belong in
+  project homes while unstable; stable product bodies belong in product homes or
+  explicitly named product repos. Generated projections may cross these
+  boundaries, but hand-maintained authority must have exactly one home.
 
 Legal work:
 - public vs expert boundary work across existing surfaces, including demoting
@@ -79,6 +86,11 @@ Illegal work under this aperture:
   operator decisions instead of removing them
 - authority promotion of parked intake artifacts without a canonical home and
   explicit operator reason
+- moving L3/product bodies into Workbench without classifying whether they are
+  shared L2 rails, unstable project bodies, stable products, generated
+  projections, or stale residue
+- treating hand-updated factual YAML as canonical when it should be generated
+  from a living authority
 - host/workload changes that are unrelated to telemetry, custody,
   control-plane truth, or subtraction of exposed compatibility paths
 
@@ -154,6 +166,15 @@ example-specific runtime.
 (Authority: [`NORTH_STAR.md`](NORTH_STAR.md),
 [`NODE_PROMOTION_LADDER.md`](docs/governance/NODE_PROMOTION_LADDER.md),
 [`first.class.change.closure.contract.yaml`](ops/bindings/first.class.change.closure.contract.yaml))
+
+When the work is repo-topology or domain extraction, classify the surface before
+moving it: L1 kernel, L2 shared rail/adapter, L3 unstable project/domain body,
+stable product body, generated projection, stale residue, or compatibility
+shim. Workbench is a valid target only for L2 rails or explicitly transitional
+domain homes with a named subtraction path; it is not proof that the surface is
+canonical.
+(Authority: [`NORTH_STAR.md`](NORTH_STAR.md),
+[`SPINE.md`](docs/governance/SPINE.md))
 
 The primary `agentic-spine` checkout must stay on `main` and clean. If repo
 mutation is needed, do the work in a managed worktree; do not use the primary

@@ -272,6 +272,11 @@ L2 owns reusable boundaries across workloads:
 
 L2 must be agent-obvious.
 
+Workbench is the preferred home for L2 operational rails only when the surface
+is reusable across workloads: shared agents, adapters, generators, validators,
+and operator tools that multiple domains can depend on. Workbench is not a
+catch-all for unstable product work.
+
 L3 owns workload-specific logic, health, and product behavior.
 
 L3 must not pull platform truth upward into product-local glue.
@@ -279,6 +284,17 @@ L3 must not pull platform truth upward into product-local glue.
 L3 depends on L1 and L2 surviving.
 
 L1 and L2 must never depend on L3 surviving.
+
+Unstable L3 project/domain bodies belong in project homes. Stable product
+bodies belong in product homes. These homes are placement boundaries, not new
+governance planes: they do not own spine authority, runtime receipts, gates, or
+control-plane state.
+
+Generated projections may cross boundaries, but hand-maintained authority must
+have exactly one home. A YAML file is acceptable as hand-authored authority only
+when it is the actual contract. A YAML file is debt when it is a factual
+projection that should be regenerated from admission, runtime, inventory,
+backup, storage, or product source authority.
 
 Deployment variables, including which machine fills which role, live outside L1
 and must not leak into it.
@@ -319,6 +335,8 @@ It does not belong here if it:
 - adds ambiguity to canonical truth
 - preserves historical names over current meaning
 - introduces product-specific clutter into L1
+- turns Workbench into a dumping ground for L3/product bodies
+- leaves hand-maintained projection YAML where generated truth is required
 - hardcodes a host, VM, or machine into L1
 - increases governance surface without increasing recoverability
 - treats human notification as if it were the coordination core
