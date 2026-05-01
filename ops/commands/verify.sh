@@ -170,10 +170,10 @@ _verify_preflight() {
       parity_detail="WARN: D62 not present/executable"
     fi
 
-    # Worktree/session isolation policy (D140).
-    local D140="$REPO_ROOT/surfaces/verify/d140-worktree-session-isolation.sh"
-    if [[ -x "$D140" ]]; then
-      if out="$("$D140" 2>&1)"; then
+    # Worktree/session isolation policy.
+    local WORKTREE_SESSION_STATUS="$REPO_ROOT/ops/plugins/core/lifecycle/bin/worktree-session-status"
+    if [[ -x "$WORKTREE_SESSION_STATUS" ]]; then
+      if out="$("$WORKTREE_SESSION_STATUS" --enforce --brief 2>&1)"; then
         isolation_status="OK"
         isolation_detail="$out"
       else
@@ -183,7 +183,7 @@ _verify_preflight() {
       fi
     else
       isolation_status="WARN"
-      isolation_detail="WARN: D140 not present/executable"
+      isolation_detail="WARN: worktree-session-status not present/executable"
     fi
   fi
 
@@ -216,7 +216,7 @@ BANNER
       if [[ -n "${parity_detail:-}" ]]; then
         echo "    ${parity_detail}" | sed 's/^/    /'
       fi
-      echo "  isolation (D140): $isolation_status"
+      echo "  worktree session isolation: $isolation_status"
       if [[ -n "${isolation_detail:-}" ]]; then
         echo "    ${isolation_detail}" | sed 's/^/    /'
       fi
@@ -283,7 +283,7 @@ BANNER
 STOP
     if [[ "$preflight_fail" -eq 1 ]]; then
       echo "  - Remote authority (origin must resolve; GitHub publication status is advisory)"
-      echo "  - Worktree/session isolation policy (D140)"
+      echo "  - Worktree/session isolation policy"
     fi
     if [[ "$gate_domain_fail" -eq 1 ]]; then
       echo "  - Gate domain discoverability surface is broken"
