@@ -10,7 +10,7 @@ scope: session-protocol
 Agent entry is simple:
 
 1. Open the repo.
-2. Read [AGENTS.md](/Users/ronnyworks/code/agentic-spine/AGENTS.md) first, then [NORTH_STAR.md](/Users/ronnyworks/code/agentic-spine/NORTH_STAR.md), [SPINE.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SPINE.md), and this file.
+2. Read [AGENTS.md](../../AGENTS.md) first, then [NORTH_STAR.md](../../NORTH_STAR.md), [SPINE.md](SPINE.md), and this file.
 3. Governed session start is `ops terminal launch` — it sets identity, resolves
    custody, and auto-attaches loops. If you are already inside a terminal-launch
    session, orientation context was rendered at birth. If you need to re-read

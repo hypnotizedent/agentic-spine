@@ -203,9 +203,14 @@ The membrane may start a workflow, but it must never be the final judge of succe
 The Membrane must assume:
 
 - **The MacBook environment is fully healthy.** Do not waste cycles re-verifying the control plane's basic functionality. The session attach capability already validates this.
-- **The Loop Anchorage is NEVER assumed.** Always verify the `LOOP_ID`. A session without a verified loop scope is a session producing floating WIP. The first act of every session is to confirm: *What loop am I operating under?*
+- **Evidence anchorage is never assumed.** First identify the human intent,
+  trace, file path, receipt, status readback, or other evidence being carried.
+  Attach it to an existing loop when the fit is clear. Create a loop only when
+  there is a bounded objective with acceptance and close criteria. A session
+  doing mutation without evidence, custody, and a governed work home is
+  producing floating WIP.
 
-**Why this asymmetry exists**: The MacBook is infrastructure — it either works or the session cannot start. The loop scope is context — it changes between sessions, between waves, between operator intents. Assuming the loop is correct is the single most common source of ungoverned drift.
+**Why this asymmetry exists**: The MacBook is infrastructure — it either works or the session cannot start. Evidence and work home are context — they change between sessions, waves, and operator intents. Assuming the loop is correct, or inventing one to make the readback prettier, is a common source of ungoverned drift.
 
 ### Part 2: Significant Context Verification
 
@@ -229,13 +234,13 @@ Before routing any work, the Membrane must establish three distinctions:
 
 ### Part 3: The Most Common Mistake — Floating WIP
 
-The most critical error in Spine V3 is **floating WIP**: starting ad-hoc work, running raw `git add`, or bypassing `.runtime/spine/state/` without registering a Loop.
+The most critical error in Spine V3 is **floating WIP**: starting ad-hoc work, running raw `git add`, or bypassing governed evidence/work-home/custody flow.
 
 **What floating WIP looks like:**
 
-- An agent makes file changes without a `LOOP_ID` in scope
-- An operator asks "just quickly fix this" and the agent complies without loop registration
-- Work products accumulate in the working tree with no traceability to a loop scope, wave, or gap
+- An agent makes file changes without carried evidence, custody, and a governed work home
+- An operator asks "just quickly fix this" and the agent complies without resolving the existing canonical home
+- Work products accumulate in the working tree with no traceability to evidence, loop scope, wave, packet, or gap
 - `git add -A` is used instead of scoped, governed staging
 - Commits land without D128 trailers linking them to governance artifacts
 
@@ -243,7 +248,7 @@ The most critical error in Spine V3 is **floating WIP**: starting ad-hoc work, r
 
 - No receipt trail — the work cannot be audited, rolled back, or attributed
 - No verification scope — gates cannot evaluate work that has no loop anchor
-- No completion criteria — "done" has no definition without a loop objective
+- No completion criteria — "done" has no definition without acceptance and close criteria
 - Drift compounds — each ungoverned change makes the next session's context harder to resolve
 
 **The rule**: If work is non-trivial (any file mutation, any state change, any infrastructure action), the first action is to establish current state from the live platform: read the startup docs, admit through `./bin/ops terminal launch --tool <tool> --terminal <name>`, run `./bin/ops status`, and run foundational verify with `./bin/ops cap run verify.engine.run` and `./bin/ops cap run spine.verify`.

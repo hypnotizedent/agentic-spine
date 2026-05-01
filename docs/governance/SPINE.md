@@ -11,7 +11,7 @@ The spine is a tool. Agent entry is AGENTS-first, then doc-first and CLI-first.
 
 ## Startup
 
-Read [AGENTS.md](/Users/ronnyworks/code/agentic-spine/AGENTS.md) first for the
+Read [AGENTS.md](../../AGENTS.md) first for the
 current aperture and operator entry rules.
 
 ```bash
@@ -31,10 +31,10 @@ orientation banner again, use the read-only orientation surface:
 
 ## Daily Use
 
-- Read [AGENTS.md](/Users/ronnyworks/code/agentic-spine/AGENTS.md) first for the current aperture.
-- Read [NORTH_STAR.md](/Users/ronnyworks/code/agentic-spine/NORTH_STAR.md) for platform identity.
-- Read [SESSION_PROTOCOL.md](/Users/ronnyworks/code/agentic-spine/docs/governance/SESSION_PROTOCOL.md) for environment behavior.
-- Read [NODE_PROMOTION_LADDER.md](/Users/ronnyworks/code/agentic-spine/docs/governance/NODE_PROMOTION_LADDER.md) when the question is how node roles become real.
+- Read [AGENTS.md](../../AGENTS.md) first for the current aperture.
+- Read [NORTH_STAR.md](../../NORTH_STAR.md) for platform identity.
+- Read [SESSION_PROTOCOL.md](SESSION_PROTOCOL.md) for environment behavior.
+- Read [NODE_PROMOTION_LADDER.md](NODE_PROMOTION_LADDER.md) when the question is how node roles become real.
 - Use `./bin/ops cap run <capability> -- ...` when a capability exists.
 - Use `./bin/ops status` as the public readback surface.
 - Use `./bin/ops status --expert` only when public status gives a reason for
