@@ -2,8 +2,8 @@
 
 Canonical domain policy for `home`.
 
-- **Doctrine**: `ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md` (historical home-vs-shop VM backup boundary and home offsite semantics)
-- **Operator Checklist**: `ops/archive/pre-2026-04-01-spine/docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md` (historical home VM/LXC protection checks)
+- **Doctrine**: `ops/bindings/home.authority.contract.yaml` and `ops/bindings/domains/backup/backup.inventory.yaml`
+- **Operator Checklist**: `home.backup.status` and `backup.status`
 - Authority: `docs/governance/SPINE.md`
 - Runtime contracts: `ops/bindings/domains/home.bundle.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain home`

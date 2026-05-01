@@ -490,9 +490,9 @@ def validate_cross_surface_policy(root: Path, policy: dict[str, Any]) -> list[Is
                             )
                         )
 
-    media_contract_path = root / "ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md"
+    media_contract_path = root / "ops/bindings/domains/media/media.archive.flow.policy.yaml"
     if not media_contract_path.is_file():
-        issues.append(Issue("error", "MEDIA_STORAGE_CONTRACT.md missing for cross-surface archive validation"))
+        issues.append(Issue("error", "media.archive.flow.policy.yaml missing for cross-surface archive validation"))
         return issues
     contract_text = media_contract_path.read_text(encoding="utf-8")
     for token in LEGACY_MEDIA_ARCHIVE_TOKENS:
@@ -500,16 +500,17 @@ def validate_cross_surface_policy(root: Path, policy: dict[str, Any]) -> list[Is
             issues.append(
                 Issue(
                     "error",
-                    "MEDIA_STORAGE_CONTRACT.md still references legacy media-cold archive path "
+                    "media.archive.flow.policy.yaml still references legacy media-cold archive path "
                     f"'{token}'",
                 )
             )
     for ref in MEDIA_CONTRACT_REQUIRED_PATHS:
-        if ref not in contract_text:
+        local_ref = ref.removeprefix("pve:")
+        if ref not in contract_text and local_ref not in contract_text:
             issues.append(
                 Issue(
                     "error",
-                    f"MEDIA_STORAGE_CONTRACT.md missing canonical media archive path '{ref}'",
+                    f"media.archive.flow.policy.yaml missing canonical media archive path '{ref}'",
                 )
             )
 

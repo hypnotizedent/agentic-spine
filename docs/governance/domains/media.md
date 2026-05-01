@@ -30,7 +30,7 @@ Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
 
 - Current placement authority: `ops/bindings/domains/media/media.path.authority.contract.yaml`
 - Current quality/policy authority: `ops/bindings/domains/media/media.quality.policy.yaml`
-- Historical placement/lifecycle docs: `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_CONTRACT.md` and `ops/archive/pre-2026-04-01-spine/docs/governance/MEDIA_STORAGE_LIFECYCLE.md`
+- Historical placement/lifecycle docs: `ops/bindings/domains/media/media.path.authority.contract.yaml` and `ops/bindings/domains/media/media.archive.flow.policy.yaml`
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog

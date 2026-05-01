@@ -2,8 +2,8 @@
 
 Canonical domain policy for `finance`.
 
-- **Doctrine**: `ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_DOCTRINE_V1.md` (historical finance stack governance)
-- **Operator Checklist**: `ops/archive/pre-2026-04-01-spine/docs/governance/FINANCE_STACK_OPERATOR_CHECKLIST.md` (historical operational procedures)
+- **Doctrine**: `ops/bindings/domains/finance.bundle.yaml` and `ops/bindings/domains/backup/backup.inventory.yaml`
+- **Operator Checklist**: `finance.stack.status` and `backup.status`
 - Authority: `docs/governance/SPINE.md`
 - Runtime contracts: `ops/bindings/domains/finance.bundle.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain finance`
