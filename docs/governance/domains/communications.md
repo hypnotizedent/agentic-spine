@@ -15,7 +15,7 @@ Canonical domain policy for `communications`.
   authority artifacts.
   `communications.delivery` remains intentionally unpromoted as a tracked
   authority artifact.
-- Verify entrypoint: `./bin/ops cap run verify.run -- domain communications`
+- Scoped domain health readback: `./bin/ops cap run verify.run -- domain communications`
 
 ## Canonical Home Decision
 

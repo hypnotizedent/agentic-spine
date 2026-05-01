@@ -24,7 +24,7 @@ Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
 
 - Capability registrations: `ops/capabilities.yaml` (47 `media.*` IDs, all `implementation_repo: workbench`)
 - Compatibility projections / thin pointers: `ops/bindings/domains/media/` (22 files total; retained local authority/projection bindings plus workbench-owned symlink pointers)
-- Verify entrypoint: `./bin/ops cap run verify.run -- domain media`
+- Scoped domain health readback: `./bin/ops cap run verify.run -- domain media`
 
 ## Governance Contracts (spine-owned)
 

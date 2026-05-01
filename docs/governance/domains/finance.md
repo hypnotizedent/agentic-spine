@@ -6,7 +6,7 @@ Canonical domain policy for `finance`.
 - **Operator Checklist**: `finance.stack.status` and `backup.status`
 - Authority: `docs/governance/SPINE.md`
 - Runtime contracts: `ops/bindings/domains/finance.bundle.yaml`
-- Verify entrypoint: `./bin/ops cap run verify.run -- domain finance`
+- Scoped domain health readback: `./bin/ops cap run verify.run -- domain finance`
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog

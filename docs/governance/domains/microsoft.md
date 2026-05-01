@@ -6,7 +6,7 @@ Canonical domain policy for `microsoft`.
 - Runtime contracts: `ops/bindings/domains/microsoft.bundle.yaml`
 - Mint customer mailbox operating contract: `ops/bindings/domains/mint/mint.customer.mailbox.standard.contract.yaml`
 - Mint tenant boringness contract: `ops/bindings/microsoft.tenant.boring.contract.yaml`
-- Verify entrypoint: `./bin/ops cap run verify.run -- domain microsoft`
+- Scoped domain health readback: `./bin/ops cap run verify.run -- domain microsoft`
 
 ## Mint Customer Mailbox Standard
 

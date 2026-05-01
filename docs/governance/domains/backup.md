@@ -9,7 +9,7 @@ Canonical domain policy for `backup`.
 - Canonical schedule: `ops/bindings/domains/backup/backup.schedule.yaml`
 - Canonical calendar projection: `ops/bindings/domains/backup/backup.calendar.yaml`
 - Runtime contracts: `ops/bindings/domains/backup.bundle.yaml`
-- Verify entrypoint: `./bin/ops cap run verify.run -- domain backup`
+- Scoped domain health readback: `./bin/ops cap run verify.run -- domain backup`
 
 `backup.status` may return `BLOCKED` when a target is present in the canonical
 inventory but the current network/auth context cannot probe freshness from this

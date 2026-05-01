@@ -171,8 +171,9 @@ required first-read language for everyday operator posture.
 
 The canonical contract above both realizations lives in
 [`dispatch.envelope.contract.yaml`](../../ops/bindings/dispatch.envelope.contract.yaml)
-(`execution_lane_contract`). Interactive delegation and mailroom task execution
-are current realizations of one execution-lane model, not separate kernels.
+(`execution_lane_contract`). Interactive delegation and internal execution
+pickup are current realizations of one execution-lane model, not separate
+kernels.
 
 ### Canonical Execution Lifecycle
 
@@ -243,7 +244,7 @@ pickup`; use raw task capability names only for drilldown or worker debugging.
 
 ```
 operator or system intent
-  → task admitted to mailroom queue          [governed: mailroom.task.enqueue]
+  → task admitted to execution pickup        [governed: mailroom.task.enqueue]
     → worker lane claims task                [governed: mailroom.task.claim]
       → worker proves liveness               [governed: mailroom.task.heartbeat]
       → worker executes allowlisted capability [governed: bounded capability lane]

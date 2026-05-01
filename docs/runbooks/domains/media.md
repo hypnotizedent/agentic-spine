@@ -5,7 +5,7 @@ Primary recovery flow for domain `media`.
 
 ## Detect
 1. `./bin/ops cap run spine.log.query -- --since-hours 24 --domain media --status failed`
-2. `./bin/ops cap run verify.run -- domain media`
+2. Run scoped media domain health readback: `./bin/ops cap run verify.run -- domain media`
 
 ## Diagnose
 1. Review latest failing run key receipt in `~/code/.evidence/spine/sessions/`.
@@ -15,10 +15,10 @@ Primary recovery flow for domain `media`.
 
 ## Recover
 1. Apply the minimal fix in the owning plugin/contract.
-2. Re-run targeted domain verify.
+2. Re-run targeted media domain health readback.
 3. Re-run `verify.infra.run`.
 
 ## Exit Criteria
-- Domain verify has zero blocking failures.
+- Media domain health readback has zero blocking failures.
 - Estate verify has zero blocking failures.
 - Failure cause and remediation are reflected in commit and receipt evidence.

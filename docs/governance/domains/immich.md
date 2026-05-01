@@ -4,7 +4,7 @@ Canonical domain policy for `immich`.
 
 - Authority: `docs/governance/SPINE.md`
 - Runtime contracts: `ops/bindings/domains/immich.bundle.yaml`
-- Verify entrypoint: `./bin/ops cap run verify.run -- domain immich`
+- Scoped domain health readback: `./bin/ops cap run verify.run -- domain immich`
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog

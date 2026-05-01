@@ -14,7 +14,7 @@ Spine retains only the governed shim/readback boundary plus the shared-infra con
   - `ops/bindings/domains/mint/mint.secrets.promotion.contract.yaml`
   - `ops/bindings/domains/mint/mint.storage.findings.map.yaml`
   - `ops/bindings/domains/mint/mint.storage.guard.policy.yaml`
-- Verify entrypoint: `./bin/ops cap run verify.run -- domain mint`
+- Scoped domain health readback: `./bin/ops cap run verify.run -- domain mint`
 
 ## Registered Capabilities (5 of 5)
 
