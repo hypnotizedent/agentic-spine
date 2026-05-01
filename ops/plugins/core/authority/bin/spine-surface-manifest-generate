@@ -17,6 +17,7 @@ import yaml
 
 MANIFEST_ID = "SPINE_SURFACE_MANIFEST"
 VTM_MANIFEST_ID = "SPINE_VERIFY_TARGET_MANIFEST"
+DOMAIN_INVENTORY_ID = "REPO_TOPOLOGY_DOMAIN_SURFACE_INVENTORY"
 GENERATOR_SURFACE_ID = "spine_surface_manifest_generate"
 VERIFY_SET_ID = "spine_scope"
 VERIFY_COMMAND_SURFACE_ID = "verify_command"
@@ -744,6 +745,345 @@ def build_parity_surfaces() -> dict[str, Any]:
     }
 
 
+def _safe_load_yaml(path: Path) -> Any:
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _repo_rel(root: Path, path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(root.resolve()))
+    except Exception:
+        return str(path)
+
+
+def _workspace_rel(workspace: Path, path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(workspace.resolve()))
+    except Exception:
+        return str(path)
+
+
+def _looks_generated(path: Path, text: str) -> bool:
+    lower = text[:4000].lower()
+    name = path.name.lower()
+    return (
+        "generated_by:" in lower
+        or "generated_from:" in lower
+        or "do not edit" in lower
+        or ".projected." in name
+        or ".snapshot." in name
+        or name.endswith(".generated.yaml")
+    )
+
+
+def _domain_from_path(rel: str) -> str:
+    parts = rel.split("/")
+    for marker in ("domains", "agents"):
+        if marker in parts:
+            idx = parts.index(marker)
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+    if parts:
+        return parts[0]
+    return "unknown"
+
+
+def _capability_disposition(cap_id: str, cap: dict[str, Any]) -> tuple[str, str, str]:
+    layer = str(cap.get("layer") or "").strip()
+    domain = str(cap.get("domain") or "").strip()
+    command = str(cap.get("command") or "").strip()
+    description = str(cap.get("description") or "").lower()
+
+    l1_l2_prefixes = (
+        "node.",
+        "site.",
+        "payload.",
+        "backup.estate.",
+        "node.recovery.",
+        "spine.",
+        "verify.",
+        "capability.",
+        "platform.",
+        "controller_prompt.",
+        "session.",
+        "intent.",
+        "rag.direct.",
+        "secrets.",
+        "observability.context.",
+    )
+    generated_words = ("projection", "snapshot", "generate", "readmodel")
+
+    if cap_id.startswith(l1_l2_prefixes):
+        return (
+            "l1_l2_keep_in_spine",
+            "existing first-class spine/L2 readback or control-plane surface",
+            "keep",
+        )
+    if layer == "L3_product_runtime" or "/domains/" in command:
+        return (
+            "l3_extract_candidate",
+            "domain/product runtime body should move behind a thin spine registry/readback pointer",
+            "externalize_after_replacement_readback_named",
+        )
+    if any(word in cap_id.lower() or word in command.lower() or word in description for word in generated_words):
+        return (
+            "generated_or_projection_surface",
+            "projection/generator can remain only if source authority and regeneration are explicit",
+            "keep_generated_or_demote_to_runtime_state",
+        )
+    if domain in {"core", "infra", "spine"}:
+        return (
+            "l1_l2_review_keep_likely",
+            "core/infra surface; review before any move because it may protect L1/L2 truth",
+            "review_before_move",
+        )
+    return (
+        "domain_review",
+        "domain-looking capability without enough metadata to move automatically",
+        "classify_before_move",
+    )
+
+
+def _binding_disposition(path: Path, rel: str, text: str) -> tuple[str, str, str]:
+    if _looks_generated(path, text):
+        return (
+            "generated_or_projection_surface",
+            "generated/projected domain binding; source authority and generator must be explicit",
+            "keep_generated_or_move_to_runtime_state",
+        )
+    if rel.startswith("ops/bindings/domains/"):
+        return (
+            "hand_authored_domain_binding_in_spine",
+            "hand-authored domain YAML in spine; valid only if it is a true L1/L2 contract",
+            "externalize_or_replace_with_generated_projection",
+        )
+    if rel.startswith("docs/governance/domains/"):
+        return (
+            "domain_doc_in_spine",
+            "domain doc in spine; should be catalog/readback only, not product doctrine",
+            "demote_or_externalize",
+        )
+    return (
+        "domain_surface_review",
+        "domain-looking repo surface found by path scan",
+        "classify_before_move",
+    )
+
+
+def build_domain_surface_inventory(root: Path, *, generated_at_utc: str) -> dict[str, Any]:
+    """Build the generated repo-topology readback for domain-looking surfaces.
+
+    This is deliberately emitted by the existing spine surface generator. It is
+    not a new authority plane; it is a worklist/readback for subtraction.
+    """
+    workspace = workspace_root(root)
+    caps_doc = _safe_load_yaml(root / "ops" / "capabilities.yaml")
+    capabilities = caps_doc.get("capabilities") if isinstance(caps_doc, dict) else {}
+    if not isinstance(capabilities, dict):
+        capabilities = {}
+
+    capability_rows: list[dict[str, Any]] = []
+    for cap_id, cap in sorted(capabilities.items()):
+        if not isinstance(cap, dict):
+            continue
+        layer = str(cap.get("layer") or "").strip()
+        domain = str(cap.get("domain") or "").strip()
+        command = str(cap.get("command") or "").strip()
+        cap_text = " ".join(
+            str(cap.get(key) or "")
+            for key in ("description", "domain", "layer", "command", "script_path")
+        ).lower()
+        domain_like = (
+            layer == "L3_product_runtime"
+            or "/domains/" in command
+            or domain not in {"", "core", "spine", "infra"}
+            or any(token in cap_id for token in ("media.", "mint.", "finance.", "home.", "pihole.", "communications."))
+            or "domain" in cap_text
+        )
+        if not domain_like:
+            continue
+        classification, reason, action = _capability_disposition(cap_id, cap)
+        capability_rows.append(
+            {
+                "capability_id": cap_id,
+                "classification": classification,
+                "recommended_action": action,
+                "reason": reason,
+                "domain": domain or "unknown",
+                "layer": layer or "unknown",
+                "safety": str(cap.get("safety") or ""),
+                "command": command,
+            }
+        )
+
+    path_roots = [
+        root / "ops" / "bindings" / "domains",
+        root / "ops" / "plugins" / "domains",
+        root / "docs" / "governance" / "domains",
+    ]
+    repo_rows: list[dict[str, Any]] = []
+    for scan_root in path_roots:
+        if not scan_root.exists():
+            continue
+        for path in sorted(p for p in scan_root.rglob("*") if p.is_file()):
+            rel = _repo_rel(root, path)
+            text = read_text(path)
+            classification, reason, action = _binding_disposition(path, rel, text)
+            repo_rows.append(
+                {
+                    "path": rel,
+                    "domain": _domain_from_path(rel),
+                    "classification": classification,
+                    "recommended_action": action,
+                    "reason": reason,
+                    "materialization": "generated_or_projected" if _looks_generated(path, text) else "hand_authored",
+                }
+            )
+
+    workbench_root = workspace / "workbench"
+    projects_root = workspace / "projects"
+    products_root = workspace / "products"
+    existing_product_roots = [
+        path
+        for path in (workspace / "ronny-products", workspace / "mint-modules")
+        if path.exists()
+    ]
+    l2_candidates = {
+        "ai-consolidation",
+        "artie",
+        "control-node",
+        "flying-dutchman",
+        "mint-agent",
+        "model-adapter",
+        "task-envelope",
+        "translator-node",
+        "workbench",
+    }
+    l3_candidates = {
+        "calendar",
+        "communications",
+        "finance",
+        "home",
+        "immich",
+        "media",
+        "ms-graph",
+        "n8n",
+    }
+    product_adjacent = {"surveillance", "products", "mint-os"}
+    workbench_rows: list[dict[str, Any]] = []
+    agents_root = workbench_root / "agents"
+    if agents_root.exists():
+        for path in sorted(p for p in agents_root.iterdir() if p.is_dir()):
+            name = path.name
+            if name in l2_candidates:
+                classification = "l2_shared_rail_candidate"
+                action = "keep_in_workbench_if_reusable_across_workloads"
+            elif name in l3_candidates:
+                classification = "l3_project_body_candidate"
+                action = "move_to_projects_when_source_authority_and_generated_spine_projection_are_ready"
+            elif name in product_adjacent:
+                classification = "product_or_pointer_candidate"
+                action = "move_to_products_or_named_product_repo_when stable; keep pointer generated only"
+            else:
+                classification = "workbench_agent_unclassified"
+                action = "classify_before_new_work"
+            workbench_rows.append(
+                {
+                    "path": _workspace_rel(workspace, path),
+                    "name": name,
+                    "classification": classification,
+                    "recommended_action": action,
+                }
+            )
+
+    all_rows = capability_rows + repo_rows + workbench_rows
+    counts: dict[str, int] = {}
+    for row in all_rows:
+        key = str(row.get("classification") or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+
+    return {
+        "manifest_id": DOMAIN_INVENTORY_ID,
+        "scope": "repo_topology_domain_surface_readback",
+        "status": "generated_supporting_readback",
+        "generated_at_utc": generated_at_utc,
+        "authoritative_as_of_commit": repo_anchor(root),
+        "generator_surface": GENERATOR_SURFACE_ID,
+        "non_authority_statement": (
+            "This inventory is a generated subtraction worklist. It does not move authority, "
+            "create a new repo plane, or make Workbench a catch-all."
+        ),
+        "target_rule": {
+            "agentic_spine": "L1 kernel/control plane and thin L2 readback registry only",
+            "workbench": "L2 shared operational rails only",
+            "projects": "unstable L3 project/domain bodies",
+            "products": "stable product bodies or explicitly named product repos",
+            "hand_yaml": "valid only when it is the actual authority contract; factual projections must be generated",
+        },
+        "home_status": {
+            "workbench_exists": workbench_root.exists(),
+            "projects_exists": projects_root.exists(),
+            "products_exists": products_root.exists(),
+            "existing_product_roots": [_workspace_rel(workspace, path) for path in existing_product_roots],
+        },
+        "summary": {
+            "domain_like_capability_count": len(capability_rows),
+            "repo_domain_surface_count": len(repo_rows),
+            "workbench_agent_home_count": len(workbench_rows),
+            "classification_counts": dict(sorted(counts.items())),
+        },
+        "capabilities": capability_rows,
+        "repo_surfaces": repo_rows,
+        "workbench_agent_homes": workbench_rows,
+    }
+
+
+def build_domain_inventory_markdown(data: dict[str, Any]) -> str:
+    lines = [
+        f"# {DOMAIN_INVENTORY_ID}",
+        "",
+        f"- Status: `{data['status']}`",
+        f"- Generated: `{data['generated_at_utc']}`",
+        f"- Commit: `{data['authoritative_as_of_commit']}`",
+        f"- Generator surface: `{data['generator_surface']}`",
+        f"- Authority: {data['non_authority_statement']}",
+        "",
+        "## Target Rule",
+    ]
+    for key, value in data["target_rule"].items():
+        lines.append(f"- `{key}`: {value}")
+    lines.extend(["", "## Home Status"])
+    for key, value in data["home_status"].items():
+        lines.append(f"- `{key}`: `{value}`")
+    lines.extend(["", "## Summary"])
+    summary = data["summary"]
+    for key in ("domain_like_capability_count", "repo_domain_surface_count", "workbench_agent_home_count"):
+        lines.append(f"- `{key}`: `{summary[key]}`")
+    lines.append("- `classification_counts`:")
+    for key, value in summary["classification_counts"].items():
+        lines.append(f"  - `{key}`: `{value}`")
+
+    lines.extend(["", "## Capabilities"])
+    for row in data["capabilities"]:
+        lines.append(
+            f"- `{row['capability_id']}`: `{row['classification']}` action=`{row['recommended_action']}` "
+            f"domain=`{row['domain']}` layer=`{row['layer']}`"
+        )
+    lines.extend(["", "## Repo Surfaces"])
+    for row in data["repo_surfaces"]:
+        lines.append(
+            f"- `{row['path']}`: `{row['classification']}` action=`{row['recommended_action']}` "
+            f"domain=`{row['domain']}` materialization=`{row['materialization']}`"
+        )
+    lines.extend(["", "## Workbench Agent Homes"])
+    for row in data["workbench_agent_homes"]:
+        lines.append(f"- `{row['path']}`: `{row['classification']}` action=`{row['recommended_action']}`")
+    return "\n".join(lines) + "\n"
+
+
 def _load_verify_target_helper(root: Path) -> Any | None:
     """Import the verify target manifest helper if available."""
     helper_path = root / "ops/plugins/core/verify/lib/spine_verify_target_manifest.py"
@@ -891,11 +1231,16 @@ def main() -> int:
     projection_path = domain_state / "SPINE_SURFACE_MANIFEST.md"
     vtm_yaml_path = domain_state / "SPINE_VERIFY_TARGET_MANIFEST.yaml"
     vtm_md_path = domain_state / "SPINE_VERIFY_TARGET_MANIFEST.md"
+    domain_inventory_yaml_path = domain_state / "REPO_TOPOLOGY_DOMAIN_SURFACE_INVENTORY.yaml"
+    domain_inventory_md_path = domain_state / "REPO_TOPOLOGY_DOMAIN_SURFACE_INVENTORY.md"
 
     generated_at = existing_generated_at(manifest_path) or utc_now() if args.check else utc_now()
     manifest = build_manifest(root, generated_at_utc=generated_at)
     yaml_out = yaml_text(manifest)
     md_out = build_markdown(manifest)
+    domain_inventory = build_domain_surface_inventory(root, generated_at_utc=generated_at)
+    domain_inventory_yaml_out = yaml_text(domain_inventory)
+    domain_inventory_md_out = build_domain_inventory_markdown(domain_inventory)
 
     # Build verify target manifest (graceful skip if helper unavailable)
     vtm_data = build_verify_target_data(root)
@@ -924,11 +1269,18 @@ def main() -> int:
             if read_text(vtm_yaml_path) != vtm_yaml_out or read_text(vtm_md_path) != vtm_md_out:
                 print("spine.surface.manifest.generate FAIL: verify target manifest drift", file=sys.stderr)
                 fail = True
+        if (
+            read_text(domain_inventory_yaml_path) != domain_inventory_yaml_out
+            or read_text(domain_inventory_md_path) != domain_inventory_md_out
+        ):
+            print("spine.surface.manifest.generate FAIL: repo topology domain inventory drift", file=sys.stderr)
+            fail = True
         if fail:
             return 1
         print(f"spine.surface.manifest.generate PASS: {manifest_path}")
         if vtm_yaml_out is not None:
             print(f"spine.surface.manifest.generate PASS: {vtm_yaml_path}")
+        print(f"spine.surface.manifest.generate PASS: {domain_inventory_yaml_path}")
         return 0
 
     atomic_write(manifest_path, yaml_out)
@@ -941,6 +1293,11 @@ def main() -> int:
         atomic_write(vtm_md_path, vtm_md_out)
         print(f"spine.surface.manifest.generate PASS: {vtm_yaml_path}")
         print(f"spine.surface.manifest.generate PASS: {vtm_md_path}")
+
+    atomic_write(domain_inventory_yaml_path, domain_inventory_yaml_out)
+    atomic_write(domain_inventory_md_path, domain_inventory_md_out)
+    print(f"spine.surface.manifest.generate PASS: {domain_inventory_yaml_path}")
+    print(f"spine.surface.manifest.generate PASS: {domain_inventory_md_path}")
 
     return 0
 
