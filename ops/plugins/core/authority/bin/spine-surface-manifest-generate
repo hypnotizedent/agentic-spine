@@ -53,6 +53,11 @@ def workspace_root(root: Path) -> Path:
     env = (os.environ.get("SPINE_WORKSPACE_ROOT") or "").strip()
     if env:
         return Path(env).expanduser().resolve()
+    parts = root.resolve().parts
+    marker = (".runtime", "spine", "tmp", "worktrees")
+    for idx in range(0, max(0, len(parts) - len(marker) + 1)):
+        if tuple(parts[idx : idx + len(marker)]) == marker:
+            return Path(*parts[:idx]).resolve()
     return root.parent
 
 
@@ -999,7 +1004,31 @@ def build_domain_surface_inventory(root: Path, *, generated_at_utc: str) -> dict
                 }
             )
 
-    all_rows = capability_rows + repo_rows + workbench_rows
+    project_rows: list[dict[str, Any]] = []
+    if projects_root.exists():
+        for path in sorted(p for p in projects_root.iterdir() if p.is_dir()):
+            project_rows.append(
+                {
+                    "path": _workspace_rel(workspace, path),
+                    "name": path.name,
+                    "classification": "l3_project_home",
+                    "recommended_action": "keep_out_of_spine_and_workbench; expose through generated readback only",
+                }
+            )
+
+    product_rows: list[dict[str, Any]] = []
+    if products_root.exists():
+        for path in sorted(p for p in products_root.iterdir() if p.is_dir()):
+            product_rows.append(
+                {
+                    "path": _workspace_rel(workspace, path),
+                    "name": path.name,
+                    "classification": "product_home",
+                    "recommended_action": "keep_out_of_spine; expose through generated readback only",
+                }
+            )
+
+    all_rows = capability_rows + repo_rows + workbench_rows + project_rows + product_rows
     counts: dict[str, int] = {}
     for row in all_rows:
         key = str(row.get("classification") or "unknown")
@@ -1033,11 +1062,15 @@ def build_domain_surface_inventory(root: Path, *, generated_at_utc: str) -> dict
             "domain_like_capability_count": len(capability_rows),
             "repo_domain_surface_count": len(repo_rows),
             "workbench_agent_home_count": len(workbench_rows),
+            "project_home_count": len(project_rows),
+            "product_home_count": len(product_rows),
             "classification_counts": dict(sorted(counts.items())),
         },
         "capabilities": capability_rows,
         "repo_surfaces": repo_rows,
         "workbench_agent_homes": workbench_rows,
+        "project_homes": project_rows,
+        "product_homes": product_rows,
     }
 
 
@@ -1060,7 +1093,7 @@ def build_domain_inventory_markdown(data: dict[str, Any]) -> str:
         lines.append(f"- `{key}`: `{value}`")
     lines.extend(["", "## Summary"])
     summary = data["summary"]
-    for key in ("domain_like_capability_count", "repo_domain_surface_count", "workbench_agent_home_count"):
+    for key in ("domain_like_capability_count", "repo_domain_surface_count", "workbench_agent_home_count", "project_home_count", "product_home_count"):
         lines.append(f"- `{key}`: `{summary[key]}`")
     lines.append("- `classification_counts`:")
     for key, value in summary["classification_counts"].items():
@@ -1080,6 +1113,12 @@ def build_domain_inventory_markdown(data: dict[str, Any]) -> str:
         )
     lines.extend(["", "## Workbench Agent Homes"])
     for row in data["workbench_agent_homes"]:
+        lines.append(f"- `{row['path']}`: `{row['classification']}` action=`{row['recommended_action']}`")
+    lines.extend(["", "## Project Homes"])
+    for row in data["project_homes"]:
+        lines.append(f"- `{row['path']}`: `{row['classification']}` action=`{row['recommended_action']}`")
+    lines.extend(["", "## Product Homes"])
+    for row in data["product_homes"]:
         lines.append(f"- `{row['path']}`: `{row['classification']}` action=`{row['recommended_action']}`")
     return "\n".join(lines) + "\n"
 
