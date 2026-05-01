@@ -5,25 +5,91 @@
 # Agents MUST consult this before creating or modifying infrastructure data.
 #
 # Status: authoritative
-# Last verified: 2026-02-13
+# Last verified: 2026-05-01
 # Created by: LOOP-INFRA-SSOT-ALIGNMENT-20260208 P2
 
-version: 1
-updated_at: "2026-02-08"
+version: 2
+updated_at: "2026-05-01"
+
+repo_topology_rule:
+  statement: >
+    Repo placement is one-way: agentic-spine is the L1 kernel/control plane,
+    workbench is the L2 shared operational rail home, unstable L3 domain bodies
+    live in project homes, and stable product bodies live in product homes or
+    explicitly named product repos. Generated projections may cross boundaries;
+    hand-maintained authority must have exactly one home.
+  generated_readback: "$SPINE_STATE/domain-state/REPO_TOPOLOGY_DOMAIN_SURFACE_INVENTORY.yaml"
+  hand_yaml_rule: "Hand-authored YAML is valid only when it is the actual authority contract; factual projections must be generated from a living authority."
+  forbidden:
+    - "Do not use workbench as a dumping ground for L3/product bodies."
+    - "Do not create repo-local governance bindings outside agentic-spine."
+    - "Do not treat generated projections or runtime configs as peer authority."
+    - "Do not create a parallel ronny-projects tree as product authority."
 
 repos:
   agentic-spine:
     path: "~/code/agentic-spine"
-    role: "Governance authority — canonical bindings, drift gates, loop state"
+    repo_class: "L1_control_plane"
+    role: "Governance authority — kernel protocol, canonical L1/L2 contracts, readbacks, verify, loop/packet/receipt state"
   workbench:
     path: "~/code/workbench"
-    role: "Supporting surface — runtime configs, reference data, dotfiles"
+    repo_class: "L2_shared_operational_rails"
+    role: "Shared operational rails, reusable adapters, generators, validators, dotfiles, and runtime materializations. Not a default home for L3/product bodies."
   mint-modules:
     path: "~/code/mint-modules"
-    role: "Product modules — standalone services extracted from mint-os monolith. Each module owns its code, schema, API spec, and Dockerfile. Governance bindings live in spine."
+    repo_class: "product_home"
+    role: "Canonical Mint product/module home — owns Mint product code, schema, API specs, Dockerfiles, runtime contracts, and product-local operational scripts. Spine keeps thin registry/readback pointers only."
   ronny-products:
     path: "~/code/ronny-products"
-    role: "Canonical standalone product repo — non-mint applications, each product owns its code, config, contract, and deployment artifacts. Governance bindings live in spine."
+    repo_class: "product_home"
+    role: "Canonical standalone product repo — non-mint applications, each product owns its code, config, contract, and deployment artifacts. Spine keeps scaffold/onboarding governance only."
+
+placement_classes:
+  L1_control_plane:
+    canonical_home: "agentic-spine"
+    allowed_contents:
+      - "kernel protocol and current aperture"
+      - "canonical L1/L2 contracts"
+      - "thin capability registry/readback pointers"
+      - "verify and receipt machinery"
+      - "generated repo-topology/domain-surface inventory"
+    forbidden_contents:
+      - "L3 product implementation bodies"
+      - "domain app policy that is not an L1/L2 contract"
+      - "hand-maintained factual projections"
+  L2_shared_operational_rails:
+    canonical_home: "workbench"
+    allowed_contents:
+      - "shared reusable agent rails"
+      - "cross-workload adapters and generators"
+      - "operator dotfiles/runtime materializations"
+      - "validators and reusable tooling"
+    forbidden_contents:
+      - "unstable L3 project bodies without an extraction path"
+      - "stable product source of truth"
+      - "new governance bindings"
+  L3_project_body:
+    canonical_home: "~/code/projects/<project>"
+    current_status: "placement class approved by human steward; root may be created only as a plain placement home, not a governance plane"
+    allowed_contents:
+      - "unstable domain/project implementation bodies"
+      - "project-local experiments and product candidates"
+    forbidden_contents:
+      - "spine governance authority"
+      - "shared L2 rails"
+  product_home:
+    canonical_homes:
+      - "mint-modules"
+      - "ronny-products"
+      - "~/code/products/<product>"
+    current_status: "mint-modules and ronny-products are existing canonical product homes; ~/code/products is a plain future placement root, not a second authority"
+    allowed_contents:
+      - "stable product code"
+      - "product-local contracts"
+      - "product-local operational scripts"
+    forbidden_contents:
+      - "spine kernel/governance authority"
+      - "shared L2 rails unless extracted as reusable workbench tooling"
 
 # ─────────────────────────────────────────────────────────────
 # Authority Map
@@ -68,8 +134,8 @@ domains:
     related:
       - repo: workbench
         file: "dotfiles/ssh/config.d/tailscale.conf"
-        note: "Runtime SSH config installed on MacBook; both maintained independently"
-    sync_policy: "Both are maintained. ssh.targets.yaml is governance; tailscale.conf is runtime config. New hosts must appear in both."
+        note: "Generated/runtime SSH config installed on MacBook; it materializes governed SSH target truth for operator use."
+    sync_policy: "ssh.targets.yaml is governance. tailscale.conf is runtime materialization/projection and must be regenerated or reconciled from governed target truth; it is not peer authority."
 
   docker_compose_targets:
     authoritative:
@@ -112,6 +178,30 @@ domains:
         note: "Detailed project structure, rotation policy, known issues"
     sync_policy: "Spine binding is governance (project IDs, lifecycle). Workbench JSON has operational detail. Both maintained."
 
+  repo_topology:
+    authoritative:
+      repo: agentic-spine
+      files:
+        - "AGENTS.md"
+        - "NORTH_STAR.md"
+        - "docs/governance/SPINE.md"
+        - "ops/bindings/cross-repo.authority.yaml"
+      generated_readback: "$SPINE_STATE/domain-state/REPO_TOPOLOGY_DOMAIN_SURFACE_INVENTORY.yaml"
+    related:
+      - repo: workbench
+        file: "AGENTS.md, README.md, WORKBENCH_CONTRACT.md"
+        note: "Workbench declares its L2 shared-rail charter. It does not own repo placement authority."
+      - repo: mint-modules
+        file: "AGENTS.md, contracts/**, scripts/ops/**"
+        note: "Existing canonical Mint product home."
+      - repo: ronny-products
+        file: "AGENTS.md, <product>/app.contract.yaml"
+        note: "Existing canonical standalone product home."
+    sync_policy: >
+      Spine owns the placement rule and generated inventory. Workbench owns
+      reusable L2 rails. Product repos own stable product bodies. Project roots
+      may hold unstable L3 bodies but must not become governance planes.
+
   mint_modules:
     authoritative:
       repo: mint-modules
@@ -128,9 +218,11 @@ domains:
         file: "ops/bindings/docker.compose.targets.yaml"
         note: "Spine owns deployment target paths (SSH host + compose location)"
     sync_policy: >
-      mint-modules owns module code and specs. Spine owns governance bindings
-      (SERVICE_REGISTRY, STACK_REGISTRY, health probes, domain routing).
-      When adding a new module: update both mint-modules (code) and spine (bindings).
+      mint-modules owns module code, specs, runtime contracts, and product-local
+      operational scripts. Spine owns only thin governance/readback pointers
+      needed for L1/L2 status, routing, secrets, backup, and placement. When a
+      Mint capability is product behavior, implement it in mint-modules and
+      keep the spine capability as a thin pointer or generated registry row.
       Deployment path on docker-host (~/artwork-module/) is NOT the source path
       (~/code/mint-modules/artwork/). Both must be documented.
 
@@ -167,13 +259,18 @@ domains:
 # ─────────────────────────────────────────────────────────────
 
 agent_rules:
-  - "When adding a new host/VM: update BOTH ssh.targets.yaml (spine) AND tailscale.conf (workbench)"
-  - "When migrating a service: update spine bindings FIRST, then sync workbench data files"
-  - "When workbench and spine disagree: spine wins (except for SSH runtime config)"
+  - "Before adding or moving repo content, read repo_topology in this contract and the generated REPO_TOPOLOGY_DOMAIN_SURFACE_INVENTORY readback."
+  - "When adding a new host/VM: admit it through the first-class node/admission path, then regenerate or reconcile runtime SSH projections."
+  - "When migrating a service: update the single authority home first, then regenerate supporting projections."
+  - "When workbench and spine disagree on L1/L2 authority: spine wins. Workbench runtime materializations do not become peer authority."
   - "Never create new governance bindings in workbench — governance lives in spine"
   - "Workbench compose files are reference/legacy — live truth is on the target host"
-  - "mint-modules owns module code/specs; spine owns service bindings. When adding a module: update both."
+  - "Workbench agents folders must be classified as L2 rail, L3 project body, product/pointer, generated projection, or stale residue before new work lands there."
+  - "mint-modules owns Mint product code/specs/runtime scripts; spine keeps thin L1/L2 pointers only."
   - "Deployment path (docker-host:~/artwork-module/) != source path (~/code/mint-modules/artwork/). Document both."
   - "When adding a ronny-product: scaffold in ronny-products repo, register in spine service.onboarding.contract.yaml"
   - "ronny-products owns product code; spine owns governance (loops, gaps, plans, scaffold contract)"
+  - "Use ~/code/projects only as a plain placement home for unstable L3 project bodies; do not make it a governance plane."
+  - "Use ~/code/products only as a plain placement home for stable products not already covered by mint-modules or ronny-products."
   - "Do not create standalone product code under ~/code/ronny-projects; that path is compatibility residue, not authority."
+  - "Do not hand-update factual YAML projections when a generator/readback can own the materialization."
