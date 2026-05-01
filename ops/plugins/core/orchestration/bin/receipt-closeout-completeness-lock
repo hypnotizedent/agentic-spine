@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 CONTRACT="$ROOT/ops/bindings/wave.closeout.contract.yaml"
 POLICY="enforce"
 DEFAULT_REGEX='(^|/)\.evidence/spine/reports/verify/W[^/]*RECEIPT[^/]*\.md$'
@@ -14,14 +14,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     -h|--help)
       cat <<'EOF'
-Usage: d274-receipt-closeout-completeness-lock.sh [--policy enforce|report]
+Usage: receipt-closeout-completeness-lock [--policy enforce|report]
 
 Blocks closeout hygiene when untracked receipt crumbs remain in the repo.
 EOF
       exit 0
       ;;
     *)
-      echo "D274 FAIL: unknown arg: $1" >&2
+      echo "receipt.closeout.completeness FAIL: unknown arg: $1" >&2
       exit 2
       ;;
   esac
@@ -30,13 +30,13 @@ done
 case "$POLICY" in
   enforce|report) ;;
   *)
-    echo "D274 FAIL: --policy must be enforce|report" >&2
+    echo "receipt.closeout.completeness FAIL: --policy must be enforce|report" >&2
     exit 2
     ;;
 esac
 
 [[ -d "$ROOT/.git" || -f "$ROOT/.git" ]] || {
-  echo "D274 FAIL: not a git repository root: $ROOT" >&2
+  echo "receipt.closeout.completeness FAIL: not a git repository root: $ROOT" >&2
   exit 1
 }
 
@@ -69,12 +69,12 @@ for path in "${untracked[@]}" "${ignored_untracked[@]}"; do
 done
 
 if [[ "${#crumbs[@]}" -eq 0 ]]; then
-  echo "D274 PASS: no untracked receipt crumbs remain before closeout"
+  echo "receipt.closeout.completeness PASS: no untracked receipt crumbs remain before closeout"
   exit 0
 fi
 
 {
-  echo "D274 ${POLICY^^}: untracked receipt crumbs detected"
+  echo "receipt.closeout.completeness ${POLICY^^}: untracked receipt crumbs detected"
   for path in "${crumbs[@]}"; do
     echo "- $path"
   done

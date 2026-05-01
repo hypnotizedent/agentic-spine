@@ -21,7 +21,7 @@ Usage:
 Behavior:
   - Validates run key presence in each receipt.
   - Stages expected receipts only.
-  - Enforces D274 receipt crumb lock before commit.
+  - Enforces receipt crumb lock before commit.
   - Commits and pushes to canonical origin by default; additional remotes are explicit.
 USAGE
 }
@@ -77,7 +77,7 @@ RUN_KEY_REGEX='^(CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S[0-9]{8}
 MIN_RUN_KEYS_PER_RECEIPT=1
 REQUIRE_RUN_KEYS="true"
 REQUIRE_CLEAN_INDEX="true"
-GATE_SCRIPT="$ROOT/surfaces/verify/d274-receipt-closeout-completeness-lock.sh"
+RECEIPT_CRUMB_LOCK="$ROOT/ops/plugins/core/orchestration/bin/receipt-closeout-completeness-lock"
 DEFAULT_REMOTES=(origin)
 
 if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
@@ -85,8 +85,8 @@ if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
   MIN_RUN_KEYS_PER_RECEIPT="$(yq e -r '.closeout.min_run_keys_per_receipt // 1' "$CONTRACT" 2>/dev/null || echo 1)"
   REQUIRE_RUN_KEYS="$(yq e -r '.closeout.require_run_keys // true' "$CONTRACT" 2>/dev/null || echo true)"
   REQUIRE_CLEAN_INDEX="$(yq e -r '.finalize.require_clean_index_before_stage // true' "$CONTRACT" 2>/dev/null || echo true)"
-  GATE_SCRIPT_REL="$(yq e -r '.finalize.gate_script // "surfaces/verify/d274-receipt-closeout-completeness-lock.sh"' "$CONTRACT" 2>/dev/null || echo "surfaces/verify/d274-receipt-closeout-completeness-lock.sh")"
-  GATE_SCRIPT="$ROOT/$GATE_SCRIPT_REL"
+  RECEIPT_CRUMB_LOCK_REL="$(yq e -r '.finalize.receipt_crumb_lock_script // "ops/plugins/core/orchestration/bin/receipt-closeout-completeness-lock"' "$CONTRACT" 2>/dev/null || echo "ops/plugins/core/orchestration/bin/receipt-closeout-completeness-lock")"
+  RECEIPT_CRUMB_LOCK="$ROOT/$RECEIPT_CRUMB_LOCK_REL"
   mapfile -t DEFAULT_REMOTES < <(yq e -r '.finalize.default_remotes[]?' "$CONTRACT" 2>/dev/null || true)
 fi
 
@@ -124,10 +124,10 @@ for receipt in "${RECEIPTS[@]}"; do
   git -C "$ROOT" add -- "$abs"
 done
 
-if [[ -x "$GATE_SCRIPT" ]]; then
-  "$GATE_SCRIPT" --policy enforce
+if [[ -x "$RECEIPT_CRUMB_LOCK" ]]; then
+  "$RECEIPT_CRUMB_LOCK" --policy enforce
 else
-  echo "wave.closeout.finalize FAIL: missing gate script: $GATE_SCRIPT" >&2
+  echo "wave.closeout.finalize FAIL: missing receipt crumb lock: $RECEIPT_CRUMB_LOCK" >&2
   exit 1
 fi
 
