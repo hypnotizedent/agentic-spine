@@ -242,10 +242,11 @@ BANNER
   echo "Gate Domains:"
   echo "  selected: ${selected_gate_domain} (${domain_source})"
   echo "  commands:"
-  echo "    ./bin/ops cap run verify.drift_gates.certify --list-domains"
-  echo "    ./bin/ops cap run verify.drift_gates.certify --domain <name> --brief"
-  echo "    ./bin/ops cap run verify.pack.list"
-  echo "    ./bin/ops cap run verify.pack.run <agent_id|domain>"
+  echo "    ./ops/plugins/core/verify/bin/drift-gates-certify --list-domains"
+  echo "    ./ops/plugins/core/verify/bin/drift-gates-certify --domain <name> --brief"
+  echo "    ./bin/ops cap run verify.infra.run"
+  echo "    ./ops/plugins/core/verify/bin/verify-topology pack-list"
+  echo "    ./ops/plugins/core/verify/bin/verify-topology pack-run <agent_id|domain>"
 
   if [[ -x "$DRIFT_CERTIFIER" ]]; then
     local domain_list_out domain_list_csv domain_brief_out

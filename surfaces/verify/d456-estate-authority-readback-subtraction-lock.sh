@@ -14,6 +14,8 @@ SCHEDULER_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
 GATE_TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 GATE_REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
 GATE_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
+VERIFY_TOPOLOGY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
+OPS_VERIFY="$ROOT/ops/commands/verify.sh"
 VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
 PLACEMENT_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
 
@@ -27,14 +29,18 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -f "$GATE_TOPOLOGY" ]] || fail "missing gate.execution.topology.yaml"
 [[ -f "$GATE_REGISTRY" ]] || fail "missing gate.registry.yaml"
 [[ -f "$GATE_PROFILES" ]] || fail "missing gate.domain.profiles.yaml"
+[[ -x "$VERIFY_TOPOLOGY" ]] || fail "missing executable verify-topology"
+[[ -f "$OPS_VERIFY" ]] || fail "missing ops verify wrapper"
 [[ -f "$VM_LIFECYCLE" ]] || fail "missing vm.lifecycle.yaml"
 [[ -f "$PLACEMENT_POLICY" ]] || fail "missing infra.storage.placement.policy.yaml"
 
 bash -n "$RUNTIME_PLACEMENT"
 python3 -m py_compile "$SCHEDULER_HEALTH"
 
-python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CAPABILITIES" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$GATE_REGISTRY" "$GATE_PROFILES" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" <<'PY'
+python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CAPABILITIES" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$GATE_REGISTRY" "$GATE_PROFILES" "$VERIFY_TOPOLOGY" "$OPS_VERIFY" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" <<'PY'
 import sys
+import json
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -52,7 +58,7 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
-runtime_path, scheduler_path, caps_path, scheduler_registry_path, topology_path, gate_registry_path, gate_profiles_path, lifecycle_path, placement_path = map(Path, sys.argv[1:])
+runtime_path, scheduler_path, caps_path, scheduler_registry_path, topology_path, gate_registry_path, gate_profiles_path, verify_topology_path, ops_verify_path, lifecycle_path, placement_path = map(Path, sys.argv[1:])
 runtime_text = runtime_path.read_text(encoding="utf-8")
 scheduler_text = scheduler_path.read_text(encoding="utf-8")
 caps_text = caps_path.read_text(encoding="utf-8")
@@ -133,6 +139,20 @@ for phrase in [
         fail(f"verify.infra.run must teach scoped estate-health demotion: missing {phrase!r}")
 
 gates = gate_registry.get("gates") or []
+gate_count = gate_registry.get("gate_count") or {}
+actual_total = len([row for row in gates if isinstance(row, dict)])
+actual_retired = len([row for row in gates if isinstance(row, dict) and row.get("retired") is True])
+actual_active = actual_total - actual_retired
+if gate_count.get("total") != actual_total or gate_count.get("active") != actual_active or gate_count.get("retired") != actual_retired:
+    fail(f"gate registry counts must match live rows, got {gate_count!r} expected total={actual_total} active={actual_active} retired={actual_retired}")
+if "D1-D457" not in str(gate_registry.get("description") or ""):
+    fail("gate registry description must name current D range through D457")
+d_rows = [row for row in gates if isinstance(row, dict) and str(row.get("id") or "").startswith("D")]
+missing_retired_field = [row.get("id") for row in d_rows if "retired" not in row]
+if missing_retired_field:
+    fail(f"live D rows must carry explicit retired field: {missing_retired_field}")
+if any(row.get("retired") is True for row in d_rows):
+    fail("retired D rows must stay archived out of the live registry")
 g_rows = [row for row in gates if isinstance(row, dict) and str(row.get("id") or "").startswith("G")]
 if len(g_rows) != 17:
     fail(f"expected exactly 17 historical G gate rows, found {len(g_rows)}")
@@ -144,6 +164,25 @@ for row in g_rows:
         fail(f"{gid} must be superseded by verify.infra.run")
     if row.get("mode") != "report":
         fail(f"{gid} must be report-only historical residue, not enforce")
+
+ids_run = subprocess.run(
+    [str(verify_topology_path), "ids-run", "G1", "G8", "G17", "--json"],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+if ids_run.returncode != 0:
+    fail(f"retired G ids-run must not fail/block: rc={ids_run.returncode} stderr={ids_run.stderr.strip()}")
+try:
+    ids_payload = json.loads(ids_run.stdout)
+except Exception as exc:
+    fail(f"retired G ids-run did not emit JSON: {exc}")
+if ids_payload.get("skipped_retired") != 3 or ids_payload.get("blocking_fail_ids"):
+    fail(f"retired G ids-run must return skipped_retired readback with no blocking failures: {ids_payload!r}")
+
+ops_verify_text = ops_verify_path.read_text(encoding="utf-8")
+if "verify.drift_gates.certify" in ops_verify_text:
+    fail("ops verify preflight must not teach unregistered verify.drift_gates.certify capability")
 
 core_ids = (((topology.get("core_mode") or {}).get("core_gate_ids")) or [])
 if any(str(gid).startswith("G") for gid in core_ids):

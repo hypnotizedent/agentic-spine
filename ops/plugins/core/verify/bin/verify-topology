@@ -170,6 +170,17 @@ gate_script_rel() {
   governed_fast_gate_rows | awk -F'\t' -v gate_id="$gate_id" '$1 == gate_id {print $2; exit}'
 }
 
+gate_is_retired() {
+  local gate_id="$1"
+  printf '%s\n' "$GATE_REGISTRY_SNAPSHOT" \
+  | jq -e --arg gate_id "$gate_id" '
+      map(select(type == "object"))
+      | map(select(((.id // "") | tostring) == $gate_id))
+      | .[0]
+      | ((.retired // false) == true)
+    ' >/dev/null 2>&1
+}
+
 domain_gate_ids() {
   local domain
   domain="$(normalize_domain "${1:-}")"
@@ -219,9 +230,11 @@ run_gate_ids() {
   local pass_count=0
   local fail_count=0
   local warning_count=0
+  local skipped_retired=0
   local failing_ids=()
   local warning_ids=()
   local blocking_fail_ids=()
+  local retired_ids=()
   local gate_id script_rel script_path rc
   local -a unique_gate_ids=()
   local seen=""
@@ -278,6 +291,17 @@ run_gate_ids() {
   fi
 
   for gate_id in "${unique_gate_ids[@]}"; do
+    if gate_is_retired "$gate_id"; then
+      skipped_retired=$((skipped_retired + 1))
+      retired_ids+=("$gate_id")
+      if [[ "$json_mode" -eq 0 ]]; then
+        echo "==> $gate_id"
+        echo "retired gate authority; use verify.infra.run for scoped estate/workload health readback"
+        echo
+      fi
+      continue
+    fi
+
     script_rel="$(gate_script_rel "$gate_id")"
     script_path="$ROOT/$script_rel"
     if [[ ! -f "$script_path" ]]; then
@@ -326,12 +350,14 @@ run_gate_ids() {
       --argjson may_block_spine_truth false \
       --argjson failing_ids "$(json_array "${failing_ids[@]}")" \
       --argjson warning_ids "$(json_array "${warning_ids[@]}")" \
+      --argjson retired_ids "$(json_array "${retired_ids[@]}")" \
       --argjson blocking_fail_ids "$(json_array "${blocking_fail_ids[@]}")" \
       --argjson non_blocking_fail_ids '[]' \
       --argjson total "${#unique_gate_ids[@]}" \
       --argjson pass "$pass_count" \
       --argjson fail "$fail_count" \
       --argjson warn "$warning_count" \
+      --argjson skipped_retired "$skipped_retired" \
       '{
         mode: $mode,
         truth_plane: $truth_plane,
@@ -342,11 +368,12 @@ run_gate_ids() {
         fail: $fail,
         warn: $warn,
         skipped_inline: 0,
-        skipped_retired: 0,
+        skipped_retired: $skipped_retired,
         skipped_network: 0,
         receipt_integrity_warnings: 0,
         failing_ids: $failing_ids,
         warning_ids: $warning_ids,
+        retired_ids: $retired_ids,
         blocking_fail_ids: $blocking_fail_ids,
         non_blocking_fail_ids: $non_blocking_fail_ids
       }'
@@ -359,6 +386,7 @@ run_gate_ids() {
     echo "pass: $pass_count"
     echo "fail: $fail_count"
     echo "warn: $warning_count"
+    echo "skipped_retired: $skipped_retired"
   fi
 
   [[ "$fail_count" -eq 0 ]]
