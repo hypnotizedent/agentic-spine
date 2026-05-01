@@ -63,6 +63,21 @@ SURVEY_FACT_SOURCE_MARKERS = {
     "shared_boot_ssd_survey",
     "chassis_survey_shared_boot_medium",
 }
+MACHINE_FACT_FIELD_ORDER = [
+    "os_pretty",
+    "kernel",
+    "arch",
+    "sys_vendor",
+    "product_name",
+    "serial",
+    "bios_version",
+    "cpu_model",
+    "cpu_threads",
+    "memory_bytes",
+    "storage_summary",
+    "nic_summary",
+]
+INTEGER_MACHINE_FACT_FIELDS = {"cpu_threads", "memory_bytes"}
 
 
 def spine_state() -> Path:
@@ -209,10 +224,54 @@ def append_unique(seq: list[Any], value: Any, changes: list[dict[str, Any]], sur
         changes.append({"surface": surface, "field": field, "action": "append", "entry": value})
 
 
+def default_recovery_control(model: str | None, device_id: str) -> CommentedMap:
+    subject = model or device_id
+    return cmap(
+        {
+            "identity": "tailscale_ssh_declared",
+            "network": "tailscale_proved_from_firstboot",
+            "power": "physical_presence_required",
+            "console": "local_physical_console",
+            "remote_power_on": False,
+            "remote_power_off": False,
+            "remote_reboot": "ssh_possible_but_no_generic_invoke",
+            "manual_action": (
+                f"{subject} has no admitted BMC/PDU/WoL power path; "
+                "operator physical presence is required for power recovery."
+            ),
+        }
+    )
+
+
+def normalize_machine_fact(key: str, value: Any) -> Any:
+    if key in INTEGER_MACHINE_FACT_FIELDS and isinstance(value, str) and value.isdigit():
+        return int(value)
+    return value
+
+
+def machine_facts_from_claim(claim: dict[str, Any]) -> CommentedMap | None:
+    raw_facts = claim.get("machine_facts") if isinstance(claim.get("machine_facts"), dict) else {}
+    if not raw_facts:
+        return None
+    facts = cmap(
+        {
+            "source": "firstboot_claim",
+            "observed_at": claim.get("bootstrap_completed_at") or now_day(),
+        }
+    )
+    for key in MACHINE_FACT_FIELD_ORDER:
+        value = raw_facts.get(key)
+        if value in (None, "", [], {}):
+            continue
+        facts[key] = normalize_machine_fact(key, value)
+    return facts if len(facts) > 2 else None
+
+
 def reconcile_inventory(data: CommentedMap, claim: dict[str, Any], args: argparse.Namespace, changes: list[dict[str, Any]]) -> None:
     machines = data.setdefault("machines", CommentedSeq())
     device_id = claim["device_id"]
     machine = find_by(machines, "device_id", device_id)
+    facts = machine_facts_from_claim(claim)
     if machine is None:
         if not args.create_inventory:
             raise SystemExit(
@@ -231,19 +290,22 @@ def reconcile_inventory(data: CommentedMap, claim: dict[str, Any], args: argpars
                 "site": args.site,
                 "tailscale_identity": claim["tailscale_identity"],
                 "tailscale_ip": claim["tailscale_ip"],
-                "eligibility_state": "candidate",
-                "role_candidacy": cseq(["none"]),
-                "promotion_stage": "taxonomy",
-                "known_constraints": CommentedSeq(),
-                "evidence": CommentedSeq(),
-                "last_assessed": now_day(),
-                "notes": (
-                    f"Reprovisioned to {claim.get('target_distro', 'Ubuntu')} "
-                    f"{claim.get('target_distro_version', '')} and admitted from firstboot claim. "
-                    "Not role-promoted; node admission/readback decides current node truth."
-                ).replace("  ", " ").strip(),
             }
         )
+        if facts:
+            machine["machine_facts"] = facts
+        machine["eligibility_state"] = "candidate"
+        machine["role_candidacy"] = cseq(["none"])
+        machine["promotion_stage"] = "taxonomy"
+        machine["known_constraints"] = CommentedSeq()
+        machine["recovery_control"] = default_recovery_control(args.model, device_id)
+        machine["evidence"] = CommentedSeq()
+        machine["last_assessed"] = now_day()
+        machine["notes"] = (
+            f"Reprovisioned to {claim.get('target_distro', 'Ubuntu')} "
+            f"{claim.get('target_distro_version', '')} and admitted from firstboot claim. "
+            "Not role-promoted; node admission/readback decides current node truth."
+        ).replace("  ", " ").strip()
         machines.append(machine)
         changes.append({"surface": "operator.hardware.inventory.yaml", "action": "create", "device_id": device_id})
     else:
@@ -260,7 +322,18 @@ def reconcile_inventory(data: CommentedMap, claim: dict[str, Any], args: argpars
         set_if_changed(machine, "eligibility_state", "candidate", changes, "operator.hardware.inventory.yaml")
         if "role_candidacy" not in machine or not machine["role_candidacy"]:
             set_if_changed(machine, "role_candidacy", cseq(["none"]), changes, "operator.hardware.inventory.yaml")
+        if not machine.get("recovery_control"):
+            set_if_changed(
+                machine,
+                "recovery_control",
+                default_recovery_control(str(machine.get("model") or args.model or ""), device_id),
+                changes,
+                "operator.hardware.inventory.yaml",
+            )
         set_if_changed(machine, "last_assessed", now_day(), changes, "operator.hardware.inventory.yaml")
+
+    if facts and machine.get("machine_facts") != facts:
+        set_if_changed(machine, "machine_facts", facts, changes, "operator.hardware.inventory.yaml")
 
     evidence = machine.setdefault("evidence", CommentedSeq())
     append_unique(evidence, f"{now_day()}: admitted from firstboot claim {args.claim_file}", changes, "operator.hardware.inventory.yaml", "evidence")
@@ -275,7 +348,7 @@ def reconcile_ssh(data: CommentedMap, claim: dict[str, Any], args: argparse.Name
             raise SystemExit("ERROR: --host is required when ssh target does not exist")
         tags = [tag.strip() for tag in args.tags.split(",") if tag.strip()]
         if not tags:
-            tags = ["operator-hardware", "dell", "optiplex", "linux", "candidate"]
+            tags = ["operator-hardware", "linux", "candidate"]
         target = cmap(
             {
                 "id": device_id,
@@ -395,7 +468,7 @@ def main() -> int:
     parser.add_argument("--model", help="Hardware model for inventory/admission evidence")
     parser.add_argument("--year", type=int, help="Hardware year for inventory evidence")
     parser.add_argument("--description", help="SSH target description")
-    parser.add_argument("--tags", default="operator-hardware,dell,optiplex,linux,candidate")
+    parser.add_argument("--tags", default="operator-hardware,linux,candidate")
     parser.add_argument("--access-policy", default="tailscale_required")
     parser.add_argument("--create-inventory", action="store_true", help="Create missing inventory evidence row")
     parser.add_argument("--execute", action="store_true")
