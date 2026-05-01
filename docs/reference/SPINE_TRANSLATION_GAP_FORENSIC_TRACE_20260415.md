@@ -1,14 +1,19 @@
 ---
-status: draft
+status: historical_reference
 owner: "@ronny"
 date: 2026-04-15
 loop_id: LOOP-SPINE-TRANSLATION-GAP-FORENSIC-TRACE-20260415
 scope: spine-translation-gap-forensic-trace
 type: forensic-packet
 posture: read-heavy-operator-analysis
+authority: non_authoritative
 ---
 
 # Spine Translation Gap Forensic Trace
+
+> Historical forensic packet only. Do not use this file as current authority.
+> Current authority lives in the live governance contracts, bindings, and
+> verify/readback surfaces.
 
 ## Purpose
 

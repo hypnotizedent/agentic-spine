@@ -1,13 +1,17 @@
 ---
-status: completed
+status: historical_reference
 created: 2026-03-09
 updated_at: 2026-03-09
+last_reviewed: 2026-05-01
 owner: "@ronny"
 scope: aof-normalization-cross-plane-audit
-authority: runtime-admission-health-normalization-wave
+authority: non_authoritative
 ---
 
 # AOF Normalization Drift Audit — 2026-03-09
+
+> Historical audit only. Do not use this file as current runtime, admission, or
+> health authority. Current authority lives in live bindings and readbacks.
 
 ## Executive Summary
 

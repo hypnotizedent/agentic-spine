@@ -1,159 +1,38 @@
-# CORE_LOCK v1.1
-
-**Locked:** 2026-02-10
-**Last verified:** 2026-02-13
-**Status:** ACTIVE
-**Gate Version:** spine.verify + D8 root hygiene
-
+---
+status: reference_pointer
+owner: "@human-steward"
+last_verified: 2026-05-01
+scope: core-lock-pointer
 ---
 
-## Core SSOT Paths
+# CORE_LOCK
 
-| Surface | Canonical Path | Notes |
-|---------|---------------|-------|
-| Repo source | `bin/`, `ops/`, `surfaces/`, `docs/`, `fixtures/` | Authored control-plane only |
-| Runtime | `~/code/.runtime/spine/` | Mutable execution state, loop scopes, logs, agent context |
-| Evidence | `~/code/.evidence/spine/` | Receipts, verify history/indexes, cap-run evidence |
-| Data | `~/code/.data/` | Externalized domain/runtime truth |
-| Backups | `~/code/.backups/` | Historical/tombstoned artifacts |
-| Foundation | archived to `~/code/.backups/foundation/repo-tombstones/` | Merged into workbench (2026-04-09) |
+This file is not the source of live gate truth.
 
-## Runtime Model
+It used to enumerate D-gates directly. That became stale as the live registry
+and verify topology were subtracted. Fresh agents must not treat this document
+as a gate list, closure checklist, or authority surface.
 
-**Single boring split**
+## Current Authority
 
-- `agentic-spine` contains authored control-plane source only.
-- `.runtime/spine` carries mutable execution state and workflow machinery.
-- `.evidence/spine` carries receipts, verify outputs, and cap-run evidence.
-- `origin` on Gitea is canonical; GitHub is mirror-only and must not block normal work.
+Use these live surfaces instead:
 
-## Identity System
+| Question | Authority |
+|---|---|
+| Is the engine alive? | `./bin/ops cap run verify.engine.run` |
+| Is the spine/control-plane coherent? | `./bin/ops cap run spine.verify` |
+| Which gates exist now? | `ops/bindings/gate.registry.yaml` |
+| Which gates are in spine scope? | `ops/bindings/gate.execution.topology.yaml` |
+| What is public status? | `./bin/ops status` |
+| Where does runtime state live? | `ops/bindings/root.authority.contract.yaml` |
 
-**Single identity: run_key**
+## Stable Core Shape
 
-Watcher format: `<session>__<slug>__R<id>`  
-Capability format: `CAP-<timestamp>__<capability>__R<id>`
+- Authored control-plane source lives in the repo.
+- Runtime state lives under `/Users/ronnyworks/code/.runtime/spine/`.
+- Evidence lives under `/Users/ronnyworks/code/.evidence/spine/`.
+- Gitea `origin` is canonical repo truth.
+- GitHub is publication/distribution only.
 
-This key is used everywhere:
-- Outbox result: `<run_key>__RESULT.md`
-- Receipt folder: `~/code/.evidence/spine/sessions/R<run_key>/`
-- Ledger row: `run_id` column (latest row per run_id is authoritative state)
-
-## Entry Points
-
-| Entry | Path | Purpose |
-|-------|------|---------|
-| CLI | `bin/ops` | Canonical operator and agent entrypoint |
-| Session admission | `./bin/ops terminal launch --tool <tool> --terminal <name>` | Canonical governed session admission |
-| Public status | `./bin/ops status` | Canonical public state readback |
-| Expert status | `./bin/ops status --expert` | Drilldown only when public status gives a reason |
-| Engine verify | `./bin/ops cap run verify.engine.run` | Foundational engine smoke verify |
-| Spine verify | `./bin/ops cap run spine.verify` | Foundational local spine/control-plane verify |
-| Estate verify | `./bin/ops cap run verify.infra.run` | Canonical estate/workload health verify entrypoint |
-| Worktree lifecycle | `ops/plugins/core/lifecycle/bin/worktree-lifecycle-*` | Workspace/worktree control surfaces |
-| Repo bootstrap | `ops/plugins/core/authority/bin/project-governance-bootstrap` | API-first Gitea repo ensure + remote alignment |
-
-## Drift Gates
-
-All must PASS for core to be healthy.
-
-| Gate | Enforces |
-|------|----------|
-| D1 | Top-level dirs bounded (allowlist enforced) |
-| D2 | No `runs/` directory |
-| D3 | Internal entrypoint smoke (`bin/ops` + capability registry parse) |
-| D4 | Watcher running (warn only) |
-| D5 | No legacy coupling (`~/agent`, `ronny-ops`) |
-| D6 | Receipts exist for recent sessions |
-| D7 | Executables only in allowed zones |
-| D8 | No backup clutter |
-| D10 | Logs under mailroom only |
-| D11 | `~/agent` is symlink to mailroom |
-| D12 | This file exists |
-| D13 | API capability secrets preconditions |
-| D14 | Cloudflare surface drift (no legacy smells) |
-| D15 | GitHub Actions surface drift (read-only, no leaks) |
-| D16 | Docs quarantine (no competing truths) |
-| D17 | Root allowlist (no drift magnets at root) |
-| D18 | Docker compose surface drift (read-only) |
-| D19 | Backup surface drift (read-only, no secret printing) |
-| D22 | Nodes surface drift (read-only SSH, no credentials) |
-| D23 | Services health surface drift (no verbose curl) |
-| D24 | GitHub labels surface drift (read-only, no mutations) |
-| D27 | Fact duplication lock for startup/governance read docs |
-| D28 | Archive runway lock (active legacy absolute paths + extraction queue contract) |
-| D29 | Active entrypoint lock (launchd/cron ronny namespace cannot execute from ronny-ops without valid exception) |
-| D30 | Active config lock (legacy refs + plaintext secret patterns) |
-| D31 | Home output sink lock (home-root logs/out/err not allowlisted) |
-| D33 | Extraction pause lock (`ops/bindings/extraction.mode.yaml` mode must be `paused` or `active`) |
-| D34 | Loop ledger integrity lock (summary counts must match deduped reducer output) |
-| D35 | Retired infra relocation parity lock (former cross-SSOT consistency check) |
-| D36 | Legacy exception hygiene lock (stale/near-expiry exception enforcement) |
-| D38 | Extraction hygiene lock (EXTRACTION_PROTOCOL enforcement) |
-| D41 | Hidden-root governance lock (home-root inventory + forbidden pattern enforcement) |
-| D42 | Code path case lock (runtime scripts must use `$HOME/code` not `$HOME/Code`) |
-| D43 | Secrets namespace policy lock (freeze legacy root-path debt + enforce /spine namespace wiring) |
-| D44 | CLI tools discovery lock (inventory + cross-refs + probes) |
-| D45 | Naming consistency lock (cross-file identity surface verification) |
-| D47 | Brain surface path lock (no `.brain/` references in runtime scripts) |
-| D49 | Agent discovery lock (agents registry + contract coverage) |
-| D50 | Gitea CI workflow lock (workflow + drift-gate reference) |
-| D51 | Caddy proto lock (X-Forwarded-Proto on Authentik upstreams) |
-| D52 | UDR6 gateway assertion (shop docs reference 192.168.1.0/24) |
-| D53 | Change pack integrity lock (template + sequencing + companion files) |
-| D54 | Retired markdown SSOT IP parity lock (superseded by binding/read-model truth) |
-| D55 | Secrets runtime readiness lock (composite: D20 + D25) |
-| D56 | Agent entry surface lock (composite: D26 + D32 + D46) |
-| D57 | Infra identity cohesion lock (composite: D37 + D39) |
-| D58 | SSOT freshness lock (last_reviewed dates within threshold) |
-| D59 | Cross-registry completeness lock (bidirectional host coverage) |
-| D60 | Deprecation sweeper (known deprecated terms blocked from governance docs) |
-| D61 | Session-loop traceability lock (agent.session.closeout freshness + loop TTL) |
-| D62 | Git remote authority advisory (origin canonical; GitHub publication status advisory) |
-| D63 | Capabilities metadata lock (registry completeness + dependency typos + executable checks) |
-| D64 | Git remote authority WARN (GitHub merges/PRs) |
-| D66 | MCP server parity gate |
-| D67 | Capability map lock (capability_map covers capabilities.yaml) |
-| D68 | RAG canonical-only gate |
-| D69 | VM creation governance lock |
-| D70 | Secrets deprecated alias lock |
-| D71 | Deprecated ref allowlist lock |
-| D72 | MacBook hotkey SSOT lock |
-| D73 | OpenCode governed entry lock |
-| D74 | Billing/provider lane lock |
-| D75 | Gap registry mutation lock |
-| D76 | Home-surface hygiene lock |
-| D80 | Workbench authority-trace lock |
-| D81 | Plugin test regression lock |
-| D84 | Docs index registration lock (every governance .md must be in _index.yaml) |
-
-### Verbose Mode (Subchecks)
-
-To run the original subchecks individually (more verbose STOP output):
-
-```bash
-DRIFT_VERBOSE=1 ./bin/ops cap run spine.verify
-```
-
-Verbose mode runs: D20, D25, D26, D32, D37, D39, D46 instead of D55, D56, D57.
-
-## Rules
-
-1. **No new runtime surfaces outside mailroom**
-2. **If gates pass, core is healthy**
-3. **Legacy is archived, never deleted** (`.archive/`)
-4. **All work produces receipts** (no exceptions)
-5. **Provider/model recorded in every receipt**
-
-## Archived Legacy
-
-Located in `.archive/` (excluded from gates, recoverable):
-- `legacy-root/runs/` - old CLI run traces
-- `legacy-root/examples/` - old CLI examples
-- `legacy-root/tasks/` - old CLI tasks
-- `surfaces/quarantine/` - deprecated scripts
-- `bin/ops-import-info-only.sh` - one-time import tool
-
----
-
-_If this file is missing, the repo is not a valid spine core._
+If this file disagrees with the live registry, topology, root authority, or
+verify output, this file loses.

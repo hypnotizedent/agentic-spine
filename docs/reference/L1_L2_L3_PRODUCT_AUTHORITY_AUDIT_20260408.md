@@ -1,4 +1,15 @@
+---
+status: historical_reference
+authority: non_authoritative
+last_reviewed: 2026-05-01
+scope: l1-l2-l3-product-authority-audit-history
+---
+
 # L1/L2/L3 Product Authority Classification Audit
+
+> Historical audit only. Do not use this file as current authority. Current
+> authority lives in the live bindings, capability registry, gate registry, and
+> verify/readback surfaces.
 
 - **Date:** 2026-04-08
 - **Loop:** LOOP-ONE-WAY-20260408

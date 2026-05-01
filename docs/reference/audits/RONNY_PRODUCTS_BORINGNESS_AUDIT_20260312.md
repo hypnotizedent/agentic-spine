@@ -1,12 +1,18 @@
 ---
-status: completed
+status: historical_reference
 owner: "@ronny"
 last_verified: 2026-03-12
+last_reviewed: 2026-05-01
 scope: repo-boringness-audit
 source_repo: /Users/ronnyworks/code/ronny-products
+authority: non_authoritative
 ---
 
 # Ronny Products Boringness Audit
+
+> Historical audit only. Do not use this file as current product authority.
+> Current authority lives in live spine bindings and the product repo's current
+> governance/readback surfaces.
 
 ## Repo Purpose
 
