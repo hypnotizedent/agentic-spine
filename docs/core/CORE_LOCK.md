@@ -3,7 +3,7 @@
 **Locked:** 2026-02-10
 **Last verified:** 2026-02-13
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v2.6
+**Gate Version:** spine.verify + D8 root hygiene
 
 ---
 
