@@ -18,6 +18,12 @@ Options:
   --disk <disk>      Target whole-disk identifier, for example /dev/disk4
   --apply            Perform the destructive write (default: dry-run only)
   --block-device-write  On macOS, write to /dev/diskN instead of /dev/rdiskN when raw node is blocked
+  --refresh-cidata-only  Reformat/copy only the existing CIDATA partition; do not rewrite the ISO
+  --cidata-partition <part> Explicit CIDATA partition for --refresh-cidata-only
+  --autoinstall-payload <path> Override user-data path from the plan
+  --autoinstall-meta-data <path> Override meta-data path from the plan
+  --remote-host <host> Refresh CIDATA on a Linux host reachable by SSH
+  --remote-user <user> SSH user for --remote-host
   --json             Machine-readable JSON output
 
 Supported write strategies:
@@ -37,6 +43,12 @@ DISK=""
 APPLY=false
 JSON_MODE=false
 BLOCK_DEVICE_WRITE=false
+REFRESH_CIDATA_ONLY=false
+CIDATA_PARTITION=""
+AUTOINSTALL_PAYLOAD_OVERRIDE=""
+AUTOINSTALL_META_DATA_OVERRIDE=""
+REMOTE_HOST=""
+REMOTE_USER=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -44,6 +56,12 @@ while [[ $# -gt 0 ]]; do
         --disk) DISK="${2:-}"; shift 2 ;;
         --apply) APPLY=true; shift ;;
         --block-device-write) BLOCK_DEVICE_WRITE=true; shift ;;
+        --refresh-cidata-only) REFRESH_CIDATA_ONLY=true; shift ;;
+        --cidata-partition) CIDATA_PARTITION="${2:-}"; shift 2 ;;
+        --autoinstall-payload) AUTOINSTALL_PAYLOAD_OVERRIDE="${2:-}"; shift 2 ;;
+        --autoinstall-meta-data) AUTOINSTALL_META_DATA_OVERRIDE="${2:-}"; shift 2 ;;
+        --remote-host) REMOTE_HOST="${2:-}"; shift 2 ;;
+        --remote-user) REMOTE_USER="${2:-}"; shift 2 ;;
         --json) JSON_MODE=true; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift ;;
@@ -66,17 +84,28 @@ autoinstall_payload_path=$(jq -r '.autoinstall_payload_path // ""' "$PLAN_PATH")
 autoinstall_meta_data_path=$(jq -r '.autoinstall_meta_data_path // ""' "$PLAN_PATH")
 enrollment_policy=$(jq -r '.enrollment_policy // ""' "$PLAN_PATH")
 
+[[ -n "$AUTOINSTALL_PAYLOAD_OVERRIDE" ]] && autoinstall_payload_path="$AUTOINSTALL_PAYLOAD_OVERRIDE"
+[[ -n "$AUTOINSTALL_META_DATA_OVERRIDE" ]] && autoinstall_meta_data_path="$AUTOINSTALL_META_DATA_OVERRIDE"
+
 case "$write_strategy" in
     stock_iso_raw_write|iso_plus_cidata_partition) ;;
     *) fail "unsupported write strategy: $write_strategy" ;;
 esac
 
 [[ -n "$iso_source" ]] || fail "plan missing iso_source"
-[[ "$iso_resolution_status" == "local_path_resolved" ]] || fail "plan does not have a resolved local ISO path"
-[[ -f "$iso_source" ]] || fail "local ISO path not found: $iso_source"
+if ! $REFRESH_CIDATA_ONLY; then
+    [[ "$iso_resolution_status" == "local_path_resolved" ]] || fail "plan does not have a resolved local ISO path"
+    [[ -f "$iso_source" ]] || fail "local ISO path not found: $iso_source"
+fi
 
 if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then
     [[ -n "$autoinstall_payload_path" && -f "$autoinstall_payload_path" ]] || fail "iso_plus_cidata_partition requires autoinstall payload at: $autoinstall_payload_path"
+fi
+if $REFRESH_CIDATA_ONLY && [[ "$write_strategy" != "iso_plus_cidata_partition" ]]; then
+    fail "--refresh-cidata-only requires write_strategy=iso_plus_cidata_partition"
+fi
+if [[ -n "$REMOTE_HOST" && "$REFRESH_CIDATA_ONLY" == "false" ]]; then
+    fail "--remote-host is currently supported only with --refresh-cidata-only"
 fi
 
 raw_disk="$DISK"
@@ -85,7 +114,18 @@ if [[ "$DISK" =~ ^/dev/disk[0-9]+$ ]] && [[ "$(uname -s)" == "Darwin" && "$BLOCK
 fi
 
 # Build command list based on strategy
-if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then
+if $REFRESH_CIDATA_ONLY; then
+    remote_prefix=""
+    [[ -n "$REMOTE_HOST" ]] && remote_prefix="remote ${REMOTE_USER:+$REMOTE_USER@}$REMOTE_HOST: "
+    commands_json=$(jq -n \
+        --arg detect_cidata "${remote_prefix}detect CIDATA partition under $DISK unless --cidata-partition is provided" \
+        --arg unmount "${remote_prefix}umount <cidata-partition> if mounted" \
+        --arg format "${remote_prefix}mkfs.vfat -n CIDATA <cidata-partition>" \
+        --arg copy_userdata "copy '$autoinstall_payload_path' as user-data" \
+        --arg copy_metadata "copy '${autoinstall_meta_data_path}' as meta-data when present" \
+        --arg sync_unmount "${remote_prefix}sync and unmount CIDATA" \
+        '[$detect_cidata, $unmount, $format, $copy_userdata, $copy_metadata, $sync_unmount]')
+elif [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then
     commands_json=$(jq -n \
         --arg unmount "diskutil unmountDisk $DISK" \
         --arg write_iso "sudo dd if='$iso_source' of='$raw_disk' bs=4m status=progress conv=sync" \
@@ -106,35 +146,141 @@ fi
 
 write_performed=false
 cidata_created=false
+cidata_refreshed=false
+
+detect_cidata_partition() {
+    if [[ -n "$CIDATA_PARTITION" ]]; then
+        printf '%s\n' "$CIDATA_PARTITION"
+        return 0
+    fi
+    case "$(uname -s)" in
+        Linux)
+            lsblk -nrpo PATH,LABEL "$DISK" 2>/dev/null | awk '$2 == "CIDATA" {print $1; exit}'
+            ;;
+        Darwin)
+            diskutil info -plist "$DISK" >/dev/null 2>&1 || true
+            diskutil list "$DISK" 2>/dev/null | awk '/CIDATA/ {print "/dev/" $NF; exit}'
+            ;;
+    esac
+}
+
+refresh_cidata_partition() {
+    local cidata_part="$1"
+    local mount_dir
+    [[ -n "$cidata_part" ]] || fail "CIDATA partition not found under $DISK (pass --cidata-partition)"
+    [[ -b "$cidata_part" || "$(uname -s)" == "Darwin" ]] || fail "CIDATA partition is not a block device: $cidata_part"
+    mount_dir="$(mktemp -d "${TMPDIR:-/tmp}/spine-cidata.XXXXXX")"
+    case "$(uname -s)" in
+        Linux)
+            local mkfs_bin
+            mkfs_bin="$(command -v mkfs.vfat || command -v mkfs.fat || true)"
+            [[ -n "$mkfs_bin" ]] || fail "missing dependency: mkfs.vfat or mkfs.fat"
+            umount "$cidata_part" 2>/dev/null || true
+            "$mkfs_bin" -n CIDATA "$cidata_part" >/dev/null
+            mount "$cidata_part" "$mount_dir"
+            ;;
+        Darwin)
+            need newfs_msdos
+            diskutil unmount "$cidata_part" >/dev/null 2>&1 || true
+            newfs_msdos -F 32 -v CIDATA "$cidata_part" >/dev/null
+            diskutil mount "$cidata_part" >/dev/null
+            mount_dir="/Volumes/CIDATA"
+            ;;
+        *)
+            fail "--refresh-cidata-only is implemented for Linux and macOS only"
+            ;;
+    esac
+    cp "$autoinstall_payload_path" "$mount_dir/user-data"
+    if [[ -n "$autoinstall_meta_data_path" && -f "$autoinstall_meta_data_path" ]]; then
+        cp "$autoinstall_meta_data_path" "$mount_dir/meta-data"
+    fi
+    sync
+    umount "$mount_dir" 2>/dev/null || diskutil unmount "$mount_dir" >/dev/null 2>&1 || true
+    [[ "$mount_dir" == /tmp/spine-cidata.* || "$mount_dir" == "${TMPDIR:-/tmp}"/spine-cidata.* ]] && rmdir "$mount_dir" 2>/dev/null || true
+}
+
+remote_refresh_cidata_partition() {
+    local remote_target="$REMOTE_HOST"
+    local remote_tmp
+    local has_meta=false
+    [[ -n "$remote_target" ]] || fail "remote host is empty"
+    [[ -n "$REMOTE_USER" ]] && remote_target="${REMOTE_USER}@${REMOTE_HOST}"
+    need ssh
+    need scp
+    remote_tmp="$(ssh "$remote_target" 'mktemp -d /tmp/spine-cidata.XXXXXX')"
+    scp -q "$autoinstall_payload_path" "$remote_target:$remote_tmp/user-data"
+    if [[ -n "$autoinstall_meta_data_path" && -f "$autoinstall_meta_data_path" ]]; then
+        scp -q "$autoinstall_meta_data_path" "$remote_target:$remote_tmp/meta-data"
+        has_meta=true
+    fi
+    ssh "$remote_target" bash -s -- "$DISK" "$CIDATA_PARTITION" "$remote_tmp" "$has_meta" <<'REMOTE'
+set -euo pipefail
+disk="$1"
+cidata_partition="$2"
+remote_tmp="$3"
+has_meta="$4"
+if [[ -z "$cidata_partition" ]]; then
+  cidata_partition="$(lsblk -nrpo PATH,LABEL "$disk" 2>/dev/null | awk '$2 == "CIDATA" {print $1; exit}')"
+fi
+[[ -n "$cidata_partition" ]] || { echo "ERROR: CIDATA partition not found under $disk" >&2; exit 1; }
+[[ -b "$cidata_partition" ]] || { echo "ERROR: CIDATA partition is not a block device: $cidata_partition" >&2; exit 1; }
+mkfs_bin="$(command -v mkfs.vfat || command -v mkfs.fat || true)"
+[[ -n "$mkfs_bin" ]] || { echo "ERROR: missing mkfs.vfat or mkfs.fat" >&2; exit 1; }
+mount_dir="$remote_tmp/mount"
+mkdir -p "$mount_dir"
+umount "$cidata_partition" 2>/dev/null || true
+"$mkfs_bin" -n CIDATA "$cidata_partition" >/dev/null
+mount "$cidata_partition" "$mount_dir"
+cp "$remote_tmp/user-data" "$mount_dir/user-data"
+if [[ "$has_meta" == "true" ]]; then
+  cp "$remote_tmp/meta-data" "$mount_dir/meta-data"
+fi
+sync
+umount "$mount_dir"
+rm -rf "$remote_tmp"
+REMOTE
+}
+
 if $APPLY; then
-    if [[ "$(uname -s)" != "Darwin" ]]; then
+    if $REFRESH_CIDATA_ONLY; then
+        if [[ -n "$REMOTE_HOST" ]]; then
+            remote_refresh_cidata_partition
+            cidata_partition="$CIDATA_PARTITION"
+        else
+            cidata_partition="$(detect_cidata_partition)"
+            refresh_cidata_partition "$cidata_partition"
+        fi
+        cidata_refreshed=true
+        cidata_created=true
+    elif [[ "$(uname -s)" != "Darwin" ]]; then
         fail "--apply is currently implemented for macOS diskutil/dd path only"
     fi
+    if ! $REFRESH_CIDATA_ONLY; then
+        # Step 1: Write ISO
+        diskutil unmountDisk "$DISK" >/dev/null
+        sudo dd if="$iso_source" of="$raw_disk" bs=4m status=progress conv=sync
+        sync
+        write_performed=true
 
-    # Step 1: Write ISO
-    diskutil unmountDisk "$DISK" >/dev/null
-    sudo dd if="$iso_source" of="$raw_disk" bs=4m status=progress conv=sync
-    sync
-    write_performed=true
-
-    # Step 2: Add CIDATA partition if using embedded strategy
-    if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then
-        sleep 2  # let the disk settle after dd
-        # Add a small CIDATA partition in the free space after the ISO.
-        # This MUST succeed — no silent downgrade to stock ISO.
-        diskutil addPartition "$DISK" MS-DOS CIDATA 100M \
-            || fail "CIDATA partition creation failed on $DISK — medium is not embedded. Re-run with stock_iso_raw_write or use a larger medium."
-        [[ -d "/Volumes/CIDATA" ]] \
-            || fail "CIDATA partition created but not mounted at /Volumes/CIDATA — cannot copy autoinstall payload"
-        cp "$autoinstall_payload_path" /Volumes/CIDATA/user-data
-        if [[ -n "$autoinstall_meta_data_path" && -f "$autoinstall_meta_data_path" ]]; then
-            cp "$autoinstall_meta_data_path" /Volumes/CIDATA/meta-data
+        # Step 2: Add CIDATA partition if using embedded strategy
+        if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then
+            sleep 2  # let the disk settle after dd
+            # Add a small CIDATA partition in the free space after the ISO.
+            # This MUST succeed — no silent downgrade to stock ISO.
+            diskutil addPartition "$DISK" MS-DOS CIDATA 100M \
+                || fail "CIDATA partition creation failed on $DISK — medium is not embedded. Re-run with stock_iso_raw_write or use a larger medium."
+            [[ -d "/Volumes/CIDATA" ]] \
+                || fail "CIDATA partition created but not mounted at /Volumes/CIDATA — cannot copy autoinstall payload"
+            cp "$autoinstall_payload_path" /Volumes/CIDATA/user-data
+            if [[ -n "$autoinstall_meta_data_path" && -f "$autoinstall_meta_data_path" ]]; then
+                cp "$autoinstall_meta_data_path" /Volumes/CIDATA/meta-data
+            fi
+            cidata_created=true
+            diskutil unmount /Volumes/CIDATA 2>/dev/null || true
         fi
-        cidata_created=true
-        diskutil unmount /Volumes/CIDATA 2>/dev/null || true
-    fi
 
-    diskutil eject "$DISK" >/dev/null || true
+        diskutil eject "$DISK" >/dev/null || true
+    fi
 fi
 
 if $JSON_MODE; then
@@ -147,9 +293,14 @@ if $JSON_MODE; then
         --arg iso_source "$iso_source" \
         --arg write_strategy "$write_strategy" \
         --arg enrollment_policy "$enrollment_policy" \
+        --arg remote_host "$REMOTE_HOST" \
+        --arg remote_user "$REMOTE_USER" \
+        --arg cidata_partition "${cidata_partition:-${CIDATA_PARTITION:-}}" \
         --argjson apply_requested "$APPLY" \
+        --argjson refresh_cidata_only "$REFRESH_CIDATA_ONLY" \
         --argjson write_performed "$write_performed" \
         --argjson cidata_created "$cidata_created" \
+        --argjson cidata_refreshed "$cidata_refreshed" \
         --argjson commands "$commands_json" \
         '{
             capability: $capability,
@@ -160,9 +311,14 @@ if $JSON_MODE; then
             iso_source: $iso_source,
             write_strategy: $write_strategy,
             enrollment_policy: (if $enrollment_policy == "" then null else $enrollment_policy end),
+            remote_host: (if $remote_host == "" then null else $remote_host end),
+            remote_user: (if $remote_user == "" then null else $remote_user end),
+            refresh_cidata_only: $refresh_cidata_only,
+            cidata_partition: (if $cidata_partition == "" then null else $cidata_partition end),
             apply_requested: $apply_requested,
             write_performed: $write_performed,
             cidata_created: $cidata_created,
+            cidata_refreshed: $cidata_refreshed,
             payload_embedded: $cidata_created,
             commands: $commands,
             note: "Writes installer medium. Target salvage device is untouched."
@@ -175,10 +331,13 @@ else
     echo "write strategy:      $write_strategy"
     echo "enrollment policy:   ${enrollment_policy:-not set}"
     echo "disk:                $DISK"
+    [[ -n "$REMOTE_HOST" ]] && echo "remote host:         ${REMOTE_USER:+$REMOTE_USER@}$REMOTE_HOST"
     echo "raw disk:            $raw_disk"
     echo "iso source:          $iso_source"
     echo "apply requested:     $APPLY"
+    echo "refresh cidata only: $REFRESH_CIDATA_ONLY"
     echo "write performed:     $write_performed"
+    echo "cidata refreshed:    $cidata_refreshed"
     echo "cidata created:      $cidata_created"
     echo
     if [[ "$write_strategy" == "iso_plus_cidata_partition" ]]; then

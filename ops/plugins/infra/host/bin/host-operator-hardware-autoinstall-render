@@ -171,10 +171,8 @@ if [[ "$enrollment_policy" == "tailscale_auto_enroll_authkey" && -n "$TAILSCALE_
     # Trust-sensitive: write auth key to a file and create a first-boot systemd
     # oneshot that runs tailscale up AFTER the real OS boots (not in the installer
     # chroot where tailscaled cannot run and network may not be ready).
-    cat >>"$autoinstall_path" <<AUTHKEY_EOF
-    - curtin in-target --target=/target bash -lc "printf '%s\n' 'trust_material=authkey_supplied' > /etc/spine/enrollment-policy-lineage"
-    - curtin in-target --target=/target bash -lc "printf '%s\n' '${TAILSCALE_AUTHKEY}' > /etc/spine/tailscale-authkey && chmod 600 /etc/spine/tailscale-authkey"
-    - curtin in-target --target=/target bash -lc "cat > /etc/systemd/system/spine-tailscale-enroll.service <<'UNIT'
+    service_unit_b64="$(
+        cat <<'UNIT' | base64 | tr -d '\n'
 [Unit]
 Description=Spine first-boot Tailscale enrollment
 After=network-online.target tailscaled.service
@@ -183,12 +181,17 @@ ConditionPathExists=/etc/spine/tailscale-authkey
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'tailscale up --authkey=\$(cat /etc/spine/tailscale-authkey) && rm -f /etc/spine/tailscale-authkey && systemctl disable spine-tailscale-enroll.service'
+ExecStart=/bin/sh -c 'tailscale up --authkey=$(cat /etc/spine/tailscale-authkey) && rm -f /etc/spine/tailscale-authkey && systemctl disable spine-tailscale-enroll.service'
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-UNIT"
+UNIT
+    )"
+    cat >>"$autoinstall_path" <<AUTHKEY_EOF
+    - curtin in-target --target=/target bash -lc "printf '%s\n' 'trust_material=authkey_supplied' > /etc/spine/enrollment-policy-lineage"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${TAILSCALE_AUTHKEY}' > /etc/spine/tailscale-authkey && chmod 600 /etc/spine/tailscale-authkey"
+    - curtin in-target --target=/target bash -lc "printf '%s' '${service_unit_b64}' | base64 -d > /etc/systemd/system/spine-tailscale-enroll.service"
     - curtin in-target --target=/target bash -lc "systemctl enable spine-tailscale-enroll.service"
 AUTHKEY_EOF
 elif [[ "$enrollment_policy" == "tailscale_installed_login_manual" ]]; then
@@ -227,6 +230,11 @@ echo "$device_class_notes" >"$notes_path"
 
 if [[ "$bootstrap_method" == "manual_console_install" ]]; then
     rm -f "$meta_data_path"
+fi
+
+if command -v yq >/dev/null 2>&1; then
+    yq e '.' "$autoinstall_path" >/dev/null \
+        || fail "rendered autoinstall user-data is not valid YAML: $autoinstall_path"
 fi
 
 generated_artifacts_json=$(jq -n --arg user_data "$autoinstall_path" --arg meta_data "$meta_data_path" --arg notes "$notes_path" --arg method "$bootstrap_method" '
