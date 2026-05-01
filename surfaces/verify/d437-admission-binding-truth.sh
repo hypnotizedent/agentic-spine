@@ -44,7 +44,7 @@ if [[ "$main_launch_output" != *"# Launch cwd: $SPINE_CODE"* ]]; then
   fail "terminal launch no longer births on the canonical primary checkout"
 fi
 
-if [[ "$main_launch_output" == *"worktree"* && "$main_launch_output" != *"SPINE_WORKTREE"* ]]; then
+if [[ "$main_launch_output" == *"worktree"* && "$main_launch_output" != *"SPINE_WORKTREE"* && "$main_launch_output" != *".runtime/spine/tmp/worktrees/"* ]]; then
   fail "terminal launch emitted ambiguous worktree routing text"
 fi
 

@@ -4,7 +4,7 @@
 # gate.registry.yaml by running the generator in --check mode.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 GENERATOR="$ROOT/ops/plugins/core/authority/bin/gate-topology-projection-build"
 
