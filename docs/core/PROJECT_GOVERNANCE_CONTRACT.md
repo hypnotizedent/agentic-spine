@@ -34,6 +34,26 @@ Purpose: define the mandatory baseline for any new product repository under
 - Secret values belong to the secrets authority, not the forge. Product repos
   may contain secret names, paths, and references only.
 
+### Publication Lifecycle
+
+A repo change has exactly one of these publication states:
+
+- `canonical_only`: landed in Gitea/origin and not intended as public release.
+- `public_release_candidate`: prepared for public release, but not live.
+- `human_go_live`: human steward explicitly approved public publication.
+- `published`: GitHub `main` and release tag reflect the approved public state.
+
+Rules:
+
+- Agents may complete `canonical_only` work on Gitea/origin.
+- Agents may prepare a `public_release_candidate`.
+- Only the human steward approves `human_go_live`.
+- GitHub `main` is the public surface of record for public repos.
+- Release tags are publication checkpoints, not a second source of truth.
+- If GitHub `main` is protected, divergent, or not fast-forwardable, report
+  `publication_blocked: human/admin repair required`. Do not invent alternate
+  publication branches as a substitute for GitHub `main`.
+
 ### Repo Creation Guardrail
 
 - If a canonical Gitea repo does not exist, it must be created via Gitea API token

@@ -58,7 +58,13 @@ ISSUE="${CURRENT_ISSUE:-$ISSUE_ARG}"
 if [[ -z "$ISSUE" ]]; then
   echo "Usage: ops pr [issue-number]" >&2
   echo "  Set CURRENT_ISSUE or pass the issue as the first argument"
+  echo "  --forge accepts only 'gitea'; GitHub is publication-only"
   exit 1
+fi
+
+if [[ "$FORGE" != "gitea" ]]; then
+  echo "STOP: unsupported forge '$FORGE'. Gitea/origin is the only canonical forge; GitHub is publication-only and cannot be used by ops pr." >&2
+  exit 2
 fi
 
 # Prevent concurrent sessions from mutating git state (branches, commits, pushes).
@@ -72,14 +78,8 @@ PR_BODY="Closes #${ISSUE}"
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "DRY RUN: git add -A"
   echo "DRY RUN: git commit -m '${COMMIT_MSG}'"
-  if [[ "$FORGE" == "github" ]]; then
-    echo "DRY RUN: git push -u origin HEAD"
-    echo "DRY RUN: git push -u github HEAD (if remote exists)"
-    echo "DRY RUN: gh pr create --title '${PR_TITLE}' --body '${PR_BODY}'"
-  else
-    echo "DRY RUN: git push -u origin HEAD"
-    echo "DRY RUN: (open Gitea compare URL unless --no-open)"
-  fi
+  echo "DRY RUN: git push -u origin HEAD"
+  echo "DRY RUN: (open Gitea compare URL unless --no-open)"
   exit 0
 fi
 
@@ -94,24 +94,6 @@ git commit -m "$COMMIT_MSG"
 if ! git remote get-url origin >/dev/null 2>&1; then
   echo "STOP: missing remote 'origin' (required)" >&2
   exit 1
-fi
-
-if [[ "$FORGE" == "github" ]]; then
-  echo "WARN: github forge selected; this bypasses Gitea CI"
-  git push -u origin HEAD
-  if git remote get-url github >/dev/null 2>&1; then
-    git push -u github HEAD
-  else
-    echo "WARN: github remote not configured; skipping mirror push"
-  fi
-
-  PR_URL=$(gh pr create --title "$PR_TITLE" --body "$PR_BODY" --json url | jq -r '.url')
-  if [[ -n "$PR_URL" ]]; then
-    echo "PR created: $PR_URL"
-  else
-    echo "PR created (URL unavailable)"
-  fi
-  exit 0
 fi
 
 # Canonical: push branch to origin (Gitea) and open a compare URL.
