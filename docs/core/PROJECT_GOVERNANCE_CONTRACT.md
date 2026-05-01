@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-12
+last_verified: 2026-05-01
 scope: project-governance-bootstrap
 ---
 
@@ -23,6 +23,16 @@ Purpose: define the mandatory baseline for any new product repository under
 - `github` is mirror-only (optional but recommended).
 - New project repos must not treat GitHub as canonical.
 - The `gitea` host alias is projected from `ops/bindings/ssh.targets.yaml`; repo tooling must not hardcode a raw IP remote.
+
+### Courthouse / Forge Vocabulary
+
+- `courthouse` is a human-intent metaphor for the source authority role.
+- `forge` is the canonical repo term for that role.
+- `gitea` is the current runtime surface for the forge.
+- `origin` is the canonical remote.
+- `github` is publication/distribution only.
+- Secret values belong to the secrets authority, not the forge. Product repos
+  may contain secret names, paths, and references only.
 
 ### Repo Creation Guardrail
 

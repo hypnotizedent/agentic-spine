@@ -53,3 +53,20 @@ This release is a subtraction release:
 Gitea `origin/main` is canonical development truth. GitHub `main` is a
 publication mirror for browsing and distribution. GitHub must not become a
 competing authority for commits, pull requests, issues, or runtime state.
+
+## Courthouse Vocabulary
+
+Some human-intent notes call the source authority surface the `courthouse`.
+That is a teaching metaphor, not a second system.
+
+In repo truth:
+
+- `forge` is the canonical general term for source authority
+- `gitea` is the current runtime surface for that forge
+- `origin` is the canonical remote
+- `github` is publication/distribution only
+- Infisical/secrets own secret values; the forge may store secret references,
+  never secret values
+
+Fresh agent work should say `forge` or `Gitea/origin` when naming operational
+source truth. Use `courthouse` only when explaining the human-origin metaphor.

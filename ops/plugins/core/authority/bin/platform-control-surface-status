@@ -66,7 +66,7 @@ for service_id in "${SERVICES[@]}"; do
     probe_status="pass"
   fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$service_id" \
     "$admin_url" \
     "$probe_url" \
@@ -77,7 +77,10 @@ for service_id in "${SERVICES[@]}"; do
     "$path_used" \
     "$(control_surface_secret_project "$service_id")" \
     "$(control_surface_secret_path "$service_id")" \
-    "$(control_surface_mutation_mode "$service_id")" >>"$rows_file"
+    "$(control_surface_mutation_mode "$service_id")" \
+    "$(control_surface_field "$service_id" "authority.canonical_role")" \
+    "$(control_surface_field "$service_id" "authority.canonical_term")" \
+    "$(control_surface_field "$service_id" "authority.publication_remote")" >>"$rows_file"
 done
 
 if [[ "$JSON_OUT" -eq 1 ]]; then
@@ -99,6 +102,9 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
             "secret_project": parts[8] or None,
             "secret_path": parts[9] or None,
             "mutation_mode": parts[10] or None,
+            "authority_role": parts[11] or None,
+            "authority_term": parts[12] or None,
+            "publication_remote": parts[13] or None,
         })
 print(json.dumps({
     "status": "ok",
@@ -112,7 +118,7 @@ echo "platform.control.surface.status"
 for service_id in "${SERVICES[@]}"; do
   row="$(grep "^${service_id}" "$rows_file" || true)"
   [[ -n "$row" ]] || continue
-  IFS=$'\t' read -r _ admin_url probe_url http_code probe_status backend_target backend_resolved path_used secret_project secret_path mutation_mode <<<"$row"
+  IFS=$'\t' read -r _ admin_url probe_url http_code probe_status backend_target backend_resolved path_used secret_project secret_path mutation_mode authority_role authority_term publication_remote <<<"$row"
   echo
   echo "service: $service_id"
   echo "admin_url: $admin_url"
@@ -125,6 +131,11 @@ for service_id in "${SERVICES[@]}"; do
   echo "secret_project: ${secret_project:-n/a}"
   echo "secret_path: ${secret_path:-n/a}"
   echo "mutation_mode: ${mutation_mode:-n/a}"
+  if [[ -n "$authority_role" ]]; then
+    echo "authority_role: $authority_role"
+    echo "authority_term: ${authority_term:-n/a}"
+    echo "publication_remote: ${publication_remote:-n/a}"
+  fi
   echo "mutation_surface: $(control_surface_mutation_surface "$service_id")"
   git_transport_host="$(control_surface_git_transport_host "$service_id" 2>/dev/null || true)"
   git_transport_port="$(control_surface_git_transport_port "$service_id" 2>/dev/null || true)"

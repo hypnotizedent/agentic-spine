@@ -109,6 +109,11 @@ It does not receive direct commits, merges, or pull requests.
 Issues, discussions, and contributions should reference the canonical
 Gitea instance. GitHub is a window, not a door.
 
+Human-intent notes may call this source authority surface the `courthouse`.
+That term means the forge role: the place where source changes become reviewed,
+named, attested, and remembered. The concrete runtime is Gitea. The concrete
+canonical remote is `origin`. GitHub is publication only.
+
 ## What It Is Not
 
 - Not a special-laptop control plane
