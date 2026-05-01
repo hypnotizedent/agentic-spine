@@ -27,6 +27,16 @@ Then use the public entry/readback path:
 ./bin/ops cap run spine.verify
 ```
 
+The taught public grammar is intentionally small:
+
+- request work through the governed entry path
+- claim custody before mutation
+- heartbeat while work is active
+- emit outcome, result, or failure truth
+- leave receipts for meaningful actions
+- read status through `./bin/ops status`
+- verify with `verify.engine.run` and `spine.verify`
+
 `verify.engine.run` and `spine.verify` are the foundational verify surfaces.
 `verify.infra.run` is secondary estate/workload health. Estate health remains
 visible, but it is not spine/object truth.
@@ -45,8 +55,8 @@ This release is a subtraction release:
 - retired G IDs invoked through expert compatibility paths return
   `skipped_retired`, not blocking failures
 - foundational verify is small again: engine smoke plus spine/object truth
-- loops, waves, packets, raw receipts, and direct registry surgery remain
-  expert/internal drilldown, not public operator grammar
+- loops, waves, packets, handoffs, raw gates, raw receipts, and direct registry
+  surgery remain expert/internal drilldown, not public operator grammar
 
 ## Publication Authority
 

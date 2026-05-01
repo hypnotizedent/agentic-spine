@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@human-steward"
-last_verified: 2026-04-07
+last_verified: 2026-05-01
 scope: spine-minimal-operating-contract
 ---
 
@@ -42,6 +42,26 @@ orientation banner again, use the read-only orientation surface:
 - Use foundational verification for entry and truth checks:
   `./bin/ops cap run verify.engine.run` and `./bin/ops cap run spine.verify`.
 
+## Public Grammar
+
+The taught operator grammar is deliberately tiny:
+
+- request
+- claim
+- heartbeat
+- outcome, result, or failure
+- receipt
+- status
+- verify
+
+Everything else is engine machinery, scoped pack behavior, compatibility, or
+expert drilldown unless this contract explicitly promotes it. Loops, waves,
+packets, handoffs, raw gates, raw receipts, manual custody surgery, direct
+SQLite inspection, and runtime path inspection may still exist because the
+engine needs internals and experts need repair tools. They must not be taught as
+normal operator grammar or treated as peer authority beside status and
+foundational verify.
+
 ## Principle
 
 If an agent cannot understand how to work here by reading the entry surface,
@@ -65,12 +85,13 @@ It answers five questions:
 - What needs attention now?
 
 This is a subtraction rule, not a new subsystem. `ops status` reads existing
-canonical authorities and presents one public operational model. Loops, gaps,
-verify/readback, standing-program health, execution-lane truth, and governed
-receipts remain canonical inputs. Waves, handoffs, delegations, packets,
-dispatch envelopes, raw receipts, direct SQLite inspection, and runtime path
-inspection remain valid engine or expert drilldown surfaces, but they must not
-be taught as peer public operator grammar.
+canonical authorities and presents one public operational model. Requests,
+claims, heartbeats, outcomes/results/failures, receipts, verify/readback,
+standing-program health, and execution-lane truth remain canonical inputs.
+Loops, waves, handoffs, delegations, packets, dispatch envelopes, raw gates,
+raw receipts, direct SQLite inspection, and runtime path inspection remain
+valid engine or expert drilldown surfaces, but they must not be taught as peer
+public operator grammar.
 
 Use `ops status --expert`, `ops wave`, `ops loops`, `delegation.status`,
 `orchestration.wave.status`, and direct evidence reads only when the public
@@ -104,8 +125,10 @@ authority rather than create a second migration plane.
 
 Persist this distinction or the shell will grow back:
 
-- **Spine Core**: request, claim, heartbeat, result/failure, receipt
-- **Spine Engine**: admission, capability execution, delegation, wave execution, verify, status
+- **Spine Core**: request, claim, heartbeat, outcome/result/failure, receipt
+- **Public Readback**: status, `verify.engine.run`, `spine.verify`
+- **Spine Engine**: admission, capability execution, delegation, wave execution,
+  internal closeout, scoped verify implementation
 - **Operational Packs**: secrets, recovery, control-cycle, service health, domain/runtime packs
 - **Shelf**: cockpit proliferation, broker read shells, narrative/explanatory comfort layers
 
@@ -123,11 +146,12 @@ truthful core would be:
 | canonical state root + shared authority | `keep` | Truth must live outside chat/session memory. |
 | `bin/ops` + governed capability registry | `keep` | Named capabilities are the boring execution/control surface. |
 | terminal identity + execution class | `keep` | Custody and legal mutation boundaries must be explicit. |
-| `work_request` / loop birth | `keep` | Bounded work must have a governed birth object. |
-| `execution_request` / delegation birth | `keep` | Execution still needs a governed birth object, even if transport realizations change. |
+| request / governed birth object | `keep` | Bounded work must have a governed birth object; loop shape is an internal materialization. |
+| execution request / governed execution birth object | `keep` | Execution still needs a governed birth object; delegation and packet transport are internal or expert-visible materializations. |
 | claim | `keep` | Custody proof is core kernel truth. |
 | heartbeat | `keep` | Liveness proof is core kernel truth. |
-| `wave.execute` / `wave.finish` | `keep` | Minimal governed execution and closeout remain core. |
+| outcome/result/failure | `keep` | Completion truth must be explicit and machine-readable. |
+| internal execute/closeout machinery | `keep` | Minimal governed execution and closeout remain necessary engine internals, not public grammar. |
 | receipts + outcome | `keep` | Every meaningful action must emit proof. |
 | `verify.engine.run`, `spine.verify`, `spine.status` | `keep` | Foundational verify must stay tiny and discoverable. |
 | `delegate.to.execution` taught as an autonomous default queue | `demote` | Today it is an explicit interactive handoff, not admitted autonomous lane truth. |
@@ -135,7 +159,7 @@ truthful core would be:
 | cockpit/mobile/operator payload variants | `shelf` | Useful read shells, not irreducible core. |
 | broker read APIs | `shelf` | Convenience/read-model shell, not kernel substrate. |
 | plans, handoffs, narrative receipts | `shelf` | Legitimate surfaces, but not day-one spine core. |
-| public teaching of raw loops/waves/scope surgery as operator-default grammar | `delete` | Keep as drilldown/surgery only, not public front-door grammar. |
+| public teaching of raw loops/waves/packets/handoffs/gates/scope surgery as operator-default grammar | `delete` | Keep as drilldown/surgery only, not public front-door grammar. |
 | mailroom task lane as the default controller-prompt execution substrate | `must_prove_again` | Real autonomous lane now admits controller-prompt work truthfully and synchronizes packet runtime state, but packet closeout is still explicit and the path is not yet proven as the permanent default. |
 | translator/control-node storytelling as irreducible core substrate | `must_prove_again` | Explanatory shell must not outrank the smaller engine. |
 

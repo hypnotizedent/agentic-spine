@@ -20,7 +20,7 @@ Purpose: define the mandatory baseline for any new product repository under
 
 - `origin` must be Gitea canonical:
   - `ssh://git@gitea:2222/<owner>/<repo>.git`
-- `github` is mirror-only (optional but recommended).
+- `github` is publication/distribution only (optional but recommended).
 - New project repos must not treat GitHub as canonical.
 - The `gitea` host alias is projected from `ops/bindings/ssh.targets.yaml`; repo tooling must not hardcode a raw IP remote.
 
@@ -41,14 +41,16 @@ A repo change has exactly one of these publication states:
 - `canonical_only`: landed in Gitea/origin and not intended as public release.
 - `public_release_candidate`: prepared for public release, but not live.
 - `human_go_live`: human steward explicitly approved public publication.
-- `published`: GitHub `main` and release tag reflect the approved public state.
+- `published`: GitHub `main` and release tag were updated from the approved
+  public state.
 
 Rules:
 
 - Agents may complete `canonical_only` work on Gitea/origin.
 - Agents may prepare a `public_release_candidate`.
 - Only the human steward approves `human_go_live`.
-- GitHub `main` is the public surface of record for public repos.
+- GitHub `main` is the public distribution surface for public repos, not a
+  forge peer or canonical authority.
 - Release tags are publication checkpoints, not a second source of truth.
 - If GitHub `main` is protected, divergent, or not fast-forwardable, report
   `publication_blocked: human/admin repair required`. Do not invent alternate

@@ -62,7 +62,7 @@ mutating anything, read the cited source path or run the cited capability. If yo
 already know an exact symbol, path, packet id, or capability name, prefer `rg` or
 direct file reads.
 
-## Workflow Objects
+## Internal Workflow Objects
 
 Evidence and human intent enter first. The objects below govern execution,
 closeout, and recovery after that evidence has a real work home. If you do not
@@ -174,16 +174,15 @@ The canonical contract above both realizations lives in
 (`execution_lane_contract`). Interactive delegation and mailroom task execution
 are current realizations of one execution-lane model, not separate kernels.
 
-### Canonical Workflow Lifecycle
+### Canonical Execution Lifecycle
 
 A spine work item should read the same way every time: evidence enters first
-(human words, file paths, status, traces, receipts, or operator approval); the
-agent attaches it to an existing loop or creates one; a packet exists only when
-there is a bounded research or implementation slice; execution runs through a
-governed capability, worker handoff, mailroom task, or wave; verification writes
-run keys and receipts; closeout records `slice_complete` when more work remains
-or `loop_complete` when success criteria are met. If the work exposes a next
-step, create or attach the next packet before final readback. If operator
+(human words, file paths, status, traces, receipts, or operator approval);
+execution runs through a governed capability or governed worker lane;
+verification writes run keys and receipts; final readback reports outcome,
+blockers, and any remaining acceptance gap. Loops, packets, waves, handoffs, and
+continuity updates are the internal custody machinery used when a bounded slice
+needs them. They are not the operator workflow to teach by default. If operator
 approval removes the only review gate and close eligibility passes, the agent
 should close the eligible object and report the receipt instead of asking the
 human steward to rediscover ceremony.
@@ -234,29 +233,30 @@ operator intent
 If no worker will explicitly claim the delegation, do not assume execution will
 occur. `delegated` is not autonomous lane admission.
 
-### Expert/Internal Operational Task Lane
+### Expert/Internal Bounded Capability Lane
 
-Autonomous/headless execution is realized today by an internal operational task
-lane. This is expert control-plane machinery, not public operator grammar and
-not role-runtime promotion authority. Public readback should say `execution
+Unattended execution is realized today only as bounded capability execution
+inside an internal operational task lane. This is expert control-plane
+machinery, not public operator grammar, not generic AI-agent autonomy, and not
+role-runtime promotion authority. Public readback should say `execution
 pickup`; use raw task capability names only for drilldown or worker debugging.
 
 ```
 operator or system intent
   → task admitted to mailroom queue          [governed: mailroom.task.enqueue]
-    → autonomous worker claims task          [governed: mailroom.task.claim]
+    → worker lane claims task                [governed: mailroom.task.claim]
       → worker proves liveness               [governed: mailroom.task.heartbeat]
-      → worker executes allowlisted capability [governed: autonomous worker lane]
+      → worker executes allowlisted capability [governed: bounded capability lane]
       → task reaches terminal result         [governed: mailroom.task.complete|mailroom.task.fail]
 ```
 
-This lane is operational for autonomous work, but the active truthful
-controller-prompt class is currently capability-backed rather than open-ended
+This lane is operational for bounded unattended work, but the active truthful
+controller-prompt class is capability-backed rather than open-ended
 `agent_tool` execution. The worker claims the task, proves liveness, executes
-the allowlisted capability, then drives canonical packet/loop closeout through
-`mailroom.task.complete|mailroom.task.fail` plus `controller_prompt.close`.
-It does not decide node admission, runtime placement, backup authority,
-watcher/observability authority, or VM/service retirement.
+the allowlisted capability, then drives canonical closeout through
+`mailroom.task.complete|mailroom.task.fail` plus the governed close writer when
+a packet exists. It does not decide node admission, runtime placement, backup
+authority, watcher/observability authority, or VM/service retirement.
 
 This is the node-architecture path for unattended work:
 
@@ -308,17 +308,17 @@ operator intent
   → handoff emitted at session boundary      [manual: session.handoff.create]
 ```
 
-## Default Close Path
+## Internal Close Path
 
 Close path is not a separate ceremony; it is the evidence-to-decision-to-receipt
-tail of the same lifecycle. When work is done, follow this sequence:
+tail of the same lifecycle. Public readback should report the outcome and
+receipt. Agents use the internal machinery that applies to the work item:
 
 1. **Worktree** — commit, push, merge to main, then: `git-worktree-hygiene --apply --maintenance --brief`
-2. **Wave** — `./bin/ops cap run wave.finish`
-3. **Packet** — write receipt to `_intake-artifacts/` (orchestration packets auto-close at wave-close)
-4. **Loop** — normal path: if last packet, `wave.finish` chains the governed loop closeout writer (`loop-closeout-finalize`); if more packets remain: `loops.continuity.update`
-5. **Handoff** — if session ending: `session.handoff.create --summary "..." --loops LOOP-ID`
-6. **Git hygiene** — `git-worktree-hygiene --apply --brief` and `wave.residue` for stale wave branches
+2. **Execution close** — use the governed close capability for the active lane, such as `wave.finish` or `controller_prompt.close`
+3. **Loop continuity** — close the loop when acceptance is met, or update continuity when more bounded work remains
+4. **Handoff** — emit `session.handoff.create --summary "..." --loops LOOP-ID` only at a real session boundary
+5. **Git hygiene** — `git-worktree-hygiene --apply --brief` and `wave.residue` for stale wave branches
 
 If the normal wave-finish close path cannot complete and a control-plane recovery close is required, use `./bin/ops cap run orchestration.loop.close`. That is the explicit manual recovery surface. Do not fall through to raw `shared_authority.db` mutation as an operator path.
 
