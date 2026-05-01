@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Derived capability autonomy readback.
+
+This does not add capability metadata. It composes existing registry fields with
+the mailroom worker contract so approval:auto cannot be mistaken for unattended
+worker authority.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(os.environ.get("SPINE_ROOT", Path(__file__).resolve().parents[5]))
+CAPABILITIES_PATH = ROOT / "ops" / "capabilities.yaml"
+WORKER_CONTRACT_PATH = ROOT / "ops" / "bindings" / "mailroom.task.worker.contract.yaml"
+
+
+BUCKET_ORDER = [
+    "expert_internal",
+    "domain_pack",
+    "worker_allowlisted_autonomous_capability",
+    "public_readonly",
+    "mutating_auto_not_unattended",
+    "manual_destructive",
+    "other",
+]
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = yaml.safe_load(handle)
+    except FileNotFoundError:
+        raise SystemExit(f"STOP: missing required file: {path}")
+    if not isinstance(loaded, dict):
+        raise SystemExit(f"STOP: expected mapping in {path}")
+    return loaded
+
+
+def tags(meta: dict[str, Any]) -> set[str]:
+    raw = meta.get("tags") or []
+    if not isinstance(raw, list):
+        return set()
+    return {str(item).strip() for item in raw if str(item).strip()}
+
+
+def classify(capability_id: str, meta: dict[str, Any], worker_allowlist: set[str]) -> str:
+    capability_tags = tags(meta)
+    safety = str(meta.get("safety") or "").strip()
+    approval = str(meta.get("approval") or "").strip()
+    plane = str(meta.get("plane") or "").strip()
+    layer = str(meta.get("layer") or "").strip()
+    lifecycle = str(meta.get("lifecycle") or "").strip()
+
+    if lifecycle == "expert_diagnostic" or capability_tags.intersection({"expert-drilldown", "internal"}):
+        return "expert_internal"
+    if plane == "domain_external" or layer == "L3_product_runtime":
+        return "domain_pack"
+    if capability_id in worker_allowlist:
+        return "worker_allowlisted_autonomous_capability"
+    if safety == "read-only" and approval == "auto" and plane == "fabric" and lifecycle == "ready":
+        return "public_readonly"
+    if safety in {"mutating", "destructive"} and approval == "auto":
+        return "mutating_auto_not_unattended"
+    if approval in {"manual", "operator"} or safety == "destructive":
+        return "manual_destructive"
+    return "other"
+
+
+def build_readback() -> dict[str, Any]:
+    capabilities_doc = load_yaml(CAPABILITIES_PATH)
+    worker_contract = load_yaml(WORKER_CONTRACT_PATH)
+
+    capabilities = capabilities_doc.get("capabilities") or {}
+    if not isinstance(capabilities, dict):
+        raise SystemExit("STOP: ops/capabilities.yaml capabilities must be a mapping")
+
+    task_execution = worker_contract.get("task_execution") or {}
+    if not isinstance(task_execution, dict):
+        raise SystemExit("STOP: mailroom.task.worker.contract.yaml task_execution must be a mapping")
+    worker_allowlist = {
+        str(item).strip()
+        for item in task_execution.get("capability_allowlist", [])
+        if str(item).strip()
+    }
+
+    missing_allowlist_entries = sorted(item for item in worker_allowlist if item not in capabilities)
+    buckets: dict[str, list[str]] = defaultdict(list)
+    raw_counts: Counter[str] = Counter()
+
+    for capability_id, raw_meta in sorted(capabilities.items()):
+        if not isinstance(raw_meta, dict):
+            continue
+        if raw_meta.get("retired") is True:
+            raw_counts["retired"] += 1
+            continue
+        bucket = classify(capability_id, raw_meta, worker_allowlist)
+        buckets[bucket].append(capability_id)
+
+        safety = str(raw_meta.get("safety") or "").strip()
+        approval = str(raw_meta.get("approval") or "").strip()
+        plane = str(raw_meta.get("plane") or "").strip()
+        layer = str(raw_meta.get("layer") or "").strip()
+        lifecycle = str(raw_meta.get("lifecycle") or "").strip()
+        if safety:
+            raw_counts[f"safety:{safety}"] += 1
+        if approval:
+            raw_counts[f"approval:{approval}"] += 1
+        if plane:
+            raw_counts[f"plane:{plane}"] += 1
+        if layer:
+            raw_counts[f"layer:{layer}"] += 1
+        if lifecycle:
+            raw_counts[f"lifecycle:{lifecycle}"] += 1
+        if raw_meta.get("automation_only") is True:
+            raw_counts["automation_only"] += 1
+
+    mutating_auto_total = sum(
+        1
+        for meta in capabilities.values()
+        if isinstance(meta, dict)
+        and meta.get("retired") is not True
+        and str(meta.get("safety") or "").strip() in {"mutating", "destructive"}
+        and str(meta.get("approval") or "").strip() == "auto"
+    )
+    approval_auto_not_worker = sum(
+        1
+        for capability_id, meta in capabilities.items()
+        if isinstance(meta, dict)
+        and meta.get("retired") is not True
+        and str(meta.get("approval") or "").strip() == "auto"
+        and capability_id not in worker_allowlist
+    )
+    automation_only_auto_not_worker = sum(
+        1
+        for capability_id, meta in capabilities.items()
+        if isinstance(meta, dict)
+        and meta.get("retired") is not True
+        and meta.get("automation_only") is True
+        and str(meta.get("approval") or "").strip() == "auto"
+        and capability_id not in worker_allowlist
+    )
+
+    bucket_counts = {bucket: len(buckets.get(bucket, [])) for bucket in BUCKET_ORDER}
+    return {
+        "capability": "capability.autonomy.status",
+        "status": "ok" if not missing_allowlist_entries else "fail",
+        "authority": "derived_readback_only",
+        "metadata_mutation": "none",
+        "rule": {
+            "approval_auto": "no manual approval gate; not unattended worker authority",
+            "automation_only": "intended automation/internal surface; not unattended worker authority by itself",
+            "worker_allowlisted": "unattended mailroom task worker may execute when route_target=capability and worker custody is active",
+        },
+        "sources": {
+            "capability_registry": str(CAPABILITIES_PATH.relative_to(ROOT)),
+            "worker_contract": str(WORKER_CONTRACT_PATH.relative_to(ROOT)),
+        },
+        "worker_allowlist": sorted(worker_allowlist),
+        "missing_worker_allowlist_entries": missing_allowlist_entries,
+        "counts": {
+            "total_capabilities": len(capabilities),
+            "retired": raw_counts.get("retired", 0),
+            "buckets": bucket_counts,
+            "raw": dict(sorted(raw_counts.items())),
+            "attention": {
+                "approval_auto_not_worker_allowlisted": approval_auto_not_worker,
+                "mutating_auto_total": mutating_auto_total,
+                "mutating_auto_not_unattended_bucket": bucket_counts["mutating_auto_not_unattended"],
+                "automation_only_auto_not_worker_allowlisted": automation_only_auto_not_worker,
+            },
+        },
+        "buckets": {bucket: buckets.get(bucket, []) for bucket in BUCKET_ORDER},
+    }
+
+
+def emit_human(payload: dict[str, Any], list_bucket: str | None) -> None:
+    print("capability.autonomy.status")
+    print(f"status: {payload['status']}")
+    print("authority: derived readback only; no capability metadata field added")
+    print()
+    print("rule:")
+    print("  approval:auto: no manual approval gate; not unattended worker authority")
+    print("  automation_only: automation/internal hint; not unattended worker authority by itself")
+    print("  worker_allowlisted: unattended mailroom task worker may execute under worker custody")
+    print()
+    print("worker_allowlist:")
+    for item in payload["worker_allowlist"]:
+        print(f"  - {item}")
+    if payload["missing_worker_allowlist_entries"]:
+        print("missing_worker_allowlist_entries:")
+        for item in payload["missing_worker_allowlist_entries"]:
+            print(f"  - {item}")
+    print()
+    print("bucket_counts:")
+    for bucket in BUCKET_ORDER:
+        print(f"  {bucket}: {payload['counts']['buckets'][bucket]}")
+    print()
+    attention = payload["counts"]["attention"]
+    print("attention:")
+    print(f"  approval_auto_not_worker_allowlisted: {attention['approval_auto_not_worker_allowlisted']}")
+    print(f"  mutating_auto_total: {attention['mutating_auto_total']}")
+    print(f"  mutating_auto_not_unattended_bucket: {attention['mutating_auto_not_unattended_bucket']}")
+    print(f"  automation_only_auto_not_worker_allowlisted: {attention['automation_only_auto_not_worker_allowlisted']}")
+
+    if list_bucket:
+        if list_bucket not in BUCKET_ORDER:
+            raise SystemExit(f"STOP: unknown bucket: {list_bucket}")
+        print()
+        print(f"{list_bucket}:")
+        for item in payload["buckets"][list_bucket]:
+            print(f"  - {item}")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Derived capability autonomy readback.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON.")
+    parser.add_argument("--list-bucket", choices=BUCKET_ORDER, help="List capabilities in a derived bucket.")
+    args = parser.parse_args(argv)
+
+    payload = build_readback()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=False))
+    else:
+        emit_human(payload, args.list_bucket)
+    return 0 if payload["status"] == "ok" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
