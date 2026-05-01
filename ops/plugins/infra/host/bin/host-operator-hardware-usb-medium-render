@@ -39,6 +39,7 @@ AUTOINSTALL_DIR=""
 ISO_PATH=""
 MEDIUM_TYPE=""
 OUTPUT_DIR=""
+OUTPUT_DIR_EXPLICIT=false
 JSON_MODE=false
 
 while [[ $# -gt 0 ]]; do
@@ -48,7 +49,7 @@ while [[ $# -gt 0 ]]; do
         --autoinstall-dir) AUTOINSTALL_DIR="${2:-}"; shift 2 ;;
         --iso-path) ISO_PATH="${2:-}"; shift 2 ;;
         --medium-type) MEDIUM_TYPE="${2:-}"; shift 2 ;;
-        --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
+        --output-dir) OUTPUT_DIR="${2:-}"; OUTPUT_DIR_EXPLICIT=true; shift 2 ;;
         --json) JSON_MODE=true; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift ;;
@@ -93,7 +94,6 @@ esac
 if [[ -z "$OUTPUT_DIR" ]]; then
     OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${DEVICE}/medium"
 fi
-mkdir -p "$OUTPUT_DIR"
 
 kit_json="$(cat "$KIT_PATH")"
 hostname=$(echo "$kit_json" | jq -r '.hostname')
@@ -108,12 +108,36 @@ device_class_from_kit=$(echo "$kit_json" | jq -r '.device_class // empty')
 chosen_network_method=$(echo "$kit_json" | jq -r '.chosen_network_method // empty')
 fallback_network_method=$(echo "$kit_json" | jq -r '.fallback_network_method // empty')
 connectivity_preflight_result=$(echo "$kit_json" | jq -r '.connectivity_preflight.result // empty')
+autoinstall_user_data="${AUTOINSTALL_DIR}/autoinstall.user-data.yaml"
+autoinstall_meta_data="${AUTOINSTALL_DIR}/autoinstall.meta-data"
+device_notes="${AUTOINSTALL_DIR}/device-class-notes.json"
+generic_stage0=false
+install_device_id="$DEVICE"
+device_class_from_notes=""
+
+if [[ -f "$device_notes" ]] && jq -e '.generic_stage0 == true' "$device_notes" >/dev/null 2>&1; then
+    generic_stage0=true
+    install_device_id="$(jq -r '.stage0_device_marker // "spine-stage0-node"' "$device_notes")"
+    hostname="$(jq -r '.stage0_hostname // "spine-stage0-node"' "$device_notes")"
+    device_class_from_notes="$(jq -r '.device_class // "generic-stage0-target"' "$device_notes")"
+    if ! $OUTPUT_DIR_EXPLICIT; then
+        OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/generic-stage0/medium"
+    fi
+fi
+mkdir -p "$OUTPUT_DIR"
 
 iso_library_ref=$(yq e -r '.artifact_shelf.iso_library_ref // ""' "$SHELF_CONTRACT")
 
 # Determine write strategy: require both user-data AND meta-data for embedded CIDATA
 enrollment_policy=$(echo "$kit_json" | jq -r '.enrollment_policy // "ssh_first_tailscale_later"')
 enrollment_policy_lineage=$(echo "$kit_json" | jq -r '.enrollment_policy_lineage // ""')
+if $generic_stage0; then
+    notes_enrollment_policy="$(jq -r '.enrollment_policy // empty' "$device_notes")"
+    if [[ -n "$notes_enrollment_policy" ]]; then
+        enrollment_policy="$notes_enrollment_policy"
+        enrollment_policy_lineage="generic_stage0_payload"
+    fi
+fi
 autoinstall_user_data_check="${AUTOINSTALL_DIR}/autoinstall.user-data.yaml"
 autoinstall_meta_data_check="${AUTOINSTALL_DIR}/autoinstall.meta-data"
 if [[ -f "$autoinstall_user_data_check" && -f "$autoinstall_meta_data_check" ]]; then
@@ -123,7 +147,9 @@ else
 fi
 
 device_class="salvage_laptop"
-if [[ -n "$device_class_from_kit" && "$device_class_from_kit" != "null" ]]; then
+if $generic_stage0; then
+    device_class="$device_class_from_notes"
+elif [[ -n "$device_class_from_kit" && "$device_class_from_kit" != "null" ]]; then
     device_class="$device_class_from_kit"
 elif [[ "$source_platform" == "mac" ]]; then
     device_class="old_intel_macbook"
@@ -157,16 +183,14 @@ if [[ -n "$ISO_PATH" ]]; then
     iso_resolution_status="local_path_resolved"
 fi
 
-autoinstall_user_data="${AUTOINSTALL_DIR}/autoinstall.user-data.yaml"
-autoinstall_meta_data="${AUTOINSTALL_DIR}/autoinstall.meta-data"
-device_notes="${AUTOINSTALL_DIR}/device-class-notes.json"
 claim_handoff_ref="ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml"
 rendered_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-plan_path="${OUTPUT_DIR}/usb-medium-plan.${DEVICE}.json"
-summary_path="${OUTPUT_DIR}/usb-medium-plan.${DEVICE}.summary.txt"
+plan_path="${OUTPUT_DIR}/usb-medium-plan.${install_device_id}.json"
+summary_path="${OUTPUT_DIR}/usb-medium-plan.${install_device_id}.summary.txt"
 
 jq -n \
-    --arg device_id "$DEVICE" \
+    --arg device_id "$install_device_id" \
+    --arg source_device_id "$DEVICE" \
     --arg device_class "$device_class" \
     --arg source_platform "$source_platform" \
     --arg target_platform "$target_platform" \
@@ -193,10 +217,13 @@ jq -n \
     --arg enrollment_policy "$enrollment_policy" \
     --arg enrollment_policy_lineage "$enrollment_policy_lineage" \
     --arg rendered_at "$rendered_at" \
+    --argjson generic_stage0 "$generic_stage0" \
     --argjson local_hands_required "$local_hands_required" \
     --argjson local_operator_steps "$boot_ritual" \
     '{
         device_id: $device_id,
+        source_device_id: (if $generic_stage0 then $source_device_id else null end),
+        generic_stage0: $generic_stage0,
         device_class: $device_class,
         source_platform: $source_platform,
         target_platform: $target_platform,
@@ -252,7 +279,9 @@ jq -n \
     }' >"$plan_path"
 
 cat >"$summary_path" <<EOF
-device_id: $DEVICE
+device_id: $install_device_id
+source_device_id: $(if $generic_stage0; then echo "$DEVICE"; else echo "not_applicable"; fi)
+generic_stage0: $generic_stage0
 medium_type: $MEDIUM_TYPE
 write_strategy: $write_strategy
 enrollment_policy: $enrollment_policy
@@ -270,7 +299,8 @@ EOF
 if $JSON_MODE; then
     jq -n \
         --arg capability "host.operator-hardware.usb-medium.render" \
-        --arg device "$DEVICE" \
+        --arg device "$install_device_id" \
+        --arg source_device "$DEVICE" \
         --arg medium_type "$MEDIUM_TYPE" \
         --arg plan_path "$plan_path" \
         --arg summary_path "$summary_path" \
@@ -280,9 +310,12 @@ if $JSON_MODE; then
         --arg iso_resolution_status "$iso_resolution_status" \
         --arg write_strategy "$write_strategy" \
         --arg enrollment_policy "$enrollment_policy" \
+        --argjson generic_stage0 "$generic_stage0" \
         '{
             capability: $capability,
             device: $device,
+            source_device: (if $generic_stage0 then $source_device else null end),
+            generic_stage0: $generic_stage0,
             medium_type: $medium_type,
             device_class: $device_class,
             write_strategy: $write_strategy,
@@ -297,7 +330,11 @@ if $JSON_MODE; then
 else
     echo "host.operator-hardware.usb-medium.render"
     echo "======================================="
-    echo "device:               $DEVICE"
+    echo "device:               $install_device_id"
+    if $generic_stage0; then
+        echo "source device:        $DEVICE"
+    fi
+    echo "generic stage0:       $generic_stage0"
     echo "medium type:          $MEDIUM_TYPE"
     echo "iso source:           ${ISO_PATH:-$iso_library_ref}"
     echo "iso resolution:       $iso_resolution_status"

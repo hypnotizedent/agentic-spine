@@ -21,6 +21,9 @@ Options:
   --enrollment-policy <p>   Override enrollment policy from kit manifest
   --tailscale-authkey <key>  Tailscale auth key (for tailscale_auto_enroll_authkey policy)
   --tailscale-authkey-env <name>  Environment variable containing Tailscale auth key (receipt-safe)
+  --generic-stage0          Render pre-admission identity instead of kit node identity
+  --stage0-hostname <name>  Temporary hostname for --generic-stage0 (default: spine-stage0-node)
+  --stage0-device-marker <id>  Temporary /etc/spine device marker (default: stage0 hostname)
   --output-dir <dir>         Output directory for generated installer artifacts
   --json                     Machine-readable JSON output
 
@@ -36,6 +39,9 @@ METHOD_OVERRIDE=""
 ENROLLMENT_POLICY_OVERRIDE=""
 TAILSCALE_AUTHKEY=""
 TAILSCALE_AUTHKEY_ENV=""
+GENERIC_STAGE0=false
+STAGE0_HOSTNAME="spine-stage0-node"
+STAGE0_DEVICE_MARKER=""
 OUTPUT_DIR=""
 JSON_MODE=false
 
@@ -46,6 +52,9 @@ while [[ $# -gt 0 ]]; do
         --enrollment-policy) ENROLLMENT_POLICY_OVERRIDE="${2:-}"; shift 2 ;;
         --tailscale-authkey) TAILSCALE_AUTHKEY="${2:-}"; shift 2 ;;
         --tailscale-authkey-env) TAILSCALE_AUTHKEY_ENV="${2:-}"; shift 2 ;;
+        --generic-stage0) GENERIC_STAGE0=true; shift ;;
+        --stage0-hostname) STAGE0_HOSTNAME="${2:-}"; shift 2 ;;
+        --stage0-device-marker) STAGE0_DEVICE_MARKER="${2:-}"; shift 2 ;;
         --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
         --json) JSON_MODE=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -73,6 +82,22 @@ tailscale_mode=$(jq -r '.tailscale_enrollment_mode' "$KIT_PATH")
 enrollment_policy=$(jq -r '.enrollment_policy // "ssh_first_tailscale_later"' "$KIT_PATH")
 kit_authkey_present=$(jq -r '.tailscale_authkey_present // false' "$KIT_PATH")
 package_baseline_json=$(jq -c '.package_baseline' "$KIT_PATH")
+
+install_device_id="$device_id"
+install_hostname="$hostname"
+identity_finalization_required=""
+
+if $GENERIC_STAGE0; then
+    [[ -n "$STAGE0_HOSTNAME" ]] || fail "--stage0-hostname cannot be empty"
+    if [[ -z "$STAGE0_DEVICE_MARKER" ]]; then
+        STAGE0_DEVICE_MARKER="$STAGE0_HOSTNAME"
+    fi
+    [[ "$STAGE0_HOSTNAME" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,62}$ ]] || fail "--stage0-hostname must be a valid single-label hostname"
+    [[ "$STAGE0_DEVICE_MARKER" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || fail "--stage0-device-marker must be a valid marker"
+    install_device_id="$STAGE0_DEVICE_MARKER"
+    install_hostname="$STAGE0_HOSTNAME"
+    identity_finalization_required="host.operator-hardware.post-boot.normalize"
+fi
 
 # Allow override from command line
 if [[ -n "$ENROLLMENT_POLICY_OVERRIDE" ]]; then
@@ -116,7 +141,11 @@ case "$bootstrap_method" in
 esac
 
 if [[ -z "$OUTPUT_DIR" ]]; then
-    OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${device_id}/autoinstall"
+    if $GENERIC_STAGE0; then
+        OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/generic-stage0/autoinstall"
+    else
+        OUTPUT_DIR="${SPINE_STATE}/domain-state/generated/operator_hardware/bootstrap/${device_id}/autoinstall"
+    fi
 fi
 mkdir -p "$OUTPUT_DIR"
 
@@ -138,7 +167,7 @@ cat >"$autoinstall_path" <<EOF
 autoinstall:
   version: 1
   identity:
-    hostname: ${hostname}
+    hostname: ${install_hostname}
     username: ${operator_user}
     password: "*"
   ssh:
@@ -150,12 +179,20 @@ autoinstall:
 ${package_yaml}
   late-commands:
     - curtin in-target --target=/target mkdir -p /etc/spine
-    - curtin in-target --target=/target bash -lc "printf '%s\n' '${device_id}' > /etc/spine/operator-hardware-device-id"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${install_device_id}' > /etc/spine/operator-hardware-device-id"
     - curtin in-target --target=/target bash -lc "printf '%s\n' '${bootstrap_method}' > /etc/spine/bootstrap-method"
     - curtin in-target --target=/target bash -lc "printf '%s\n' '${target_distro} ${target_distro_version}' > /etc/spine/bootstrap-target-distro"
     - curtin in-target --target=/target bash -lc "printf '%s\n' '${tailscale_mode}' > /etc/spine/tailscale-enrollment-mode"
     - curtin in-target --target=/target bash -lc "printf '%s\n' '${enrollment_policy}' > /etc/spine/enrollment-policy"
 EOF
+
+if $GENERIC_STAGE0; then
+    cat >>"$autoinstall_path" <<STAGE0_EOF
+    - curtin in-target --target=/target bash -lc "printf '%s\n' 'true' > /etc/spine/stage0-pre-admission"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' 'pre_admission_generic' > /etc/spine/operator-hardware-device-id-state"
+    - curtin in-target --target=/target bash -lc "printf '%s\n' '${identity_finalization_required}' > /etc/spine/stage0-finalization-required"
+STAGE0_EOF
+fi
 
 # Enrollment-policy-specific late-commands
 if [[ "$enrollment_policy" == "tailscale_installed_login_manual" || "$enrollment_policy" == "tailscale_auto_enroll_authkey" ]]; then
@@ -205,8 +242,8 @@ SSHONLY_EOF
 fi
 
 cat >"$meta_data_path" <<EOF
-instance-id: ${device_id}-${generated_at}
-local-hostname: ${hostname}
+instance-id: ${install_device_id}-${generated_at}
+local-hostname: ${install_hostname}
 EOF
 
 case "$source_platform" in
@@ -225,6 +262,31 @@ if [[ "$bootstrap_method" == "pxe" || "$bootstrap_method" == "iventoy" ]]; then
     device_class_notes=$(echo "$device_class_notes" | jq '.batchability = "high"')
 else
     device_class_notes=$(echo "$device_class_notes" | jq '.batchability = "medium"')
+fi
+
+if $GENERIC_STAGE0; then
+    batchability="$(echo "$device_class_notes" | jq -r '.batchability')"
+    device_class_notes=$(jq -n \
+        --arg batchability "$batchability" \
+        --arg stage0_device_marker "$install_device_id" \
+        --arg stage0_hostname "$install_hostname" \
+        --arg enrollment_policy "$enrollment_policy" \
+        --arg identity_finalization_required "$identity_finalization_required" \
+        '{
+            device_class: "generic-stage0-target",
+            notes: [
+              "Reusable Stage 0 installer payload; do not infer final hardware class from the render source kit",
+              "First boot must be finalized through post-boot normalize before node admission decisions"
+            ],
+            likely_trust_boundary: "local hands required for boot path; final identity requires post-boot readback",
+            batchability: $batchability,
+            generic_stage0: true,
+            identity_state: "pre_admission",
+            stage0_device_marker: $stage0_device_marker,
+            stage0_hostname: $stage0_hostname,
+            enrollment_policy: $enrollment_policy,
+            identity_finalization_required: $identity_finalization_required
+        }')
 fi
 echo "$device_class_notes" >"$notes_path"
 
@@ -260,20 +322,32 @@ operator_steps_json=$(case "$bootstrap_method" in
 esac)
 
 if $JSON_MODE; then
+    generic_stage0_json=false
+    if $GENERIC_STAGE0; then
+        generic_stage0_json=true
+    fi
     jq -n \
         --arg capability "host.operator-hardware.autoinstall.render" \
         --arg device "$device_id" \
+        --arg install_device "$install_device_id" \
+        --arg hostname "$install_hostname" \
         --arg method "$bootstrap_method" \
         --arg enrollment_policy "$enrollment_policy" \
         --arg target_platform "$target_platform" \
+        --arg identity_finalization_required "$identity_finalization_required" \
         --arg installer_provenance "rendered:${bootstrap_method}:${target_distro}-${target_distro_version}:${generated_at}" \
         --arg output_dir "$OUTPUT_DIR" \
+        --argjson generic_stage0 "$generic_stage0_json" \
         --argjson generated_artifacts "$generated_artifacts_json" \
         --argjson operator_steps "$operator_steps_json" \
         --argjson device_class_notes "$(cat "$notes_path")" \
         '{
             capability: $capability,
             device: $device,
+            install_device: $install_device,
+            install_hostname: $hostname,
+            generic_stage0: $generic_stage0,
+            identity_finalization_required: (if $generic_stage0 then $identity_finalization_required else null end),
             target_platform: $target_platform,
             bootstrap_method: $method,
             enrollment_policy: $enrollment_policy,
@@ -287,7 +361,13 @@ if $JSON_MODE; then
 else
     echo "host.operator-hardware.autoinstall.render"
     echo "========================================"
-    echo "device:               $device_id"
+    echo "source device:        $device_id"
+    echo "install device:       $install_device_id"
+    echo "install hostname:     $install_hostname"
+    echo "generic stage0:       $GENERIC_STAGE0"
+    if $GENERIC_STAGE0; then
+        echo "finalization:         $identity_finalization_required"
+    fi
     echo "target platform:      $target_platform"
     echo "bootstrap method:     $bootstrap_method"
     echo "output dir:           $OUTPUT_DIR"
