@@ -12,6 +12,8 @@ import argparse
 import datetime as dt
 import json
 import os
+import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,8 @@ STATE_ROOT = Path(os.environ.get("SPINE_STATE") or RUNTIME_ROOT / "state")
 WAVES_ROOT = RUNTIME_ROOT / "waves"
 DELEGATIONS_ROOT = STATE_ROOT / "delegations"
 TASK_ROOT = STATE_ROOT / "agent-tasks"
+SCHEDULER_REGISTRY = ROOT / "ops" / "bindings" / "launchd.scheduler.registry.yaml"
+SSH_RESOLVER = ROOT / "ops" / "lib" / "ssh-resolve.sh"
 STALE_SECONDS = int(os.environ.get("EXECUTION_PICKUP_STALE_SECONDS") or "300")
 
 
@@ -68,6 +72,50 @@ def load_yaml(path: Path) -> dict[str, Any]:
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def mailroom_worker_proof_channel() -> dict[str, Any]:
+    registry = load_yaml(SCHEDULER_REGISTRY)
+    for entry in registry.get("labels", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("label") or "") == "com.ronny.mailroom-task-worker":
+            proof = entry.get("proof_channel")
+            return proof if isinstance(proof, dict) else {}
+    return {}
+
+
+def load_remote_json(host_ref: str, remote_path: str) -> dict[str, Any]:
+    if not host_ref or not remote_path or not SSH_RESOLVER.is_file():
+        return {}
+    script = f'''
+set -euo pipefail
+source {shlex.quote(str(SSH_RESOLVER))}
+target={shlex.quote(host_ref)}
+path={shlex.quote(remote_path)}
+resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
+user="$(ssh_resolve_user "$target" ubuntu)"
+identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
+ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" "cat $(printf %q "$path")"
+'''
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", script],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception:
+        return {}
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return {}
+    try:
+        payload = json.loads(proc.stdout)
+    except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -295,6 +343,16 @@ def worker_status() -> dict[str, Any]:
         STATE_ROOT / "mailroom-task-worker.status.json",
     ]
     payloads = [load_json(path) | {"path": str(path)} for path in candidates if path.is_file()]
+    proof_channel = mailroom_worker_proof_channel()
+    remote_payload = load_remote_json(
+        str(proof_channel.get("host") or ""),
+        str(proof_channel.get("path") or ""),
+    )
+    if remote_payload:
+        payloads.append(remote_payload | {
+            "path": str(proof_channel.get("path") or ""),
+            "host": str(proof_channel.get("host") or ""),
+        })
     freshest: dict[str, Any] = {}
     freshest_age: int | None = None
     for payload in payloads:

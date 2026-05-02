@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ METABOLIZER_STATUS_BIN = (
 SCHEDULER_HEALTH_BIN = (
     REPO_ROOT / "ops" / "plugins" / "infra" / "host" / "bin" / "launchd-scheduler-health-status"
 )
+SSH_RESOLVER = REPO_ROOT / "ops" / "lib" / "ssh-resolve.sh"
 
 OPEN_DISPOSITIONS = frozenset({
     "active",  # legacy compatibility
@@ -591,16 +593,63 @@ def _local_heartbeat_candidate(path_text: str) -> Path:
     return path
 
 
+def _remote_heartbeat_payload(host_ref: str, remote_path: str) -> dict[str, Any]:
+    if not host_ref or not remote_path or not SSH_RESOLVER.is_file():
+        return {}
+    script = f'''
+set -euo pipefail
+source {shlex.quote(str(SSH_RESOLVER))}
+target={shlex.quote(host_ref)}
+path={shlex.quote(remote_path)}
+resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
+user="$(ssh_resolve_user "$target" ubuntu)"
+identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
+ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" "cat $(printf %q "$path")"
+'''
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", script],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception:
+        return {}
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return {}
+    try:
+        payload = json.loads(proc.stdout)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def evaluate_file_heartbeat_label(entry: dict[str, Any]) -> dict[str, Any]:
     label = str(entry.get("label") or "")
     proof_channel = entry.get("proof_channel") or {}
     path_text = str(proof_channel.get("path") or "")
+    host_ref = str(proof_channel.get("host") or "")
     stale_threshold = int(proof_channel.get("stale_threshold_seconds", 0) or 0) or None
     path = _local_heartbeat_candidate(path_text)
     heartbeat_at = None
     read_state = "missing"
     detail = "heartbeat file missing"
-    if path.is_file():
+    remote_data = _remote_heartbeat_payload(host_ref, path_text)
+    if remote_data:
+        heartbeat_at = str(
+            remote_data.get("heartbeat_at")
+            or remote_data.get("generated_at")
+            or remote_data.get("updated_at")
+            or remote_data.get("recorded_at")
+            or remote_data.get("last_run_at")
+            or remote_data.get("timestamp")
+            or ""
+        ).strip() or None
+        read_state = "ok" if heartbeat_at else "missing_timestamp"
+        detail = str(remote_data.get("health") or remote_data.get("status") or "remote_heartbeat")
+    elif path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
