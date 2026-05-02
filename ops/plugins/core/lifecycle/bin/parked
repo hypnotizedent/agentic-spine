@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Read-only scanner for parked items with parked_lifecycle blocks."""
+"""Read-only scanner for parked items with parked_lifecycle blocks.
+
+Each item carries a structured review-horizon flag derived from `next_review`
+or, when absent, a fallback cadence of `parked_at + 90d`. The fallback cadence
+was named in PARKED-ITEM-LIFECYCLE-FORENSIC-20260415 as the missing piece for
+parked items whose triggers never fire. This readback flags it; it is not a
+runtime daemon.
+"""
 from __future__ import annotations
 
 import argparse
@@ -7,9 +14,14 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+
+# Fallback review cadence applied when `next_review` is null/missing.
+# Origin: PARKED-ITEM-LIFECYCLE-FORENSIC-20260415 line 94 ("90 days would close this gap").
+_FALLBACK_REVIEW_DAYS = 90
 
 
 def spine_state() -> Path:
@@ -111,10 +123,84 @@ def item_location(path: Path) -> str:
     return "other"
 
 
+def _parse_iso_date(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    s = str(value).strip().strip('"').strip("'")
+    if not s or s.lower() in {"null", "none", "(none)"}:
+        return None
+    # Accept either YYYY-MM-DD or full ISO timestamps.
+    try:
+        if len(s) == 10:
+            return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _path_mtime_utc(path: Path) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return None
+
+
+def _review_horizon(lc: dict, path: Path, now: datetime) -> dict:
+    """Derive structured review-horizon truth for a parked item.
+
+    Returns a dict with:
+      - declared_next_review: original next_review value (string or None)
+      - has_next_review: bool — True only when a real ISO date was declared
+      - effective_next_review: ISO date used for staleness math
+                                (declared if present; otherwise parked_at + fallback days)
+      - source: "declared" | "fallback_parked_plus_90d" | "unknown"
+      - days_overdue: int (negative when not yet due, 0 when due today)
+      - review_horizon_missing: bool — True when no declared next_review exists
+      - review_horizon_overdue: bool — True when effective_next_review is past today
+    """
+    declared = lc.get("next_review")
+    declared_dt = _parse_iso_date(declared)
+
+    if declared_dt is not None:
+        eff_dt = declared_dt
+        source = "declared"
+        missing = False
+    else:
+        parked_at = _parse_iso_date(lc.get("parked_at"))
+        if parked_at is None:
+            parked_at = _path_mtime_utc(path)
+        if parked_at is None:
+            return {
+                "declared_next_review": declared,
+                "has_next_review": False,
+                "effective_next_review": None,
+                "source": "unknown",
+                "days_overdue": None,
+                "review_horizon_missing": True,
+                "review_horizon_overdue": False,
+            }
+        from datetime import timedelta
+        eff_dt = parked_at + timedelta(days=_FALLBACK_REVIEW_DAYS)
+        source = "fallback_parked_plus_90d"
+        missing = True
+
+    days_overdue = (now.date() - eff_dt.date()).days
+    return {
+        "declared_next_review": declared,
+        "has_next_review": declared_dt is not None,
+        "effective_next_review": eff_dt.date().isoformat(),
+        "source": source,
+        "days_overdue": days_overdue,
+        "review_horizon_missing": missing,
+        "review_horizon_overdue": days_overdue > 0,
+    }
+
+
 def scan_all() -> list[dict]:
     """Walk scan dirs and collect all parked items with lifecycle blocks."""
     items = []
     seen = set()
+    now = datetime.now(timezone.utc)
     for base in scan_dirs():
         for path in sorted(base.rglob("*")):
             if path.is_dir():
@@ -130,6 +216,7 @@ def scan_all() -> list[dict]:
             triggers = lc.get("activation_trigger", [])
             if isinstance(triggers, str):
                 triggers = [triggers]
+            horizon = _review_horizon(lc, path, now)
             items.append({
                 "name": item_name(path),
                 "path": str(path),
@@ -139,6 +226,7 @@ def scan_all() -> list[dict]:
                 "activation_trigger": triggers,
                 "trigger_count": len(triggers),
                 "next_review": lc.get("next_review"),
+                "review_horizon": horizon,
                 "activation_destination": lc.get("activation_destination", ""),
                 "retire_if": lc.get("retire_if", ""),
                 "superseded_by": lc.get("superseded_by", []),
@@ -146,13 +234,25 @@ def scan_all() -> list[dict]:
     return items
 
 
+def _summary_counts(items: list[dict]) -> dict:
+    missing = sum(1 for it in items if it.get("review_horizon", {}).get("review_horizon_missing"))
+    overdue = sum(1 for it in items if it.get("review_horizon", {}).get("review_horizon_overdue"))
+    return {
+        "total": len(items),
+        "review_horizon_missing": missing,
+        "review_horizon_overdue": overdue,
+    }
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     items = scan_all()
+    summary = _summary_counts(items)
     if args.json:
         print(json.dumps({
             "capability": "parked.list",
             "status": "ok",
             "count": len(items),
+            "summary": summary,
             "items": items,
         }, indent=2))
     else:
@@ -168,7 +268,18 @@ def cmd_list(args: argparse.Namespace) -> int:
             print(f"  triggers:    {item['trigger_count']} defined")
             for t in item["activation_trigger"]:
                 print(f"               - {t}")
-            print(f"  next_review: {item['next_review'] or '(none)'}")
+            horizon = item.get("review_horizon", {})
+            review_label = item['next_review'] or '(none)'
+            flags = []
+            if horizon.get("review_horizon_missing"):
+                flags.append("missing")
+            if horizon.get("review_horizon_overdue"):
+                days = horizon.get("days_overdue")
+                flags.append(f"overdue:{days}d" if days is not None else "overdue")
+            flag_suffix = f"  [{' '.join(flags)}]" if flags else ""
+            print(f"  next_review: {review_label}{flag_suffix}")
+            if horizon.get("source") == "fallback_parked_plus_90d":
+                print(f"  effective:   {horizon.get('effective_next_review')} (fallback parked_at + 90d)")
             print(f"  destination: {item['activation_destination']}")
             print(f"  retire_if:   {item['retire_if']}")
             sup = item["superseded_by"]
@@ -176,7 +287,11 @@ def cmd_list(args: argparse.Namespace) -> int:
                 print(f"  superseded:  {', '.join(sup)}")
             print(f"  path:        {item['path']}")
         print(f"\n{'─' * 60}")
-        print(f"\nTotal: {len(items)} parked item(s) with lifecycle.\n")
+        print(
+            f"\nTotal: {summary['total']} parked  |  "
+            f"review_horizon_missing: {summary['review_horizon_missing']}  |  "
+            f"review_horizon_overdue: {summary['review_horizon_overdue']}\n"
+        )
     return 0
 
 

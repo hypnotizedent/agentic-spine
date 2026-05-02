@@ -67,22 +67,30 @@ def _find_packet_path(packet_id: str, state_root: str) -> Path:
     if not prompts_dir.is_dir():
         raise ControllerPromptAmendError(f"controller-prompts directory not found: {prompts_dir}")
 
-    for path in prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md"):
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if not text.startswith("---"):
-            continue
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            continue
-        try:
-            fm = yaml.safe_load(parts[1])
-        except yaml.YAMLError:
-            continue
-        if isinstance(fm, dict) and str(fm.get("packet_id", "")).strip() == packet_id:
-            return path
+    # Dual glob: canonical CONTROLLER-PACKET-*.md and legacy MAILROOM-CONTROLLER-PACKET-*.md.
+    # The legacy prefix was retired by LOOP-VOCABULARY-READBACK-SUBTRACTION-SLICE-1; old files
+    # remain on disk for historical compatibility.
+    _seen: set[Path] = set()
+    for _glob in ("CONTROLLER-PACKET-*.md", "MAILROOM-CONTROLLER-PACKET-*.md"):
+        for path in prompts_dir.glob(_glob):
+            if path in _seen:
+                continue
+            _seen.add(path)
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if not text.startswith("---"):
+                continue
+            parts = text.split("---", 2)
+            if len(parts) < 3:
+                continue
+            try:
+                fm = yaml.safe_load(parts[1])
+            except yaml.YAMLError:
+                continue
+            if isinstance(fm, dict) and str(fm.get("packet_id", "")).strip() == packet_id:
+                return path
 
     raise ControllerPromptAmendError(f"packet '{packet_id}' not found")
 

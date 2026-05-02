@@ -424,7 +424,17 @@ def _find_packet(packet_id: str, state_root: str) -> tuple[str, dict[str, Any], 
     """Find a delegable work item by ID. Returns (path, metadata, kind)."""
     prompts_dir = Path(state_root) / "controller-prompts"
     if prompts_dir.is_dir():
-        for path in prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md"):
+        # Dual glob: canonical CONTROLLER-PACKET-*.md and legacy MAILROOM-CONTROLLER-PACKET-*.md.
+        # Legacy prefix retired by LOOP-VOCABULARY-READBACK-SUBTRACTION-SLICE-1.
+        _seen: set = set()
+        _all = []
+        for _glob in ("CONTROLLER-PACKET-*.md", "MAILROOM-CONTROLLER-PACKET-*.md"):
+            for _p in prompts_dir.glob(_glob):
+                if _p in _seen:
+                    continue
+                _seen.add(_p)
+                _all.append(_p)
+        for path in _all:
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:

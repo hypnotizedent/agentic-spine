@@ -525,7 +525,10 @@ check E13 "cap.sh no silent widen-by-fallback to worker" bash -c '
 
 # E14 is warning-only. Runtime custody can be proven by delegation/packet/handoff
 # or by current wave/worktree/heartbeat evidence.
-warn_check E14 "active-loop continuity (delegation, packet, handoff, wave/worktree custody, or heartbeat)" bash -c '
+# When E14 fires, per-loop diagnostic names which custody classes were checked
+# (all checked classes were absent for the listed loop). Operators read the
+# per-loop output to learn which seam would clear the warn.
+warn_check E14 "active-loop custody seam absent (no delegation, packet, handoff, wave, worktree, or heartbeat for at least one active loop)" bash -c '
     python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
 import json, os, subprocess, sys
 from datetime import datetime, timezone
@@ -575,9 +578,19 @@ def parse_iso_utc(value):
         return None
 
 # Check which loops have at least one packet
+# Dual glob: canonical CONTROLLER-PACKET-*.md and legacy MAILROOM-CONTROLLER-PACKET-*.md.
+# Legacy prefix retired by LOOP-VOCABULARY-READBACK-SUBTRACTION-SLICE-1.
 loops_with_packet = set()
 if prompts_dir.is_dir():
-    for p in prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md"):
+    _packet_paths = []
+    _seen_paths = set()
+    for _glob in ("CONTROLLER-PACKET-*.md", "MAILROOM-CONTROLLER-PACKET-*.md"):
+        for _p in prompts_dir.glob(_glob):
+            if _p in _seen_paths:
+                continue
+            _seen_paths.add(_p)
+            _packet_paths.append(_p)
+    for p in _packet_paths:
         try:
             text = p.read_text(encoding="utf-8", errors="ignore")
             for line in text.splitlines()[:30]:
@@ -724,9 +737,24 @@ covered = (
 )
 uncovered = active_loops - covered
 if uncovered:
-    print("%d active loop(s) without continuity evidence:" % len(uncovered))
+    print("%d active loop(s) with no custody seam (checked: delegation, packet, handoff, wave, worktree, heartbeat):" % len(uncovered))
     for lid in sorted(uncovered):
-        print("  %s" % lid)
+        absent = []
+        if lid not in loops_with_delegation:
+            absent.append("delegation")
+        if lid not in loops_with_packet:
+            absent.append("packet")
+        if lid not in loops_with_handoff:
+            absent.append("handoff")
+        if lid not in loops_with_wave:
+            absent.append("wave")
+        if lid not in loops_with_worktree:
+            absent.append("worktree")
+        if lid not in loops_with_heartbeat:
+            absent.append("heartbeat")
+        # By construction `absent` lists every checked class, since `lid in uncovered`
+        # means no class matched. Spelling them out makes the trigger class explicit.
+        print("  %s — absent: %s" % (lid, ", ".join(absent)))
     raise SystemExit(1)
 PY
 '

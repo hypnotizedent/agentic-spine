@@ -2260,7 +2260,11 @@ if terminal_telemetry:
         if term.get("liveness_fresh"):
             term_bits.append("live")
         elif term.get("last_heartbeat_utc"):
-            term_bits.append("stale-live")
+            # stale-telemetry: terminal had heartbeats once, but they are no longer fresh.
+            # This is NOT proof of active custody. Workers whose outcome reached terminal
+            # (success/failure) and whose heartbeat has aged out belong here. The label
+            # used to read "stale-live", which falsely suggested ongoing custody.
+            term_bits.append("stale-telemetry")
         if term.get("last_capability"):
             term_bits.append(f"cap={term['last_capability']}")
         if term.get("custody_fresh"):

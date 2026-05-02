@@ -12,9 +12,25 @@ from pathlib import Path
 import yaml
 
 
-TRACKER_GLOB = "MAILROOM-CONTROLLER-PACKET-EXECUTION-*.md"
-INDEX_GLOB = "MAILROOM-CONTROLLER-PACKET-SET-*.md"
-PROMPT_GLOB = "MAILROOM-CONTROLLER-PACKET-[0-9][0-9]-*.md"
+# Dual glob lists: canonical (CONTROLLER-PACKET-*) + legacy (MAILROOM-CONTROLLER-PACKET-*).
+# Legacy prefix retired by LOOP-VOCABULARY-READBACK-SUBTRACTION-SLICE-1.
+TRACKER_GLOBS = (
+    "CONTROLLER-PACKET-EXECUTION-*.md",
+    "MAILROOM-CONTROLLER-PACKET-EXECUTION-*.md",
+)
+INDEX_GLOBS = (
+    "CONTROLLER-PACKET-SET-*.md",
+    "MAILROOM-CONTROLLER-PACKET-SET-*.md",
+)
+PROMPT_GLOBS = (
+    "CONTROLLER-PACKET-[0-9][0-9]-*.md",
+    "MAILROOM-CONTROLLER-PACKET-[0-9][0-9]-*.md",
+)
+# Backward-compat aliases — single-pattern names retained as the canonical
+# pattern so any external caller importing them sees the new shape.
+TRACKER_GLOB = TRACKER_GLOBS[0]
+INDEX_GLOB = INDEX_GLOBS[0]
+PROMPT_GLOB = PROMPT_GLOBS[0]
 
 
 def state_root() -> Path:
@@ -75,7 +91,15 @@ def resolve_path(raw: str, *, base: Path) -> Path:
 
 
 def find_prompt_path(packet_id: str, prompts_dir: Path) -> Path:
-    for path in sorted(prompts_dir.glob(PROMPT_GLOB)):
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    for glob in PROMPT_GLOBS:
+        for path in prompts_dir.glob(glob):
+            if path in seen:
+                continue
+            seen.add(path)
+            candidates.append(path)
+    for path in sorted(candidates):
         frontmatter = parse_frontmatter(path)
         if str(frontmatter.get("packet_id") or "").strip() == packet_id:
             return path

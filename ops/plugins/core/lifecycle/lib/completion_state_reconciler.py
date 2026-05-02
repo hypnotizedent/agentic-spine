@@ -630,7 +630,17 @@ def _collect_controller_prompt_packets(state_root: str) -> list[dict[str, Any]]:
     if not prompts_dir.is_dir():
         return items
 
-    for path in sorted(prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+    # Dual glob: canonical (CONTROLLER-PACKET-*) + legacy (MAILROOM-CONTROLLER-PACKET-*).
+    # Legacy prefix retired by LOOP-VOCABULARY-READBACK-SUBTRACTION-SLICE-1.
+    _seen: set = set()
+    _all = []
+    for _glob in ("CONTROLLER-PACKET-*.md", "MAILROOM-CONTROLLER-PACKET-*.md"):
+        for _p in prompts_dir.glob(_glob):
+            if _p in _seen:
+                continue
+            _seen.add(_p)
+            _all.append(_p)
+    for path in sorted(_all):
         front = _parse_frontmatter(path)
         packet_id = str(front.get("packet_id") or "").strip()
         status = str(front.get("status") or "unknown").strip().lower()

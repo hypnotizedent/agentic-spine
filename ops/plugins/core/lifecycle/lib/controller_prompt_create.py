@@ -57,11 +57,37 @@ def _validate_packet_id(packet_id: str) -> tuple[str, str]:
     return m.group(1), m.group(2)
 
 
+# Filename glob pattern that matches BOTH the new canonical mint
+# (CONTROLLER-PACKET-*.md) AND the historical legacy mint
+# (MAILROOM-CONTROLLER-PACKET-*.md). Used by every uniqueness/scan loop here
+# so that retiring the MAILROOM- prefix does not orphan 300+ historical files.
+# The legacy prefix was retired by LOOP-VOCABULARY-READBACK-SUBTRACTION-SLICE-1
+# per HUMAN-INPUT-PIPELINE-FULL-TRACE-RESEARCH-20260502.
+PACKET_FILENAME_GLOBS = ("CONTROLLER-PACKET-*.md", "MAILROOM-CONTROLLER-PACKET-*.md")
+
+
+def _iter_packet_files(prompts_path: Path):
+    """Yield existing packet files matching either canonical or legacy globs."""
+    seen: set[Path] = set()
+    for glob in PACKET_FILENAME_GLOBS:
+        for path in prompts_path.glob(glob):
+            if path in seen:
+                continue
+            seen.add(path)
+            yield path
+
+
 def _derive_packet_path(
     nn: str, slug: str, created_date: str, controller_prompts_dir: str
 ) -> str:
-    """Derive the deterministic packet file path."""
-    filename = f"MAILROOM-CONTROLLER-PACKET-{nn}-{slug}-{created_date}.md"
+    """Derive the deterministic packet file path.
+
+    Canonical mint pattern is CONTROLLER-PACKET-{nn}-{slug}-{date}.md. The
+    legacy MAILROOM- prefix is no longer produced; old files remain as
+    historical compatibility and are still discovered via the dual-glob
+    scan in _iter_packet_files().
+    """
+    filename = f"CONTROLLER-PACKET-{nn}-{slug}-{created_date}.md"
     return os.path.join(controller_prompts_dir, filename)
 
 
@@ -81,7 +107,7 @@ def _check_packet_id_uniqueness(
     if not prompts_path.is_dir():
         return  # no directory = no duplicates possible
 
-    for path in prompts_path.glob("MAILROOM-CONTROLLER-PACKET-*.md"):
+    for path in _iter_packet_files(prompts_path):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -129,7 +155,7 @@ def _live_packets_for_loop(
         return []
 
     packets: list[dict[str, str]] = []
-    for path in sorted(prompts_path.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+    for path in sorted(_iter_packet_files(prompts_path)):
         fm = _packet_frontmatter(path)
         if str(fm.get("loop_id") or "").strip() != loop_id:
             continue

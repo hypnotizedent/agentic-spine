@@ -43,6 +43,100 @@ TERMINAL_DELEGATION_STATES = frozenset({"landed", "needs_review", "cancelled"})
 TERMINAL_WAVE_STATUSES = frozenset({"closed", "superseded"})
 TERMINAL_OPERATIONAL_TASK_STATES = frozenset({"done", "failed", "cancelled"})
 
+# Filename glob pattern matching BOTH the canonical CONTROLLER-PACKET-*.md
+# mint and the historical MAILROOM-CONTROLLER-PACKET-*.md mint. The legacy
+# prefix was retired by LOOP-VOCABULARY-READBACK-SUBTRACTION-SLICE-1; old
+# files remain on disk as historical compatibility and are still discovered
+# by every scan loop here via the dual glob.
+PACKET_FILENAME_GLOBS = ("CONTROLLER-PACKET-*.md", "MAILROOM-CONTROLLER-PACKET-*.md")
+
+
+def _iter_packet_files(prompts_dir: Path):
+    """Yield existing packet files matching either canonical or legacy globs."""
+    seen: set[Path] = set()
+    for glob in PACKET_FILENAME_GLOBS:
+        for path in prompts_dir.glob(glob):
+            if path in seen:
+                continue
+            seen.add(path)
+            yield path
+
+
+# Materialization-status normalization at close time. Closed packets must not
+# read as `in_progress`, `pending`, `materializing`, etc. — those values are
+# operational, not terminal. The map below lifts every known operational
+# value to a terminal value derived from the packet's close disposition.
+# Origin: HUMAN-INPUT-PIPELINE-FULL-TRACE-RESEARCH-20260502 disease #7.
+_MATERIALIZATION_NON_TERMINAL = frozenset({
+    "",
+    "in_progress",
+    "pending",
+    "patch_in_progress",
+    "delegation_ready",
+    "delegation_requested",
+    "materializing",
+    "loop_opened",
+    "packet_created",
+    "research_active",
+    "research_packet_open",
+    "research_design_pending_review",
+    "build_ready_prep",
+    "build_ready",
+    "blocked_pending_proof",
+    "proof_closeout_required",
+    "approved_for_research_synthesis",
+    "approved_for_packet_1_research_only",
+    "approved_research_design_only_stop_before_build",
+    "approved_build_with_gate_design_only",
+    "approved_for_meaning_extraction",
+    "approved_for_non_destructive_lifecycle_correction",
+    "approved_for_non_destructive_closure_plan",
+    "stale_ingress_state",
+    "deferred_plan",
+    "planned",
+    "proposed",
+    "parked_before_execute",
+    "repo_contract_scoped",
+    "research_only",
+    "readonly_discovery_delivered",
+    "delivered_candidate_spec",
+    "evidence_executed",
+    "implemented",
+    "active",
+})
+
+# Disposition → terminal materialization_status mapping at close. These are
+# the only values a closed packet may carry on its materialization_status
+# field. Values that already mean "terminal at close" (e.g. existing "landed"
+# rows on closed packets) are preserved; non-terminal rows get rewritten to
+# match the close disposition.
+_MATERIALIZATION_TERMINAL_BY_DISPOSITION = {
+    "delivered": "landed",
+    "deferred": "deferred",
+    "abandoned": "abandoned",
+    "superseded": "superseded",
+}
+
+
+def _normalize_materialization_status(
+    current: str, disposition: str
+) -> tuple[str, bool]:
+    """Compute terminal materialization_status from current value and close disposition.
+
+    Returns (new_value, did_normalize). Forward-only: only rewrites values
+    listed in _MATERIALIZATION_NON_TERMINAL. Already-terminal values pass
+    through unchanged.
+    """
+    cur = (current or "").strip().lower()
+    if cur in _MATERIALIZATION_NON_TERMINAL:
+        terminal = _MATERIALIZATION_TERMINAL_BY_DISPOSITION.get(
+            (disposition or "").strip().lower(),
+            "landed",
+        )
+        if terminal != cur:
+            return terminal, True
+    return current, False
+
 
 class ControllerPromptCloseError(Exception):
     """Raised for validation or write failure during close."""
@@ -96,6 +190,18 @@ def _update_frontmatter(
     fm["closed_by"] = closed_by
     if completion_level:
         fm["completion_level"] = completion_level
+
+    # Materialization-status normalization: a closed packet must not retain a
+    # non-terminal materialization_status (in_progress/pending/materializing).
+    # If the field is absent we do not invent one — only existing non-terminal
+    # values get lifted to a terminal value derived from the close disposition.
+    if "materialization_status" in fm:
+        current = str(fm.get("materialization_status") or "")
+        new_value, did = _normalize_materialization_status(current, disposition)
+        if did:
+            fm["materialization_status"] = new_value
+            # Audit trail: record the prior non-terminal value for forensic clarity.
+            fm["materialization_status_prior_at_close"] = current
 
     new_fm = yaml.safe_dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
     body = text[end:]
@@ -155,7 +261,7 @@ def _active_packet_ids_for_loop(
         return []
 
     active_ids: list[str] = []
-    for path in sorted(prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+    for path in sorted(_iter_packet_files(prompts_dir)):
         fm = _packet_frontmatter(path)
         if str(fm.get("loop_id", "")).strip() != loop_id:
             continue
@@ -179,7 +285,7 @@ def _packet_ids_for_loop(
         return []
 
     packet_ids: list[str] = []
-    for path in sorted(prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+    for path in sorted(_iter_packet_files(prompts_dir)):
         fm = _packet_frontmatter(path)
         if str(fm.get("loop_id", "")).strip() != loop_id:
             continue
@@ -196,7 +302,7 @@ def _packet_paths_for_loop(state_root: str, loop_id: str) -> list[Path]:
         return []
 
     paths: list[Path] = []
-    for path in sorted(prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+    for path in sorted(_iter_packet_files(prompts_dir)):
         fm = _packet_frontmatter(path)
         if str(fm.get("loop_id", "")).strip() == loop_id:
             paths.append(path)
@@ -248,7 +354,7 @@ def _active_operational_task_ids_for_loop(state_root: str, loop_id: str) -> list
         return []
 
     active_ids: list[str] = []
-    for path in sorted(prompts_dir.glob("MAILROOM-CONTROLLER-PACKET-*.md")):
+    for path in sorted(_iter_packet_files(prompts_dir)):
         fm = _packet_frontmatter(path)
         if str(fm.get("loop_id", "")).strip() != loop_id:
             continue
