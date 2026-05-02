@@ -291,6 +291,213 @@ def _normalize_legacy_tokens_in_item(item: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+# ---------------------------------------------------------------------------
+# Realization-state derivation (read-side only)
+# ---------------------------------------------------------------------------
+# Slice / loop: LOOP-OI-REALIZATION-READBACK-FOLD-20260502.
+# `landed` in adoption_state means intake reached terminal state. It does NOT
+# mean the underlying idea became real. This module derives `realization_state`
+# at emit time so operator readbacks can answer the human question:
+# did this idea become real, or did we only finish intake?
+#
+# Derived only — never written to OI YAML on disk. Purely a read-side fold.
+
+_REALIZATION_CATEGORIES = (
+    "realized",
+    "attached_to_existing",
+    "shelved",
+    "awaiting_promotion",
+    "deferred",
+    "historical_inert",
+    "unresolved",
+)
+
+# Workspace home roots checked for project/product realization.
+def _workspace_root() -> Path:
+    # Resolve the parent of the spine code root, which is conventionally `~/code`.
+    spine_code = os.environ.get("SPINE_CODE", "")
+    if spine_code:
+        return Path(spine_code).expanduser().parent
+    return Path.home() / "code"
+
+
+def _project_home_candidates(domain: str) -> list[Path]:
+    """Candidate filesystem homes for a domain. Existence alone is not proof."""
+    if not domain:
+        return []
+    root = _workspace_root()
+    return [
+        root / "projects" / domain,
+        root / "products" / domain,
+        # Mint product is special-cased per cross-repo.authority.yaml; agents
+        # reading inferred_domain="mint" should resolve to mint-modules.
+        root / "mint-modules" if domain in {"mint", "mint-modules"} else root / "_unused__not_a_real_path__",
+    ]
+
+
+def _resolve_realization_evidence(
+    *,
+    domain: str,
+    proof_ref: str,
+    adoption_state: str,
+    adoption_ref: str,
+) -> tuple[bool, str]:
+    """Return (has_realization_home, realized_as_path).
+
+    Realization requires BOTH a candidate home that exists on disk AND a piece
+    of evidence (proof_ref present, OR adoption_state in {adopted, landed} with
+    a non-empty adoption_ref). Directory existence alone is NOT proof.
+    """
+    candidates = [c for c in _project_home_candidates(domain) if c.is_dir()]
+    if not candidates:
+        return False, ""
+    has_evidence = bool(
+        (proof_ref and str(proof_ref).strip())
+        or (adoption_state in {"adopted", "landed"} and adoption_ref)
+    )
+    if not has_evidence:
+        return False, ""
+    # Pick the first existing candidate as realized_as.
+    return True, str(candidates[0])
+
+
+def _derive_realization_state(item: dict[str, Any]) -> dict[str, Any]:
+    """Compute realization_state, realized_as, promotion_condition, why_not_realized.
+
+    Reads only the existing item dict (which is already built from on-disk OI
+    fields plus existing derived chain readback). No on-disk mutation.
+    """
+    disposition = str(item.get("disposition", "")).strip()
+    adoption_state = str(item.get("adoption_state", "")).strip()
+    adoption_ref = str(item.get("adoption_ref", "")).strip()
+    chain = item.get("intent_chain_readback") or {}
+    proof_ref = ""
+    if isinstance(chain, dict):
+        proof_block = chain.get("proof_receipt") or {}
+        if isinstance(proof_block, dict):
+            proof_ref = str(proof_block.get("ref") or "").strip()
+    domain = str(item.get("inferred_domain") or "").strip()
+    if not domain:
+        # Fallback: take the first likely_domain from the metabolize plan when present.
+        likely = item.get("likely_domains")
+        if isinstance(likely, list) and likely:
+            first = str(likely[0]).strip()
+            if first:
+                domain = first
+
+    realized_as = ""
+    promotion_condition = ""
+    why_not_realized = ""
+    state = "unresolved"
+
+    if adoption_state == "historical_inert":
+        state = "historical_inert"
+        why_not_realized = (
+            "OI aged past the freshness window with no intent-use receipt; "
+            "preserved as historical evidence, not active backlog."
+        )
+    elif disposition == "no_op_preserved":
+        state = "shelved"
+        why_not_realized = (
+            "Disposition is no_op_preserved: classified as valuable context "
+            "with no action required."
+        )
+        if domain:
+            promotion_condition = (
+                f"Explicit operator decision to promote into "
+                f"~/code/projects/{domain} or ~/code/products/{domain}"
+            )
+    elif disposition == "deferred":
+        state = "deferred"
+        activation = str(item.get("activation_conditions") or "").strip()
+        why_not_realized = activation or "Deferred awaiting an activation trigger."
+    elif disposition in {"recommended_for_review", "packet_candidate"}:
+        # Slice 4 may have already canonicalized the value in derivative
+        # fields, but the raw on-disk value may still surface here.
+        has_home, home_path = _resolve_realization_evidence(
+            domain=domain,
+            proof_ref=proof_ref,
+            adoption_state=adoption_state,
+            adoption_ref=adoption_ref,
+        )
+        if has_home:
+            state = "awaiting_promotion"
+            realized_as = home_path
+            why_not_realized = (
+                f"A project/product home exists at {home_path}, but the OI "
+                "has not been promoted into bounded work."
+            )
+            promotion_condition = (
+                "Explicit operator decision to bind this recommendation "
+                f"into a packet/loop scoped against {home_path}"
+            )
+        else:
+            state = "shelved"
+            why_not_realized = (
+                "Disposition is recommended_for_review, but no project/product "
+                "home exists for the inferred domain. Recommendation only."
+            )
+            if domain:
+                promotion_condition = (
+                    f"Explicit operator decision to promote {domain}-class "
+                    f"work into ~/code/projects/{domain}"
+                )
+            else:
+                promotion_condition = (
+                    "Explicit operator decision to name a project/product "
+                    "home before the recommendation can become real work"
+                )
+    elif disposition == "attached":
+        has_home, home_path = _resolve_realization_evidence(
+            domain=domain,
+            proof_ref=proof_ref,
+            adoption_state=adoption_state,
+            adoption_ref=adoption_ref,
+        )
+        if has_home:
+            state = "realized"
+            realized_as = home_path
+        else:
+            state = "attached_to_existing"
+            realized_as = adoption_ref or proof_ref
+            why_not_realized = (
+                "Bound to an existing seam (loop/packet) inside spine; "
+                "the implementation lives in spine itself, not a separate "
+                "product/project home."
+            )
+    elif adoption_state == "orphaned":
+        state = "unresolved"
+        why_not_realized = (
+            "Downstream loop/packet reference is missing the durable object "
+            "it pointed at; reconciler classified as orphaned."
+        )
+    elif adoption_state == "review_required":
+        state = "awaiting_promotion"
+        why_not_realized = (
+            "Reconciler flagged operator review required (e.g., missing "
+            "OI-bound receipt). No automatic promotion until the review "
+            "evidence is supplied."
+        )
+        promotion_condition = (
+            "Operator review of the existing closeout/proof receipt to "
+            "confirm intent satisfied."
+        )
+
+    return {
+        "realization_state": state,
+        "realized_as": realized_as or "none",
+        "promotion_condition": promotion_condition,
+        "why_not_realized": why_not_realized,
+    }
+
+
+def _apply_realization_readback(item: dict[str, Any]) -> dict[str, Any]:
+    """Attach derived realization_* fields to a status item. Read-only."""
+    derived = _derive_realization_state(item)
+    item.update(derived)
+    return item
+
+
 def _parse_iso_utc(value: str) -> datetime | None:
     """Parse an ISO-8601 UTC timestamp tolerantly. Returns None on failure."""
     if not value:
@@ -742,6 +949,20 @@ def list_operator_ingress(
         # prose, statements, paths) pass through verbatim. Raw OI YAML on
         # disk is unchanged.
         item = _normalize_legacy_tokens_in_item(item)
+
+        # Realization readback fold (LOOP-OI-REALIZATION-READBACK-FOLD-20260502):
+        # derive `realization_state`, `realized_as`, `promotion_condition`,
+        # `why_not_realized` from existing fields plus a filesystem cross-check.
+        # `landed` continues to mean intake completion; the new fields answer
+        # "did this idea become real?" Read-only — never written to OI YAML.
+        # Also derive `intake_state` so operator readbacks can speak
+        # intake-vs-realization without overloading `landed`.
+        item = _apply_realization_readback(item)
+        intake_state = "in_progress"
+        if item.get("lifecycle_state") in {"classified", "routed"}:
+            intake_state = "landed"
+        item["intake_state"] = intake_state
+
         items.append(item)
         if len(items) >= limit:
             break
