@@ -35,7 +35,7 @@ Target steady state:
 
 ## In Scope
 
-1. Consolidate communications authority into `workbench/agents/communications`
+1. Consolidate communications authority into `projects/communications`
 2. Consolidate media authority into `workbench/agents/media`
 3. Decide whether `agentic-foundation` is:
    - merged into `workbench`, or
@@ -62,7 +62,7 @@ As of 2026-04-09:
 
 ### Phase 1 — Communications Consolidation
 
-- move canonical comms scripts/contracts from `communications-domain` into `workbench/agents/communications`
+- move canonical comms scripts/contracts from `communications-domain` into `projects/communications`
 - repoint spine comms shims/seams to workbench
 - leave blocked runtime rails in spine if still intentional
 - only after all callers are truthful may `communications-domain` be archived

@@ -137,7 +137,7 @@ Files that are hand-maintained, authoritative, and drive spine behavior:
 | `ops/plugins/domains/surveillance/` | — | surveillance |
 | `ops/plugins/domains/taxlegal/` | — | tax-legal |
 | `ops/bindings/domains/media/` | 23 contracts | media |
-| `ops/bindings/domains/communications/` | 13 contracts | communications |
+| `projects/communications/bindings/` | 13 contracts | communications |
 | `ops/bindings/domains/mint.bundle.yaml` | 1 bundle | mint |
 
 **This is the bulk of the product truth in spine** — not capabilities.yaml, and not routing.dispatch.yaml.
@@ -193,7 +193,7 @@ Files that are hand-maintained, authoritative, and drive spine behavior:
 | Path | Product | Files | Action |
 |---|---|---|---|
 | `ops/bindings/domains/media/*` | media | 23 contracts | extract |
-| `ops/bindings/domains/communications/*` | comms | 13 contracts | extract |
+| `projects/communications/bindings/*` | comms | 13 contracts | extract |
 | `ops/bindings/domains/mint.bundle.yaml` | mint | 1 bundle | extract |
 | `ops/bindings/vpn.provider.yaml` | media | 1 binding (single-product) | extract |
 
