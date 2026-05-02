@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""Emit governed cluster lifecycle receipts into SPINE_STATE."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+CAPABILITY = "cluster.lifecycle.receipt.emit"
+SCHEMA = "cluster.lifecycle.receipt.v1"
+
+EVENT_TYPES = {
+    "inventory",
+    "network_baseline",
+    "install_attestation",
+    "cluster_up",
+    "control_plane_ha_test",
+    "worker_join",
+    "gitops_roundtrip",
+    "disposable_workload",
+    "rebuild_cycle",
+    "storage_baseline",
+    "ha_workload_test",
+    "engine_receipt_integration",
+    "decision_doc",
+    "node_join",
+    "node_drain",
+    "node_fail",
+    "node_wipe",
+    "node_reinstall",
+    "node_rejoin",
+}
+
+EVENT_ALIASES = {
+    "net_baseline": "network_baseline",
+    "net-baseline": "network_baseline",
+    "network-baseline": "network_baseline",
+    "install-attestation": "install_attestation",
+    "cluster-up": "cluster_up",
+    "cp_ha_test": "control_plane_ha_test",
+    "cp-ha-test": "control_plane_ha_test",
+    "control-plane-ha-test": "control_plane_ha_test",
+    "worker-join": "worker_join",
+    "gitops-roundtrip": "gitops_roundtrip",
+    "disposable-workload": "disposable_workload",
+    "rebuild-cycle": "rebuild_cycle",
+    "storage-baseline": "storage_baseline",
+    "ha-workload-test": "ha_workload_test",
+    "engine-receipt-integration": "engine_receipt_integration",
+    "decision-doc": "decision_doc",
+    "join": "node_join",
+    "drain": "node_drain",
+    "fail": "node_fail",
+    "wipe": "node_wipe",
+    "reinstall": "node_reinstall",
+    "rejoin": "node_rejoin",
+    "node-join": "node_join",
+    "node-drain": "node_drain",
+    "node-fail": "node_fail",
+    "node-wipe": "node_wipe",
+    "node-reinstall": "node_reinstall",
+    "node-rejoin": "node_rejoin",
+}
+
+NODE_REQUIRED_EVENTS = {
+    "install_attestation",
+    "cluster_up",
+    "control_plane_ha_test",
+    "worker_join",
+    "disposable_workload",
+    "rebuild_cycle",
+    "node_join",
+    "node_drain",
+    "node_fail",
+    "node_wipe",
+    "node_reinstall",
+    "node_rejoin",
+    "storage_baseline",
+    "ha_workload_test",
+}
+
+RESULTS = {"pass", "fail", "blocked", "observed"}
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[4]
+
+
+def spine_state() -> Path:
+    return Path(os.environ.get("SPINE_STATE", str(Path.home() / "code" / ".runtime" / "spine" / "state")))
+
+
+def fail(message: str) -> None:
+    print(f"{CAPABILITY} FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def normalize_event_type(raw: str) -> str:
+    value = raw.strip().lower().replace(" ", "_")
+    value = EVENT_ALIASES.get(value, value.replace("-", "_"))
+    value = EVENT_ALIASES.get(value, value)
+    if value not in EVENT_TYPES:
+        allowed = ", ".join(sorted(EVENT_TYPES))
+        fail(f"unknown event type '{raw}'. allowed: {allowed}")
+    return value
+
+
+def parse_timestamp(raw: str | None) -> str:
+    if not raw:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    value = raw.strip()
+    parse_value = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(parse_value)
+    except ValueError:
+        fail(f"timestamp must be ISO-8601 UTC, got {raw!r}")
+    if parsed.tzinfo is None:
+        fail("timestamp must include timezone, use trailing Z for UTC")
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def slug(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
+    return cleaned.strip("-") or "unknown"
+
+
+def parse_kv(items: list[str]) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for item in items:
+        if "=" not in item:
+            fail(f"attestation item must be key=value, got {item!r}")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            fail(f"attestation item has empty key: {item!r}")
+        parsed[key] = value.strip()
+    return parsed
+
+
+def load_extra_attestation(path: str | None) -> Any:
+    if not path:
+        return None
+    extra_path = Path(path).expanduser()
+    if not extra_path.exists():
+        fail(f"attestation JSON not found: {extra_path}")
+    try:
+        return json.loads(extra_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        fail(f"attestation JSON invalid: {extra_path}: {exc}")
+
+
+def node_admission_row(node_id: str) -> dict[str, Any]:
+    script = repo_root() / "ops" / "plugins" / "infra" / "bin" / "node-admission-status"
+    proc = subprocess.run(
+        [str(script), "--node", node_id, "--json"],
+        cwd=str(repo_root()),
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "node.admission.status failed"
+        fail(f"node admission readback failed for {node_id}: {detail}")
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        fail(f"node admission readback was not JSON for {node_id}: {exc}")
+    rows = payload.get("rows") or []
+    if len(rows) != 1:
+        fail(f"node admission readback for {node_id} returned {len(rows)} rows")
+    row = rows[0]
+    if not isinstance(row, dict):
+        fail(f"node admission row for {node_id} is not an object")
+    return row
+
+
+def receipt_id(timestamp_utc: str, lab_id: str, cluster_id: str, event_type: str, node_id: str | None) -> str:
+    ts = timestamp_utc.replace("-", "").replace(":", "").replace("Z", "Z")
+    parts = ["CLR", ts, slug(lab_id), slug(cluster_id), event_type]
+    if node_id:
+        parts.append(slug(node_id))
+    return "-".join(parts)
+
+
+def build_receipt(args: argparse.Namespace) -> tuple[dict[str, Any], Path]:
+    event_type = normalize_event_type(args.event_type)
+    if event_type in NODE_REQUIRED_EVENTS and not args.node_id:
+        fail(f"event type {event_type} requires --node-id")
+    if not args.source_ref:
+        fail("--source-ref is required so lifecycle evidence is traceable")
+    result = args.result.strip().lower()
+    if result not in RESULTS:
+        fail(f"--result must be one of: {', '.join(sorted(RESULTS))}")
+
+    timestamp_utc = parse_timestamp(args.timestamp_utc)
+    node_row = node_admission_row(args.node_id) if args.node_id else None
+    attest = parse_kv(args.attestation or [])
+    extra = load_extra_attestation(args.attestation_json)
+    if args.image_hash:
+        attest["image_hash"] = args.image_hash
+    if args.config_hash:
+        attest["config_hash"] = args.config_hash
+    if args.git_revision:
+        attest["git_revision"] = args.git_revision
+    if args.k3s_version:
+        attest["k3s_version"] = args.k3s_version
+    if args.os_image:
+        attest["os_image"] = args.os_image
+    if args.duration_seconds is not None:
+        attest["duration_seconds"] = str(args.duration_seconds)
+    if args.attempt is not None:
+        attest["attempt"] = str(args.attempt)
+    if args.notes:
+        attest["notes"] = args.notes
+    if extra is not None:
+        attest["extra"] = extra
+
+    rid = receipt_id(timestamp_utc, args.lab_id, args.cluster_id, event_type, args.node_id)
+    receipt_path = (
+        spine_state()
+        / "domain-state"
+        / "cluster-lifecycle"
+        / "receipts"
+        / slug(args.lab_id)
+        / slug(args.cluster_id)
+        / f"{rid}.json"
+    )
+
+    node_payload = None
+    if node_row:
+        node_payload = {
+            "node_id": node_row.get("node_id"),
+            "admission_state": node_row.get("admission_state"),
+            "lifecycle_state": node_row.get("lifecycle_state"),
+            "promotion_stage": node_row.get("promotion_stage"),
+            "role_candidacy": node_row.get("role_candidacy") or [],
+            "durable_identifiers": node_row.get("durable_identifiers") or {},
+            "source_surfaces": node_row.get("source_surfaces") or [],
+            "subtraction_caption": node_row.get("subtraction_caption"),
+        }
+
+    receipt = {
+        "schema": SCHEMA,
+        "receipt_id": rid,
+        "emitted_at_utc": timestamp_utc,
+        "capability": CAPABILITY,
+        "lab_id": args.lab_id,
+        "cluster_id": args.cluster_id,
+        "event_type": event_type,
+        "result": result,
+        "node": node_payload,
+        "source_refs": args.source_ref,
+        "attestation": attest,
+        "boundary": {
+            "authority_effect": "evidence_only_not_activation",
+            "canonical_node_readback": "node.admission.status",
+            "receipt_path": str(receipt_path),
+            "subtracted_surfaces": [
+                "raw_kubectl_output_as_lifecycle_truth",
+                "ad_hoc_lab_readme_checkboxes_as_status_truth",
+                "hand_edited_cluster_lifecycle_yaml",
+                "standalone_gitops_dashboard_as_engine_receipt",
+            ],
+            "does_not_own": [
+                "kubernetes_or_k3s_cluster_authority",
+                "gitops_desired_state",
+                "node_role_assignment",
+                "workload_placement_truth",
+                "production_service_dependency",
+                "kernel_or_engine_internal_receipt_protocol",
+            ],
+        },
+    }
+    return receipt, receipt_path
+
+
+def write_receipt(receipt: dict[str, Any], receipt_path: Path) -> None:
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    ledger = spine_state() / "domain-state" / "cluster-lifecycle" / "ledger.ndjson"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(receipt, sort_keys=True) + "\n")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Emit a governed cluster lifecycle receipt.")
+    parser.add_argument("--lab-id", required=False)
+    parser.add_argument("--cluster-id", required=False)
+    parser.add_argument("--event-type", required=False)
+    parser.add_argument("--node-id")
+    parser.add_argument("--result", default="observed")
+    parser.add_argument("--source-ref", action="append", default=[])
+    parser.add_argument("--timestamp-utc")
+    parser.add_argument("--image-hash")
+    parser.add_argument("--config-hash")
+    parser.add_argument("--git-revision")
+    parser.add_argument("--k3s-version")
+    parser.add_argument("--os-image")
+    parser.add_argument("--duration-seconds", type=float)
+    parser.add_argument("--attempt", type=int)
+    parser.add_argument("--notes")
+    parser.add_argument("--attestation", action="append", default=[])
+    parser.add_argument("--attestation-json")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--self-check", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print(json.dumps({"capability": CAPABILITY, "status": "ok", "schema": SCHEMA, "event_types": sorted(EVENT_TYPES)}, indent=2))
+        return 0
+    if not args.lab_id:
+        fail("--lab-id is required")
+    if not args.cluster_id:
+        fail("--cluster-id is required")
+    if not args.event_type:
+        fail("--event-type is required")
+
+    receipt, path = build_receipt(args)
+    if not args.dry_run:
+        write_receipt(receipt, path)
+
+    if args.json:
+        print(json.dumps({"status": "dry-run" if args.dry_run else "written", "receipt_path": str(path), "receipt": receipt}, indent=2))
+    else:
+        print("cluster.lifecycle.receipt.emit")
+        print(f"status: {'dry-run' if args.dry_run else 'written'}")
+        print(f"receipt_id: {receipt['receipt_id']}")
+        print(f"event_type: {receipt['event_type']}")
+        print(f"result: {receipt['result']}")
+        print(f"receipt_path: {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

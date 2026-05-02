@@ -1,0 +1,174 @@
+---
+status: authoritative
+owner: "@ronny"
+scope: l2-cluster-lifecycle-receipt-contract
+version: 1
+updated_at: "2026-05-02"
+last_verified: "2026-05-02"
+
+# Cluster Lifecycle Receipt Contract
+#
+# Thin L2 receipt rail for disposable cluster/lab lifecycle events.
+# The first consumer is the OptiPlex k3s learning lab, but this contract is not
+# OptiPlex-specific and does not make Kubernetes a spine runtime substrate.
+
+subordinate_to: ops/bindings/root.authority.contract.yaml
+
+related_contracts:
+  - contract: ops/bindings/node.role.contract.yaml
+    relationship: "Node role truth remains here; cluster lifecycle receipts do not promote node roles."
+  - contract: ops/bindings/fleet.admission.contract.yaml
+    relationship: "First-touch/admission policy for candidate hardware."
+  - contract: ops/bindings/fleet.admission.classification.yaml
+    relationship: "Runtime admission evidence consumed through node.admission.status."
+  - contract: ops/bindings/operator.hardware.inventory.yaml
+    relationship: "Operator hardware inventory remains candidacy evidence only."
+  - contract: docs/governance/NODE_PROMOTION_LADDER.md
+    relationship: "Cluster events cannot skip the promotion ladder."
+
+authority:
+  emit_capability: cluster.lifecycle.receipt.emit
+  emit_script: ops/plugins/infra/bin/cluster-lifecycle-receipt-emit
+  status_capability: cluster.lifecycle.status
+  status_script: ops/plugins/infra/bin/cluster-lifecycle-status
+  receipt_root: $SPINE_STATE/domain-state/cluster-lifecycle/receipts
+  ledger_path: $SPINE_STATE/domain-state/cluster-lifecycle/ledger.ndjson
+
+truth_boundary:
+  owns:
+    - lifecycle_receipt_shape
+    - receipt_custody_path
+    - event_to_node_admission_readback_join
+    - attestation_field_requirements
+  does_not_own:
+    - kubernetes_or_k3s_cluster_authority
+    - gitops_desired_state
+    - node_role_assignment
+    - workload_placement_truth
+    - production_service_dependency
+    - kernel_or_engine_internal_receipt_protocol
+  authority_effect: evidence_only_not_activation
+  canonical_node_readback: node.admission.status
+  canonical_recovery_readback: node.recovery.status
+
+subtraction:
+  old_surfaces_demoted:
+    - raw_kubectl_output_as_lifecycle_truth
+    - ad_hoc_lab_readme_checkboxes_as_status_truth
+    - hand_edited_cluster_lifecycle_yaml
+    - standalone_gitops_dashboard_as_engine_receipt
+  replacement_readback:
+    - cluster.lifecycle.receipt.emit
+    - cluster.lifecycle.status
+  rule: >
+    Cluster or GitOps observations can become governed evidence only by being
+    emitted as cluster lifecycle receipts joined to canonical node admission
+    readback. They do not become placement truth, node role truth, watcher
+    truth, or production readiness.
+
+receipt_schema:
+  schema_id: cluster.lifecycle.receipt.v1
+  required_fields:
+    - schema
+    - receipt_id
+    - emitted_at_utc
+    - capability
+    - lab_id
+    - cluster_id
+    - event_type
+    - result
+    - source_refs
+    - boundary
+  node_required_for_event_types:
+    - install_attestation
+    - cluster_up
+    - control_plane_ha_test
+    - worker_join
+    - disposable_workload
+    - rebuild_cycle
+    - node_join
+    - node_drain
+    - node_fail
+    - node_wipe
+    - node_reinstall
+    - node_rejoin
+    - storage_baseline
+    - ha_workload_test
+  attestation_fields:
+    optional:
+      - image_hash
+      - config_hash
+      - git_revision
+      - k3s_version
+      - os_image
+      - duration_seconds
+      - attempt
+      - notes
+      - extra
+
+event_types:
+  inventory:
+    receipt_name: inventory.json
+    meaning: "Hardware inventory/tiering evidence was captured."
+  network_baseline:
+    receipt_name: net-baseline
+    meaning: "Network baseline evidence was captured."
+  install_attestation:
+    receipt_name: install-attestation
+    meaning: "Unattended install evidence was captured for a node."
+  cluster_up:
+    receipt_name: cluster-up
+    meaning: "Single-node cluster and scheduling proof was captured."
+  control_plane_ha_test:
+    receipt_name: cp-ha-test
+    meaning: "Control-plane quorum/failover proof was captured."
+  worker_join:
+    receipt_name: worker-join
+    meaning: "Worker join and spread proof was captured."
+  gitops_roundtrip:
+    receipt_name: gitops-roundtrip
+    meaning: "Git change to cluster state roundtrip proof was captured."
+  disposable_workload:
+    receipt_name: disposable-workload
+    meaning: "Disposable workload scheduling/move proof was captured."
+  rebuild_cycle:
+    receipt_name: rebuild-cycle
+    meaning: "Nuke-and-rejoin cycle timing proof was captured."
+  storage_baseline:
+    receipt_name: storage-baseline
+    meaning: "Local-path storage baseline proof was captured."
+  ha_workload_test:
+    receipt_name: ha-workload-test
+    meaning: "Stateful workload failure behavior proof was captured."
+  engine_receipt_integration:
+    receipt_name: engine-receipt-integration
+    meaning: "Engine consumption of cluster lifecycle receipts was proved."
+  decision_doc:
+    receipt_name: decision-doc
+    meaning: "Keep/narrow/stop decision evidence was captured."
+  node_join:
+    receipt_name: node-join
+    meaning: "Node joined the disposable cluster."
+  node_drain:
+    receipt_name: node-drain
+    meaning: "Node drain lifecycle event was captured."
+  node_fail:
+    receipt_name: node-fail
+    meaning: "Node failure lifecycle event was captured."
+  node_wipe:
+    receipt_name: node-wipe
+    meaning: "Node wipe lifecycle event was captured."
+  node_reinstall:
+    receipt_name: node-reinstall
+    meaning: "Node reinstall lifecycle event was captured."
+  node_rejoin:
+    receipt_name: node-rejoin
+    meaning: "Node rejoin lifecycle event was captured."
+
+v1_guardrails:
+  - no_production_dependency
+  - no_important_data
+  - no_hand_config_without_rebuild
+  - no_role_promotion_from_cluster_membership
+  - no_engine_kernel_internal_edits
+  - no_gitops_or_kubectl_output_as_authority_without_receipt

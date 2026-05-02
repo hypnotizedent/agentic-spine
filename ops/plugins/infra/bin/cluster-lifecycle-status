@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Read cluster lifecycle receipts from SPINE_STATE."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+CAPABILITY = "cluster.lifecycle.status"
+SCHEMA = "cluster.lifecycle.receipt.v1"
+V1_REQUIRED_EVENTS = [
+    "inventory",
+    "network_baseline",
+    "install_attestation",
+    "cluster_up",
+    "control_plane_ha_test",
+    "worker_join",
+    "gitops_roundtrip",
+    "rebuild_cycle",
+    "storage_baseline",
+    "engine_receipt_integration",
+    "decision_doc",
+]
+
+
+def spine_state() -> Path:
+    return Path(os.environ.get("SPINE_STATE", str(Path.home() / "code" / ".runtime" / "spine" / "state")))
+
+
+def receipt_root() -> Path:
+    return spine_state() / "domain-state" / "cluster-lifecycle" / "receipts"
+
+
+def parse_time(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def load_receipts() -> list[dict[str, Any]]:
+    root = receipt_root()
+    receipts: list[dict[str, Any]] = []
+    if not root.exists():
+        return receipts
+    for path in sorted(root.glob("*/*/*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if payload.get("schema") != SCHEMA:
+            continue
+        payload["_path"] = str(path)
+        receipts.append(payload)
+    return receipts
+
+
+def matches(receipt: dict[str, Any], args: argparse.Namespace, cutoff: datetime | None) -> bool:
+    if args.lab_id and receipt.get("lab_id") != args.lab_id:
+        return False
+    if args.cluster_id and receipt.get("cluster_id") != args.cluster_id:
+        return False
+    if args.node_id:
+        node = receipt.get("node") or {}
+        if node.get("node_id") != args.node_id:
+            return False
+    if cutoff:
+        emitted = parse_time(str(receipt.get("emitted_at_utc") or ""))
+        if emitted is None or emitted < cutoff:
+            return False
+    return True
+
+
+def build_summary(args: argparse.Namespace) -> dict[str, Any]:
+    cutoff = None
+    if args.days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+    receipts = [row for row in load_receipts() if matches(row, args, cutoff)]
+    receipts.sort(key=lambda item: str(item.get("emitted_at_utc") or ""), reverse=True)
+    by_event = Counter(str(row.get("event_type") or "unknown") for row in receipts)
+    by_result = Counter(str(row.get("result") or "unknown") for row in receipts)
+    nodes = sorted(
+        {
+            str((row.get("node") or {}).get("node_id"))
+            for row in receipts
+            if (row.get("node") or {}).get("node_id")
+        }
+    )
+    present = set(by_event)
+    missing_v1 = [event for event in V1_REQUIRED_EVENTS if event not in present]
+    latest = receipts[0] if receipts else None
+    return {
+        "capability": CAPABILITY,
+        "status": "ok",
+        "receipt_root": str(receipt_root()),
+        "filters": {
+            "lab_id": args.lab_id,
+            "cluster_id": args.cluster_id,
+            "node_id": args.node_id,
+            "days": args.days,
+        },
+        "count": len(receipts),
+        "by_event": dict(sorted(by_event.items())),
+        "by_result": dict(sorted(by_result.items())),
+        "nodes": nodes,
+        "missing_v1_events": missing_v1,
+        "latest": latest,
+    }
+
+
+def print_human(summary: dict[str, Any]) -> None:
+    print("cluster.lifecycle.status")
+    print(f"receipts: {summary['count']}")
+    print(f"receipt_root: {summary['receipt_root']}")
+    latest = summary.get("latest")
+    if latest:
+        print(f"latest: {latest.get('emitted_at_utc')} {latest.get('event_type')} {latest.get('result')}")
+        if latest.get("node"):
+            print(f"latest_node: {(latest.get('node') or {}).get('node_id')}")
+    else:
+        print("latest: none")
+    print("by_event:")
+    for event, count in (summary.get("by_event") or {}).items():
+        print(f"  {event}: {count}")
+    missing = summary.get("missing_v1_events") or []
+    print(f"missing_v1_events: {', '.join(missing) if missing else 'none'}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Read governed cluster lifecycle receipts.")
+    parser.add_argument("--lab-id")
+    parser.add_argument("--cluster-id")
+    parser.add_argument("--node-id")
+    parser.add_argument("--days", type=int)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--self-check", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print(json.dumps({"capability": CAPABILITY, "status": "ok", "schema": SCHEMA}, indent=2))
+        return 0
+
+    summary = build_summary(args)
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        print_human(summary)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
