@@ -64,6 +64,53 @@ taxonomy:
       MacBook local DB at the canonical path was renamed to
       shared_authority.divergent-pre-d3b-v4-* during cutover (ZFS snapshot
       preserves pre-cutover state on pve as canonical reversibility).
+    file_plane_policy:
+      rule: >
+        State files under $SPINE_STATE/domain-state/ on consumer hosts
+        (MacBook, ai-cons, pve-r620) are projection/cache only. Canonical
+        state files live at /md1400/spine/state/domain-state/ on pve.
+        Caps that emit state files — recovery drill receipts, OI realization
+        receipts, watcher cycle receipts, storage-evidence proof receipts,
+        and similar YAML/Markdown artifacts written under domain-state/ —
+        must execute on the storage_evidence_node so the artifact lands at
+        the canonical path. cap.sh routing already carries mutating caps and
+        DB-backed read-only caps annotated with state_authority. Caps that
+        write to domain-state/ from a consumer host produce projection/cache
+        artifacts only; those artifacts must not be relied on as authority
+        by readbacks or verify gates.
+      reach_mechanism:
+        - cap.sh routes mutating caps to pve (since D.3b v4 cutover 2026-05-02T21:43Z)
+        - cap.sh routes DB-backed read-only caps annotated with state_authority: shared_authority_db
+        - non-DB state-file-emitting caps reach the canonical path either by
+          running on pve via the mutating routing path, or (when NFS mounted)
+          writing through the canonical mount; running locally on a consumer
+          and emitting under $SPINE_STATE/domain-state/ produces a non-authority
+          projection only
+      consumer_local_disposition: |
+        Files at $SPINE_STATE/domain-state/* on consumer hosts are not
+        authority. Readbacks (e.g., node.admission.status) that consume a
+        receipt path must read from the canonical pve location to be honest.
+        A consumer host holding a stale or pre-cutover local copy of a
+        receipt class does not establish authority truth.
+      pre_cutover_residue: |
+        Before D.3b v4 cutover (2026-05-02T21:43:00Z), consumer-local writes
+        to $SPINE_STATE/domain-state/ were canonical. Receipts from before
+        that timestamp may exist locally without a canonical pve copy.
+        Migration of those receipts is opportunistic — the next governed
+        re-run of the same cap via cap.sh routing writes the canonical
+        version on pve and supersedes the local copy. The specimen
+        disaster.drill.execution_pickup latest.yaml is regenerated on pve
+        canonical at PACKET-590 closeout via routed cap re-run.
+      enforcement: |
+        Readbacks that consume $SPINE_STATE/domain-state/* paths must
+        resolve those paths from the canonical pve location when running on
+        pve (via cap.sh routing or local execution on the authority host).
+        When a consumer-local copy and the canonical pve copy disagree, the
+        canonical pve copy wins. node.admission.status running on pve
+        correctly reports recovery_drill_proof as missing if the receipt is
+        not yet present at /md1400/spine/state/domain-state/recovery-drills/
+        execution-pickup/latest.yaml; the cure is to re-run the drill via
+        cap.sh routing, not to copy the consumer-local file.
 
   home:
     path: /Users/ronnyworks

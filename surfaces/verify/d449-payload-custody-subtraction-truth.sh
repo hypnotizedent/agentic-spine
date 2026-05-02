@@ -86,11 +86,21 @@ master_by_id = {row.get("id"): row for row in rows if isinstance(row, dict)}
 if not isinstance(master_by_id.get("authority.payload.custody.readback"), dict):
     fail("master inventory missing authority.payload.custody.readback row")
 
+# L1/L3 boundary: D449 validates that SPINE-LOCAL bindings cite the canonical
+# payload.custody.status authority. L3 media surfaces (media.capacity.snapshot,
+# media.content.snapshot) are already validated for demotion above via
+# snapshot.surface.contract.yaml authority_layer + consumer_policy /
+# subtraction_disposition checks (the loop over by_id). That is the
+# spine-side validation of those L3 surfaces. Whether the L3 media files
+# themselves cite payload.custody.status is an L3 verify concern, not a
+# spine.verify concern. Spine.verify must not read MacBook-local L3 product
+# bodies as a foundational truth dependency. (PACKET-590; see
+# root.authority.contract.yaml#storage_evidence_node_canonical.file_plane_policy
+# and prior forensic trace
+# $SPINE_STATE/domain-state/STORAGE-EVIDENCE-PHASE-E-FORENSIC-DRIFT-TRACE-20260502.md.)
 for rel in [
     "ops/bindings/shop.storage.map.yaml",
     "ops/bindings/home.storage.map.yaml",
-    "/Users/ronnyworks/code/projects/media/bindings/media.capacity.snapshot.yaml",
-    "/Users/ronnyworks/code/projects/media/bindings/media.content.snapshot.yaml",
 ]:
     text = (root / rel).read_text(encoding="utf-8")
     if "payload.custody.status" not in text:
