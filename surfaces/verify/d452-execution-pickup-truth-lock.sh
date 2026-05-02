@@ -306,8 +306,16 @@ for row in data.get("requests") or []:
                 if row.get("review_worktree"):
                     raise SystemExit("D452 FAIL: terminal/retained review states must not imply a live review_worktree")
                 patch_artifact = Path(str(row.get("patch_artifact_path") or proof.get("patch_artifact_path") or ""))
-                if row.get("review_state") == "review_artifact_retained" and not patch_artifact.is_file():
-                    raise SystemExit("D452 FAIL: review_artifact_retained requires durable patch_artifact_path")
+                if row.get("review_state") == "review_artifact_retained":
+                    artifact_available = row.get("patch_artifact_available")
+                    artifact_locality = str(row.get("patch_artifact_locality") or "")
+                    if patch_artifact.is_file():
+                        if artifact_available is not True or artifact_locality != "local":
+                            raise SystemExit("D452 FAIL: local review_artifact_retained path must read back as available/local")
+                    elif artifact_available is False and artifact_locality == "foreign_absolute":
+                        pass
+                    else:
+                        raise SystemExit("D452 FAIL: review_artifact_retained requires durable local artifact or honest foreign_absolute locality")
                 if row.get("review_state") == "merged_by_controller":
                     push_sha = str(row.get("push_sha") or "")
                     if not push_sha:

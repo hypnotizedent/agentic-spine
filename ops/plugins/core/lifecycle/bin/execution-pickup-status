@@ -98,6 +98,36 @@ def effective_patch_review_state(review: dict[str, Any]) -> str:
     return "needs_controller_review"
 
 
+def patch_artifact_readback(path_value: Any) -> dict[str, Any]:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return {
+            "patch_artifact_available": False,
+            "patch_artifact_locality": "missing",
+        }
+    path = Path(path_text)
+    if path.is_file():
+        return {
+            "patch_artifact_available": True,
+            "patch_artifact_locality": "local",
+        }
+    if path.is_absolute():
+        try:
+            path.relative_to(STATE_ROOT)
+        except ValueError:
+            locality = "foreign_absolute"
+        else:
+            locality = "missing_local"
+        return {
+            "patch_artifact_available": False,
+            "patch_artifact_locality": locality,
+        }
+    return {
+        "patch_artifact_available": False,
+        "patch_artifact_locality": "missing",
+    }
+
+
 def normalize_task_payload(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -334,6 +364,7 @@ def add_request(rows: list[dict[str, Any]], **kwargs: Any) -> None:
                 row["review_branch"] = review.get("review_branch")
             if review.get("patch_artifact_path"):
                 row["patch_artifact_path"] = review.get("patch_artifact_path")
+                row.update(patch_artifact_readback(review.get("patch_artifact_path")))
             for key in ("push_sha", "merge_commit", "pushed_ref", "confirmed_by", "merged_at_utc"):
                 if review.get(key):
                     row[key] = review.get(key)
