@@ -147,8 +147,8 @@ actual_retired = len([row for row in gates if isinstance(row, dict) and row.get(
 actual_active = actual_total - actual_retired
 if gate_count.get("total") != actual_total or gate_count.get("active") != actual_active or gate_count.get("retired") != actual_retired:
     fail(f"gate registry counts must match live rows, got {gate_count!r} expected total={actual_total} active={actual_active} retired={actual_retired}")
-if "D1-D458" not in str(gate_registry.get("description") or ""):
-    fail("gate registry description must name current D range through D458")
+if "D1-D459" not in str(gate_registry.get("description") or ""):
+    fail("gate registry description must name current D range through D459")
 d_rows = [row for row in gates if isinstance(row, dict) and str(row.get("id") or "").startswith("D")]
 missing_retired_field = [row.get("id") for row in d_rows if "retired" not in row]
 if missing_retired_field:

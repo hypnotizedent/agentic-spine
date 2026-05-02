@@ -1,0 +1,517 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# node-control-baseline-status
+# Read-only operator Linux control-baseline probe.
+#
+# This surface answers a narrow question that node.admission.status and
+# node.recovery.status deliberately do not answer:
+# will an agent terminal hit a password/elevation wall before mutation?
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_TARGETS="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SSH_TARGET_STATUS="$SPINE_ROOT/ops/plugins/infra/ssh/bin/ssh-target-status"
+SSH_RESOLVE="$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+usage() {
+  cat <<'EOF'
+node-control-baseline-status - Read-only Linux operator control-baseline probe
+
+Usage:
+  node-control-baseline-status --node <id> [--json]
+  node-control-baseline-status --self-check [--json]
+
+Checks:
+  - declared SSH path works without prompts
+  - remote host is Linux
+  - remote hostname matches the governed node id
+  - /etc/spine device marker matches the governed node id
+  - sudo -n true succeeds or reports password/elevation blockage
+  - declared and observed Tailscale IP are explicit when present
+
+Boundary:
+  This capability is read-only. It does not admit nodes, assign roles, widen
+  recovery authority, configure sudo, enable root SSH, or evaluate k3s/lab state.
+EOF
+}
+
+fail() {
+  echo "STOP (2): $*" >&2
+  exit 2
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"
+}
+
+json_bool() {
+  case "$1" in
+    true|false) printf '%s' "$1" ;;
+    *) printf 'false' ;;
+  esac
+}
+
+classify_sudo_reason() {
+  local rc="$1"
+  local stderr="$2"
+
+  if [[ "$rc" == "0" ]]; then
+    echo "passwordless_sudo_ok"
+    return
+  fi
+  if echo "$stderr" | grep -qiE "password is required|a password is required|sudo: a terminal is required|no tty present"; then
+    echo "sudo_password_required"
+    return
+  fi
+  if echo "$stderr" | grep -qiE "not in the sudoers file|may not run sudo"; then
+    echo "sudo_not_authorized"
+    return
+  fi
+  echo "sudo_noninteractive_blocked"
+}
+
+emit_self_check() {
+  local status="ok"
+  if [[ ! -f "$SSH_TARGETS" || ! -x "$SSH_TARGET_STATUS" || ! -f "$SSH_RESOLVE" ]]; then
+    status="fail"
+  fi
+
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "node.control-baseline.status" \
+      --arg status "$status" \
+      --arg ssh_targets "$SSH_TARGETS" \
+      --arg ssh_target_status "$SSH_TARGET_STATUS" \
+      --arg ssh_resolve "$SSH_RESOLVE" \
+      '{
+        capability:$capability,
+        mode:"self_check",
+        status:$status,
+        dependencies:{
+          ssh_targets:$ssh_targets,
+          ssh_target_status:$ssh_target_status,
+          ssh_resolve:$ssh_resolve
+        },
+        boundary:{
+          admission_authority:"node.admission.status",
+          recovery_authority:"node.recovery.status",
+          role_authority:"node role contracts",
+          mutation:"none"
+        }
+      }'
+  else
+    echo "node.control-baseline.status self-check: $status"
+    echo "admission_authority: node.admission.status"
+    echo "recovery_authority: node.recovery.status"
+    echo "mutation: none"
+  fi
+
+  [[ "$status" == "ok" ]] || exit 2
+}
+
+NODE_ID=""
+JSON_MODE=0
+SELF_CHECK=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --node|--id)
+      [[ $# -ge 2 && -n "${2:-}" ]] || fail "$1 requires a node id"
+      NODE_ID="$2"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --self-check)
+      SELF_CHECK=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+need jq
+need yq
+need ssh
+need timeout
+need python3
+
+[[ -f "$SSH_TARGETS" ]] || fail "missing SSH targets binding: $SSH_TARGETS"
+[[ -x "$SSH_TARGET_STATUS" ]] || fail "missing executable ssh.target.status primitive: $SSH_TARGET_STATUS"
+[[ -f "$SSH_RESOLVE" ]] || fail "missing SSH resolve library: $SSH_RESOLVE"
+
+if [[ "$SELF_CHECK" -eq 1 ]]; then
+  emit_self_check
+  exit 0
+fi
+
+[[ -n "$NODE_ID" ]] || fail "--node is required unless --self-check is used"
+
+BINDING_JSON="$(mktemp)"
+SSH_STATUS_JSON="$(mktemp)"
+REMOTE_KV="$(mktemp)"
+SSH_STATUS_ERR="$(mktemp)"
+REMOTE_ERR="$(mktemp)"
+cleanup_tmp() {
+  rm -f "$BINDING_JSON" "$SSH_STATUS_JSON" "$REMOTE_KV" "$SSH_STATUS_ERR" "$REMOTE_ERR" 2>/dev/null || true
+}
+trap cleanup_tmp EXIT
+
+yq -o=json '.' "$SSH_TARGETS" > "$BINDING_JSON" 2>/dev/null || fail "failed to parse $SSH_TARGETS"
+
+target_json="$(jq -c --arg id "$NODE_ID" '.ssh.targets[]? | select(.id == $id)' "$BINDING_JSON" | head -1)"
+if [[ -z "$target_json" || "$target_json" == "null" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "node.control-baseline.status" \
+      --arg node_id "$NODE_ID" \
+      '{
+        capability:$capability,
+        status:"ok",
+        node_id:$node_id,
+        baseline_state:"no_ssh_target",
+        will_prompt_for_sudo:"unknown",
+        mutation_readiness:{state:"blocked", reason:"no_declared_ssh_target"},
+        boundary:{admission_authority:"node.admission.status", recovery_authority:"node.recovery.status", mutation:"none"}
+      }'
+    exit 0
+  fi
+  echo "node.control-baseline.status: $NODE_ID -> no declared ssh target"
+  exit 0
+fi
+
+DEF_USER="$(jq -r '.ssh.defaults.user // "root"' "$BINDING_JSON")"
+DEF_PORT="$(jq -r '.ssh.defaults.port // 22' "$BINDING_JSON")"
+DEF_TO="$(jq -r '.ssh.defaults.connect_timeout_sec // 5' "$BINDING_JSON")"
+DEF_STRICT="$(jq -r '.ssh.defaults.strict_host_key_checking // "no"' "$BINDING_JSON")"
+DEF_KNOWN_HOSTS="$(jq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$BINDING_JSON")"
+
+user="$(jq -r --arg def "$DEF_USER" '.user // $def' <<<"$target_json")"
+host="$(jq -r '.host // ""' <<<"$target_json")"
+port="$(jq -r --argjson def "$DEF_PORT" '.port // $def' <<<"$target_json")"
+timeout_s="$(jq -r --argjson def "$DEF_TO" '.connect_timeout_sec // $def' <<<"$target_json")"
+access_policy="$(jq -r '.access_policy // "lan_first"' <<<"$target_json")"
+tailscale_declared="$(jq -r '.tailscale_ip // ""' <<<"$target_json")"
+probe_via="$(jq -r '.probe_via // ""' <<<"$target_json")"
+
+set +e
+SPINE_ROOT="$SPINE_ROOT" "$SSH_TARGET_STATUS" --id "$NODE_ID" --json --attempts 1 --retry-backoff-sec 0 > "$SSH_STATUS_JSON" 2>"$SSH_STATUS_ERR"
+ssh_target_rc=$?
+set -e
+
+ssh_target_payload="$(cat "$SSH_STATUS_JSON" 2>/dev/null || true)"
+target_status="$(jq -r '.targets[0].status // "fail"' "$SSH_STATUS_JSON" 2>/dev/null || echo "fail")"
+path_used="$(jq -r '.targets[0].path_used // ""' "$SSH_STATUS_JSON" 2>/dev/null || echo "")"
+effective_host="$(jq -r '.targets[0].effective_host // ""' "$SSH_STATUS_JSON" 2>/dev/null || echo "")"
+contract_state="$(jq -r '.targets[0].contract_state // "unknown"' "$SSH_STATUS_JSON" 2>/dev/null || echo "unknown")"
+ssh_reason="$(jq -r '.targets[0].reason // ""' "$SSH_STATUS_JSON" 2>/dev/null || echo "")"
+
+if [[ "$target_status" != "ok" && ! ( "$target_status" == "warn" && -n "$path_used" && "$path_used" != "null" ) ]]; then
+  blocked_state="unreachable"
+  blocked_reason="ssh_unreachable"
+  if [[ "$ssh_reason" == "auth_denied" ]]; then
+    blocked_state="ssh_auth_blocked"
+    blocked_reason="ssh_auth_denied"
+  elif [[ "$ssh_reason" == "host_key_mismatch" ]]; then
+    blocked_state="ssh_identity_drift"
+    blocked_reason="ssh_host_key_mismatch"
+  fi
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "node.control-baseline.status" \
+      --arg node_id "$NODE_ID" \
+      --arg user "$user" \
+      --arg host "$host" \
+      --arg blocked_state "$blocked_state" \
+      --arg blocked_reason "$blocked_reason" \
+      --arg status "$target_status" \
+      --arg reason "$ssh_reason" \
+      --arg contract_state "$contract_state" \
+      --argjson ssh_target_rc "$ssh_target_rc" \
+      '{
+        capability:$capability,
+        status:"ok",
+        node_id:$node_id,
+        baseline_state:$blocked_state,
+        will_prompt_for_sudo:"unknown",
+        mutation_readiness:{state:"blocked", reason:$blocked_reason},
+        ssh:{user:$user, host:$host, status:$status, reason:$reason, contract_state:$contract_state, primitive_exit:$ssh_target_rc},
+        boundary:{admission_authority:"node.admission.status", recovery_authority:"node.recovery.status", mutation:"none"}
+      }'
+    exit 0
+  fi
+  echo "node.control-baseline.status: $NODE_ID -> ${blocked_state} via ssh.target.status reason=${ssh_reason:-unknown}"
+  exit 0
+fi
+
+[[ -n "$effective_host" && "$effective_host" != "null" ]] || effective_host="$host"
+
+source "$SSH_RESOLVE"
+
+ssh_opts=(
+  -o "BatchMode=yes"
+  -o "NumberOfPasswordPrompts=0"
+  -o "ConnectTimeout=${timeout_s}"
+  -o "StrictHostKeyChecking=${DEF_STRICT}"
+  -o "UserKnownHostsFile=${DEF_KNOWN_HOSTS}"
+  -o "LogLevel=ERROR"
+)
+identity_opts="$(ssh_resolve_machine_identity_opts "$NODE_ID" 2>/dev/null)" || true
+extra_opts="$(ssh_resolve_extra_opts "$NODE_ID")"
+if [[ -n "$identity_opts" ]]; then
+  # shellcheck disable=SC2206
+  ssh_opts+=($identity_opts)
+fi
+if [[ -n "$extra_opts" ]]; then
+  # shellcheck disable=SC2206
+  ssh_opts+=($extra_opts)
+fi
+
+jump_spec=""
+if [[ "$path_used" == "proxyjump" && -n "$probe_via" && "$probe_via" != "null" ]]; then
+  jump_row="$(jq -r \
+    --arg probe_via "$probe_via" \
+    --arg def_user "$DEF_USER" \
+    --argjson def_port "$DEF_PORT" \
+    '.ssh.targets[]? | select(.id == $probe_via) |
+      [(.host // ""), (.user // $def_user), ((.port // $def_port) | tostring)] | @tsv' "$BINDING_JSON" | head -1)"
+  IFS=$'\t' read -r jump_host jump_user jump_port <<< "$jump_row"
+  if [[ -n "${jump_host:-}" && "$jump_host" != "null" ]]; then
+    jump_spec="${jump_user}@${jump_host}:${jump_port}"
+  fi
+fi
+
+remote_script='
+one_line() { printf "%s" "$1" | tr "\r\n" "  " | sed "s/[[:space:]][[:space:]]*/ /g"; }
+kv() { printf "%s=%s\n" "$1" "$(one_line "$2")"; }
+kv uname_s "$(uname -s 2>/dev/null || true)"
+kv kernel "$(uname -r 2>/dev/null || true)"
+kv hostname "$(hostname 2>/dev/null || true)"
+kv whoami "$(whoami 2>/dev/null || true)"
+kv groups "$(id -nG 2>/dev/null || true)"
+os_id=""
+os_pretty=""
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  os_id="${ID:-}"
+  os_pretty="${PRETTY_NAME:-}"
+fi
+kv os_id "$os_id"
+kv os_pretty "$os_pretty"
+kv spine_device_id "$(cat /etc/spine/operator-hardware-device-id 2>/dev/null || true)"
+kv spine_bootstrap_method "$(cat /etc/spine/bootstrap-method 2>/dev/null || true)"
+kv spine_target_distro "$(cat /etc/spine/bootstrap-target-distro 2>/dev/null || true)"
+sudo_output="$(sudo -n true 2>&1)"
+sudo_rc=$?
+kv sudo_rc "$sudo_rc"
+kv sudo_stderr "$sudo_output"
+kv tailscale_ip "$(tailscale ip -4 2>/dev/null | head -1 || true)"
+kv sshd_permit_root_login "$(grep -hEi "^[[:space:]]*PermitRootLogin[[:space:]]+" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | tail -1 || true)"
+'
+
+set +e
+if [[ -n "$jump_spec" ]]; then
+  timeout 15 ssh "${ssh_opts[@]}" -J "$jump_spec" -p "$port" "${user}@${effective_host}" sh -s > "$REMOTE_KV" 2>"$REMOTE_ERR" <<< "$remote_script"
+else
+  timeout 15 ssh "${ssh_opts[@]}" -p "$port" "${user}@${effective_host}" sh -s > "$REMOTE_KV" 2>"$REMOTE_ERR" <<< "$remote_script"
+fi
+remote_rc=$?
+set -e
+
+if [[ "$remote_rc" -ne 0 ]]; then
+  remote_err="$(cat "$REMOTE_ERR" 2>/dev/null || true)"
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "node.control-baseline.status" \
+      --arg node_id "$NODE_ID" \
+      --arg user "$user" \
+      --arg effective_host "$effective_host" \
+      --arg path_used "$path_used" \
+      --arg remote_err "$remote_err" \
+      --argjson remote_rc "$remote_rc" \
+      '{
+        capability:$capability,
+        status:"ok",
+        node_id:$node_id,
+        baseline_state:"remote_probe_failed",
+        will_prompt_for_sudo:"unknown",
+        mutation_readiness:{state:"blocked", reason:"remote_probe_failed"},
+        ssh:{user:$user, effective_host:$effective_host, path_used:$path_used, remote_probe_exit:$remote_rc, error:$remote_err},
+        boundary:{admission_authority:"node.admission.status", recovery_authority:"node.recovery.status", mutation:"none"}
+      }'
+    exit 0
+  fi
+  echo "node.control-baseline.status: $NODE_ID -> remote probe failed"
+  exit 0
+fi
+
+remote_json="$(jq -Rn '
+  reduce inputs as $line ({};
+    if ($line | test("=")) then
+      ($line | split("=")) as $parts
+      | . + {($parts[0]): ($parts[1:] | join("="))}
+    else . end
+  )' "$REMOTE_KV")"
+
+uname_s="$(jq -r '.uname_s // ""' <<<"$remote_json")"
+observed_hostname="$(jq -r '.hostname // ""' <<<"$remote_json")"
+observed_user="$(jq -r '.whoami // ""' <<<"$remote_json")"
+sudo_rc="$(jq -r '.sudo_rc // "999"' <<<"$remote_json")"
+sudo_stderr="$(jq -r '.sudo_stderr // ""' <<<"$remote_json")"
+spine_device_id="$(jq -r '.spine_device_id // ""' <<<"$remote_json")"
+tailscale_observed="$(jq -r '.tailscale_ip // ""' <<<"$remote_json")"
+sshd_permit_root_login="$(jq -r '.sshd_permit_root_login // ""' <<<"$remote_json")"
+
+is_linux=false
+[[ "$uname_s" == "Linux" ]] && is_linux=true
+
+hostname_match=false
+[[ "$observed_hostname" == "$NODE_ID" ]] && hostname_match=true
+
+marker_status="missing"
+marker_match=false
+if [[ -n "$spine_device_id" ]]; then
+  marker_status="present"
+  [[ "$spine_device_id" == "$NODE_ID" ]] && marker_match=true
+fi
+
+sudo_passwordless=false
+will_prompt_for_sudo="yes"
+sudo_reason="$(classify_sudo_reason "$sudo_rc" "$sudo_stderr")"
+if [[ "$sudo_rc" == "0" ]]; then
+  sudo_passwordless=true
+  will_prompt_for_sudo="no"
+elif [[ "$sudo_reason" == "sudo_password_required" ]]; then
+  will_prompt_for_sudo="yes"
+else
+  will_prompt_for_sudo="blocked"
+fi
+
+tailscale_match=false
+if [[ -n "$tailscale_declared" && -n "$tailscale_observed" && "$tailscale_declared" == "$tailscale_observed" ]]; then
+  tailscale_match=true
+fi
+
+baseline_state="mutation_ready"
+readiness_state="ready"
+readiness_reason="noninteractive_privileged_probe_passed"
+if [[ "$is_linux" != "true" ]]; then
+  baseline_state="unsupported"
+  readiness_state="blocked"
+  readiness_reason="remote_host_not_linux"
+elif [[ "$sudo_passwordless" != "true" ]]; then
+  baseline_state="password_required"
+  readiness_state="blocked"
+  readiness_reason="$sudo_reason"
+elif [[ "$hostname_match" != "true" || "$marker_match" != "true" ]]; then
+  baseline_state="identity_drift"
+  readiness_state="blocked"
+  readiness_reason="hostname_or_spine_marker_drift"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg capability "node.control-baseline.status" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg node_id "$NODE_ID" \
+    --arg baseline_state "$baseline_state" \
+    --arg will_prompt_for_sudo "$will_prompt_for_sudo" \
+    --arg readiness_state "$readiness_state" \
+    --arg readiness_reason "$readiness_reason" \
+    --arg user "$user" \
+    --arg observed_user "$observed_user" \
+    --arg host "$host" \
+    --arg effective_host "$effective_host" \
+    --arg path_used "$path_used" \
+    --arg access_policy "$access_policy" \
+    --arg contract_state "$contract_state" \
+    --arg uname_s "$uname_s" \
+    --argjson is_linux "$(json_bool "$is_linux")" \
+    --arg expected_hostname "$NODE_ID" \
+    --arg observed_hostname "$observed_hostname" \
+    --argjson hostname_match "$(json_bool "$hostname_match")" \
+    --arg marker_status "$marker_status" \
+    --arg spine_device_id "$spine_device_id" \
+    --argjson marker_match "$(json_bool "$marker_match")" \
+    --arg sudo_reason "$sudo_reason" \
+    --argjson sudo_passwordless "$(json_bool "$sudo_passwordless")" \
+    --arg sudo_rc "$sudo_rc" \
+    --arg declared_tailscale_ip "$tailscale_declared" \
+    --arg observed_tailscale_ip "$tailscale_observed" \
+    --argjson tailscale_match "$(json_bool "$tailscale_match")" \
+    --arg sshd_permit_root_login "$sshd_permit_root_login" \
+    --argjson remote "$remote_json" \
+    --argjson ssh_target "$ssh_target_payload" \
+    '{
+      capability:$capability,
+      generated_at:$generated_at,
+      status:"ok",
+      node_id:$node_id,
+      baseline_state:$baseline_state,
+      will_prompt_for_sudo:$will_prompt_for_sudo,
+      mutation_readiness:{state:$readiness_state, reason:$readiness_reason},
+      ssh:{
+        user:$user,
+        observed_user:$observed_user,
+        host:$host,
+        effective_host:$effective_host,
+        path_used:$path_used,
+        access_policy:$access_policy,
+        contract_state:$contract_state,
+        primitive:"ssh.target.status"
+      },
+      platform:{uname:$uname_s, linux:$is_linux},
+      privilege:{
+        noninteractive_sudo:$sudo_passwordless,
+        sudo_rc:($sudo_rc | tonumber? // 999),
+        reason:$sudo_reason
+      },
+      identity:{
+        expected_hostname:$expected_hostname,
+        observed_hostname:$observed_hostname,
+        hostname_match:$hostname_match,
+        spine_device_marker_status:$marker_status,
+        spine_device_marker:$spine_device_id,
+        spine_device_marker_match:$marker_match
+      },
+      tailscale:{
+        declared_ip:$declared_tailscale_ip,
+        observed_ip:$observed_tailscale_ip,
+        match:$tailscale_match
+      },
+      root_ssh:{
+        observed_permit_root_login:$sshd_permit_root_login,
+        generic_baseline_requirement:"not_required"
+      },
+      boundary:{
+        admission_authority:"node.admission.status",
+        recovery_authority:"node.recovery.status",
+        role_authority:"node role contracts",
+        lab_or_k3s_facts:"not_evaluated",
+        mutation:"none"
+      },
+      raw_remote_probe:$remote,
+      ssh_target_status:$ssh_target
+    }'
+  exit 0
+fi
+
+echo "node.control-baseline.status: $NODE_ID"
+echo "  baseline_state: $baseline_state"
+echo "  mutation_readiness: $readiness_state ($readiness_reason)"
+echo "  ssh: user=$user host=$effective_host path=$path_used contract=$contract_state"
+echo "  hostname: observed=$observed_hostname expected=$NODE_ID match=$hostname_match"
+echo "  spine_marker: status=$marker_status value=${spine_device_id:-} match=$marker_match"
+echo "  sudo: noninteractive=$sudo_passwordless will_prompt=$will_prompt_for_sudo reason=$sudo_reason"
+echo "  tailscale: declared=${tailscale_declared:-} observed=${tailscale_observed:-} match=$tailscale_match"
+echo "  root_ssh: generic_requirement=not_required observed='${sshd_permit_root_login:-}'"
+echo "  boundary: admission=node.admission.status recovery=node.recovery.status mutation=none"
