@@ -1,11 +1,17 @@
 # microsoft
 
-Canonical domain policy for `microsoft`.
+Canonical boundary note for `microsoft`.
+
+`microsoft` is not a standalone L3 product domain in the current estate. The
+live tenant work here exists for Mint (`mintprints.com`) and its customer-mail
+workflow. Spine keeps the Microsoft capability provider and scoped health
+readback, but Mint owns the tenant operating contracts.
 
 - Authority: `docs/governance/SPINE.md`
-- Runtime contracts: `ops/bindings/domains/microsoft.bundle.yaml`
+- Runtime bundle: `ops/bindings/domains/microsoft.bundle.yaml`
 - Mint customer mailbox operating contract: `ops/bindings/domains/mint/mint.customer.mailbox.standard.contract.yaml`
-- Mint tenant boringness contract: `ops/bindings/microsoft.tenant.boring.contract.yaml`
+- Mint tenant boringness contract: `ops/bindings/domains/microsoft/microsoft.tenant.boring.contract.yaml`
+- Product contract home: `~/code/products/mint-os/bindings/`
 - Scoped domain health readback: `./bin/ops cap run verify.run -- domain microsoft`
 
 ## Mint Customer Mailbox Standard
@@ -35,7 +41,7 @@ The Mint tenant should stay small on purpose.
 
 Directory cleanup should be boring too.
 
-- The tenant-owned automation app contract lives at `ops/bindings/microsoft.entra.admin.app.contract.yaml`.
+- The tenant-owned automation app contract lives at `ops/bindings/domains/microsoft/microsoft.entra.admin.app.contract.yaml`, a compatibility path to the Mint product contract home.
 - Its governed token wrapper is `./ops/plugins/providers/microsoft/bin/microsoft-entra-admin-token-exec`.
 - The one deprecation command is `./ops/plugins/providers/microsoft/bin/microsoft-tenant-boring-deprecate`.
 - By default, the Entra lane may reuse `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` if that live app token already carries the required Graph application permissions.
