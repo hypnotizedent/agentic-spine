@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -12,8 +13,17 @@ def state_root() -> Path:
     return Path(os.environ.get("SPINE_STATE", str(Path.home() / "code" / ".runtime" / "spine" / "state")))
 
 
-def query_latest(conn: sqlite3.Connection) -> dict | None:
-    row = conn.execute("SELECT loop_id, status, objective FROM loops ORDER BY created_at_utc DESC LIMIT 1").fetchone()
+def generated_at_utc() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def query_latest(conn: sqlite3.Connection, *, include_closed: bool = False) -> dict | None:
+    if include_closed:
+        row = conn.execute("SELECT loop_id, status, objective FROM loops ORDER BY created_at_utc DESC LIMIT 1").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT loop_id, status, objective FROM loops WHERE status != 'closed' ORDER BY created_at_utc DESC LIMIT 1"
+        ).fetchone()
     return dict(row) if row else None
 
 
@@ -22,37 +32,63 @@ def query_loop(conn: sqlite3.Connection, loop_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def emit_payload(capability: str, payload: dict, *, json_envelope: bool) -> None:
+    if not json_envelope:
+        print(json.dumps(payload, indent=2, default=str))
+        return
+    envelope = {
+        "capability": capability,
+        "schema_version": 1,
+        "status": "ok",
+        "generated_at": generated_at_utc(),
+        "data": payload,
+    }
+    print(json.dumps(envelope, indent=2, default=str))
+
+
+def add_json_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--json", action="store_true", help="Emit the stable Cap-RPC JSON envelope.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_latest = sub.add_parser("latest-loop")
     p_latest.add_argument("--include-closed", action="store_true")
+    add_json_flag(p_latest)
     p_status = sub.add_parser("loop-status")
     p_status.add_argument("--loop-id", default="")
     p_status.add_argument("--latest", action="store_true")
+    add_json_flag(p_status)
     p_progress = sub.add_parser("loop-progress")
     p_progress.add_argument("--loop-id", default="")
     p_progress.add_argument("--latest", action="store_true")
+    add_json_flag(p_progress)
     p_att = sub.add_parser("request-attestation")
     p_att.add_argument("--request-id", required=True)
+    add_json_flag(p_att)
     args = parser.parse_args()
 
     db = state_root() / "shared_authority.db"
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    capability = f"spine.broker.get_{args.cmd.replace('-', '_')}"
     if args.cmd == "latest-loop":
-        payload = query_latest(conn) or {}
+        capability = "spine.broker.get_latest_loop"
+        payload = query_latest(conn, include_closed=args.include_closed) or {}
     elif args.cmd in {"loop-status", "loop-progress"}:
         loop_id = args.loop_id
         if args.latest or not loop_id:
             latest = query_latest(conn) or {}
             loop_id = latest.get("loop_id", "")
         payload = query_loop(conn, loop_id) or {}
+        capability = f"spine.broker.get_{args.cmd.replace('-', '_')}"
     else:
         evidence_root = Path(os.environ.get("SPINE_EVIDENCE_ROOT", str(Path.home() / "code" / ".evidence" / "spine")))
         payload = {"request_id": args.request_id, "matches": [str(p) for p in list(evidence_root.glob(f"**/*{args.request_id}*"))[:20]]}
+        capability = "spine.broker.get_request_attestation"
     conn.close()
-    print(json.dumps(payload, indent=2, default=str))
+    emit_payload(capability, payload, json_envelope=bool(args.json))
     return 0
 
 
