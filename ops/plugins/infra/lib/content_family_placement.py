@@ -82,7 +82,12 @@ def ensure_list(value: Any) -> list[Any]:
 
 
 def rel(root: Path, path: Path) -> str:
-    return str(path.resolve().relative_to(root.resolve()))
+    root_resolved = root.resolve()
+    path_resolved = path.resolve()
+    try:
+        return str(path_resolved.relative_to(root_resolved))
+    except ValueError:
+        return str(path_resolved)
 
 
 def source_sha(root: Path, paths: list[Path]) -> str:
@@ -96,7 +101,15 @@ def source_sha(root: Path, paths: list[Path]) -> str:
 
 
 def source_stamp(root: Path, paths: list[Path]) -> str:
-    rel_paths = [rel(root, path) for path in paths if path.exists()]
+    root_resolved = root.resolve()
+    rel_paths = []
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            rel_paths.append(str(path.resolve().relative_to(root_resolved)))
+        except ValueError:
+            continue
     if rel_paths:
         proc = subprocess.run(
             ["git", "-C", str(root), "log", "-1", "--format=%cI", "--", *rel_paths],
