@@ -14,6 +14,7 @@ MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 CLOSEOUT_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-closeout"
 CLOSEOUT_CAP="coordinator.lane.closeout"
 WAVE_CMD="$ROOT/ops/commands/wave.sh"
+WAVE_CLOSE_BIN="$ROOT/ops/plugins/core/orchestration/bin/wave-close"
 REGRESSION_SCRIPT="$ROOT/surfaces/verify/lib/wave_hardening_regression.py"
 WAVE_RESIDUE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/wave-residue"
 CANONICAL_WT_PREFIX="$(spine_canonical_worktree_prefix "$ROOT")"
@@ -28,6 +29,7 @@ fail() {
 [[ -f "$MANIFEST" ]] || fail "missing plugin manifest: $MANIFEST"
 [[ -x "$CLOSEOUT_SCRIPT" ]] || fail "missing closeout script: $CLOSEOUT_SCRIPT"
 [[ -f "$WAVE_CMD" ]] || fail "missing wave command: $WAVE_CMD"
+[[ -x "$WAVE_CLOSE_BIN" ]] || fail "missing wave close script: $WAVE_CLOSE_BIN"
 [[ -f "$REGRESSION_SCRIPT" ]] || fail "missing wave regression harness: $REGRESSION_SCRIPT"
 [[ -x "$WAVE_RESIDUE_BIN" ]] || fail "missing wave residue surface: $WAVE_RESIDUE_BIN"
 command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
@@ -62,6 +64,39 @@ for marker in \
   "force-close denied while dispatches are pending without stub evidence"; do
   grep -qF "$marker" "$WAVE_CMD" || fail "wave.sh missing required control marker: $marker"
 done
+
+# Wave close must keep lane context present until packet/loop reconcile finishes.
+# Removing the worktree first lets the closeout readback skip loop closure and
+# leaves the operator to clean residue manually.
+python3 - "$WAVE_CLOSE_BIN" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+
+def fail(msg: str) -> None:
+    print(f"D331 FAIL: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+for marker in (
+    "closed_pending_loop_reconcile",
+    '"cleanup_deferred"] = True',
+    "workspace_cleanup_after_loop_reconcile",
+    "ordering: after loop closeout reconcile",
+):
+    if marker not in text:
+        fail(f"wave-close missing deferred cleanup marker: {marker}")
+
+reconcile_idx = text.find("reconcile_single_packet_loop_closeout")
+cleanup_idx = text.find('["worktree", "remove", "--force", worktree_path]')
+if reconcile_idx < 0:
+    fail("wave-close missing loop closeout reconcile call")
+if cleanup_idx < 0:
+    fail("wave-close missing workspace cleanup call")
+if cleanup_idx < reconcile_idx:
+    fail("wave-close removes the worktree before loop closeout reconcile")
+PY
 
 # Contract must explicitly require anti-drift fields.
 for required_field in cross_repo_pushability_gate lane_outcomes stub_matrix plan_transition; do

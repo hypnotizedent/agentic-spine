@@ -768,28 +768,9 @@ try:
         if not worktree_path or not branch_name:
             print("ERROR: wave workspace metadata missing worktree or branch for atomic cleanup", file=sys.stderr)
             sys.exit(1)
-        if _worktree_exists(worktree_path):
-            proc = _git(["worktree", "remove", "--force", worktree_path])
-            if proc.returncode != 0:
-                detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
-                print(f"ERROR: wave close teardown failed: worktree remove failed for {worktree_path}: {detail}", file=sys.stderr)
-                sys.exit(proc.returncode or 1)
-        branch_attached = _branch_attached_worktrees(branch_name)
-        if branch_attached:
-            detail = ", ".join(branch_attached)
-            print(
-                f"ERROR: wave close teardown failed: branch {branch_name} still attached to worktree(s): {detail}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if _branch_exists(branch_name):
-            proc = _git(["branch", "-D", branch_name])
-            if proc.returncode != 0:
-                detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
-                print(f"ERROR: wave close teardown failed: branch delete failed for {branch_name}: {detail}", file=sys.stderr)
-                sys.exit(proc.returncode or 1)
         workspace["closed_at"] = now
-        workspace["lifecycle_state"] = "cleaned"
+        workspace["cleanup_deferred"] = True
+        workspace["lifecycle_state"] = "closed_pending_loop_reconcile"
         state["workspace"] = workspace
 
     _atomic_write_json(sf, state)
@@ -1187,6 +1168,45 @@ elif _loop_closeout_reconcile_error:
     with open(receipt_path, "a", encoding="utf-8") as rf:
         rf.write("\n## Loop Closeout Reconcile\n\n")
         rf.write(f"- error: {_loop_closeout_reconcile_error}\n")
+
+workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
+if workspace.get("enabled") and workspace.get("cleanup_deferred"):
+    worktree_path = str(workspace.get("worktree", "")).strip()
+    branch_name = str(workspace.get("branch", "")).strip()
+    if not worktree_path or not branch_name:
+        print("ERROR: wave workspace metadata missing worktree or branch for deferred cleanup", file=sys.stderr)
+        sys.exit(1)
+    if _worktree_exists(worktree_path):
+        proc = _git(["worktree", "remove", "--force", worktree_path])
+        if proc.returncode != 0:
+            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+            print(f"ERROR: wave close teardown failed: worktree remove failed for {worktree_path}: {detail}", file=sys.stderr)
+            sys.exit(proc.returncode or 1)
+    branch_attached = _branch_attached_worktrees(branch_name)
+    if branch_attached:
+        detail = ", ".join(branch_attached)
+        print(
+            f"ERROR: wave close teardown failed: branch {branch_name} still attached to worktree(s): {detail}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if _branch_exists(branch_name):
+        proc = _git(["branch", "-D", branch_name])
+        if proc.returncode != 0:
+            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+            print(f"ERROR: wave close teardown failed: branch delete failed for {branch_name}: {detail}", file=sys.stderr)
+            sys.exit(proc.returncode or 1)
+    workspace["cleanup_deferred"] = False
+    workspace["lifecycle_state"] = "cleaned"
+    state["workspace"] = workspace
+    _atomic_write_json(sf, state)
+    close_receipt["workspace_lifecycle_state"] = "cleaned"
+    close_receipt["workspace_cleanup_after_loop_reconcile"] = True
+    _atomic_write_json(close_receipt_path, close_receipt)
+    with open(receipt_path, "a", encoding="utf-8") as rf:
+        rf.write("\n## Workspace Cleanup\n\n")
+        rf.write("- status: cleaned\n")
+        rf.write("- ordering: after loop closeout reconcile\n")
 
 print(f"Wave '{state['wave_id']}' closed.")
 print(f"  Disposition: {disposition}")
