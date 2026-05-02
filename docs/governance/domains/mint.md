@@ -3,17 +3,20 @@
 Canonical domain boundary for `mint`.
 
 **Mint product and runtime authority live in [`mint-modules`](https://github.com/hypnotizedent/mint-modules), not in spine.**
-Spine retains only the governed shim/readback boundary plus the shared-infra contracts that still pay rent.
+Spine retains only the governed shim/readback boundary plus compatibility paths
+to Mint-owned product contracts.
 
 - Authority: `docs/governance/SPINE.md`
 - Spine domain bundle: `ops/bindings/domains/mint.bundle.yaml`
 - Product/runtime contract home: `~/code/mint-modules/contracts/`
 - Spine routing shims: `ops/plugins/domains/mint/bin/`
-- Spine shared-infra keep-set:
+- Mint-owned product contract compatibility paths:
   - `ops/bindings/domains/mint/mint.operator.storage.contract.yaml`
   - `ops/bindings/domains/mint/mint.secrets.promotion.contract.yaml`
   - `ops/bindings/domains/mint/mint.storage.findings.map.yaml`
   - `ops/bindings/domains/mint/mint.storage.guard.policy.yaml`
+  - `ops/bindings/domains/microsoft/microsoft.tenant.boring.contract.yaml`
+  - `ops/bindings/domains/microsoft/microsoft.entra.admin.app.contract.yaml`
 - Scoped domain health readback: `./bin/ops cap run verify.run -- domain mint`
 
 ## Registered Capabilities (5 of 5)
@@ -30,7 +33,7 @@ All 5 registered Mint capabilities delegate to `mint-modules`:
 L3 move-out is complete for Mint product/runtime authority. Spine keeps:
 - 5 thin capability-routing shims in `ops/plugins/domains/mint/bin/`
 - thin product authority pointers under `ops/bindings/domains/mint/`
-- the shared-infra keep-set listed above
+- Microsoft tenant compatibility paths for Mint-owned contracts
 
 Workbench `agents/mint-agent/` may retain operator tooling, but it is not the
 owner of Mint runtime truth.
