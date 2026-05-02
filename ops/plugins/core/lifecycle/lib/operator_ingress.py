@@ -184,6 +184,113 @@ def _iso_utc(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# ---------------------------------------------------------------------------
+# Legacy-token read-side filter
+# ---------------------------------------------------------------------------
+# Slice 4 (LOOP-OI-READBACK-LEGACY-STRING-FILTER-20260502): historical OI
+# files retain legacy `domain_agent:*` and `packet_candidate` strings in
+# derivative fields (next_stage, disposition_detail, nested intent_chain
+# blocks, W2.routing_target, etc.). The on-disk record stays as historical
+# evidence; the public/operator readback canonicalizes the strings at emit
+# time so agents do not read legacy tokens as current truth.
+#
+# Hard rule: operator-authored prose (raw_content, operator_hint,
+# human_intent_statement) is NEVER filtered — those are the steward's
+# actual words and must remain verbatim. The protected-key set below
+# names every field whose string value passes through unmodified.
+
+# Field keys whose VALUE must never be normalized at any nesting depth.
+_LEGACY_FILTER_PROTECTED_KEYS = frozenset({
+    "raw_content",
+    "operator_hint",
+    "human_intent_statement",
+    "statement",  # nested human_intent.statement
+    "path",       # filesystem path may legitimately contain "packet" etc.
+    "ingress_path",
+})
+
+# Pattern: domain_agent:<dom>:review (review variant) and domain_agent:<dom>.
+_LEGACY_DOMAIN_AGENT_REVIEW_RE = re.compile(r"\bdomain_agent:([a-zA-Z0-9_-]+):review\b")
+_LEGACY_DOMAIN_AGENT_RE = re.compile(r"\bdomain_agent:([a-zA-Z0-9_-]+)\b")
+_LEGACY_PACKET_CANDIDATE_RE = re.compile(r"\bpacket_candidate\b")
+
+
+def _normalize_legacy_token_string(value: str) -> str:
+    """Translate legacy tokens in a free-text string to canonical phrasing.
+
+    `domain_agent:<dom>:review` → `(inferred domain: <dom> — recommended for review; no executable route)`
+    `domain_agent:<dom>`        → `(inferred domain: <dom>; no executable route)`
+    `packet_candidate`          → `recommended_for_review`
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    out = _LEGACY_DOMAIN_AGENT_REVIEW_RE.sub(
+        r"(inferred domain: \1 — recommended for review; no executable route)",
+        value,
+    )
+    out = _LEGACY_DOMAIN_AGENT_RE.sub(
+        r"(inferred domain: \1; no executable route)",
+        out,
+    )
+    out = _LEGACY_PACKET_CANDIDATE_RE.sub("recommended_for_review", out)
+    return out
+
+
+def _normalize_legacy_tokens_in_field(key: str, value: Any) -> Any:
+    """Recursive translator. Skips protected keys and operator-authored fields."""
+    if key in _LEGACY_FILTER_PROTECTED_KEYS:
+        return value
+    if isinstance(value, str):
+        # next_stage carrying domain_agent:* was already null-routing per Slice 2;
+        # for read-emit we keep the same shape: if the entire value is a legacy
+        # routing string, drop to null rather than emit translated prose as if
+        # it were a route.
+        if key == "next_stage":
+            stripped = value.strip()
+            if stripped.startswith("domain_agent:"):
+                return None
+        # A bare `packet_candidate` value in a disposition-like field becomes
+        # the canonical name.
+        if value == "packet_candidate" and key in {
+            "disposition", "downstream_disposition", "current_disposition",
+        }:
+            return "recommended_for_review"
+        return _normalize_legacy_token_string(value)
+    if isinstance(value, list):
+        out_list = []
+        for v in value:
+            if isinstance(v, str):
+                # next_stage-like list values: drop legacy routing strings
+                stripped = v.strip()
+                if stripped.startswith("domain_agent:"):
+                    continue
+                out_list.append(_normalize_legacy_token_string(v))
+            elif isinstance(v, dict):
+                out_list.append({
+                    k: _normalize_legacy_tokens_in_field(k, v2) for k, v2 in v.items()
+                })
+            else:
+                out_list.append(v)
+        return out_list
+    if isinstance(value, dict):
+        return {
+            k: _normalize_legacy_tokens_in_field(k, v) for k, v in value.items()
+        }
+    return value
+
+
+def _normalize_legacy_tokens_in_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Apply the legacy-token filter across a status item dict.
+
+    Operates in-place for nested mutation efficiency, also returns the dict.
+    Protected keys (raw_content, operator_hint, human_intent_statement, etc.)
+    are passed through verbatim.
+    """
+    for k in list(item.keys()):
+        item[k] = _normalize_legacy_tokens_in_field(k, item[k])
+    return item
+
+
 def _parse_iso_utc(value: str) -> datetime | None:
     """Parse an ISO-8601 UTC timestamp tolerantly. Returns None on failure."""
     if not value:
@@ -630,6 +737,11 @@ def list_operator_ingress(
         )
         item["canonical_lifecycle"] = _canonical_lifecycle_readback(doc)
         item["canonical_state"] = item["canonical_lifecycle"]["canonical_state"]
+        # Read-side legacy-token filter (Slice 4): canonicalize derivative
+        # field strings before emit. Protected keys (raw_content, operator
+        # prose, statements, paths) pass through verbatim. Raw OI YAML on
+        # disk is unchanged.
+        item = _normalize_legacy_tokens_in_item(item)
         items.append(item)
         if len(items) >= limit:
             break
