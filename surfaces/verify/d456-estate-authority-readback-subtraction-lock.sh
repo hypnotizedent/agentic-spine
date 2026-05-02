@@ -18,6 +18,7 @@ VERIFY_TOPOLOGY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
 OPS_VERIFY="$ROOT/ops/commands/verify.sh"
 VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
 PLACEMENT_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
+BINDINGS_DIR="$ROOT/ops/bindings"
 
 fail() { echo "D456 FAIL: $*" >&2; exit 1; }
 
@@ -33,11 +34,12 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -f "$OPS_VERIFY" ]] || fail "missing ops verify wrapper"
 [[ -f "$VM_LIFECYCLE" ]] || fail "missing vm.lifecycle.yaml"
 [[ -f "$PLACEMENT_POLICY" ]] || fail "missing infra.storage.placement.policy.yaml"
+[[ -d "$BINDINGS_DIR" ]] || fail "missing ops/bindings directory"
 
 bash -n "$RUNTIME_PLACEMENT"
 python3 -m py_compile "$SCHEDULER_HEALTH"
 
-python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CAPABILITIES" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$GATE_REGISTRY" "$GATE_PROFILES" "$VERIFY_TOPOLOGY" "$OPS_VERIFY" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" <<'PY'
+python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CAPABILITIES" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$GATE_REGISTRY" "$GATE_PROFILES" "$VERIFY_TOPOLOGY" "$OPS_VERIFY" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" "$BINDINGS_DIR" <<'PY'
 import sys
 import json
 import subprocess
@@ -58,7 +60,7 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
-runtime_path, scheduler_path, caps_path, scheduler_registry_path, topology_path, gate_registry_path, gate_profiles_path, verify_topology_path, ops_verify_path, lifecycle_path, placement_path = map(Path, sys.argv[1:])
+runtime_path, scheduler_path, caps_path, scheduler_registry_path, topology_path, gate_registry_path, gate_profiles_path, verify_topology_path, ops_verify_path, lifecycle_path, placement_path, bindings_dir = map(Path, sys.argv[1:])
 runtime_text = runtime_path.read_text(encoding="utf-8")
 scheduler_text = scheduler_path.read_text(encoding="utf-8")
 caps_text = caps_path.read_text(encoding="utf-8")
@@ -210,6 +212,24 @@ if "execution_host" not in f"{operator_surface.get('purpose') or ''} {operator_s
 
 if "D456" not in core_ids:
     fail("D456 must be part of spine core verify topology")
+
+binding_failures = []
+for binding_path in sorted(bindings_dir.rglob("*.yaml")):
+    rel = binding_path.relative_to(bindings_dir.parent)
+    if binding_path.is_symlink():
+        if not binding_path.exists():
+            binding_failures.append(f"{rel}: broken symlink")
+        continue
+    binding_text = binding_path.read_text(encoding="utf-8")
+    # Existing binding files are a mix of plain YAML and front-matter YAML.
+    # This lock is about provenance visibility, not re-parsing every external
+    # domain contract that is exposed through a compatibility symlink.
+    if not any(line.startswith("status:") for line in binding_text.splitlines()):
+        binding_failures.append(f"{rel}: missing status/provenance field")
+if binding_failures:
+    detail = "\n  - ".join(binding_failures[:80])
+    extra = "" if len(binding_failures) <= 80 else f"\n  ... {len(binding_failures) - 80} more"
+    fail(f"binding provenance must be explicit and symlink targets must resolve:\n  - {detail}{extra}")
 
 print("D456 PASS: estate authority readbacks are first-class/subordinate and old expert probes cannot silently masquerade as drift")
 PY
