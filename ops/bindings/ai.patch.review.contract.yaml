@@ -15,6 +15,7 @@ authority:
     - v2_5_patch_review_lifecycle
     - patch_receipt_validation
     - review_worktree_materialization
+    - review_final_state_truth
     - review_rejection_receipts
   does_not_decide:
     - provider_tool_access
@@ -38,23 +39,34 @@ lifecycle:
         - merge_performed: false
     needs_controller_review:
       public_readback: execution.pickup.status
-      review_state: needs_controller_review_before_merge
-    promoted_to_review_worktree:
+      review_state: needs_controller_review
+      substrate_truth: "No review receipt exists yet; patch artifact from the V2.5 task is durable."
+    review_worktree_active:
       capability: ai.patch.review.promote
-      review_state: promoted_to_review_worktree
+      review_state: review_worktree_active
       mutation_scope: controller_review_worktree_only
+      substrate_truth: "review_worktree directory exists; review_commit is reachable; no push or merge."
+    review_artifact_retained:
+      review_state: review_artifact_retained
+      mutation_scope: none
+      substrate_truth: "review worktree/branch are absent or historical; patch_artifact_path exists and is the durable review substrate."
     rejected_by_controller:
       capability: ai.patch.review.reject
       review_state: rejected_by_controller
       mutation_scope: none
-    applied_to_worktree:
-      meaning: "Patch applied to a controller review worktree and committed on the local review branch only; not pushed or merged."
-    verified:
-      allowed_verify_command:
-        - git diff --check
-    merged:
-      status: out_of_scope
-      note: "Merge requires a later controller/human lane."
+      substrate_truth: "terminal rejection receipt exists; no review worktree required."
+    merged_by_controller:
+      status: reserved
+      review_state: merged_by_controller
+      note: "Merge requires a later controller/human lane and must not be inferred from patch review."
+    superseded:
+      status: reserved
+      review_state: superseded
+      note: "Terminal state for a patch replaced by a later patch."
+    stale:
+      status: reserved
+      review_state: stale
+      note: "Terminal state for an aged-out review with no controller decision."
 
 review_worktree:
   root: "$SPINE_RUNTIME_ROOT/tmp/worktrees/agentic-spine"
@@ -65,11 +77,12 @@ review_worktree:
   lease_ttl_hours: 24
   lifecycle_contract: ops/bindings/worktree.lifecycle.contract.yaml
   creation_surface: "ops wave start"
-  cleanup: "left_clean_for_controller_review_under_canonical_worktree_root_with_wave_state"
+  cleanup: "when a review worktree is pruned, readback must transition to review_artifact_retained if the patch artifact still exists"
 
 receipts:
   root: "$SPINE_STATE/domain-state/ai-patch-reviews"
-  promoted_status: promoted_to_review_worktree
+  active_status: review_worktree_active
+  retained_status: review_artifact_retained
   rejected_status: rejected_by_controller
   required_common_fields:
     - review_id
@@ -81,13 +94,15 @@ receipts:
     - side_effect_files
     - push_performed
     - merge_performed
-  promoted_required_fields:
+  active_required_fields:
     - review_worktree
     - review_branch
     - review_commit
     - verify_command
     - verify_rc
     - worktree_status
+  retained_required_fields:
+    - patch_artifact_path
   rejected_required_fields:
     - rejection_reason
 

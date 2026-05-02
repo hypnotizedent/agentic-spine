@@ -53,6 +53,7 @@ fi
 
 python3 - "$tmp_json" <<'PY'
 import json
+from pathlib import Path
 import sys
 
 path = sys.argv[1]
@@ -189,7 +190,7 @@ elif bridge_state == "delivered (tool-using: patch apply sandbox)":
         and row["bridge_proof"].get("merge_performed") is False
         and row["bridge_proof"].get("mutation_access") == "leased_sandbox_worktree_only"
         and row["bridge_proof"].get("receipt") == "task_envelope_bridge_proof"
-        and row.get("review_state") in {"needs_controller_review_before_merge", "promoted_to_review_worktree", "rejected_by_controller"}
+        and row.get("review_state") in {"needs_controller_review", "review_worktree_active", "review_artifact_retained", "rejected_by_controller", "merged_by_controller", "superseded", "stale"}
     ]
     if not proofs:
         raise SystemExit("D452 FAIL: delivered V2.5 bridge requires completed sandbox patch-apply bridge_proof task envelope")
@@ -203,7 +204,16 @@ if not isinstance(safety_tiers, dict):
 patch_review = summary.get("patch_review")
 if not isinstance(patch_review, dict):
     raise SystemExit("D452 FAIL: execution pickup summary must expose patch_review")
-for required_review_key in ("pending", "promoted_to_review_worktree", "rejected_by_controller", "other"):
+review_states = {
+    "needs_controller_review",
+    "review_worktree_active",
+    "review_artifact_retained",
+    "rejected_by_controller",
+    "merged_by_controller",
+    "superseded",
+    "stale",
+}
+for required_review_key in (*sorted(review_states), "other"):
     if required_review_key not in patch_review:
         raise SystemExit(f"D452 FAIL: patch_review missing {required_review_key}")
 for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_v2_5_patch_apply_sandbox", "tool_using_agent_reserved", "destructive_manual"):
@@ -277,10 +287,22 @@ for row in data.get("requests") or []:
                 raise SystemExit("D452 FAIL: terminal V2.5 success requires patch apply proof")
             if not isinstance(proof.get("expected_patch_files"), list) or proof.get("expected_patch_files") != proof.get("actual_patch_files") or proof.get("side_effect_files") != []:
                 raise SystemExit("D452 FAIL: terminal V2.5 success must prove expected-vs-actual patch file parity")
-            if row.get("review_state") not in {"needs_controller_review_before_merge", "promoted_to_review_worktree", "rejected_by_controller"}:
+            if row.get("review_state") not in review_states:
                 raise SystemExit("D452 FAIL: terminal V2.5 success must surface valid controller review state in execution pickup")
-            if row.get("review_state") in {"promoted_to_review_worktree", "rejected_by_controller"} and not row.get("patch_review_receipt"):
+            if row.get("review_state") in review_states - {"needs_controller_review"} and not row.get("patch_review_receipt"):
                 raise SystemExit("D452 FAIL: terminal reviewed V2.5 row must include patch_review_receipt")
+            if row.get("review_state") == "review_worktree_active":
+                review_worktree = Path(str(row.get("review_worktree") or ""))
+                if not review_worktree.is_dir():
+                    raise SystemExit("D452 FAIL: review_worktree_active requires existing review_worktree directory")
+                if not row.get("review_branch"):
+                    raise SystemExit("D452 FAIL: review_worktree_active requires review_branch")
+            if row.get("review_state") in {"review_artifact_retained", "rejected_by_controller", "merged_by_controller", "superseded", "stale"}:
+                if row.get("review_worktree"):
+                    raise SystemExit("D452 FAIL: terminal/retained review states must not imply a live review_worktree")
+                patch_artifact = Path(str(row.get("patch_artifact_path") or proof.get("patch_artifact_path") or ""))
+                if row.get("review_state") == "review_artifact_retained" and not patch_artifact.is_file():
+                    raise SystemExit("D452 FAIL: review_artifact_retained requires durable patch_artifact_path")
     if tier.startswith("tool_using_agent_") and tier not in {"tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_v2_5_patch_apply_sandbox"} and row.get("pickup_state") in {"done", "failed", "cancelled"}:
         proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
         if proof.get("scope") != tier:

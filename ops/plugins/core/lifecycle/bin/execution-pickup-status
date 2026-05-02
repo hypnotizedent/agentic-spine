@@ -83,6 +83,21 @@ def patch_review_for(task_id: str) -> dict[str, Any]:
     return load_yaml(PATCH_REVIEW_ROOT / f"{task_id}.yaml")
 
 
+def effective_patch_review_state(review: dict[str, Any]) -> str:
+    raw_state = str(review.get("review_state") or review.get("review_status") or "").strip()
+    if raw_state in {"rejected_by_controller", "merged_by_controller", "superseded", "stale"}:
+        return raw_state
+    patch_artifact = Path(str(review.get("patch_artifact_path") or ""))
+    review_worktree = Path(str(review.get("review_worktree") or ""))
+    if review_worktree and str(review_worktree) != "." and review_worktree.is_dir():
+        return "review_worktree_active"
+    if patch_artifact and str(patch_artifact) != "." and patch_artifact.is_file():
+        return "review_artifact_retained"
+    if raw_state:
+        return raw_state
+    return "needs_controller_review"
+
+
 def normalize_task_payload(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -311,14 +326,16 @@ def add_request(rows: list[dict[str, Any]], **kwargs: Any) -> None:
     if proof.get("scope") == "tool_using_agent_v2_5_patch_apply_sandbox" and row.get("pickup_state") == "done":
         review = patch_review_for(str(row.get("request_id") or ""))
         if review:
-            row["review_state"] = str(review.get("review_state") or review.get("review_status") or "needs_controller_review_before_merge")
+            row["review_state"] = effective_patch_review_state(review)
             row["patch_review_receipt"] = str(PATCH_REVIEW_ROOT / f"{row.get('request_id')}.yaml")
-            if review.get("review_worktree"):
+            if row["review_state"] == "review_worktree_active" and review.get("review_worktree"):
                 row["review_worktree"] = review.get("review_worktree")
-            if review.get("review_branch"):
+            if row["review_state"] == "review_worktree_active" and review.get("review_branch"):
                 row["review_branch"] = review.get("review_branch")
+            if review.get("patch_artifact_path"):
+                row["patch_artifact_path"] = review.get("patch_artifact_path")
         else:
-            row["review_state"] = "needs_controller_review_before_merge"
+            row["review_state"] = "needs_controller_review"
     row.update(kernel_states_for(row))
     rows.append(row)
 
@@ -548,18 +565,20 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if delivered_v2_5:
         ai_agent_bridge = "delivered (tool-using: patch apply sandbox)"
     patch_review = {
-        "pending": 0,
-        "promoted_to_review_worktree": 0,
+        "needs_controller_review": 0,
+        "review_worktree_active": 0,
+        "review_artifact_retained": 0,
         "rejected_by_controller": 0,
+        "merged_by_controller": 0,
+        "superseded": 0,
+        "stale": 0,
         "other": 0,
     }
     for row in rows:
         if row.get("safety_tier") != "tool_using_agent_v2_5_patch_apply_sandbox" or row.get("pickup_state") != "done":
             continue
-        state = str(row.get("review_state") or "needs_controller_review_before_merge")
-        if state == "needs_controller_review_before_merge":
-            patch_review["pending"] += 1
-        elif state in {"promoted_to_review_worktree", "rejected_by_controller"}:
+        state = str(row.get("review_state") or "needs_controller_review")
+        if state in patch_review:
             patch_review[state] += 1
         else:
             patch_review["other"] += 1
