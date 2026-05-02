@@ -60,6 +60,8 @@ for marker in \
   "worktree_report" \
   "worktree.lifecycle.report -- --json" \
   "worktree_cleanup" \
+  "POST_INTEGRATION_OPS" \
+  "POST_INTEGRATION_ROOT" \
   "friction.reconcile -- --loop-id" \
   "spine.verify" \
   "worktree.lifecycle.cleanup -- --mode"; do

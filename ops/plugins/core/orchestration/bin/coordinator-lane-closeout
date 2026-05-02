@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 OPS="$ROOT/bin/ops"
+POST_INTEGRATION_ROOT="$ROOT"
+POST_INTEGRATION_OPS="$OPS"
 
 LOOP_ID=""
 LANE_BRANCH=""
@@ -111,7 +113,7 @@ run_cap() {
   local output rc run_key
 
   set +e
-  output="$(OPS_CAP_AUTO_APPROVE=yes "$OPS" cap run "$@" 2>&1)"
+  output="$(cd "$POST_INTEGRATION_ROOT" && OPS_CAP_AUTO_APPROVE=yes "$POST_INTEGRATION_OPS" cap run "$@" 2>&1)"
   rc=$?
   set -e
 
@@ -150,8 +152,8 @@ else
     git -C "$integration_worktree" push "$REMOTE" "$TARGET_BRANCH" >/dev/null 2>&1 || fail "push failed: $REMOTE/$TARGET_BRANCH"
     did_push=1
   fi
-  cleanup_integration_worktree
-  integration_worktree=""
+  POST_INTEGRATION_ROOT="$integration_worktree"
+  POST_INTEGRATION_OPS="$integration_worktree/bin/ops"
 fi
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
