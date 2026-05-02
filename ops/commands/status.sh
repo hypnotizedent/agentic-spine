@@ -1976,7 +1976,14 @@ if mode == "--brief":
     later_count = sum(1 for loop in open_loops if loop.get("horizon", "now") == "later")
     future_count = sum(1 for loop in open_loops if loop.get("horizon", "now") == "future")
     joined_open_loops = int(joined_state_summary.get("open_loops", len(open_loops)) or len(open_loops))
-    loop_part = f"Loops: {joined_open_loops} open"
+    # PACKET-586 follow-on: detect routed-elsewhere from the anomalies signal
+    # set when loops_authority.connect raised DbAuthorityRoutingRequired.
+    # Avoid showing misleading "0 open" when DB is just routed elsewhere.
+    _loops_routed = any("LOOP AUTHORITY ROUTED" in str(a) for a in anomalies)
+    if _loops_routed and joined_open_loops == 0:
+        loop_part = "Loops: routed (use 'bin/ops cap run loops.status')"
+    else:
+        loop_part = f"Loops: {joined_open_loops} open"
     if background_open:
         loop_part += f" ({background_open} background"
         if stale_background_count:
@@ -1998,6 +2005,9 @@ if mode == "--brief":
         parts.append(f"Residue: {projection_residue} stale scope file(s)")
     if gaps_available:
         parts.append(f"Gaps: {open_gap_count} open ({unlinked_gap_count} unlinked)")
+    elif gap_state.get("status") == "routed":
+        # PACKET-586 follow-on: distinguish routed-elsewhere from degraded.
+        parts.append("Gaps: routed (use 'bin/ops cap run gaps.status')")
     else:
         parts.append("Gaps: unknown (authority degraded)")
     _engine_vs = joined_state_summary.get("engine_verify_status", "unknown")
