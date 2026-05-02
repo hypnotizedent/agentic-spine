@@ -12,6 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[5]
 PROBE_REGISTRY_PATH = ROOT / "ops" / "bindings" / "probe.registry.yaml"
+SERVICE_DATA_LIFECYCLE_PATH = ROOT / "ops" / "bindings" / "service.data.lifecycle.registry.yaml"
 SERVICES_HEALTH_PATH = ROOT / "ops" / "bindings" / "services.health.yaml"
 
 
@@ -48,17 +49,23 @@ def ensure_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def source_sha(path: Path) -> str:
+def source_sha(paths: list[Path]) -> str:
     digest = hashlib.sha256()
-    digest.update(rel(path).encode("utf-8"))
-    digest.update(b"\0")
-    digest.update(path.read_bytes())
+    for path in paths:
+        digest.update(rel(path).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
     return digest.hexdigest()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="probe-registry-projection-build")
-    parser.add_argument("--check", action="store_true", help="Fail if services.health.yaml drifts from probe.registry.yaml.")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail if services.health.yaml drifts from probe.registry.yaml or service.data.lifecycle.registry.yaml.",
+    )
     parser.add_argument("--verify", action="store_true", help="Verify probe registry shape before writing/checking.")
     return parser.parse_args()
 
@@ -69,6 +76,8 @@ def validate_registry(registry: dict[str, Any]) -> None:
         errors.append("probe.registry.yaml must declare authority_state: authoritative")
     if registry.get("authority_concern") != "l1_probe_registry_surfaces":
         errors.append("probe.registry.yaml must declare authority_concern: l1_probe_registry_surfaces")
+    if "lifecycle_bindings" in registry:
+        errors.append("probe.registry.yaml must not carry lifecycle_bindings; services.health projects them from service.data.lifecycle.registry.yaml")
 
     seen: set[str] = set()
     for raw_probe in ensure_list(registry.get("probes")):
@@ -99,7 +108,56 @@ def validate_registry(registry: dict[str, Any]) -> None:
         raise SystemExit(1)
 
 
-def build_services_health(registry: dict[str, Any], sha: str) -> str:
+def path_list(rows: list[Any]) -> list[str]:
+    rendered: list[str] = []
+    for raw_row in rows:
+        row = ensure_dict(raw_row)
+        host = str(row.get("host") or "").strip()
+        path = str(row.get("path") or "").strip()
+        purpose = str(row.get("purpose") or "").strip()
+        if not host or not path:
+            continue
+        value = f"{host}:{path}"
+        if purpose:
+            value = f"{value} ({purpose})"
+        rendered.append(value)
+    return rendered
+
+
+def build_lifecycle_bindings(lifecycle_registry: dict[str, Any]) -> list[dict[str, Any]]:
+    by_host: dict[str, dict[str, Any]] = {}
+    services = ensure_dict(lifecycle_registry.get("services"))
+    for service_id, raw_service in sorted(services.items()):
+        service = ensure_dict(raw_service)
+        refs = ensure_dict(service.get("binding_refs"))
+        hosts = [str(host).strip() for host in ensure_list(refs.get("services_health_hosts")) if str(host).strip()]
+        if not hosts:
+            continue
+        service_payload = {
+            "service_id": str(service_id),
+            "display_name": str(service.get("display_name") or service_id),
+            "criticality": str(service.get("criticality") or ""),
+            "canonical_live_roots": path_list(ensure_list(service.get("canonical_live_roots"))),
+            "staging_roots": path_list(ensure_list(service.get("staging_roots"))),
+            "quarantine_roots": path_list(ensure_list(service.get("quarantine_roots"))),
+            "export_archive_lanes": path_list(ensure_list(service.get("export_archive_lanes"))),
+            "retention_policy": ensure_dict(service.get("retention_policy")),
+            "capacity_model": ensure_dict(service.get("capacity_model")),
+        }
+        for host in hosts:
+            binding = by_host.setdefault(
+                host,
+                {
+                    "host": host,
+                    "source_registry": rel(SERVICE_DATA_LIFECYCLE_PATH),
+                    "services": [],
+                },
+            )
+            binding["services"].append(service_payload)
+    return [by_host[host] for host in sorted(by_host)]
+
+
+def build_services_health(registry: dict[str, Any], lifecycle_registry: dict[str, Any], sha: str) -> str:
     defaults = ensure_dict(registry.get("defaults")) or {
         "connect_timeout_sec": 5,
         "max_time_sec": 10,
@@ -125,7 +183,7 @@ def build_services_health(registry: dict[str, Any], sha: str) -> str:
             row["description"] = description
         endpoints.append(row)
 
-    lifecycle_bindings = ensure_list(registry.get("lifecycle_bindings"))
+    lifecycle_bindings = build_lifecycle_bindings(lifecycle_registry)
     payload: dict[str, Any] = {
         "version": 1,
         "status": "projection",
@@ -168,10 +226,11 @@ def check_matches(path: Path, expected: str) -> None:
 def main() -> None:
     args = parse_args()
     registry = load_yaml(PROBE_REGISTRY_PATH)
+    lifecycle_registry = load_yaml(SERVICE_DATA_LIFECYCLE_PATH)
     if args.verify:
         validate_registry(registry)
-    sha = source_sha(PROBE_REGISTRY_PATH)
-    rendered = build_services_health(registry, sha)
+    sha = source_sha([PROBE_REGISTRY_PATH, SERVICE_DATA_LIFECYCLE_PATH])
+    rendered = build_services_health(registry, lifecycle_registry, sha)
     if args.check:
         check_matches(SERVICES_HEALTH_PATH, rendered)
     else:
