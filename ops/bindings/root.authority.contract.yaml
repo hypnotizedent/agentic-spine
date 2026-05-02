@@ -18,11 +18,52 @@ related_contracts:
 taxonomy:
   host_path_resolution:
     rule: >
-      The path taxonomy below is the canonical Darwin/operator-console
-      installation default. Linux execution hosts must resolve runtime paths
-      from their host-local environment file before reading these defaults.
+      Path taxonomy precedence — primary canonical first, host installation
+      defaults second. Post-D.3b v4 cutover (commit ec1a88a2 + 1a183696),
+      pve as delivered storage_evidence_node holds primary canonical for
+      state/evidence/mailroom/receipts/archive roots. Darwin paths under
+      /Users/ronnyworks are operator-workstation install defaults — never
+      canonical write target for spine state. Linux execution hosts other
+      than the storage_evidence_node resolve runtime paths from their
+      host-local /etc/spine/execution-host.env (e.g., ai-cons), which itself
+      points back at the canonical storage_evidence_node where appropriate.
+    primary_canonical_source: ops/bindings/node.role.contract.yaml#storage_evidence_node.promotion_standard.current_delivered_host
     linux_execution_host_env_file: /etc/spine/execution-host.env
-    linux_policy: "host-local env file wins over darwin defaults"
+    linux_policy: "host-local env file wins over darwin defaults; storage_evidence_node canonical wins over both"
+
+  storage_evidence_node_canonical:
+    delivered_host: pve
+    delivered_proof_refs:
+      dataset_substrate_proof: $SPINE_STATE/domain-state/storage-evidence-node/pve-dataset-substrate-proof-20260502.yaml
+      canonical_root_export_proof: $SPINE_STATE/domain-state/storage-evidence-node/pve-canonical-root-export-proof-20260502.yaml
+      authority_transfer_proof: $SPINE_STATE/domain-state/storage-evidence-node/pve-authority-transfer-proof-20260502.yaml
+      recovery_drill_proof: $SPINE_STATE/domain-state/storage-evidence-node/pve-recovery-drill-proof-20260502.yaml
+    primary_canonical_root: /md1400/spine
+    primary_canonical_subpaths:
+      state: /md1400/spine/state
+      shared_authority_db: /md1400/spine/state/shared_authority.db
+      evidence: /md1400/spine/evidence
+      receipts: /md1400/spine/receipts
+      mailroom: /md1400/spine/mailroom
+      runtime: /md1400/spine/runtime
+      archive: /md1400/spine/archive
+    reach_mechanism: |
+      Consumers reach this canonical root via two patterns:
+      1. cap.sh routing for DB-backed and mutating caps (D.3a + D.3c + PACKET-582)
+      2. NFS exports for cold artifact reads (Phase D.2; verified PACKET-584)
+      MacBook reaches via cap-routing primarily (no NFS mount today, by choice).
+      ai-cons reaches via NFS mount + cap-routing.
+      pve-r620 reaches via NFS read-only mount (watcher posture).
+    role: canonical_state_evidence_authority
+    policy: writes_for_state_evidence_mailroom_receipts_archive_land_here_via_routing_or_nfs
+    darwin_paths_relationship: |
+      Pre-D.3b v4, paths under /Users/ronnyworks/code/.runtime/spine and
+      /Users/ronnyworks/code/.evidence/spine were canonical authority for the
+      operator console. Post-cutover, those paths are operator-workstation
+      install defaults only — never canonical write target for spine state.
+      MacBook local DB at the canonical path was renamed to
+      shared_authority.divergent-pre-d3b-v4-* during cutover (ZFS snapshot
+      preserves pre-cutover state on pve as canonical reversibility).
 
   home:
     path: /Users/ronnyworks
@@ -45,8 +86,9 @@ taxonomy:
 
   runtime:
     path: /Users/ronnyworks/code/.runtime/spine
-    default_scope: darwin_only_default
-    role: canonical_runtime_state
+    default_scope: darwin_install_default
+    role: operator_workstation_install_default
+    primary_canonical_authority: storage_evidence_node_canonical.primary_canonical_subpaths.runtime
     subpaths:
       state: /Users/ronnyworks/code/.runtime/spine/state
       mailroom: /Users/ronnyworks/code/.runtime/spine/mailroom
@@ -54,23 +96,31 @@ taxonomy:
       logs: /Users/ronnyworks/code/.runtime/spine/logs
       tmp: /Users/ronnyworks/code/.runtime/spine/tmp
     note: >
-      Externalized runtime state for the spine. Local-only, not inside any
-      versioned repo. The mailroom subpath is the external logical inbox/outbox
-      namespace; operational task queues and worker status live under the
-      canonical state root. Source contracts: ops/bindings/mailroom.runtime.contract.yaml
-      and ops/bindings/mailroom.inventory.contract.yaml.
+      Pre-D.3b v4, this was canonical_runtime_state. Post-cutover, this is the
+      operator-workstation install default — local cache for cap output paths,
+      worktree provisioning, etc. The canonical runtime state root for the
+      spine lane is now /md1400/spine/state on pve (the delivered
+      storage_evidence_node). Mutating writes route via cap.sh; reads of
+      DB-backed authority route too. This subpath block defines where
+      MacBook-local install artifacts live; it is no longer canonical for
+      governed state.
 
   evidence:
     path: /Users/ronnyworks/code/.evidence/spine
-    default_scope: darwin_only_default
-    role: canonical_evidence_trail
+    default_scope: darwin_install_default
+    role: operator_workstation_install_default
+    primary_canonical_authority: storage_evidence_node_canonical.primary_canonical_subpaths.evidence
     subpaths:
       sessions: /Users/ronnyworks/code/.evidence/spine/sessions
       verify: /Users/ronnyworks/code/.evidence/spine/verify
       reports: /Users/ronnyworks/code/.evidence/spine/reports
       cap_runs: /Users/ronnyworks/code/.evidence/spine/cap-runs
     note: >
-      Governed evidence trail. Receipts, verify reports, and cap run logs.
+      Pre-D.3b v4, this was canonical_evidence_trail. Post-cutover, the
+      canonical evidence trail is at /md1400/spine/evidence on pve. Caps
+      routed via cap.sh write receipts directly to /md1400/spine/evidence/sessions/.
+      Receipts written by non-routed local tooling on MacBook still land here
+      as operator-workstation install default.
 
   worktrees:
     path: /Users/ronnyworks/code/.runtime/spine/tmp/worktrees
