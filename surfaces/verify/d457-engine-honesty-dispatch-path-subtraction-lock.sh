@@ -11,6 +11,7 @@ HONESTY="$ROOT/ops/plugins/core/verify/bin/verify-engine-honesty"
 MANIFEST_GENERATOR="$ROOT/ops/plugins/core/authority/bin/spine-surface-manifest-generate"
 WAVE="$ROOT/ops/commands/wave.sh"
 GATE_TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
+CAPS="$ROOT/ops/capabilities.yaml"
 
 fail() { echo "D457 FAIL: $*" >&2; exit 1; }
 
@@ -19,12 +20,13 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -f "$MANIFEST_GENERATOR" ]] || fail "missing spine-surface-manifest-generate"
 [[ -x "$WAVE" ]] || fail "missing wave.sh"
 [[ -f "$GATE_TOPOLOGY" ]] || fail "missing gate.execution.topology.yaml"
+[[ -f "$CAPS" ]] || fail "missing capabilities.yaml"
 
 bash -n "$HONESTY"
 bash -n "$WAVE"
 python3 -m py_compile "$MANIFEST_GENERATOR"
 
-python3 - "$HONESTY" "$MANIFEST_GENERATOR" "$WAVE" "$GATE_TOPOLOGY" <<'PY'
+python3 - "$HONESTY" "$MANIFEST_GENERATOR" "$WAVE" "$GATE_TOPOLOGY" "$CAPS" <<'PY'
 import sys
 from pathlib import Path
 
@@ -36,11 +38,12 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-honesty_path, manifest_path, wave_path, topology_path = map(Path, sys.argv[1:])
+honesty_path, manifest_path, wave_path, topology_path, caps_path = map(Path, sys.argv[1:])
 honesty = honesty_path.read_text(encoding="utf-8")
 manifest = manifest_path.read_text(encoding="utf-8")
 wave = wave_path.read_text(encoding="utf-8")
 topology = yaml.safe_load(topology_path.read_text(encoding="utf-8")) or {}
+caps = yaml.safe_load(caps_path.read_text(encoding="utf-8")) or {}
 
 for label, text in {
     "verify-engine-honesty": honesty,
@@ -67,5 +70,17 @@ core_ids = (((topology.get("core_mode") or {}).get("core_gate_ids")) or [])
 if "D457" not in core_ids:
     fail("D457 must be part of spine core verify topology")
 
-print("D457 PASS: engine honesty uses current wave machinery and retired dispatch.sh stays subtracted")
+cap_rows = caps.get("capabilities") if isinstance(caps, dict) else {}
+honesty_cap = cap_rows.get("verify.engine.honesty") if isinstance(cap_rows, dict) else {}
+verify_run_cap = cap_rows.get("verify.run") if isinstance(cap_rows, dict) else {}
+if honesty_cap.get("safety") != "mutating":
+    fail("verify.engine.honesty must be registered as mutating because it creates synthetic waves/receipts")
+if verify_run_cap.get("safety") != "mutating":
+    fail("verify.run must be registered as mutating because the honesty scope creates synthetic waves/receipts")
+if "synthetic runtime" not in str(honesty_cap.get("description") or ""):
+    fail("verify.engine.honesty description must disclose synthetic runtime mutation")
+if "synthetic runtime-mutating" not in str(verify_run_cap.get("description") or ""):
+    fail("verify.run description must disclose honesty scope mutation")
+
+print("D457 PASS: engine honesty uses current wave machinery, discloses synthetic runtime mutation, and retired dispatch.sh stays subtracted")
 PY

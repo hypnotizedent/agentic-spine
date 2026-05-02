@@ -13,6 +13,7 @@ CAPS="$ROOT/ops/capabilities.yaml"
 MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 CLOSEOUT_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-closeout"
 CLOSEOUT_CAP="coordinator.lane.closeout"
+WAVE_RESIDUE_CAP="wave.residue"
 WAVE_CMD="$ROOT/ops/commands/wave.sh"
 WAVE_CLOSE_BIN="$ROOT/ops/plugins/core/orchestration/bin/wave-close"
 REGRESSION_SCRIPT="$ROOT/surfaces/verify/lib/wave_hardening_regression.py"
@@ -39,6 +40,8 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 # Coordinator closeout capability wiring must stay in parity.
 rg -n "^[[:space:]]*${CLOSEOUT_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilities.yaml missing $CLOSEOUT_CAP"
 rg -n "${CLOSEOUT_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $CLOSEOUT_CAP"
+rg -n "^[[:space:]]*${WAVE_RESIDUE_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilities.yaml missing $WAVE_RESIDUE_CAP"
+rg -n "${WAVE_RESIDUE_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $WAVE_RESIDUE_CAP"
 
 # Closeout chain markers remain deterministic/idempotent.
 for marker in \
@@ -245,7 +248,7 @@ if failures:
 
 print(
     "D331 PASS: orchestrator packet + closeout controls valid "
-    f"(required={len(required_fields)} closeout={len(closeout_fields)} packets_checked={packets_checked} capability=coordinator.lane.closeout)"
+    f"(required={len(required_fields)} closeout={len(closeout_fields)} packets_checked={packets_checked} capability=coordinator.lane.closeout residue_capability=wave.residue)"
 )
 PY
 
