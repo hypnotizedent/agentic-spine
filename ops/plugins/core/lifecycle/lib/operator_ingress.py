@@ -687,6 +687,42 @@ def _resolve_loop_proof_ref(loop_id: str, state_root: str) -> tuple[str, str]:
     return "", ""
 
 
+def _intent_identity_candidates(
+    doc: dict[str, Any],
+    *,
+    path: Path | None = None,
+) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+    ingress_id = str(doc.get("ingress_id", path.stem if path else "")).strip()
+    if ingress_id:
+        candidates.append(("ingress_id", ingress_id))
+
+    human_intent = doc.get("human_intent") if isinstance(doc.get("human_intent"), dict) else {}
+    for key, label in (
+        ("intent_id", "human_intent_id"),
+        ("source_ref", "source_ref"),
+    ):
+        value = str(human_intent.get(key, "")).strip()
+        if value:
+            candidates.append((label, value))
+
+    return candidates
+
+
+def _text_identity_bindings(
+    text: str,
+    doc: dict[str, Any],
+    *,
+    path: Path | None = None,
+    prefix: str = "",
+) -> list[str]:
+    bindings: list[str] = []
+    for label, value in _intent_identity_candidates(doc, path=path):
+        if value and value in text:
+            bindings.append(f"{prefix}{label}")
+    return list(dict.fromkeys(bindings))
+
+
 _INFERRED_LOOP_PROOF_KINDS = {
     "closed_loop_scope",
     "live_loop_scope",
@@ -705,26 +741,90 @@ def _materialization_bindings(
     if not evidence_ref:
         return []
 
-    candidates: list[tuple[str, str]] = []
-    ingress_id = str(doc.get("ingress_id", path.stem if path else "")).strip()
-    if ingress_id:
-        candidates.append(("ingress_id", ingress_id))
-
-    human_intent = doc.get("human_intent") if isinstance(doc.get("human_intent"), dict) else {}
-    for key, label in (
-        ("intent_id", "human_intent_id"),
-        ("source_ref", "source_ref"),
-    ):
-        value = str(human_intent.get(key, "")).strip()
-        if value:
-            candidates.append((label, value))
-
     try:
         content = Path(evidence_ref).read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return []
 
-    return [label for label, value in candidates if value and value in content]
+    return _text_identity_bindings(content, doc, path=path)
+
+
+def _query_intent_use_receipts(
+    doc: dict[str, Any],
+    *,
+    state_root: str,
+) -> list[dict[str, Any]]:
+    human_intent = doc.get("human_intent") if isinstance(doc.get("human_intent"), dict) else {}
+    human_intent_id = str(human_intent.get("intent_id", "")).strip()
+    if not human_intent_id or iur is None:
+        return []
+
+    conn = None
+    try:
+        conn = iur.connect(iur.db_path(state_root))
+        iur.ensure_schema(conn)
+        return iur.query_receipts(conn, human_intent_ref=human_intent_id, limit=20)
+    except Exception:
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _intent_use_receipt_bindings(
+    receipt: dict[str, Any],
+    doc: dict[str, Any],
+    *,
+    path: Path | None = None,
+) -> list[str]:
+    bindings: list[str] = []
+    source_ref = str(receipt.get("source_ref") or "").strip()
+    if source_ref:
+        bindings.extend(_text_identity_bindings(source_ref, doc, path=path, prefix="intent_use_source_ref:"))
+
+    proof_ref = str(receipt.get("proof_ref") or "").strip()
+    if proof_ref:
+        bindings.extend(_materialization_bindings(proof_ref, doc, path=path))
+
+    return list(dict.fromkeys(bindings))
+
+
+def _binding_intent_use_receipt(
+    receipts: list[dict[str, Any]],
+    doc: dict[str, Any],
+    *,
+    path: Path | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    for receipt in receipts:
+        proof_ref = str(receipt.get("proof_ref") or "").strip()
+        proof_bindings = _materialization_bindings(proof_ref, doc, path=path)
+        if proof_bindings:
+            return receipt, _intent_use_receipt_bindings(receipt, doc, path=path)
+
+    for receipt in receipts:
+        bindings = _intent_use_receipt_bindings(receipt, doc, path=path)
+        if bindings:
+            return receipt, bindings
+    return None, []
+
+
+def _strongest_intent_use_receipt(receipts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not receipts:
+        return None
+    order = {
+        "closeout": 0,
+        "commit": 1,
+        "packet": 2,
+        "loop": 3,
+        "plan": 4,
+    }
+    return sorted(
+        receipts,
+        key=lambda r: (order.get(str(r.get("destination_type")), 9), str(r.get("created_at", ""))),
+    )[0]
 
 
 def _operator_review_readback(
@@ -735,15 +835,20 @@ def _operator_review_readback(
     materialization_kind: str,
     proof_ref: str,
     proof_kind: str,
+    intent_use_receipt_ref: str = "",
+    intent_use_receipt_bindings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Classify whether materialization evidence is explicit or inferred."""
     bindings = _materialization_bindings(proof_ref, doc, path=path)
-    evidence_kind = proof_kind or ""
+    if intent_use_receipt_bindings:
+        bindings = list(dict.fromkeys(bindings + intent_use_receipt_bindings))
+    evidence_ref = proof_ref or intent_use_receipt_ref
+    evidence_kind = proof_kind or ("intent_use_receipt" if intent_use_receipt_ref else "")
     binding = "missing"
     state = "not_required"
     reason = ""
 
-    if proof_ref and bindings:
+    if evidence_ref and bindings:
         binding = "explicit_oi_bound"
     elif materialization_ref and materialization_kind == "loop":
         binding = "inferred_loop_ref"
@@ -757,7 +862,7 @@ def _operator_review_readback(
         state = "required"
         reason = "missing_oi_bound_receipt"
 
-    if proof_ref and not bindings and evidence_kind in _INFERRED_LOOP_PROOF_KINDS:
+    if evidence_ref and not bindings and evidence_kind in _INFERRED_LOOP_PROOF_KINDS:
         state = "required"
         reason = reason or "inferred_loop_binding"
 
@@ -765,7 +870,7 @@ def _operator_review_readback(
         "operator_review": state,
         "review_reason": reason,
         "materialization_binding": binding,
-        "materialization_evidence_ref": proof_ref,
+        "materialization_evidence_ref": evidence_ref,
         "materialization_evidence_kind": evidence_kind,
         "materialization_evidence_binds": bindings,
         "intent_match_confidence": "high" if bindings else ("low" if materialization_ref else "unknown"),
@@ -815,24 +920,13 @@ def build_intent_chain_readback(
     proof_kind = "explicit_ref" if proof_ref else ""
     if not proof_ref and materialization_kind == "loop":
         proof_ref, proof_kind = _resolve_loop_proof_ref(materialization_ref, state_root)
-    intent_use_receipts: list[dict[str, Any]] = []
-    strongest_intent_use: dict[str, Any] | None = None
-    if human_intent_id and iur is not None:
-        try:
-            conn = iur.connect(iur.db_path(state_root))
-            iur.ensure_schema(conn)
-            intent_use_receipts = iur.query_receipts(conn, human_intent_ref=human_intent_id, limit=20)
-            strongest_intent_use = iur.strongest_receipt_for_intent(conn, human_intent_id)
-            conn.close()
-        except Exception:
-            intent_use_receipts = []
-            strongest_intent_use = None
-    binding_intent_use: dict[str, Any] | None = None
-    for receipt in intent_use_receipts:
-        receipt_proof = str(receipt.get("proof_ref") or "").strip()
-        if receipt_proof and _materialization_bindings(receipt_proof, doc, path=path):
-            binding_intent_use = receipt
-            break
+    intent_use_receipts = _query_intent_use_receipts(doc, state_root=state_root)
+    strongest_intent_use = _strongest_intent_use_receipt(intent_use_receipts)
+    binding_intent_use, intent_use_bindings = _binding_intent_use_receipt(
+        intent_use_receipts,
+        doc,
+        path=path,
+    )
     if binding_intent_use:
         strongest_intent_use = binding_intent_use
     if not materialization_ref and strongest_intent_use:
@@ -851,6 +945,8 @@ def build_intent_chain_readback(
         materialization_kind=materialization_kind,
         proof_ref=proof_ref,
         proof_kind=proof_kind,
+        intent_use_receipt_ref=str(binding_intent_use.get("id") or "") if binding_intent_use else "",
+        intent_use_receipt_bindings=intent_use_bindings,
     )
 
     next_missing_seam = "none"
@@ -2157,6 +2253,11 @@ def reconcile_operator_ingress_adoption(
             adoption_ref = loop_candidate
             if new_state in ("adopted", "landed"):
                 proof_ref, proof_kind = _resolve_loop_proof_ref(loop_candidate, state_root)
+                intent_use_receipt, intent_use_bindings = _binding_intent_use_receipt(
+                    _query_intent_use_receipts(doc, state_root=state_root),
+                    doc,
+                    path=path,
+                )
                 review = _operator_review_readback(
                     doc=doc,
                     path=path,
@@ -2164,12 +2265,19 @@ def reconcile_operator_ingress_adoption(
                     materialization_kind="loop",
                     proof_ref=proof_ref,
                     proof_kind=proof_kind,
+                    intent_use_receipt_ref=str(intent_use_receipt.get("id") or "") if intent_use_receipt else "",
+                    intent_use_receipt_bindings=intent_use_bindings,
                 )
                 if review.get("operator_review") == "required":
                     new_state = "review_required"
                     reason = (
                         f"{reason}; operator review required: "
                         f"{review.get('review_reason') or 'missing_oi_bound_receipt'}"
+                    )
+                elif intent_use_receipt and intent_use_bindings:
+                    reason = (
+                        f"{reason}; explicit intent-use receipt "
+                        f"{intent_use_receipt.get('id')} binds OI"
                     )
 
         # Check existing adoption block for idempotency

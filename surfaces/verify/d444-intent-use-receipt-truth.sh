@@ -201,6 +201,73 @@ try:
         raise SystemExit("OI-bound packet proof still required operator review")
     if readback["next_missing_seam"] == "operator_review_required":
         raise SystemExit("OI-bound packet proof still reported operator_review_required")
+
+    loop_routed = oi.create_operator_ingress(
+        state_root=str(tmp),
+        raw_content="Loop-routed OI must accept explicit intent-use receipt source binding.",
+        content_type="note",
+        operator_hint="Verify intent-use receipts can satisfy loop adoption review.",
+        source_device="verify",
+        source_app="d444",
+        submitted_via="verify_self_check",
+    )
+    loop_id = "LOOP-VERIFY-IUR-BOUND-ADOPTION"
+    oi.metabolize_operator_ingress(
+        state_root=str(tmp),
+        ingress_id=loop_routed["ingress_id"],
+        classification="direct_command",
+        disposition="attached",
+        disposition_detail="Verify loop-bound OI adoption reconciliation honors explicit intent-use receipts.",
+        next_stage=loop_id,
+        downstream_refs=[loop_id],
+    )
+    loop_path = Path(loop_routed["path"])
+    loop_doc = yaml.safe_load(loop_path.read_text(encoding="utf-8"))
+    closed_scope_dir = tmp / "archive" / "closed-loop-scopes"
+    closed_scope_dir.mkdir(parents=True, exist_ok=True)
+    closed_scope = closed_scope_dir / f"{loop_id}.scope.md"
+    closed_scope.write_text(
+        "---\ndisposition: landed\n---\nClosed loop proof intentionally omits the source OI.\n",
+        encoding="utf-8",
+    )
+
+    oi.reconcile_operator_ingress_adoption(state_root=str(tmp))
+    loop_doc = yaml.safe_load(loop_path.read_text(encoding="utf-8"))
+    if loop_doc.get("adoption_state") != "review_required":
+        raise SystemExit("loop-bound OI without OI-bound receipt should require review")
+
+    db = iur.connect(iur.db_path(tmp))
+    try:
+        iur.ensure_schema(db)
+        iur.write_receipt(
+            db,
+            human_intent_ref=loop_doc["human_intent"]["intent_id"],
+            used_as="problem_evidence",
+            destination_type="closeout",
+            destination_ref="VERIFY-IUR-BOUND-ADOPTION",
+            reason="Verify source_ref-bound intent-use receipt satisfies loop adoption review.",
+            proof_ref=str(closed_scope),
+            capture_mode="agent_declared",
+            source_ref=loop_routed["ingress_id"],
+            created_by="D444",
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    oi.reconcile_operator_ingress_adoption(state_root=str(tmp))
+    loop_doc = yaml.safe_load(loop_path.read_text(encoding="utf-8"))
+    if loop_doc.get("adoption_state") != "landed":
+        raise SystemExit("source_ref-bound intent-use receipt did not clear loop adoption review_required")
+    if loop_doc.get("operator_review") == "required":
+        raise SystemExit("source_ref-bound intent-use receipt left operator review required")
+    if "explicit intent-use receipt" not in str(loop_doc.get("reconciliation_reason", "")):
+        raise SystemExit("loop adoption did not record intent-use receipt binding reason")
+    loop_readback = oi.build_intent_chain_readback(loop_doc, state_root=str(tmp), path=loop_path)
+    if loop_readback["operator_review"]["state"] != "not_required":
+        raise SystemExit("source_ref-bound intent-use receipt still read back operator review required")
+    if "intent_use_source_ref:ingress_id" not in loop_readback["operator_review"]["evidence_binds"]:
+        raise SystemExit("loop readback did not expose source_ref intent-use binding")
 finally:
     if old_shared_db is not None:
         os.environ["SPINE_SHARED_AUTHORITY_DB"] = old_shared_db
