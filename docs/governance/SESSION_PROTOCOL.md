@@ -64,12 +64,33 @@ direct file reads.
 
 ## Internal Workflow Objects
 
-Evidence and human intent enter first. The objects below govern execution,
-closeout, and recovery after that evidence has a real work home. If you do not
-know which loop you are in, do not create one to satisfy ceremony; identify the
-evidence or operator intent being carried, attach it to an existing loop when
-the fit is clear, and create a loop only when there is a bounded objective with
-acceptance and close criteria.
+### Operator input vs evidence vs state vs work
+
+The spine distinguishes four kinds of thing that agents must not collapse:
+
+- **operator input** — unverified outside thinking from the human steward
+  (raw OI/HI drops, conversational notes, freshly captured ideas). Not
+  authority. Not proof.
+- **evidence** — verified proof: receipts, live probes, repo/runtime
+  observations, authoritative doc readback. Produced by the system
+  acting on or comparing against operator input.
+- **state** — current canonical readback of the system (e.g., `ops status`,
+  `spine.verify`, capability readbacks).
+- **work** — bounded objective after operator input has been compared
+  against state and evidence and a packet/loop has been opened.
+
+The one-way flow is:
+
+`operator input → interpretation → repo/runtime comparison → recommendation
+→ human approval/governed work → evidence/receipt`
+
+Operator input and human intent enter first. The objects below govern
+execution, closeout, and recovery after operator input has a real work
+home and the system has produced verified evidence. If you do not know
+which loop you are in, do not create one to satisfy ceremony; identify
+the operator input being carried, attach it to an existing loop when
+the fit is clear, and create a loop only when there is a bounded objective
+with acceptance and close criteria.
 
 Human intent is provenance and acceptance input, not standalone authority.
 Before mutation, resolve the owning canonical surface, confirm the request fits
@@ -101,8 +122,9 @@ only when public status gives a reason for drilldown.
 A bounded problem slice with a named objective. Opens via `loops.create`
 (enforces WIP cap). Closes via `loop-closeout-finalize` (archives scope,
 generates receipt). If there is no loop, mutation or execution is ungoverned;
-capture/readback/research evidence may still exist as intake, but it must not
-be treated as active work until attached or promoted into a bounded loop.
+operator input (capture/readback/research notes) may still exist as intake,
+but it must not be treated as active work until attached or promoted into
+a bounded loop.
 
 - State: `$SPINE_STATE/loop-scopes/LOOP-{NAME}-{DATE}.scope.md`
 - Authority: `ops/bindings/loop.closeout.contract.yaml`
@@ -178,23 +200,25 @@ kernels.
 
 ### Canonical Execution Lifecycle
 
-A spine work item should read the same way every time: evidence enters first
-(human words, file paths, status, traces, receipts, or operator approval);
-execution runs through a governed capability or governed worker lane;
-verification writes run keys and receipts; final readback reports outcome,
-blockers, and any remaining acceptance gap. Loops, packets, waves, handoffs, and
-continuity updates are the internal custody machinery used when a bounded slice
-needs them. They are not the operator workflow to teach by default. If operator
-approval removes the only review gate and close eligibility passes, the agent
-should close the eligible object and report the receipt instead of asking the
-human steward to rediscover ceremony.
+A spine work item should read the same way every time: operator input
+(human words, file paths, named intent) enters first, joined as needed by
+verified evidence (status readbacks, traces, receipts, governed
+observations); execution runs through a governed capability or governed
+worker lane; verification writes run keys and receipts; final readback
+reports outcome, blockers, and any remaining acceptance gap. Loops,
+packets, waves, handoffs, and continuity updates are the internal custody
+machinery used when a bounded slice needs them. They are not the operator
+workflow to teach by default. If operator approval removes the only review
+gate and close eligibility passes, the agent should close the eligible
+object and report the receipt instead of asking the human steward to
+rediscover ceremony.
 
-Do not invert this into loop-first custody. When a terminal is alive but open
-work is unmapped, the first read is "what evidence or operator intent is this
-terminal carrying?" not "which loop should be claimed?" Loops are bounded work
-containers. Custody becomes first-class when carried evidence is attached to the
-right seam and execution claim/heartbeat/receipt evidence proves who is doing
-the work.
+Do not invert this into loop-first custody. When a terminal is alive but
+open work is unmapped, the first read is "what operator input or human
+intent is this terminal carrying?" not "which loop should be claimed?"
+Loops are bounded work containers. Custody becomes first-class when
+carried operator input is attached to the right seam and execution
+claim/heartbeat/receipt evidence proves who is doing the work.
 
 When the work promotes a new first-class L1/L2 authority or readback, the
 workflow also has a subtraction tail: answer the first-class closure contract,

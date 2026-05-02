@@ -279,7 +279,14 @@ if proc.returncode != 0:
     raise SystemExit(proc.stderr.strip() or proc.stdout.strip())
 for expected in [
     "operator ingress is raw human notepad/context, not workflow authority",
-    "raw OI/HI remains evidence",
+    # Updated by LOOP-OPERATOR-INPUT-VS-EVIDENCE-VOCAB-FOLD-20260502:
+    # the legacy assertion was "raw OI/HI remains evidence" — that wording
+    # collapsed unverified operator input with verified proof. The fold
+    # corrected the guide to "raw OI/HI remains operator input ... not
+    # evidence", reserving "evidence" for receipts/probes/runtime
+    # observations/authoritative doc readback.
+    "raw OI/HI remains operator input",
+    "not evidence",
     "raw OI never becomes execution by itself",
 ]:
     if expected not in proc.stdout:

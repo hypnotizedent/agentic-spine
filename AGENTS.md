@@ -144,11 +144,15 @@ Non-promoted work, synthesis artifacts, and parked material belong in
 New repo docs require deliberate promotion and human-steward co-sign.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
-Evidence and human intent are the entry point; loops are bounded execution
-containers, not intake buckets. Do not create a loop just to hold Q&A, make
-status/readback prettier, or satisfy packet binding. Attach evidence to an
-existing loop when the fit is clear; create a loop only when there is a bounded
-objective with acceptance and close criteria.
+Operator input and human intent are the entry point; loops are bounded
+execution containers, not intake buckets. Operator input is unverified
+outside thinking from the human steward (raw OI/HI drops); evidence is
+the verified proof — receipts, live probes, repo/runtime observations,
+authoritative doc readback — that the system produces by acting on or
+comparing against operator input. Do not create a loop just to hold Q&A,
+make status/readback prettier, or satisfy packet binding. Attach operator
+input to an existing loop when the fit is clear; create a loop only when
+there is a bounded objective with acceptance and close criteria.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
 Human intent, examples, and packet prose are inputs to consider, not authority
