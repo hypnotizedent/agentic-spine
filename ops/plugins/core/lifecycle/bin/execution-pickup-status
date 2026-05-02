@@ -143,6 +143,9 @@ def receipt_refs_from(row: dict[str, Any]) -> list[str]:
             value = str(bridge_proof.get(key) or "").strip()
             if value:
                 refs.append(value)
+        run_keys = bridge_proof.get("run_keys")
+        if isinstance(run_keys, list):
+            refs.extend(str(item).strip() for item in run_keys if str(item).strip())
     result = str(row.get("result") or "")
     for token in result.replace(",", " ").split():
         if token.startswith("run_key="):
@@ -156,6 +159,7 @@ SAFETY_TIERS = (
     "capability",
     "bounded_readonly_provider_agent",
     "tool_using_agent_v2_1_readonly_repo",
+    "tool_using_agent_v2_2_readonly_capability_calls",
     "tool_using_agent_reserved",
     "destructive_manual",
 )
@@ -167,6 +171,11 @@ def safety_tier_for(row: dict[str, Any]) -> str:
         bridge_proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         bridge_scope = str(bridge_proof.get("scope") or "").strip()
+        if (
+            bridge_proof.get("scope") == "tool_using_agent_v2_2_readonly_capability_calls"
+            or str(payload.get("tool_set") or "").strip() == "read_only_capability_calls"
+        ):
+            return "tool_using_agent_v2_2_readonly_capability_calls"
         if bridge_proof.get("scope") == "tool_using_agent_v2_1_readonly_repo" or str(payload.get("tool_set") or "").strip() == "read_only_repo":
             return "tool_using_agent_v2_1_readonly_repo"
         if bridge_scope.startswith("tool_using_agent_"):
@@ -448,6 +457,14 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         and (row.get("bridge_proof") or {}).get("scope") == "tool_using_agent_v2_1_readonly_repo"
         for row in rows
     )
+    delivered_v2_2 = any(
+        row.get("pickup_state") == "done"
+        and str(row.get("route_target") or "").strip().lower() == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and (row.get("bridge_proof") or {}).get("status") == "completed"
+        and (row.get("bridge_proof") or {}).get("scope") == "tool_using_agent_v2_2_readonly_capability_calls"
+        for row in rows
+    )
     delivered_bridge = any(
         row.get("pickup_state") == "done"
         and str(row.get("route_target") or "").strip().lower() == "agent_tool"
@@ -467,9 +484,11 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "operational_capability_worker": sum(1 for row in active_rows if row.get("realization") == "operational_capability_worker"),
         "interactive_worker_handoff": sum(1 for row in active_rows if row.get("realization") == "interactive_worker_handoff"),
         "ai_agent_bridge": (
-            "delivered (tool-using: read-only repo inspection)"
-            if delivered_v2_1
+            "delivered (tool-using: read-only capability calls)"
+            if delivered_v2_2
+            else ("delivered (tool-using: read-only repo inspection)" if delivered_v2_1
             else ("delivered (bounded: readonly provider agent)" if delivered_bridge else "not_delivered")
+            )
         ),
         "safety_tiers": safety_tiers,
     }
