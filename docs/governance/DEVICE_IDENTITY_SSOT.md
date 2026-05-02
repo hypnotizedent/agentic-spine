@@ -16,7 +16,10 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 > Run `./bin/ops cap run device.identity.readmodel.generate` for the current
 > device identity read model.
 >
-> For current SSH/access-path truth -> CHECK `ops/bindings/ssh.targets.yaml`.
+> For current SSH/access-path evidence -> run `./bin/ops cap run device.identity.readmodel.generate`
+> and read `$SPINE_STATE/domain-state/ssh.access.projection.yaml`.
+> `ops/bindings/ssh.targets.yaml` remains the access-path source binding; it is
+> not machine identity, role, placement, watcher, backup, or recovery truth.
 > For VM lifecycle state -> CHECK `ops/bindings/vm.lifecycle.yaml`.
 > For hardware inventory -> CHECK `ops/bindings/hardware.inventory.yaml`.
 > For operator-owned machine identity -> CHECK `ops/bindings/operator.hardware.inventory.yaml`.
@@ -78,7 +81,8 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 
 | Domain | Authority File | What It Answers |
 |--------|---------------|-----------------|
-| SSH targets / access paths | `ops/bindings/ssh.targets.yaml` | How to reach each host (IP, user, policy) |
+| SSH/access projection | `./bin/ops cap run device.identity.readmodel.generate` -> `$SPINE_STATE/domain-state/ssh.access.projection.yaml` | Generated access evidence for how to reach each host |
+| SSH targets source binding | `ops/bindings/ssh.targets.yaml` | Source access-path facts (IP, user, policy); not machine authority |
 | VM lifecycle | `ops/bindings/vm.lifecycle.yaml` | What VMs exist, status, workloads, IPs |
 | Hardware inventory | `ops/bindings/hardware.inventory.yaml` | Physical machines, storage controllers, recovery |
 | Operator hardware | `ops/bindings/operator.hardware.inventory.yaml` | Operator-owned machine candidacy |

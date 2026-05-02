@@ -4,7 +4,9 @@ set -euo pipefail
 # infra.device.identity.readmodel.generate
 # Generate device identity read model from structured authority bindings.
 # Sources: ssh.targets.yaml, vm.lifecycle.yaml, hardware.inventory.yaml
-# Output:  $SPINE_STATE/domain-state/device.identity.readmodel.md (runtime only)
+# Outputs:
+#   $SPINE_STATE/domain-state/device.identity.readmodel.md (runtime only)
+#   $SPINE_STATE/domain-state/ssh.access.projection.yaml (runtime only)
 #
 # This replaces the factual host/IP/VM tables that were previously maintained
 # manually in docs/governance/DEVICE_IDENTITY_SSOT.md. The doc now contains
@@ -27,9 +29,44 @@ done
 SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
 OUTPUT_DIR="$SPINE_STATE/domain-state"
 OUTPUT_FILE="$OUTPUT_DIR/device.identity.readmodel.md"
+ACCESS_PROJECTION_FILE="$OUTPUT_DIR/ssh.access.projection.yaml"
 NOW="$(TZ=UTC date '+%Y-%m-%dT%H:%M:%SZ')"
 
 mkdir -p "$OUTPUT_DIR"
+
+# --- SSH/access projection ---
+# This keeps access-path facts visible as generated runtime state while
+# preserving node admission/recovery as machine authority.
+NOW="$NOW" yq -P '
+  {
+    "status": "generated",
+    "authority_state": "projection",
+    "generated_at_utc": env(NOW),
+    "source_surface": "ops/bindings/ssh.targets.yaml",
+    "projection_of": "ops/bindings/ssh.targets.yaml",
+    "canonical_readback": "node.admission.status",
+    "recovery_readback": "node.recovery.status",
+    "subtraction_statement": "SSH targets supply access-path evidence only; machine identity, role, placement, watcher, backup, and recovery truth resolve through canonical node readbacks.",
+    "rows": (
+      .ssh.targets
+      | map({
+          "id": .id,
+          "host": (.host // ""),
+          "tailscale_ip": (.tailscale_ip // ""),
+          "user": (.user // ""),
+          "site": (.site // ""),
+          "access_policy": (.access_policy // "lan_first"),
+          "probe_via": (.probe_via // ""),
+          "optional": (.optional // false),
+          "tags": (.tags // []),
+          "description": (.description // ""),
+          "source_surface": "ops/bindings/ssh.targets.yaml",
+          "authority_role": "access_evidence_only",
+          "demoted_by": "node.admission.status"
+        })
+    )
+  }
+' "$SSH_TARGETS" > "$ACCESS_PROJECTION_FILE"
 
 # --- Tailscale host table (all targets with tailscale_ip) ---
 TS_HOSTS="$(yq -r '
@@ -298,7 +335,8 @@ cat <<'FOOTER'
 ## Authority Pointers
 
 - **Naming rules and topology memory:** `docs/governance/DEVICE_IDENTITY_SSOT.md`
-- **SSH target authority:** `ops/bindings/ssh.targets.yaml`
+- **SSH access source binding:** `ops/bindings/ssh.targets.yaml`
+- **Generated access projection:** `$SPINE_STATE/domain-state/ssh.access.projection.yaml`
 - **VM lifecycle authority:** `ops/bindings/vm.lifecycle.yaml`
 - **Hardware inventory:** `ops/bindings/hardware.inventory.yaml`
 - **Service endpoints:** `ops/bindings/probe.registry.yaml`
@@ -308,5 +346,6 @@ FOOTER
 } > "$OUTPUT_FILE"
 
 echo "Generated: $OUTPUT_FILE"
+echo "Generated: $ACCESS_PROJECTION_FILE"
 echo ""
 cat "$OUTPUT_FILE"

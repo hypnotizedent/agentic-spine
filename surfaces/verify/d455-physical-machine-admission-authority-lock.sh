@@ -9,6 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ADMISSION_STATUS="$ROOT/ops/plugins/infra/bin/node-admission-status"
 RECOVERY_STATUS="$ROOT/ops/plugins/infra/bin/node-recovery-status"
+READMODEL_GENERATOR="$ROOT/ops/plugins/infra/bin/infra-device-identity-readmodel-generate"
 SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
 SHOP_DEVICES="$ROOT/ops/bindings/shop.device.registry.yaml"
 FLEET="$ROOT/ops/bindings/fleet.admission.classification.yaml"
@@ -19,6 +20,7 @@ fail() { echo "D455 FAIL: $*" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -x "$ADMISSION_STATUS" ]] || fail "missing executable node-admission-status"
 [[ -x "$RECOVERY_STATUS" ]] || fail "missing executable node-recovery-status"
+[[ -x "$READMODEL_GENERATOR" ]] || fail "missing executable infra-device-identity-readmodel-generate"
 [[ -f "$SSH_TARGETS" ]] || fail "missing ssh.targets.yaml"
 [[ -f "$SHOP_DEVICES" ]] || fail "missing shop.device.registry.yaml"
 [[ -f "$FLEET" ]] || fail "missing fleet.admission.classification.yaml"
@@ -26,6 +28,13 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 
 python3 -m py_compile "$ADMISSION_STATUS"
 bash -n "$RECOVERY_STATUS"
+bash -n "$READMODEL_GENERATOR"
+
+TMP_STATE="$(mktemp -d "${TMPDIR:-/tmp}/d455-spine-state.XXXXXX")"
+trap 'rm -rf "$TMP_STATE"' EXIT
+SPINE_STATE="$TMP_STATE" SPINE_ROOT="$ROOT" "$READMODEL_GENERATOR" >/tmp/d455-device-identity-readmodel.out
+ACCESS_PROJECTION="$TMP_STATE/domain-state/ssh.access.projection.yaml"
+[[ -f "$ACCESS_PROJECTION" ]] || fail "device identity readmodel generator did not emit ssh.access.projection.yaml"
 
 SPINE_ROOT="$ROOT" "$ADMISSION_STATUS" --node windows-mint --machine-spec --json >/tmp/d455-windows-mint-admission.json
 SPINE_ROOT="$ROOT" "$ADMISSION_STATUS" --node dfs-laptop --machine-spec --json >/tmp/d455-dfs-laptop-admission.json
@@ -34,7 +43,7 @@ SPINE_ROOT="$ROOT" "$RECOVERY_STATUS" --node windows-mint --json >/tmp/d455-wind
 SPINE_ROOT="$ROOT" "$RECOVERY_STATUS" --node dfs-laptop --json >/tmp/d455-dfs-laptop-recovery.json
 SPINE_ROOT="$ROOT" "$RECOVERY_STATUS" --node screenpro-lenovo --json >/tmp/d455-screenpro-lenovo-recovery.json
 
-python3 - "$SSH_TARGETS" "$SHOP_DEVICES" "$FLEET" "$GATE_TOPOLOGY" \
+python3 - "$SSH_TARGETS" "$SHOP_DEVICES" "$FLEET" "$GATE_TOPOLOGY" "$ACCESS_PROJECTION" \
   /tmp/d455-windows-mint-admission.json /tmp/d455-dfs-laptop-admission.json /tmp/d455-screenpro-lenovo-admission.json \
   /tmp/d455-windows-mint-recovery.json /tmp/d455-dfs-laptop-recovery.json /tmp/d455-screenpro-lenovo-recovery.json <<'PY'
 import json
@@ -56,11 +65,12 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
-ssh_path, shop_path, fleet_path, topology_path, *json_paths = map(Path, sys.argv[1:])
+ssh_path, shop_path, fleet_path, topology_path, access_projection_path, *json_paths = map(Path, sys.argv[1:])
 ssh = load_yaml(ssh_path)
 shop = load_yaml(shop_path)
 fleet = load_yaml(fleet_path)
 topology = load_yaml(topology_path)
+access_projection = load_yaml(access_projection_path)
 
 ssh_text = ssh_path.read_text(encoding="utf-8")
 shop_text = shop_path.read_text(encoding="utf-8")
@@ -78,6 +88,36 @@ if "D455" not in core_ids:
 ssh_targets = ((ssh.get("ssh") or {}).get("targets") or [])
 shop_devices = shop.get("devices") or []
 fleet_rows = fleet.get("fleet") or {}
+
+if access_projection.get("status") != "generated":
+    fail("ssh.access.projection.yaml must declare status: generated")
+if access_projection.get("authority_state") != "projection":
+    fail("ssh.access.projection.yaml must declare authority_state: projection")
+if access_projection.get("projection_of") != "ops/bindings/ssh.targets.yaml":
+    fail("ssh.access.projection.yaml must project ops/bindings/ssh.targets.yaml")
+if access_projection.get("canonical_readback") != "node.admission.status":
+    fail("ssh.access.projection.yaml must point machine truth at node.admission.status")
+statement = str(access_projection.get("subtraction_statement") or "")
+for phrase in ["access-path evidence only", "machine identity", "canonical node readbacks"]:
+    if phrase not in statement:
+        fail(f"ssh.access.projection.yaml must teach access-only subtraction: missing {phrase!r}")
+projection_rows = access_projection.get("rows") or []
+if not isinstance(projection_rows, list) or not projection_rows:
+    fail("ssh.access.projection.yaml must emit rows")
+projection_by_id = {row.get("id"): row for row in projection_rows if isinstance(row, dict)}
+ssh_ids = {row.get("id") for row in ssh_targets if isinstance(row, dict)}
+if set(projection_by_id) != ssh_ids:
+    fail("ssh.access.projection.yaml rows must exactly match ssh.targets.yaml ids")
+for sample_id in ["pve", "pve-r620", "nas", "screenpro-lenovo"]:
+    row = projection_by_id.get(sample_id)
+    if not row:
+        fail(f"ssh.access.projection.yaml missing sample access row: {sample_id}")
+    if row.get("authority_role") != "access_evidence_only":
+        fail(f"{sample_id} access projection must be access_evidence_only")
+    if row.get("demoted_by") != "node.admission.status":
+        fail(f"{sample_id} access projection must be demoted by node.admission.status")
+    if row.get("source_surface") != "ops/bindings/ssh.targets.yaml":
+        fail(f"{sample_id} access projection must name ssh.targets.yaml source")
 
 for machine_id in ["dfs-laptop", "screenpro-lenovo"]:
     if not any(isinstance(row, dict) and row.get("id") == machine_id for row in ssh_targets):
