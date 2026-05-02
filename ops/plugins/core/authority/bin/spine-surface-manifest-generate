@@ -878,6 +878,129 @@ def _binding_disposition(path: Path, rel: str, text: str) -> tuple[str, str, str
     )
 
 
+def _entry_doc_text(path: Path) -> tuple[list[str], str]:
+    docs: list[str] = []
+    chunks: list[str] = []
+    for name in ("AGENT.md", "AGENTS.md", "README.md", "app.contract.yaml"):
+        doc = path / name
+        if doc.is_file():
+            docs.append(name)
+            chunks.append(read_text(doc))
+    return docs, "\n".join(chunks)
+
+
+def _workbench_surface_disposition(path: Path, workspace: Path) -> dict[str, Any]:
+    """Classify one Workbench top-level or agents/* surface.
+
+    This is a readback only. It does not assign authority; it reports whether
+    the surface proves its Workbench L2 role from existing local entry docs.
+    """
+    rel = _workspace_rel(workspace, path)
+    name = path.name
+    docs, text = _entry_doc_text(path)
+    lower = text.lower()
+    file_count = sum(1 for child in path.rglob("*") if child.is_file())
+
+    explicit_l2 = any(
+        phrase in lower
+        for phrase in (
+            "l2",
+            "shared operational rail",
+            "operator surface",
+            "operator rail",
+            "operator tooling",
+            "shared rail",
+            "adapter",
+            "validator",
+            "generator",
+        )
+    )
+    compatibility = any(phrase in lower for phrase in ("compatibility shim", "shim only", "pointer only"))
+    generated = any(phrase in lower for phrase in ("status: generated", "generated projection", "managed_by:"))
+    l3_or_product = any(
+        phrase in lower
+        for phrase in (
+            "l3",
+            "project body",
+            "product body",
+            "product code",
+            "domain body",
+        )
+    )
+    no_runtime = any(
+        phrase in lower
+        for phrase in (
+            "no runtime queues",
+            "no watchers",
+            "no standalone cron",
+            "no standalone watcher",
+            "must not become an infrastructure control plane",
+        )
+    )
+
+    classification = "ambiguous_workbench_surface"
+    proof_status = "ambiguous"
+    recommended_action = "classify_before_new_work"
+    reason = "surface has no enough entry text proving L2/shared-rail role"
+
+    if not docs:
+        classification = "ambiguous_no_entry_doc"
+        proof_status = "not_proved"
+        recommended_action = "add bounded entry classification or retire/move"
+        reason = "surface has files but no AGENT/README/app contract entry"
+    elif compatibility:
+        classification = "compatibility_shim"
+        proof_status = "proved_secondary"
+        recommended_action = "keep only while it names source authority and retirement path"
+        reason = "entry text declares compatibility/shim behavior"
+    elif generated:
+        classification = "generated_projection"
+        proof_status = "proved_secondary"
+        recommended_action = "keep only if source authority and regeneration path stay explicit"
+        reason = "entry text declares generated projection/materialization behavior"
+    elif name in {"dotfiles", "scripts", "bin"}:
+        classification = "l2_operator_materialization_or_tooling"
+        proof_status = "proved_l2"
+        recommended_action = "keep in workbench; individual factual outputs still need provenance"
+        reason = "top-level Workbench tooling/materialization home"
+    elif name in {"infra", "docs", "ops"}:
+        classification = "mixed_workbench_support_surface"
+        proof_status = "partial"
+        recommended_action = "keep support docs/configs, but classify factual/domain subtrees before new work"
+        reason = "top-level Workbench support surface is allowed but contains mixed authority classes"
+    elif name == "backup-plane":
+        classification = "l2_shared_rail"
+        proof_status = "proved_l2"
+        recommended_action = "keep as generic adapter; do not promote current estate backup truth here"
+        reason = "entry text declares generic backup-class adapter and denies estate authority"
+    elif explicit_l2 and not l3_or_product:
+        classification = "l2_shared_rail"
+        proof_status = "proved_l2"
+        recommended_action = "keep in workbench while spine remains governance authority"
+        reason = "entry text proves L2/operator/shared-rail role"
+    elif explicit_l2 and l3_or_product:
+        classification = "mixed_l2_l3_language"
+        proof_status = "partial"
+        recommended_action = "subtract or move domain/product body portions; keep only L2 rail"
+        reason = "entry text mixes L2/operator rail language with L3/product-body language"
+    elif no_runtime:
+        classification = "workbench_support_surface"
+        proof_status = "partial"
+        recommended_action = "keep only if source authority and invocation route stay spine-owned"
+        reason = "entry text denies runtime/control-plane ownership but does not fully prove L2 role"
+
+    return {
+        "path": rel,
+        "name": name,
+        "classification": classification,
+        "proof_status": proof_status,
+        "entry_docs": docs,
+        "file_count": file_count,
+        "recommended_action": recommended_action,
+        "reason": reason,
+    }
+
+
 def build_domain_surface_inventory(root: Path, *, generated_at_utc: str) -> dict[str, Any]:
     """Build the generated repo-topology readback for domain-looking surfaces.
 
@@ -956,61 +1079,23 @@ def build_domain_surface_inventory(root: Path, *, generated_at_utc: str) -> dict
         for path in (workspace / "mint-modules", workspace / "products")
         if path.exists()
     ]
-    l2_candidates = {
-        "ai-consolidation",
-        "artie",
-        "control-node",
-        "flying-dutchman",
-        "mint-agent",
-        "model-adapter",
-        "task-envelope",
-        "translator-node",
-        "workbench",
-    }
-    l3_candidates = {
-        "calendar",
-        "communications",
-        "finance",
-        "home",
-        "immich",
-        "media",
-        "ms-graph",
-        "n8n",
-        "health",
-        "travel",
-        "investment",
-        "cc-benefits-tracker",
-        "vouchervault",
-        "inbox-shield",
-    }
-    product_adjacent = {"surveillance", "products", "mint-os"}
     workbench_rows: list[dict[str, Any]] = []
+    if workbench_root.exists():
+        for path in sorted(p for p in workbench_root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+            if path.name == "agents":
+                continue
+            if not any(child.is_file() for child in path.rglob("*")):
+                continue
+            workbench_rows.append(_workbench_surface_disposition(path, workspace))
+
     agents_root = workbench_root / "agents"
     if agents_root.exists():
         for path in sorted(p for p in agents_root.iterdir() if p.is_dir()):
             if not any(child.is_file() for child in path.rglob("*")):
                 continue
-            name = path.name
-            if name in l2_candidates:
-                classification = "l2_shared_rail_candidate"
-                action = "keep_in_workbench_if_reusable_across_workloads"
-            elif name in l3_candidates:
-                classification = "l3_project_body_candidate"
-                action = "move_to_projects_when_source_authority_and_generated_spine_projection_are_ready"
-            elif name in product_adjacent:
-                classification = "product_or_pointer_candidate"
-                action = "move_to_products_or_named_product_repo_when stable; keep pointer generated only"
-            else:
-                classification = "workbench_agent_unclassified"
-                action = "classify_before_new_work"
-            workbench_rows.append(
-                {
-                    "path": _workspace_rel(workspace, path),
-                    "name": name,
-                    "classification": classification,
-                    "recommended_action": action,
-                }
-            )
+            row = _workbench_surface_disposition(path, workspace)
+            row["surface_family"] = "agents"
+            workbench_rows.append(row)
 
     project_rows: list[dict[str, Any]] = []
     if projects_root.exists():
@@ -1041,6 +1126,10 @@ def build_domain_surface_inventory(root: Path, *, generated_at_utc: str) -> dict
     for row in all_rows:
         key = str(row.get("classification") or "unknown")
         counts[key] = counts.get(key, 0) + 1
+    workbench_proof_counts: dict[str, int] = {}
+    for row in workbench_rows:
+        key = str(row.get("proof_status") or "unknown")
+        workbench_proof_counts[key] = workbench_proof_counts.get(key, 0) + 1
 
     return {
         "manifest_id": DOMAIN_INVENTORY_ID,
@@ -1070,9 +1159,13 @@ def build_domain_surface_inventory(root: Path, *, generated_at_utc: str) -> dict
             "domain_like_capability_count": len(capability_rows),
             "repo_domain_surface_count": len(repo_rows),
             "workbench_agent_home_count": len(workbench_rows),
+            "workbench_l2_proved_count": workbench_proof_counts.get("proved_l2", 0),
+            "workbench_partial_count": workbench_proof_counts.get("partial", 0),
+            "workbench_ambiguous_count": workbench_proof_counts.get("ambiguous", 0) + workbench_proof_counts.get("not_proved", 0),
             "project_home_count": len(project_rows),
             "product_home_count": len(product_rows),
             "classification_counts": dict(sorted(counts.items())),
+            "workbench_proof_counts": dict(sorted(workbench_proof_counts.items())),
         },
         "capabilities": capability_rows,
         "repo_surfaces": repo_rows,
@@ -1101,10 +1194,22 @@ def build_domain_inventory_markdown(data: dict[str, Any]) -> str:
         lines.append(f"- `{key}`: `{value}`")
     lines.extend(["", "## Summary"])
     summary = data["summary"]
-    for key in ("domain_like_capability_count", "repo_domain_surface_count", "workbench_agent_home_count", "project_home_count", "product_home_count"):
+    for key in (
+        "domain_like_capability_count",
+        "repo_domain_surface_count",
+        "workbench_agent_home_count",
+        "workbench_l2_proved_count",
+        "workbench_partial_count",
+        "workbench_ambiguous_count",
+        "project_home_count",
+        "product_home_count",
+    ):
         lines.append(f"- `{key}`: `{summary[key]}`")
     lines.append("- `classification_counts`:")
     for key, value in summary["classification_counts"].items():
+        lines.append(f"  - `{key}`: `{value}`")
+    lines.append("- `workbench_proof_counts`:")
+    for key, value in summary["workbench_proof_counts"].items():
         lines.append(f"  - `{key}`: `{value}`")
 
     lines.extend(["", "## Capabilities"])
@@ -1121,7 +1226,11 @@ def build_domain_inventory_markdown(data: dict[str, Any]) -> str:
         )
     lines.extend(["", "## Workbench Agent Homes"])
     for row in data["workbench_agent_homes"]:
-        lines.append(f"- `{row['path']}`: `{row['classification']}` action=`{row['recommended_action']}`")
+        entry_docs = ", ".join(row.get("entry_docs") or [])
+        lines.append(
+            f"- `{row['path']}`: `{row['classification']}` proof=`{row.get('proof_status', '')}` "
+            f"entries=`{entry_docs}` action=`{row['recommended_action']}`"
+        )
     lines.extend(["", "## Project Homes"])
     for row in data["project_homes"]:
         lines.append(f"- `{row['path']}`: `{row['classification']}` action=`{row['recommended_action']}`")
