@@ -245,9 +245,9 @@ execution_lane_contract:
         Work has entered an autonomous task lane and will be claimed/executed
         by the standing mailroom worker according to that lane's policy.
       current_limitations:
-        - autonomous controller-prompt execution is currently capability-backed; open-ended agent_tool execution remains deferred
+        - autonomous controller-prompt execution is capability-backed; bounded provider-backed agent_tool execution is active only when bridge_allowed=true and route_prompt_ref is present
         - task lifecycle state remains in the operational task envelope; public join/readback is execution.pickup.status
-        - the active worker runs `ops cap run <capability>`; it does not spawn Claude/OpenAI/API agents or inject compiled prompts into a model context
+        - the active worker runs `ops cap run <capability>` for capability routes and a no-tools provider subprocess for the bounded agent_tool bridge
 
     durable_remote_transfer_job:
       status: contract_defined
@@ -270,20 +270,23 @@ execution_lane_contract:
         - destructive cleanup remains a separate approval gate after copy and verification
 
     agent_tool_bridge:
-      status: deferred
+      status: bounded_active
       realization_mode: operational
       lane_id: agent_tool_bridge
-      admission_surface: undefined
-      queue_state_surface: undefined
-      claim_surface: undefined
-      heartbeat_surface: undefined
-      terminal_completion_surface: undefined
-      escalation_surface: undefined
+      admission_surface: mailroom.task.enqueue --route-target agent_tool --bridge-allowed --route-prompt-ref
+      queue_state_surface: queued/running/done/failed task envelopes
+      claim_surface: mailroom.task.claim
+      heartbeat_surface: mailroom.task.heartbeat while spawned provider process is active
+      terminal_completion_surface: mailroom.task.complete|mailroom.task.fail with bridge_proof
+      escalation_surface: task failure + worker heartbeat drift + provider timeout
       truthful_operator_statement: >
-        No governed agent-tool bridge is delivered today. A future bridge must
-        prove spawn, prompt injection, heartbeat, outcome, receipt collection,
-        and closeout before any surface may claim orchestrated AI-agent
-        execution.
+        A bounded no-tools provider-backed agent bridge is delivered for tasks
+        that explicitly opt in with bridge_allowed=true and route_prompt_ref.
+        Generic tool-using AI-agent autonomy remains out of scope.
+      current_limitations:
+        - spawned provider agent receives only a bounded prompt; it has no shell, git, filesystem, ops capability, or mutation access
+        - one task at a time under the existing mailroom worker claim policy
+        - terminal receipt is the task envelope bridge_proof plus provider run artifacts; no new receipt class
 
   invariants:
     - no execution request may claim autonomous behavior without a standing operational realization

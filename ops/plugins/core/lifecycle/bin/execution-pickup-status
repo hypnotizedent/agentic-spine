@@ -125,6 +125,12 @@ def receipt_refs_from(row: dict[str, Any]) -> list[str]:
     run_key = str(row.get("run_key") or "").strip()
     if run_key:
         refs.append(run_key)
+    bridge_proof = row.get("bridge_proof")
+    if isinstance(bridge_proof, dict):
+        for key in ("run_id", "run_dir", "request_file", "result_file"):
+            value = str(bridge_proof.get(key) or "").strip()
+            if value:
+                refs.append(value)
     result = str(row.get("result") or "")
     for token in result.replace(",", " ").split():
         if token.startswith("run_key="):
@@ -325,6 +331,8 @@ def collect_task_dir(rows: list[dict[str, Any]], state_name: str) -> None:
             heartbeat_age_seconds=heartbeat_age,
             route_target=doc.get("route_target"),
             route_capability=doc.get("route_capability"),
+            route_prompt_ref=doc.get("route_prompt_ref"),
+            bridge_proof=doc.get("bridge_proof") if isinstance(doc.get("bridge_proof"), dict) else None,
             task=str(doc.get("summary") or "")[:180],
             result=doc.get("result"),
             failure_reason=doc.get("failure_reason"),
@@ -376,6 +384,14 @@ def worker_status() -> dict[str, Any]:
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     active_rows = [row for row in rows if row.get("pickup_state") not in TERMINAL_TASK_STATES]
+    delivered_bridge = any(
+        row.get("pickup_state") == "done"
+        and str(row.get("route_target") or "").strip().lower() == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and (row.get("bridge_proof") or {}).get("status") == "completed"
+        and (row.get("bridge_proof") or {}).get("scope") == "bounded_readonly_provider_agent"
+        for row in rows
+    )
     return {
         "requests_total": len(active_rows),
         "not_claimed": sum(1 for row in active_rows if row.get("pickup_state") == "not_claimed"),
@@ -386,7 +402,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "wave_dispatch_request_only": sum(1 for row in active_rows if row.get("realization") == "wave_dispatch_request_only"),
         "operational_capability_worker": sum(1 for row in active_rows if row.get("realization") == "operational_capability_worker"),
         "interactive_worker_handoff": sum(1 for row in active_rows if row.get("realization") == "interactive_worker_handoff"),
-        "ai_agent_bridge": "not_delivered",
+        "ai_agent_bridge": "delivered (bounded: readonly provider agent)" if delivered_bridge else "not_delivered",
     }
 
 

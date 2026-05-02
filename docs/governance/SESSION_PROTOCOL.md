@@ -247,17 +247,18 @@ operator or system intent
   → task admitted to execution pickup        [governed: mailroom.task.enqueue]
     → worker lane claims task                [governed: mailroom.task.claim]
       → worker proves liveness               [governed: mailroom.task.heartbeat]
-      → worker executes allowlisted capability [governed: bounded capability lane]
+      → worker executes bounded route        [governed: capability or no-tools agent bridge]
       → task reaches terminal result         [governed: mailroom.task.complete|mailroom.task.fail]
 ```
 
 This lane is operational for bounded unattended work, but the active truthful
-controller-prompt class is capability-backed rather than open-ended
-`agent_tool` execution. The worker claims the task, proves liveness, executes
-the allowlisted capability, then drives canonical closeout through
+controller-prompt class is capability-backed or explicitly admitted as the
+bounded no-tools `agent_tool` bridge. The worker claims the task, proves
+liveness, executes the bounded route, then drives canonical closeout through
 `mailroom.task.complete|mailroom.task.fail` plus the governed close writer when
-a packet exists. It does not decide node admission, runtime placement, backup
-authority, watcher/observability authority, or VM/service retirement.
+a packet exists. It does not grant spawned agents shell/filesystem/git/ops
+capability access, and it does not decide node admission, runtime placement,
+backup authority, watcher/observability authority, or VM/service retirement.
 
 This is the node-architecture path for unattended work:
 

@@ -1777,9 +1777,12 @@ if mode == "--json":
         "execution_pickup": execution_pickup_status,
         "execution_lane_truth": {
             "capability_worker": "operational_capability_worker",
-            "agent_tool_bridge": "deferred",
+            "agent_tool_bridge": execution_pickup_status.get("summary", {}).get("ai_agent_bridge", "not_delivered") if isinstance(execution_pickup_status.get("summary"), dict) else "not_delivered",
             "interactive_delegation": "explicit_worker_pickup_required",
-            "autonomous_ai_agent_lane": "not_delivered",
+            "autonomous_ai_agent_lane": "bounded_no_tools_bridge" if (
+                isinstance(execution_pickup_status.get("summary"), dict)
+                and execution_pickup_status.get("summary", {}).get("ai_agent_bridge") == "delivered (bounded: readonly provider agent)"
+            ) else "not_delivered",
             "public_readback": "execution.pickup.status",
         },
         "counts": {
@@ -2032,7 +2035,7 @@ if mode != "--expert":
         print(f"  durable transfers: {_dt_total} total, {int(_dt_summary.get('active', 0) or 0)} active, {int(_dt_summary.get('stale', 0) or 0)} attention")
     print(f"  execution pickup:  {_pickup_total} request(s), {_pickup_running} claimed/running, {_pickup_unclaimed} not claimed, {_pickup_stale} stale")
     print(f"  capability worker: {_pickup_worker_status}{' fresh' if _pickup_worker_fresh else ' not fresh'}")
-    print("  AI agent bridge:   not delivered")
+    print(f"  AI agent bridge:   {_pickup_summary.get('ai_agent_bridge', 'not_delivered')}")
     print()
 
     print("HEALTH")

@@ -50,8 +50,26 @@ data = json.load(open(path, encoding="utf-8"))
 summary = data.get("summary") or {}
 subtraction = data.get("subtraction") or {}
 
-if summary.get("ai_agent_bridge") != "not_delivered":
-    raise SystemExit("D452 FAIL: AI agent bridge must remain explicitly not_delivered")
+bridge_state = summary.get("ai_agent_bridge")
+if bridge_state == "not_delivered":
+    pass
+elif bridge_state == "delivered (bounded: readonly provider agent)":
+    proofs = [
+        row for row in data.get("requests") or []
+        if row.get("pickup_state") == "done"
+        and row.get("route_target") == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and row["bridge_proof"].get("status") == "completed"
+        and row["bridge_proof"].get("scope") == "bounded_readonly_provider_agent"
+        and row["bridge_proof"].get("spawn") == "subprocess"
+        and row["bridge_proof"].get("prompt_injection") == "route_prompt_ref"
+        and int(row["bridge_proof"].get("heartbeats_emitted") or 0) >= 1
+        and row["bridge_proof"].get("receipt") == "task_envelope_bridge_proof"
+    ]
+    if not proofs:
+        raise SystemExit("D452 FAIL: delivered AI agent bridge requires completed bridge_proof task envelope")
+else:
+    raise SystemExit(f"D452 FAIL: unknown AI agent bridge state: {bridge_state!r}")
 if subtraction.get("public_language") != "execution pickup":
     raise SystemExit("D452 FAIL: public language must be execution pickup")
 
@@ -119,6 +137,15 @@ allowlist = (
 missing = [cap for cap in allowlist if cap not in capabilities]
 if missing:
     raise SystemExit(f"D452 FAIL: worker capability allowlist has unregistered entries: {', '.join(missing)}")
+task_execution = worker_contract.get("task_execution") or {}
+routes = set(task_execution.get("execute_route_targets") or [])
+if "agent_tool" not in routes:
+    raise SystemExit("D452 FAIL: bounded agent_tool bridge must be an explicit execute_route_target")
+bridge = task_execution.get("agent_tool_bridge") or {}
+if bridge.get("scope") != "bounded_readonly_provider_agent":
+    raise SystemExit("D452 FAIL: agent_tool bridge scope must remain bounded_readonly_provider_agent")
+if bridge.get("tool_access") != "none" or bridge.get("mutation_access") != "none":
+    raise SystemExit("D452 FAIL: bounded agent_tool bridge must not grant tools or mutation access")
 PY
 
 echo "D452 PASS: execution pickup truth locked"

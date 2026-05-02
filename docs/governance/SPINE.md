@@ -177,7 +177,7 @@ truthful core would be:
 | broker read APIs | `shelf` | Convenience/read-model shell, not kernel substrate. |
 | plans, handoffs, narrative receipts | `shelf` | Legitimate surfaces, but not day-one spine core. |
 | public teaching of raw loops/waves/packets/handoffs/gates/scope surgery as operator-default grammar | `delete` | Keep as drilldown/surgery only, not public front-door grammar. |
-| bounded capability lane as the internal controller-prompt execution substrate | `keep` | Operational mailroom execution is now proved as the bounded capability-backed runtime artery: request, claim, heartbeat, outcome/result/failure, receipt. It is engine-internal and public readback is `execution.pickup.status`; open-ended AI-agent execution remains deferred. |
+| bounded execution pickup lane as the internal controller-prompt execution substrate | `keep` | Operational mailroom execution is now proved as the bounded runtime artery: request, claim, heartbeat, outcome/result/failure, receipt. It supports capability-backed routes plus one no-tools provider-backed `agent_tool` bridge proof class. It is engine-internal and public readback is `execution.pickup.status`; open-ended tool-using AI-agent autonomy is not part of the kernel. |
 | translator/control-node storytelling as irreducible core substrate | `must_prove_again` | Explanatory shell must not outrank the smaller engine. |
 
 This matrix is deliberately smaller than the current shell. A surface may be
