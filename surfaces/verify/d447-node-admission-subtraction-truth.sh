@@ -222,6 +222,7 @@ D3C_DB_BACKED_CAPS = {
     "spine.broker.get_loop_progress",
     "spine.broker.get_loop_status",
     "spine.broker.get_request_attestation",
+    "spine.verify",
     "surface.operator.overview.payload",
     "transition.parity.check",
     "verify.engine.run",
@@ -557,12 +558,18 @@ if pve_storage_standard.get("state") == "delivered":
 pve_storage_proofs = pve_storage_standard.get("proofs") or {}
 if (pve_storage_proofs.get("dataset_substrate_proof") or {}).get("status") != "present":
     fail("pve storage_evidence_node dataset_substrate_proof must read as present (Phase B closed it)")
-for proof_name in ("canonical_root_export_proof", "authority_transfer_proof", "recovery_drill_proof"):
+# D.3b v4 (commits ec1a88a2 + 1a183696) closed authority_transfer_proof.
+# The transfer is structurally complete: pve canonical DB is live, consumers
+# routed via cap.sh, no local stubs created. Receipt at
+# $SPINE_STATE/domain-state/storage-evidence-node/pve-authority-transfer-proof-20260502.yaml.
+if (pve_storage_proofs.get("authority_transfer_proof") or {}).get("status") != "present":
+    fail("pve storage_evidence_node authority_transfer_proof must read as present (D.3b v4 closed it; receipt has node: pve and proof_class: authority_transfer_proof)")
+for proof_name in ("canonical_root_export_proof", "recovery_drill_proof"):
     if (pve_storage_proofs.get(proof_name) or {}).get("status") != "missing":
         fail(f"pve storage_evidence_node {proof_name} must read as missing until that phase closes")
 pve_storage_missing = set(pve_storage_standard.get("missing_proofs") or [])
-if pve_storage_missing != {"canonical_root_export_proof", "authority_transfer_proof", "recovery_drill_proof"}:
-    fail(f"pve storage_evidence_node missing_proofs must equal the three deferred phases; got {sorted(pve_storage_missing)}")
+if pve_storage_missing != {"canonical_root_export_proof", "recovery_drill_proof"}:
+    fail(f"pve storage_evidence_node missing_proofs must equal the two deferred phases (canonical_root_export, recovery_drill); got {sorted(pve_storage_missing)}")
 if "storage_evidence_node" not in (pve_row.get("role_candidacy") or []):
     fail("pve role_candidacy must include storage_evidence_node while Phase A's contract candidacy is active")
 
