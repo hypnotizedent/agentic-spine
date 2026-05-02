@@ -118,6 +118,12 @@ for row in data.get("requests") or []:
             raise SystemExit("D452 FAIL: terminal V2.1 read-only repo row requires V2.1 bridge_proof")
         if proof.get("tool_set") != "read_only_repo" or proof.get("mutation_access") != "none":
             raise SystemExit("D452 FAIL: terminal V2.1 read-only repo row must keep read-only/no-mutation proof")
+    if tier.startswith("tool_using_agent_") and tier != "tool_using_agent_v2_1_readonly_repo" and row.get("pickup_state") in {"done", "failed", "cancelled"}:
+        proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
+        if proof.get("scope") != tier:
+            raise SystemExit(f"D452 FAIL: terminal {tier} row must carry matching bridge_proof scope")
+        if proof.get("mutation_access") != "none" or proof.get("receipt") != "task_envelope_bridge_proof":
+            raise SystemExit(f"D452 FAIL: terminal {tier} row must keep no-mutation task-envelope proof")
 
 demoted = set(subtraction.get("demoted_public_terms") or [])
 for term in ("mailroom lane", "mailroom bridge", "dispatch means executing"):
