@@ -213,7 +213,7 @@ As of 2026-04-09 (updated end-of-day):
   - Mint extracted
   - communications extracted
   - media extracted
-  - finance extracted to `workbench/agents/finance` (spine `704a7745`)
+  - finance extracted to `projects/finance` (supersedes prior workbench staging)
   - n8n extracted to `projects/n8n` (spine `704a7745`)
   - immich extracted to `projects/immich` (spine `704a7745`)
   - calendar landing zone decided (standalone domain) and extracted to `workbench/agents/calendar` (spine `7699a338`)
