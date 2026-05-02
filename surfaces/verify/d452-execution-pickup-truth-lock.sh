@@ -357,11 +357,12 @@ for key in expected:
         raise SystemExit(f"D452 FAIL: seven-question {key} value must be an object")
 PY
 
-(cd "$ROOT" && "$OPS" cap list --all | grep -q "execution.pickup.status") || fail "capability registry missing execution.pickup.status"
-(cd "$ROOT" && "$OPS" cap list --all | grep -q "disaster.drill.execution_pickup") || fail "capability registry missing disaster.drill.execution_pickup"
-(cd "$ROOT" && "$OPS" cap list --all | grep -q "ai.patch.review.promote") || fail "capability registry missing ai.patch.review.promote"
-(cd "$ROOT" && "$OPS" cap list --all | grep -q "ai.patch.review.reject") || fail "capability registry missing ai.patch.review.reject"
-(cd "$ROOT" && "$OPS" cap list --all | grep -q "ai.patch.review.merge") || fail "capability registry missing ai.patch.review.merge"
+cap_list_all="$(cd "$ROOT" && "$OPS" cap list --all)"
+grep -q "execution.pickup.status" <<<"$cap_list_all" || fail "capability registry missing execution.pickup.status"
+grep -q "disaster.drill.execution_pickup" <<<"$cap_list_all" || fail "capability registry missing disaster.drill.execution_pickup"
+grep -q "ai.patch.review.promote" <<<"$cap_list_all" || fail "capability registry missing ai.patch.review.promote"
+grep -q "ai.patch.review.reject" <<<"$cap_list_all" || fail "capability registry missing ai.patch.review.reject"
+grep -q "ai.patch.review.merge" <<<"$cap_list_all" || fail "capability registry missing ai.patch.review.merge"
 "$DRILL_BIN" --self-check >/dev/null || fail "execution pickup recovery drill self-check failed"
 
 grep -q -- "--route-capability" "$WAVE_EXECUTE" || fail "wave.execute dispatch must expose --route-capability"
