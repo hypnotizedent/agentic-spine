@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""infra.host.code.drift.status — read-only host code drift readback.
+
+PACKET-589 (under PACKET-588 canonical plan). Reports per-host:
+- checkout HEAD vs origin/main HEAD
+- dirty worktree state
+- reachability
+
+NO mutation. NO automatic pull. NO rsync. NO host modification.
+
+Stop lines (per PACKET-588 Phase 1):
+- No automatic pull.
+- No rsync.
+- No host mutation.
+- No watcher movement.
+
+Output: JSON with overall_status (ok|attention) + per-host detail.
+Always exit 0; consumers parse status from payload.
+
+Hosts probed (v1 hardcoded; future: read from contract):
+- macbook-2016-pro: operator_console (local)
+- ai-consolidation: execution_host (ssh ubuntu@192.168.1.8)
+- pve: storage_evidence_node (ssh root@192.168.1.184 via spine_machine_ed25519)
+
+Note: pve-r620 is the watcher_node. It does not host an agentic-spine checkout
+(observes via NFS read-only mount + heartbeat per node.role.contract). It is
+explicitly excluded from drift checks here per PACKET-588 stop line "no
+watcher movement" — no checkout to drift-check.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+HOSTS = [
+    {
+        "name": "macbook-2016-pro",
+        "role": "operator_console",
+        "reach": "local",
+        "checkout": "/Users/ronnyworks/code/agentic-spine",
+    },
+    {
+        "name": "ai-consolidation",
+        "role": "execution_host",
+        "reach": "ssh",
+        "ssh_target": "ubuntu@192.168.1.8",
+        "ssh_key": None,
+        "checkout": "/home/ubuntu/code/agentic-spine",
+    },
+    {
+        "name": "pve",
+        "role": "storage_evidence_node",
+        "reach": "ssh",
+        "ssh_target": "root@192.168.1.184",
+        "ssh_key": str(Path.home() / ".ssh" / "spine_machine_ed25519"),
+        "checkout": "/opt/agentic-spine",
+        "sync_mechanism": "rsync from MacBook (no gitea SSH from pve today; per HOST_DRIFT_POLICY.md)",
+    },
+]
+
+CONNECT_TIMEOUT_SECONDS = 10
+
+
+def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
+    """Run a command and return (rc, stdout, stderr)."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"command timed out after {timeout}s"
+    except FileNotFoundError as exc:
+        return 127, "", str(exc)
+
+
+def _ssh_cmd(host: dict[str, Any]) -> list[str]:
+    cmd = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={CONNECT_TIMEOUT_SECONDS}",
+    ]
+    if host.get("ssh_key"):
+        cmd.extend(["-i", host["ssh_key"]])
+    cmd.append(host["ssh_target"])
+    return cmd
+
+
+def probe_host(host: dict[str, Any], origin_head: str) -> dict[str, Any]:
+    """Return a dict describing the host's drift state."""
+    result: dict[str, Any] = {
+        "name": host["name"],
+        "role": host["role"],
+        "checkout": host["checkout"],
+        "reach": host["reach"],
+        "head": None,
+        "dirty": None,
+        "status": "unknown",
+        "note": None,
+    }
+    if host.get("sync_mechanism"):
+        result["sync_mechanism"] = host["sync_mechanism"]
+
+    head_cmd_remote = f"git -C {host['checkout']} rev-parse HEAD 2>/dev/null"
+    dirty_cmd_remote = f"git -C {host['checkout']} status --porcelain 2>/dev/null"
+
+    if host["reach"] == "local":
+        rc_h, out_h, err_h = _run(["git", "-C", host["checkout"], "rev-parse", "HEAD"])
+        rc_d, out_d, err_d = _run(["git", "-C", host["checkout"], "status", "--porcelain"])
+    else:
+        ssh_base = _ssh_cmd(host)
+        rc_h, out_h, err_h = _run(ssh_base + [head_cmd_remote])
+        rc_d, out_d, err_d = _run(ssh_base + [dirty_cmd_remote])
+
+    if rc_h != 0:
+        result["status"] = "unreachable"
+        result["note"] = f"head probe failed: {err_h.strip()[:200] or out_h.strip()[:200] or 'unknown'}"
+        return result
+
+    head_sha = out_h.strip()
+    result["head"] = head_sha
+
+    is_dirty = bool(out_d.strip()) if rc_d == 0 else None
+    result["dirty"] = is_dirty
+
+    if head_sha != origin_head:
+        result["status"] = "drift"
+        result["note"] = f"checkout HEAD {head_sha[:8]} != origin/main {origin_head[:8]}"
+    elif is_dirty is True:
+        result["status"] = "dirty"
+        result["note"] = "checkout has uncommitted local changes"
+    elif rc_d != 0:
+        result["status"] = "attention"
+        result["note"] = f"dirty probe failed: {err_d.strip()[:200] or 'unknown'}"
+    else:
+        result["status"] = "ok"
+
+    return result
+
+
+def resolve_origin_head() -> tuple[str | None, str | None]:
+    """Get origin/main HEAD from local repo (origin = canonical Gitea)."""
+    repo_root = Path(__file__).resolve().parents[5]
+    rc, out, err = _run(["git", "-C", str(repo_root), "rev-parse", "origin/main"])
+    if rc != 0:
+        return None, f"failed to resolve origin/main: {err.strip()[:200]}"
+    return out.strip(), None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="infra.host.code.drift.status")
+    parser.add_argument("--json", action="store_true", help="emit JSON only (default: human-readable)")
+    parser.add_argument("--self-check", action="store_true", help="emit self-check pass and exit")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("infra.host.code.drift.status self-check PASS")
+        return 0
+
+    origin_head, err = resolve_origin_head()
+    if origin_head is None:
+        payload = {
+            "capability": "infra.host.code.drift.status",
+            "status": "fail",
+            "error": err,
+        }
+        print(json.dumps(payload, indent=2))
+        return 1
+
+    hosts_result = [probe_host(h, origin_head) for h in HOSTS]
+
+    statuses = {h["status"] for h in hosts_result}
+    if "drift" in statuses or "dirty" in statuses or "unreachable" in statuses or "attention" in statuses:
+        overall = "attention"
+    elif statuses == {"ok"}:
+        overall = "ok"
+    else:
+        overall = "unknown"
+
+    payload = {
+        "capability": "infra.host.code.drift.status",
+        "origin_main_head": origin_head,
+        "overall_status": overall,
+        "hosts": hosts_result,
+        "scope_note": "PACKET-589 read-only drift readback; pve-r620 excluded (watcher_node, no checkout). No mutation, no automatic pull, no rsync.",
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"infra.host.code.drift.status")
+        print(f"origin/main: {origin_head}")
+        print(f"overall:     {overall}")
+        for h in hosts_result:
+            label = f"{h['name']:<22} ({h['role']})"
+            line = f"  {label} {h['status']}"
+            if h["status"] != "ok":
+                line += f" — {h.get('note', '')}"
+            print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

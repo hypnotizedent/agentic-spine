@@ -2038,6 +2038,36 @@ if mode == "--brief":
     _wt_dirty = int(worktree_cleanup_state.get("dirty_blocked_worktrees", 0) or 0)
     if _wt_cleanable or _wt_dirty:
         parts.append(f"Worktrees: {_wt_cleanable} cleanable / {_wt_dirty} dirty blocked")
+    # PACKET-589: host code drift readback (per PACKET-588 canonical plan).
+    # Probes MacBook + ai-cons + pve checkout HEAD vs origin/main. Read-only.
+    # Wrapped in subprocess timeout so brief stays responsive even if a
+    # remote host is unreachable.
+    _drift_bin = spine / "ops/plugins/infra/host/bin/host-code-drift-status"
+    if _drift_bin.is_file() and os.access(str(_drift_bin), os.X_OK):
+        try:
+            _drift_proc = subprocess.run(
+                [str(_drift_bin), "--json"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if _drift_proc.returncode == 0 and _drift_proc.stdout.strip():
+                _drift_payload = json.loads(_drift_proc.stdout)
+                _drift_overall = _drift_payload.get("overall_status", "unknown")
+                if _drift_overall == "ok":
+                    parts.append("Code drift: ok")
+                else:
+                    _problem_hosts = [
+                        h.get("name", "?")
+                        for h in _drift_payload.get("hosts", [])
+                        if h.get("status") not in (None, "ok")
+                    ]
+                    if _problem_hosts:
+                        parts.append(f"Code drift: {_drift_overall} ({', '.join(_problem_hosts)})")
+                    else:
+                        parts.append(f"Code drift: {_drift_overall}")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+            parts.append("Code drift: unknown")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)

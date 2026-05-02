@@ -23,6 +23,7 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 
 python3 - "$CAPS" "$SNAPSHOT" "$MASTER" "$NODE_ADMISSION" <<'PY'
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -292,6 +293,36 @@ if "/opt/agentic-spine" not in drift_policy_text:
     fail("HOST_DRIFT_POLICY.md must name /opt/agentic-spine as pve's drift surface")
 if "rsync" not in drift_policy_text.lower():
     fail("HOST_DRIFT_POLICY.md must document the rsync sync mechanism for pve (gitea SSH not yet available from pve)")
+
+# PACKET-589 (under PACKET-588): the live drift readback capability must exist
+# and be wired into capabilities.yaml. The cap is read-only and probes each
+# host via local-or-ssh git rev-parse; brief integration in status.sh emits
+# "Code drift: ok|attention". This extends D447 (no new D-gate) per the
+# add-one-retire-one rule and feedback_no-new-gate-without-subtraction.
+drift_cap_script = root / "ops/plugins/infra/host/bin/host-code-drift-status"
+if not drift_cap_script.is_file():
+    fail("ops/plugins/infra/host/bin/host-code-drift-status missing (PACKET-589 host code drift readback)")
+if not os.access(str(drift_cap_script), os.X_OK):
+    fail("host-code-drift-status must be executable")
+drift_cap_text = drift_cap_script.read_text(encoding="utf-8")
+if "infra.host.code.drift.status" not in drift_cap_text:
+    fail("host-code-drift-status script must self-identify as infra.host.code.drift.status capability")
+if "macbook-2016-pro" not in drift_cap_text or "ai-consolidation" not in drift_cap_text or '"pve"' not in drift_cap_text:
+    fail("host-code-drift-status must probe all three hosts (macbook-2016-pro, ai-consolidation, pve)")
+# PACKET-588 Phase 1 stop lines (no automatic pull, no rsync, no host mutation)
+# are enforced at the cap-safety annotation layer (must be safety: read-only)
+# and through code review — substring checks on the script body would false-fire
+# on docstring text. Read-only safety + script_path checks below cover this.
+caps_doc_drift = (caps_map.get("infra.host.code.drift.status") or {})
+if caps_doc_drift.get("safety") != "read-only":
+    fail("infra.host.code.drift.status must be safety: read-only in capabilities.yaml")
+if caps_doc_drift.get("script_path") != "./ops/plugins/infra/host/bin/host-code-drift-status":
+    fail("infra.host.code.drift.status script_path must point at ops/plugins/infra/host/bin/host-code-drift-status")
+status_sh_text = (root / "ops/commands/status.sh").read_text(encoding="utf-8")
+if "infra/host/bin/host-code-drift-status" not in status_sh_text:
+    fail("ops/commands/status.sh brief output must integrate host-code-drift-status (PACKET-589 ops status --brief deliverable)")
+if "Code drift:" not in status_sh_text:
+    fail("ops/commands/status.sh must emit 'Code drift:' field in --brief output (PACKET-589)")
 
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
