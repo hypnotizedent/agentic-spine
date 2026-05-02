@@ -121,10 +121,17 @@ node_types:
           - path_resolution_proof
           - recovery_drill_proof
           - role_boundary_conflict_currently_watcher_node
-        pve-730xd:
-          - runtime_placement_proof
-          - path_resolution_proof
-          - recovery_drill_proof
+      deferred_candidates:
+        pve:
+          deferred_until: "storage_evidence_node delivered on pve and a separate execution_host promotion is initiated"
+          reason: >
+            pve is the active candidate for storage_evidence_node. Storage and
+            execution are different jobs; bundling them on the same host
+            without independent proof would conflate roles. execution_host
+            candidacy on pve is deferred until storage_evidence_node delivery
+            is complete and a separate explicit promotion sequence runs.
+          drift_subtractions:
+            - "pve-730xd as candidate identity (not canonical; pve is the canonical machine ID per ssh.targets, hardware.inventory, fleet.admission, node.admission.status)"
     physical_separation_posture:
       operator_console: preferred
       translator_node: permitted_no_preference
@@ -158,6 +165,39 @@ node_types:
     description: "Canonical durable owner of governed runtime state, evidence trail, receipts archive, and domain state."
     multiple_instances_allowed: false
     colocation_allowed: true
+    realized_by:
+      - contract: ops/bindings/root.authority.contract.yaml
+        surface: "spine canonical roots (state, evidence, mailroom, receipt archive)"
+        boundary: "Storage owns durable state, evidence, and archive substrate; node admission and role assignment remain in node.role.contract. Storage writers are not authority for placement, role promotion, or domain truth."
+    promotion_standard:
+      current_delivered_host: null
+      statement: >
+        Active workload intent is observation. A host is delivered as
+        storage_evidence_node only when dataset substrate, canonical-root
+        export, authority transfer, and recovery drill proofs are all present.
+      required_proofs:
+        dataset_substrate_proof:
+          source:
+            - ops/bindings/hardware.inventory.yaml
+            - host-side ZFS readback
+          requirement: "Durable ZFS dataset (or equivalent) exists on the candidate host with capacity-visible, snapshottable, ONLINE status. Spine subdataset hierarchy materialized under one namespace covering runtime, evidence, mailroom, receipts, and archive."
+        canonical_root_export_proof:
+          source:
+            - ops/bindings/root.authority.contract.yaml
+            - mount/export configuration on consuming nodes
+          requirement: "Every node that consumes spine state (operator_console, execution_host, watcher_node, verification_node) reaches the canonical roots through one stable mount/path shape, not divergent operator-workstation defaults."
+        authority_transfer_proof:
+          source: ops/bindings/root.authority.contract.yaml
+          requirement: "root.authority.contract.yaml declares the storage_evidence_node-backed roots as primary canonical. Darwin/operator-workstation paths demoted to install-target/client-fallback only, never canonical write target. Existing state migrated once with the transfer recorded as evidence on the new root."
+        recovery_drill_proof:
+          source: ops/bindings/disaster.drill.execution_pickup.contract.yaml
+          requirement: "Fresh recovery drill receipt covers storage_evidence_node failure modes: dataset unavailable, read failure visibly fails (not silently partial), snapshot recovery proven, no fallback to operator-workstation state."
+      candidate_gaps:
+        pve:
+          - dataset_substrate_proof
+          - canonical_root_export_proof
+          - authority_transfer_proof
+          - recovery_drill_proof
     physical_separation_posture:
       operator_console: preferred
       execution_host: preferred

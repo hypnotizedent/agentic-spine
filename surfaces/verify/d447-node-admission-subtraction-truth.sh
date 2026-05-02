@@ -70,6 +70,51 @@ required_proofs = execution_host_standard.get("required_proofs") or {}
 for proof_name in ("runtime_placement_proof", "path_resolution_proof", "recovery_drill_proof"):
     if proof_name not in required_proofs:
         fail(f"execution_host promotion_standard missing {proof_name}")
+
+storage_evidence_standard = (((node_role_contract.get("node_types") or {}).get("storage_evidence_node") or {}).get("promotion_standard") or {})
+if not isinstance(storage_evidence_standard, dict) or not storage_evidence_standard:
+    fail("storage_evidence_node promotion_standard missing from node.role.contract.yaml")
+storage_required_proofs = storage_evidence_standard.get("required_proofs") or {}
+for proof_name in ("dataset_substrate_proof", "canonical_root_export_proof", "authority_transfer_proof", "recovery_drill_proof"):
+    if proof_name not in storage_required_proofs:
+        fail(f"storage_evidence_node promotion_standard missing {proof_name}")
+
+# Candidate name resolution: every candidate in any role's candidate_gaps and
+# deferred_candidates blocks must resolve through node.admission.status. This
+# structurally prevents drift like 'pve-730xd' (non-canonical machine identity)
+# from re-entering node.role.contract.yaml. Canonical machine names live in
+# ssh.targets / hardware.inventory / fleet.admission / node.admission.status.
+for role_name, role_data in (node_role_contract.get("node_types") or {}).items():
+    if not isinstance(role_data, dict):
+        continue
+    promotion = role_data.get("promotion_standard") or {}
+    if not isinstance(promotion, dict):
+        continue
+    candidate_names = []
+    gaps = promotion.get("candidate_gaps") or {}
+    if isinstance(gaps, dict):
+        candidate_names.extend(str(k) for k in gaps.keys())
+    deferred = promotion.get("deferred_candidates") or {}
+    if isinstance(deferred, dict):
+        candidate_names.extend(str(k) for k in deferred.keys())
+    for cand in candidate_names:
+        proc = subprocess.run(
+            [str(node_admission), "--node", cand, "--json"],
+            text=True,
+            capture_output=True,
+        )
+        stderr = proc.stderr.strip()
+        stdout = proc.stdout.strip()
+        if proc.returncode != 0:
+            fail(f"node.role.contract role '{role_name}' candidate '{cand}' does not resolve through node.admission.status: {stderr or stdout}")
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            fail(f"node.role.contract role '{role_name}' candidate '{cand}' admission readback was not valid JSON: {exc}")
+        rows = payload.get("rows") or []
+        if len(rows) != 1:
+            fail(f"node.role.contract role '{role_name}' candidate '{cand}' did not return exactly one admission row")
+
 standard_text = (root / "ops/plugins/infra/bin/node-admission-status").read_text(encoding="utf-8")
 for required_snippet in [
     "execution_host_promotion_standard_for",
