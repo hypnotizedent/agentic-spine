@@ -76,6 +76,18 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def normalize_task_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
 def mailroom_worker_proof_channel() -> dict[str, Any]:
     registry = load_yaml(SCHEDULER_REGISTRY)
     for entry in registry.get("labels", []) or []:
@@ -143,6 +155,7 @@ def receipt_refs_from(row: dict[str, Any]) -> list[str]:
 SAFETY_TIERS = (
     "capability",
     "bounded_readonly_provider_agent",
+    "tool_using_agent_v2_1_readonly_repo",
     "tool_using_agent_reserved",
     "destructive_manual",
 )
@@ -152,6 +165,9 @@ def safety_tier_for(row: dict[str, Any]) -> str:
     route_target = str(row.get("route_target") or "").strip().lower()
     if route_target == "agent_tool":
         bridge_proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        if bridge_proof.get("scope") == "tool_using_agent_v2_1_readonly_repo" or str(payload.get("tool_set") or "").strip() == "read_only_repo":
+            return "tool_using_agent_v2_1_readonly_repo"
         if (
             bridge_proof.get("scope") == "bounded_readonly_provider_agent"
             or row.get("bridge_allowed") is True
@@ -362,6 +378,7 @@ def collect_task_dir(rows: list[dict[str, Any]], state_name: str) -> None:
             route_capability=doc.get("route_capability"),
             route_prompt_ref=doc.get("route_prompt_ref"),
             bridge_allowed=doc.get("bridge_allowed"),
+            payload=normalize_task_payload(doc.get("payload")),
             bridge_proof=doc.get("bridge_proof") if isinstance(doc.get("bridge_proof"), dict) else None,
             task=str(doc.get("summary") or "")[:180],
             result=doc.get("result"),
@@ -420,6 +437,14 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if tier not in safety_tiers:
             safety_tiers[tier] = 0
         safety_tiers[tier] += 1
+    delivered_v2_1 = any(
+        row.get("pickup_state") == "done"
+        and str(row.get("route_target") or "").strip().lower() == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and (row.get("bridge_proof") or {}).get("status") == "completed"
+        and (row.get("bridge_proof") or {}).get("scope") == "tool_using_agent_v2_1_readonly_repo"
+        for row in rows
+    )
     delivered_bridge = any(
         row.get("pickup_state") == "done"
         and str(row.get("route_target") or "").strip().lower() == "agent_tool"
@@ -438,7 +463,11 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "wave_dispatch_request_only": sum(1 for row in active_rows if row.get("realization") == "wave_dispatch_request_only"),
         "operational_capability_worker": sum(1 for row in active_rows if row.get("realization") == "operational_capability_worker"),
         "interactive_worker_handoff": sum(1 for row in active_rows if row.get("realization") == "interactive_worker_handoff"),
-        "ai_agent_bridge": "delivered (bounded: readonly provider agent)" if delivered_bridge else "not_delivered",
+        "ai_agent_bridge": (
+            "delivered (tool-using: read-only repo inspection)"
+            if delivered_v2_1
+            else ("delivered (bounded: readonly provider agent)" if delivered_bridge else "not_delivered")
+        ),
         "safety_tiers": safety_tiers,
     }
 

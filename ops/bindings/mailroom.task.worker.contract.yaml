@@ -233,11 +233,17 @@ task_execution:
           - agent_tool
         meaning: "V1 provider-backed agent subprocess with prompt-only input and no shell, filesystem, git, ops capability, or mutation access."
         proof_boundary: "Requires bridge_allowed=true, route_prompt_ref, bridge_proof scope bounded_readonly_provider_agent, and terminal task receipt."
+      tool_using_agent_v2_1_readonly_repo:
+        status: realized
+        route_targets:
+          - agent_tool
+        meaning: "V2.1 provider-backed agent subprocess with worker-prepared read-only repo context from explicitly admitted file paths."
+        proof_boundary: "Requires bridge_allowed=true, route_prompt_ref, payload.tool_set=read_only_repo, repo_read_paths inside the repo fence, bridge_proof scope tool_using_agent_v2_1_readonly_repo, files_read, and terminal task receipt."
       tool_using_agent_reserved:
         status: reserved_empty
         route_targets: []
-        meaning: "Future tool-using agent bridge slot. Must remain empty until a separately proven bridge tier lands."
-        proof_boundary: "execution.pickup.status summary count must remain zero until that implementation lands."
+        meaning: "Future tool-using agent bridge slots beyond V2.1. Must remain empty until a separately proven bridge tier lands."
+        proof_boundary: "execution.pickup.status summary count must remain zero for this reserved slot until another implementation lands."
       destructive_manual:
         status: reserved_manual
         route_targets: []
@@ -253,6 +259,27 @@ task_execution:
     require_route_prompt_ref: true
     tool_access: none
     mutation_access: none
+    supported_tool_sets:
+      - prompt_only
+      - read_only_repo
+    v2_1_read_only_repo_inspection:
+      scope: tool_using_agent_v2_1_readonly_repo
+      tool_set: read_only_repo
+      tool_boundary: "worker-prepared read-only context only; provider receives file excerpts in prompt and receives no filesystem, shell, git, network, or ops capability tool."
+      repo_fence: "$SPINE_ROOT"
+      excluded_roots:
+        - .git
+        - .runtime
+      max_files: 6
+      max_bytes_per_file: 6000
+      max_total_bytes: 18000
+      mutation_access: none
+      receipt_fields:
+        - scope
+        - tool_set
+        - files_read
+        - tool_call_count
+        - repo_fence
     receipt: "terminal task envelope with bridge_proof plus provider run artifacts under ops/plugins/providers/runs"
   packet_closeout:
     linked_controller_prompt_packets: true

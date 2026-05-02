@@ -72,6 +72,26 @@ elif bridge_state == "delivered (bounded: readonly provider agent)":
     ]
     if not proofs:
         raise SystemExit("D452 FAIL: delivered AI agent bridge requires completed bridge_proof task envelope")
+elif bridge_state == "delivered (tool-using: read-only repo inspection)":
+    proofs = [
+        row for row in data.get("requests") or []
+        if row.get("pickup_state") == "done"
+        and row.get("route_target") == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and row["bridge_proof"].get("status") == "completed"
+        and row["bridge_proof"].get("scope") == "tool_using_agent_v2_1_readonly_repo"
+        and row["bridge_proof"].get("tool_set") == "read_only_repo"
+        and row["bridge_proof"].get("spawn") == "subprocess"
+        and row["bridge_proof"].get("prompt_injection") == "route_prompt_ref"
+        and int(row["bridge_proof"].get("heartbeats_emitted") or 0) >= 1
+        and int(row["bridge_proof"].get("tool_call_count") or 0) >= 1
+        and isinstance(row["bridge_proof"].get("files_read"), list)
+        and row["bridge_proof"].get("files_read")
+        and row["bridge_proof"].get("mutation_access") == "none"
+        and row["bridge_proof"].get("receipt") == "task_envelope_bridge_proof"
+    ]
+    if not proofs:
+        raise SystemExit("D452 FAIL: delivered V2.1 bridge requires completed read-only repo bridge_proof task envelope")
 else:
     raise SystemExit(f"D452 FAIL: unknown AI agent bridge state: {bridge_state!r}")
 if subtraction.get("public_language") != "execution pickup":
@@ -79,7 +99,7 @@ if subtraction.get("public_language") != "execution pickup":
 safety_tiers = summary.get("safety_tiers")
 if not isinstance(safety_tiers, dict):
     raise SystemExit("D452 FAIL: execution pickup summary must expose safety_tiers")
-for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_reserved", "destructive_manual"):
+for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_reserved", "destructive_manual"):
     if required_tier not in safety_tiers:
         raise SystemExit(f"D452 FAIL: safety_tiers missing {required_tier}")
 if int(safety_tiers.get("tool_using_agent_reserved") or 0) != 0:
@@ -92,6 +112,12 @@ for row in data.get("requests") or []:
         proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
         if proof.get("scope") != "bounded_readonly_provider_agent":
             raise SystemExit("D452 FAIL: terminal bounded_readonly_provider_agent row requires bounded bridge_proof")
+    if tier == "tool_using_agent_v2_1_readonly_repo" and row.get("pickup_state") in {"done", "failed", "cancelled"}:
+        proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
+        if proof.get("scope") != "tool_using_agent_v2_1_readonly_repo":
+            raise SystemExit("D452 FAIL: terminal V2.1 read-only repo row requires V2.1 bridge_proof")
+        if proof.get("tool_set") != "read_only_repo" or proof.get("mutation_access") != "none":
+            raise SystemExit("D452 FAIL: terminal V2.1 read-only repo row must keep read-only/no-mutation proof")
 
 demoted = set(subtraction.get("demoted_public_terms") or [])
 for term in ("mailroom lane", "mailroom bridge", "dispatch means executing"):
@@ -201,13 +227,15 @@ if missing:
 task_execution = worker_contract.get("task_execution") or {}
 routes = set(task_execution.get("execute_route_targets") or [])
 taxonomy = ((task_execution.get("route_target_taxonomy") or {}).get("safety_tiers") or {})
-for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_reserved", "destructive_manual"):
+for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_reserved", "destructive_manual"):
     if required_tier not in taxonomy:
         raise SystemExit(f"D452 FAIL: mailroom worker route_target_taxonomy missing {required_tier}")
 if taxonomy["tool_using_agent_reserved"].get("status") != "reserved_empty":
     raise SystemExit("D452 FAIL: tool_using_agent_reserved must be reserved_empty")
 if taxonomy["tool_using_agent_reserved"].get("route_targets") not in ([], None):
     raise SystemExit("D452 FAIL: tool_using_agent_reserved route_targets must be empty")
+if taxonomy["tool_using_agent_v2_1_readonly_repo"].get("status") != "realized":
+    raise SystemExit("D452 FAIL: V2.1 read-only repo tier must be realized")
 if "agent_tool" not in routes:
     raise SystemExit("D452 FAIL: bounded agent_tool bridge must be an explicit execute_route_target")
 bridge = task_execution.get("agent_tool_bridge") or {}
@@ -215,6 +243,15 @@ if bridge.get("scope") != "bounded_readonly_provider_agent":
     raise SystemExit("D452 FAIL: agent_tool bridge scope must remain bounded_readonly_provider_agent")
 if bridge.get("tool_access") != "none" or bridge.get("mutation_access") != "none":
     raise SystemExit("D452 FAIL: bounded agent_tool bridge must not grant tools or mutation access")
+if "read_only_repo" not in set(bridge.get("supported_tool_sets") or []):
+    raise SystemExit("D452 FAIL: agent_tool bridge must declare read_only_repo supported_tool_sets for V2.1")
+v2_1 = bridge.get("v2_1_read_only_repo_inspection") or {}
+if v2_1.get("scope") != "tool_using_agent_v2_1_readonly_repo":
+    raise SystemExit("D452 FAIL: V2.1 read-only repo bridge scope missing")
+if v2_1.get("mutation_access") != "none":
+    raise SystemExit("D452 FAIL: V2.1 read-only repo bridge must keep mutation_access none")
+if ".git" not in set(v2_1.get("excluded_roots") or []):
+    raise SystemExit("D452 FAIL: V2.1 read-only repo bridge must exclude .git")
 
 for path in (bridge_path, consumers_path, endpoints_path, inventory_path):
     doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -239,6 +276,8 @@ fixtures = {item.get("id") for item in drill_contract.get("fixtures") or [] if i
 for required in {"idle_restart", "queued_restart", "provider_failure", "timeout", "stale_heartbeat"}:
     if required not in fixtures:
         raise SystemExit(f"D452 FAIL: recovery drill missing fixture={required}")
+if "v2_1_readonly_repo_denied_path" not in fixtures:
+    raise SystemExit("D452 FAIL: recovery drill must cover V2.1 denied read-only repo path")
 PY
 
 echo "D452 PASS: execution pickup truth locked"

@@ -73,6 +73,7 @@ _AGENT_TOOL_REFUSAL = (
     "agent_tool route target requires bridge_allowed=true and a readable "
     "route_prompt_ref. Generic tool-using AI-agent autonomy remains unavailable."
 )
+V2_1_SCOPE = "tool_using_agent_v2_1_readonly_repo"
 
 
 def _task_supported(doc: dict[str, Any], *, allowlist: set[str], supported_routes: set[str]) -> tuple[bool, str]:
@@ -212,6 +213,106 @@ def _normalize_payload(doc: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _payload_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return []
+
+
+def _agent_bridge_contract() -> dict[str, Any]:
+    return (_task_execution_contract(_load_contract()).get("agent_tool_bridge") or {})
+
+
+def _repo_relative_path(path: Path) -> str:
+    return str(path.relative_to(ROOT.resolve()))
+
+
+def _build_readonly_repo_context(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    tool_set = str(payload.get("tool_set") or payload.get("agent_tool_tool_set") or "prompt_only").strip()
+    if tool_set in {"", "none"}:
+        tool_set = "prompt_only"
+    if tool_set == "prompt_only":
+        return "", {
+            "tool_set": "prompt_only",
+            "tool_access": "none",
+            "files_read": [],
+            "tool_call_count": 0,
+        }
+    if tool_set != "read_only_repo":
+        raise WorkerError(f"unsupported agent tool_set={tool_set}")
+
+    paths = _payload_list(payload.get("repo_read_paths") or payload.get("read_only_paths"))
+    if not paths:
+        raise WorkerError("read_only_repo tool_set requires repo_read_paths")
+
+    bridge = _agent_bridge_contract()
+    v2 = bridge.get("v2_1_read_only_repo_inspection") if isinstance(bridge.get("v2_1_read_only_repo_inspection"), dict) else {}
+    max_files = int(v2.get("max_files") or 6)
+    max_bytes_per_file = int(v2.get("max_bytes_per_file") or 6000)
+    max_total_bytes = int(v2.get("max_total_bytes") or 18000)
+    excluded_roots = {str(item).strip() for item in (v2.get("excluded_roots") or [".git", ".runtime"]) if str(item).strip()}
+
+    root_resolved = ROOT.resolve()
+    sections: list[str] = []
+    files_read: list[dict[str, Any]] = []
+    total_bytes = 0
+
+    for raw in paths[:max_files]:
+        candidate = (ROOT / raw).expanduser()
+        try:
+            resolved = candidate.resolve()
+        except OSError as exc:
+            raise WorkerError(f"repo_read_path cannot be resolved: {raw}") from exc
+        try:
+            relative = resolved.relative_to(root_resolved)
+        except ValueError as exc:
+            raise WorkerError(f"repo_read_path outside repo root: {resolved}") from exc
+        if relative.parts and relative.parts[0] in excluded_roots:
+            raise WorkerError(f"repo_read_path uses excluded root: {relative.parts[0]}")
+        if not resolved.is_file():
+            raise WorkerError(f"repo_read_path is not a file: {relative}")
+
+        raw_bytes = resolved.read_bytes()
+        truncated = len(raw_bytes) > max_bytes_per_file
+        chunk = raw_bytes[:max_bytes_per_file]
+        remaining = max_total_bytes - total_bytes
+        if remaining <= 0:
+            break
+        if len(chunk) > remaining:
+            chunk = chunk[:remaining]
+            truncated = True
+        total_bytes += len(chunk)
+        text = chunk.decode("utf-8", errors="replace")
+        rel_text = str(relative)
+        sections.append(f"--- FILE: {rel_text} ---\n{text}\n--- END FILE: {rel_text} ---")
+        files_read.append(
+            {
+                "path": rel_text,
+                "bytes_read": len(chunk),
+                "truncated": truncated,
+            }
+        )
+
+    if not files_read:
+        raise WorkerError("read_only_repo tool_set produced no admitted file reads")
+    return (
+        "\n\nREAD_ONLY_REPO_CONTEXT:\n"
+        "The following files were read by the mailroom worker before spawn. "
+        "They are the only repo context admitted for this task.\n\n"
+        + "\n\n".join(sections)
+        + "\n",
+        {
+            "tool_set": "read_only_repo",
+            "tool_access": "bounded_read_only_repo_context",
+            "repo_fence": str(root_resolved),
+            "files_read": files_read,
+            "tool_call_count": len(files_read),
+        },
+    )
+
+
 def _resolve_prompt_ref(value: str) -> Path:
     prompt_ref = Path(value).expanduser()
     if not prompt_ref.is_absolute():
@@ -231,27 +332,32 @@ def _resolve_prompt_ref(value: str) -> Path:
     return resolved
 
 
-def _build_agent_prompt(task_id: str, doc: dict[str, Any]) -> tuple[str, Path]:
+def _build_agent_prompt(task_id: str, doc: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
     payload = _normalize_payload(doc)
     prompt_ref = str(doc.get("route_prompt_ref") or payload.get("route_prompt_ref") or "").strip()
     prompt_path = _resolve_prompt_ref(prompt_ref)
     prompt_text = prompt_path.read_text(encoding="utf-8")
-    max_prompt_bytes = int(((_task_execution_contract(_load_contract()).get("agent_tool_bridge") or {}).get("max_prompt_bytes")) or 12000)
+    max_prompt_bytes = int((_agent_bridge_contract().get("max_prompt_bytes")) or 12000)
     encoded = prompt_text.encode("utf-8")
     if len(encoded) > max_prompt_bytes:
         prompt_text = encoded[:max_prompt_bytes].decode("utf-8", errors="ignore")
     summary = str(doc.get("summary") or task_id).strip()
+    repo_context, tool_proof = _build_readonly_repo_context(payload)
     return (
-        "You are a bounded no-tools AI agent running under the spine mailroom "
-        "execution pickup bridge. You must not claim to mutate files, run shell "
-        "commands, use hidden context, or complete work outside this prompt. "
+        "You are a bounded AI agent running under the spine mailroom execution "
+        "pickup bridge. You must not claim to mutate files, run shell commands, "
+        "use hidden context, or complete work outside this prompt. If a "
+        "READ_ONLY_REPO_CONTEXT block is present, treat it as the only admitted "
+        "repo inspection context for this task. "
         "Return a concise result with three fields: OBSERVED, RESULT, LIMITS.\n\n"
         f"TASK_ID: {task_id}\n"
         f"SUMMARY: {summary}\n"
         f"PROMPT_REF: {prompt_path}\n\n"
         "PROMPT_BODY:\n"
-        f"{prompt_text}\n",
+        f"{prompt_text}\n"
+        f"{repo_context}",
         prompt_path,
+        tool_proof,
     )
 
 
@@ -279,7 +385,27 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
         _fail_task(task_id, _AGENT_TOOL_REFUSAL)
         return {"task_id": task_id, "status": "failed", "error": _AGENT_TOOL_REFUSAL}
 
-    prompt, prompt_path = _build_agent_prompt(task_id, doc)
+    try:
+        prompt, prompt_path, tool_proof = _build_agent_prompt(task_id, doc)
+    except WorkerError as exc:
+        payload_tool_set = str(payload.get("tool_set") or payload.get("agent_tool_tool_set") or "prompt_only").strip()
+        scope = V2_1_SCOPE if payload_tool_set == "read_only_repo" else "bounded_readonly_provider_agent"
+        reason = str(exc)
+        _fail_task(task_id, reason)
+        _write_task_fields(
+            _terminal_file(task_id, "failed"),
+            {
+                "bridge_proof": {
+                    "scope": scope,
+                    "status": "failed",
+                    "failure_reason": reason,
+                    "tool_set": payload_tool_set or "prompt_only",
+                    "mutation_access": "none",
+                    "receipt": "task_envelope_bridge_proof",
+                }
+            },
+        )
+        return {"task_id": task_id, "status": "failed", "route_target": "agent_tool", "error": reason}
     run_id = f"{task_id}-agent"
     provider_runs = ROOT / "ops" / "plugins" / "providers" / "runs"
     run_dir = provider_runs / run_id
@@ -288,7 +414,7 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
     request_file.write_text(prompt, encoding="utf-8")
 
     provider = str(payload.get("provider") or os.environ.get("SPINE_AGENT_BRIDGE_PROVIDER") or "zai")
-    timeout_seconds = int(payload.get("timeout_seconds") or (((_task_execution_contract(_load_contract()).get("agent_tool_bridge") or {}).get("timeout_seconds")) or 300))
+    timeout_seconds = int(payload.get("timeout_seconds") or ((_agent_bridge_contract().get("timeout_seconds")) or 300))
     env = os.environ.copy()
     env.update(
         {
@@ -337,8 +463,9 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
     if not result_text and merged:
         result_text = merged.splitlines()[-1][:1000]
 
+    scope = V2_1_SCOPE if tool_proof.get("tool_set") == "read_only_repo" else "bounded_readonly_provider_agent"
     base_proof = {
-        "scope": "bounded_readonly_provider_agent",
+        "scope": scope,
         "provider_requested": provider,
         "provider_used": provider_info.get("used"),
         "model": provider_info.get("model"),
@@ -348,11 +475,12 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
         "spawn": "subprocess",
         "prompt_injection": "route_prompt_ref",
         "heartbeats_emitted": heartbeats,
-        "tool_access": "none",
+        "tool_access": tool_proof.get("tool_access") or "none",
         "mutation_access": "none",
         "receipt": "task_envelope_bridge_proof",
         "usage": provider_info.get("usage") or {},
     }
+    base_proof.update(tool_proof)
     if base_proof["provider_run_retained"]:
         base_proof.update(
             {
@@ -375,7 +503,7 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
         return {"task_id": task_id, "status": "failed", "error": reason}
 
     summary = str(doc.get("summary") or task_id).strip()
-    result = f"{summary} -> agent_tool provider={provider_info.get('used') or provider} model={provider_info.get('model') or 'unknown'} bridge_proof=bounded_readonly_provider_agent"
+    result = f"{summary} -> agent_tool provider={provider_info.get('used') or provider} model={provider_info.get('model') or 'unknown'} bridge_proof={scope}"
     _complete_task(task_id, result)
     _write_task_fields(
         _terminal_file(task_id, "done"),
@@ -588,9 +716,11 @@ def main() -> int:
         print(f"failed: {len(result['failed'])}")
         print(f"skipped: {len(result['skipped'])}")
         for item in result["completed"]:
-            print(f"- completed {item['task_id']} capability={item['capability']} run_key={item.get('run_key', '')}")
+            detail = item.get("capability") or item.get("route_target") or item.get("provider") or "unknown"
+            print(f"- completed {item['task_id']} route={detail} run_key={item.get('run_key', '')}")
         for item in result["failed"]:
-            print(f"- failed {item['task_id']} capability={item['capability']} error={item['error']}")
+            detail = item.get("capability") or item.get("route_target") or item.get("provider") or "unknown"
+            print(f"- failed {item['task_id']} route={detail} error={item['error']}")
         for item in result["skipped"]:
             print(f"- skipped {item['task_id']} reason={item['reason']}")
     return 0
