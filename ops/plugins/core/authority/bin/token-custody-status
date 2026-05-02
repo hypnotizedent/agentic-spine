@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+POLICY_PATH = ROOT / "ops/bindings/secrets.namespace.policy.yaml"
+
+
+CUSTODY_CLASSES = {
+    "GITEA_API_TOKEN": "api_token",
+    "GITEA_RUNNER_TOKEN": "runner_registration_token",
+    "GITEA_OAUTH_CLIENT_ID": "oauth_client_id",
+    "GITEA_OAUTH_CLIENT_SECRET": "oauth_client_secret",
+    "GITHUB_PUSH_MIRROR_TOKEN": "publication_mirror_token",
+    "GITEA_INTERNAL_TOKEN": "internal_token",
+    "GITEA_SECRET_KEY": "application_secret_key",
+    "GITEA_DB_PASSWORD": "database_password",
+    "GITEA_ADMIN_PASSWORD": "admin_password",
+    "INFISICAL_AUTH_SECRET": "infisical_auth_secret",
+    "INFISICAL_ENCRYPTION_KEY": "infisical_encryption_key",
+    "INFISICAL_MCP_CLIENT_ID": "mcp_client_id",
+    "INFISICAL_MCP_CLIENT_SECRET": "mcp_client_secret",
+    "INFISICAL_POSTGRES_PASSWORD": "database_password",
+}
+
+
+def fail(message: str) -> None:
+    print(f"token.custody.status FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing YAML file: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def rel(path: Path) -> str:
+    return str(path.resolve().relative_to(ROOT))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="token-custody-status")
+    parser.add_argument("--domain", choices=("all", "forge", "safe"), default="all")
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args()
+
+
+def classify_domain(key: str, path: str) -> str:
+    if path == "/spine/vm-infra/gitea" or key.startswith("GITEA_") or key == "GITHUB_PUSH_MIRROR_TOKEN":
+        return "forge"
+    if path == "/spine/platform/security" or key.startswith("INFISICAL_"):
+        return "safe"
+    return "other"
+
+
+def collect_references(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    rules = ensure_dict(policy.get("rules"))
+    buckets = (
+        ("required_key_paths", "required"),
+        ("key_path_overrides", "override"),
+        ("planned_key_paths", "planned"),
+    )
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for bucket_name, source in buckets:
+        for key, raw_path in sorted(ensure_dict(rules.get(bucket_name)).items()):
+            path = str(raw_path or "").strip()
+            key_name = str(key or "").strip()
+            if not key_name or not path:
+                continue
+            identity = (key_name, path, source)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            domain = classify_domain(key_name, path)
+            refs.append(
+                {
+                    "key": key_name,
+                    "path": path,
+                    "source": source,
+                    "domain": domain,
+                    "custody_class": CUSTODY_CLASSES.get(key_name, "reference"),
+                    "value_exposed": False,
+                }
+            )
+    refs.sort(key=lambda row: (str(row["domain"]), str(row["path"]), str(row["custody_class"]), str(row["key"])))
+    return refs
+
+
+def render_text(payload: dict[str, Any]) -> None:
+    print("token.custody.status")
+    print(f"status: {payload['status'].upper()}")
+    print(f"authority: {payload['authority']}")
+    print(f"domain: {payload['domain']}")
+    print(f"references: {payload['count']}")
+    print()
+    print(f"{'DOMAIN':<8} {'CLASS':<28} {'KEY':<34} PATH")
+    for row in payload["references"]:
+        print(f"{row['domain']:<8} {row['custody_class']:<28} {row['key']:<34} {row['path']}")
+
+
+def main() -> None:
+    args = parse_args()
+    policy = load_yaml(POLICY_PATH)
+    refs = collect_references(policy)
+    if args.domain != "all":
+        refs = [row for row in refs if row["domain"] == args.domain]
+    payload = {
+        "status": "ok",
+        "authority": rel(POLICY_PATH),
+        "domain": args.domain,
+        "count": len(refs),
+        "references": refs,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        render_text(payload)
+
+
+if __name__ == "__main__":
+    main()
