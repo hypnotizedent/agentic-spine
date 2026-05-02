@@ -39,7 +39,7 @@ For this program, a domain counts as extracted if its canonical authority lives 
 - `/Users/ronnyworks/code/mint-modules`
 - `/Users/ronnyworks/code/communications-domain`
 - `/Users/ronnyworks/code/media-domain`
-- `/Users/ronnyworks/code/workbench/agents/<domain>`
+- `/Users/ronnyworks/code/projects/home/agents/<domain>`
 - another explicitly chosen external repo or workbench target
 
 This prevents the finish line from moving every time repo topology is debated.
@@ -54,7 +54,7 @@ The intended steady-state roles are:
   - shared rails
   - verify/gates
   - compatibility shims/seams
-- `/Users/ronnyworks/code/workbench`
+- `/Users/ronnyworks/code/projects/home`
   - operator/domain operational truth
   - agent tooling
   - domain-local bindings/contracts
@@ -217,7 +217,7 @@ As of 2026-04-09 (updated end-of-day):
   - n8n extracted to `projects/n8n` (spine `704a7745`)
   - immich extracted to `projects/immich` (spine `704a7745`)
   - calendar landing zone decided (standalone domain) and extracted to `workbench/agents/calendar` (spine `7699a338`)
-  - home extracted to `workbench/agents/home-assistant/tools/spine-plugin-home` (spine `d5d1fa22`)
+  - home extracted to `projects/home/tools/spine-plugin-home` (spine `d5d1fa22`)
   - shared communications/media/operator-storage rails classified
   - spine operational health clean (engine smoke 5/5, waves 0/0)
 

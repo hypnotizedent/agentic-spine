@@ -2,8 +2,9 @@
 
 Canonical domain policy for `home`.
 
+- **Canonical home:** `projects/home/`
 - **Doctrine**: `ops/bindings/home.authority.contract.yaml` and `ops/bindings/domains/backup/backup.inventory.yaml`
-- **Operator Checklist**: `home.backup.status` and `backup.status`
+- **Operator Checklist**: project-local Home Assistant readbacks under `projects/home/tools/` plus `backup.status`
 - Authority: `docs/governance/SPINE.md`
 - Runtime contracts: `ops/bindings/domains/home.bundle.yaml`
 - Scoped domain health readback: `./bin/ops cap run verify.run -- domain home`
@@ -14,8 +15,5 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 
 | Capability |
 |---|
-| `home.backup.status` |
-| `home.health.alert` |
-| `home.health.check` |
-| `home.vm.status` |
+| Project-local Home Assistant tools live under `projects/home/tools/`; no `home.*` spine capabilities are currently registered. |
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->
