@@ -234,6 +234,25 @@ retirement surfaces. If those surfaces disagree, the work is a promotion
 closure problem, not a reason to build an adapter around the most recent
 example.
 
+For estate-shape work, do not rely on operator memory, chat wording, or a single
+alias to find the work. Reconcile three planes before planning, promotion, or
+subtraction:
+
+- **runtime truth** — the host, VM, service, route, workload, data, storage,
+  backup, and watcher state that actually exists today;
+- **intent/planning truth** — OI/HI records, packet bodies, domain-state notes,
+  candidate records, handoffs, and receipts that preserve what the human steward
+  already named;
+- **repo/contract truth** — the node-role contracts, root authority, capability
+  registry, status/readback surfaces, and verify locks that are currently
+  first-class.
+
+If a concern exists in one plane but not the others, the next slice must either
+create the minimal canonical readback/promotion path or explicitly demote the
+stale surface. Use the existing authority home that owns the concern; do not
+create a new doctrine shelf just to preserve scattered aliases. Concrete
+examples are proof fixtures for this rule, not the boundary of the disease.
+
 ### Interactive Control-Surface Handoff
 
 `delegate.to.execution` remains available for interactive control-surface

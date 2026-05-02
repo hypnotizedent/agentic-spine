@@ -44,6 +44,13 @@ Subtraction aperture discipline:
 - Parked/deferred is not closure. If a legacy surface cannot be subtracted yet,
   the live gap is the missing canonical replacement proof, not a new governance
   shelf.
+- Estate truth must not split into three disconnected planes. When planning or
+  changing L1/L2 estate shape, reconcile runtime truth (what actually runs on
+  hosts and storage), intent/planning truth (OI/HI, packets, domain-state notes,
+  receipts, and candidate records), and repo/contract truth (contracts,
+  capabilities, status, and verifies) before choosing the next slice. If the
+  planes disagree, the work is a first-class reconciliation and subtraction
+  problem; do not solve only the most visible symptom.
 - Repo topology must not hide drift. `agentic-spine` owns the L1 kernel and
   control-plane truth. Workbench may own L2 shared operational rails, adapters,
   generators, validators, and reusable agent tools, but it must not become the
@@ -68,6 +75,9 @@ Legal work:
 - control-plane truth decisions and implementation, including node/control-plane
   topology, custody/attestation semantics, and whether `operator_console` or a
   promoted control node is the long-term governing control plane
+- estate-truth reconciliation across runtime, intent/planning, and repo/contract
+  planes, including alias cleanup, promotion-path readback, and subtraction of
+  stale surfaces that make the planes disagree
 - bounded governance/contract updates required to make the above truthful
 - subtraction cleanup of migration residue, stale references, stale loops,
   stale parked operator-visible artifacts, and visible compatibility shells
