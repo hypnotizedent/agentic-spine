@@ -191,6 +191,48 @@ else
     note FAIL "lib guard did not fail closed (rc=$guard_test_rc)"
 fi
 
-echo "=== D.3c self-check summary: $PASS pass, $FAIL fail ==="
+# PACKET-582 Case 8: guard fires under user-systemd subprocess env (only SPINE_REPO).
+# D.3b v3 cutover failed because user-services on ai-cons set SPINE_REPO but
+# not SPINE_CODE; the original resolver returned None, making the guard a
+# no-op for those subprocesses.
+echo "=== PACKET-582 Case 8: guard fires under user-service env (no SPINE_CODE) ==="
+user_svc_env_rc=0
+SPINE_CODE="" SPINE_REPO="$TMP" python3 - <<PY || user_svc_env_rc=$?
+import sys, os
+os.environ.pop("SPINE_CODE", None)
+sys.path.insert(0, '$GUARD_LIB')
+from db_authority_guard import assert_db_open_safe, DbAuthorityRoutingRequired, _resolve_contract_path
+contract = _resolve_contract_path()
+assert contract is not None, "resolver returned None under SPINE_REPO-only env"
+from pathlib import Path
+try:
+    assert_db_open_safe(Path('/tmp/d3c-pkt582-no-such-db.db'))
+    sys.exit(2)
+except DbAuthorityRoutingRequired:
+    pass
+PY
+if [[ $user_svc_env_rc -eq 0 ]]; then
+    note PASS "PACKET-582: guard fires under user-systemd subprocess env (only SPINE_REPO)"
+else
+    note FAIL "PACKET-582: guard did not fire under SPINE_REPO-only env (rc=$user_svc_env_rc)"
+fi
+
+# PACKET-582 Case 9: resolver walks up from __file__ when no SPINE_* env.
+echo "=== PACKET-582 Case 9: __file__ walk-up fallback ==="
+walkup_rc=0
+env -i HOME="$HOME" PATH="$PATH" python3 - <<PY || walkup_rc=$?
+import sys, os
+sys.path.insert(0, '$GUARD_LIB')
+from db_authority_guard import _resolve_contract_path
+contract = _resolve_contract_path()
+assert contract is not None, "walk-up fallback returned None when no env vars set"
+PY
+if [[ $walkup_rc -eq 0 ]]; then
+    note PASS "PACKET-582: resolver walks up from __file__ when no SPINE_* env vars set"
+else
+    note FAIL "PACKET-582: __file__ walk-up fallback broken (rc=$walkup_rc)"
+fi
+
+echo "=== D.3c+PACKET-582 self-check summary: $PASS pass, $FAIL fail ==="
 [[ $FAIL -eq 0 ]] || exit 1
 exit 0

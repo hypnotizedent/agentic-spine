@@ -145,6 +145,18 @@ if "def assert_db_open_safe" not in guard_text:
 if "DbAuthorityRoutingRequired" not in guard_text:
     fail("db_authority_guard.py must define DbAuthorityRoutingRequired exception class")
 
+# PACKET-582: db_authority_guard._resolve_contract_path must be structural —
+# multi-source so the guard fires under user-systemd subprocess env that may
+# only set SPINE_REPO (not SPINE_CODE). D.3b v3 cutover failed because the
+# original resolver returned None when SPINE_CODE was empty, making the guard
+# a silent no-op for background services. Resolver now falls back through
+# SPINE_REPO/SPINE_TARGET_REPO/SPINE_ROOT and walks up from __file__.
+for required_env_alt in ("SPINE_CODE", "SPINE_REPO", "SPINE_TARGET_REPO", "SPINE_ROOT"):
+    if f'"{required_env_alt}"' not in guard_text and f"'{required_env_alt}'" not in guard_text:
+        fail(f"db_authority_guard._resolve_contract_path must reference env var {required_env_alt} (PACKET-582 multi-source resolver)")
+if "__file__" not in guard_text:
+    fail("db_authority_guard._resolve_contract_path must walk up from __file__ as fallback (PACKET-582)")
+
 # Each primary SQL authority lib must call the guard before sqlite3.connect.
 sql_auth_libs = [
     "ops/plugins/core/lifecycle/lib/loops_sql_authority.py",
@@ -159,6 +171,23 @@ for lib_rel in sql_auth_libs:
     lib_text = lib_path.read_text(encoding="utf-8")
     if "assert_db_open_safe" not in lib_text:
         fail(f"{lib_rel} must call assert_db_open_safe before sqlite3.connect (D.3c lib-level guard)")
+
+# PACKET-582: cap scripts that perform default-mode sqlite3.connect (auto-create
+# capable) MUST also call assert_db_open_safe. controller-prompt-closeout-backfill
+# is the load-bearing case (no early-out before connect); other cap scripts
+# (verify-engine, terminal-loop-claim, session-v3-attach) have explicit
+# is_file()/SystemExit early-outs that prevent stub creation, so they're
+# acceptable without the explicit guard call but still benefit from it.
+load_bearing_cap_scripts = [
+    "ops/plugins/core/lifecycle/bin/controller-prompt-closeout-backfill",
+]
+for script_rel in load_bearing_cap_scripts:
+    script_path = root / script_rel
+    if not script_path.is_file():
+        fail(f"{script_rel} missing")
+    script_text = script_path.read_text(encoding="utf-8")
+    if "assert_db_open_safe" not in script_text:
+        fail(f"{script_rel} must call assert_db_open_safe before sqlite3.connect (PACKET-582 — script has no early-out so guard is load-bearing)")
 
 # Every read-only cap whose script chain opens shared_authority.db (directly or
 # via SQL authority libs / ops loops|gaps|wave subcommand delegation) MUST

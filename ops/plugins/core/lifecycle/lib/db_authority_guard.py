@@ -40,11 +40,28 @@ class DbAuthorityRoutingRequired(RuntimeError):
 
 
 def _resolve_contract_path() -> Optional[Path]:
-    spine_code = os.environ.get("SPINE_CODE")
-    if not spine_code:
-        return None
-    candidate = Path(spine_code) / "ops" / "bindings" / "runtime.bootstrap.contract.yaml"
-    return candidate if candidate.is_file() else None
+    """Locate runtime.bootstrap.contract.yaml. Multi-source resolution so the
+    guard fires even when calling processes don't set SPINE_CODE.
+
+    Background services (e.g., user systemd services) often set SPINE_REPO or
+    SPINE_ROOT but not SPINE_CODE. PACKET-582 made this resolver structural:
+    if any env var locates the repo, OR the lib's own __file__ ancestry leads
+    to it, the contract is found and the guard can enforce.
+    """
+    rel = Path("ops") / "bindings" / "runtime.bootstrap.contract.yaml"
+    for env_var in ("SPINE_CODE", "SPINE_REPO", "SPINE_TARGET_REPO", "SPINE_ROOT"):
+        root = os.environ.get(env_var)
+        if not root:
+            continue
+        candidate = Path(root) / rel
+        if candidate.is_file():
+            return candidate
+    here = Path(__file__).resolve()
+    for ancestor in here.parents:
+        candidate = ancestor / rel
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _read_contract_field(contract_path: Path, dotted_path: str) -> Optional[str]:
