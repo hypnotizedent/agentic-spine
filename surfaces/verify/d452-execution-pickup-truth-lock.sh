@@ -80,6 +80,17 @@ if grep -Eq 'Drilldown:.*mailroom\.task' "$STATUS_BIN"; then
 fi
 grep -q "internal task lifecycle" "$STATUS_BIN" || fail "execution pickup drilldown must keep task lifecycle internal"
 
+for authority_file in \
+  "$ROOT/docs/governance/SPINE.md" \
+  "$ROOT/docs/governance/SESSION_PROTOCOL.md" \
+  "$ROOT/ops/bindings/dispatch.envelope.contract.yaml" \
+  "$ROOT/ops/bindings/mailroom.task.worker.contract.yaml" \
+  "$ROOT/ops/bindings/launchd.scheduler.registry.yaml"; do
+  if grep -Eiq 'mailroom[ /]kernel|runtime kernel|engine kernel|mailroom/runtime kernel' "$authority_file"; then
+    fail "authority language must say one kernel, one engine, mailroom runtime: ${authority_file#$ROOT/}"
+  fi
+done
+
 python3 - "$ROOT/ops/capabilities.yaml" "$ROOT/ops/bindings/mailroom.task.worker.contract.yaml" <<'PY'
 import sys
 from pathlib import Path
