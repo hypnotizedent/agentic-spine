@@ -827,6 +827,14 @@ def build_intent_chain_readback(
         except Exception:
             intent_use_receipts = []
             strongest_intent_use = None
+    binding_intent_use: dict[str, Any] | None = None
+    for receipt in intent_use_receipts:
+        receipt_proof = str(receipt.get("proof_ref") or "").strip()
+        if receipt_proof and _materialization_bindings(receipt_proof, doc, path=path):
+            binding_intent_use = receipt
+            break
+    if binding_intent_use:
+        strongest_intent_use = binding_intent_use
     if not materialization_ref and strongest_intent_use:
         materialization_ref = str(strongest_intent_use.get("destination_ref") or "").strip()
         materialization_kind = str(strongest_intent_use.get("destination_type") or "").strip()
@@ -2175,6 +2183,11 @@ def reconcile_operator_ingress_adoption(
         if adoption_ref:
             doc["adoption_ref"] = adoption_ref
             doc["adoption_ref_kind"] = "loop"
+        else:
+            doc.pop("adoption_ref", None)
+            doc.pop("adoption_ref_kind", None)
+            doc.pop("adopted_at", None)
+            doc.pop("landed_at", None)
         doc["reconciled_at"] = now
         doc["reconciliation_reason"] = reason
 
@@ -2187,8 +2200,10 @@ def reconcile_operator_ingress_adoption(
             doc["review_reason"] = reason
             doc.pop("adopted_at", None)
             doc.pop("landed_at", None)
-        elif doc.get("operator_review") == "required":
-            doc["operator_review"] = "not_required"
+        else:
+            if doc.get("operator_review") == "required":
+                doc["operator_review"] = "not_required"
+            doc.pop("review_reason", None)
 
         content = yaml.safe_dump(
             doc,
