@@ -28,7 +28,7 @@ import os
 import re
 import secrets
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,12 +53,28 @@ LIFECYCLE_STATES = ("submitted", "classified", "routed")
 
 # Dispositions are the bounded operator-ingress lifecycle vocabulary.
 # No new public taxonomy.
+#
+# `recommended_for_review` is the canonical replacement for `packet_candidate`
+# (LOOP-VOCABULARY-READBACK-SUBTRACTION-SLICE-2-20260502, hard line:
+# "Recommended for review is not queued work, not execution, and not authority.
+#  It is only a signal that a human or bounded packet may later choose to act.")
+# `packet_candidate` is retained ONLY as a legacy read-side compat alias for
+# OIs minted before the rename. Fresh classifier paths must emit
+# `recommended_for_review`.
 ALLOWED_DISPOSITIONS = {
     "awaiting_classification",  # birth state
     "attached",                 # linked to existing loop/packet/design track
     "deferred",                 # parked with review trigger
-    "packet_candidate",         # recommended for packetization, needs approval
+    "recommended_for_review",   # signal that a human or bounded packet may later act; not queued work
+    "packet_candidate",         # legacy compat alias for recommended_for_review (read-side only)
     "no_op_preserved",          # valuable context, no action needed
+}
+
+# Legacy disposition names that should be normalized on read. Keys are the
+# legacy term, values are the canonical term. Used by the reconciler and any
+# read-side resolver that wants to present canonical vocabulary.
+DISPOSITION_LEGACY_ALIASES = {
+    "packet_candidate": "recommended_for_review",
 }
 
 # Classification categories are the canonical operator-ingress route vocabulary.
@@ -166,6 +182,19 @@ def _utcnow() -> datetime:
 
 def _iso_utc(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_iso_utc(value: str) -> datetime | None:
+    """Parse an ISO-8601 UTC timestamp tolerantly. Returns None on failure."""
+    if not value:
+        return None
+    s = str(value).strip().strip('"').strip("'")
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _ingress_dir(state_root: str) -> Path:
@@ -569,7 +598,28 @@ def list_operator_ingress(
                     item["confidence"] = w1["confidence"]
             w2 = translator_workload.get("W2")
             if isinstance(w2, dict) and "routing_target" in w2:
-                item["routing_target"] = str(w2["routing_target"])
+                # Read-side vocabulary subtraction: a legacy `domain_agent:*`
+                # routing_target is not real routing. The hard_lines block in
+                # operator-ingress-status denies it. Surface a separate
+                # `inferred_domain` hint here and emit routing_target=null so
+                # nobody reads the legacy string as routing evidence.
+                # Authorized by LOOP-VOCABULARY-READBACK-SUBTRACTION-SLICE-2-20260502.
+                rt_raw = str(w2["routing_target"])
+                if rt_raw.startswith("domain_agent:"):
+                    parts = rt_raw.split(":")
+                    inferred = parts[1] if len(parts) >= 2 else ""
+                    if inferred:
+                        item["inferred_domain"] = inferred
+                    item["routing_target"] = None
+                else:
+                    item["routing_target"] = rt_raw
+            # Lift inferred_domain from on-disk top-level field if reconcile
+            # already wrote one (overrides the W2-derived value when present).
+            if doc.get("inferred_domain"):
+                item["inferred_domain"] = str(doc["inferred_domain"])
+            # Top-level on-disk routing_target null-out also wins over W2.
+            if "routing_target" in doc and doc["routing_target"] in (None, "", "null"):
+                item["routing_target"] = None
             w3 = translator_workload.get("W3")
             if isinstance(w3, dict) and "execution_dispatched" in w3:
                 item["execution_dispatched"] = bool(w3["execution_dispatched"])
@@ -1150,16 +1200,22 @@ def _routing_target_for_plan(
     likely_domains: list[str],
     refs: dict[str, list[str]],
 ) -> str:
+    """Return the routing target string for an auto-metabolize plan.
+
+    `domain_agent:*` strings were retired by
+    LOOP-VOCABULARY-READBACK-SUBTRACTION-SLICE-2-20260502 because the
+    hard_lines block explicitly denies that domain_agent:* is real routing.
+    Domain inference is now carried in the separate `inferred_domain` field
+    populated by `_build_auto_metabolize_plan` so it cannot masquerade as
+    routing evidence.
+    """
     if refs["loops"]:
         return refs["loops"][0]
     if refs["packets"]:
         return refs["packets"][0]
     if classification == "review_request":
-        if concern_class == "domain_workload" and likely_domains:
-            return f"domain_agent:{likely_domains[0]}:review"
+        # Domain hint, when present, is exposed via inferred_domain instead.
         return "control_plane.review"
-    if concern_class == "domain_workload" and likely_domains:
-        return f"domain_agent:{likely_domains[0]}"
     if concern_class == "external_membrane_or_operator_rail":
         return "runtime_parking"
     return "control_plane"
@@ -1252,13 +1308,23 @@ def _build_auto_metabolize_plan(doc: dict[str, Any]) -> dict[str, Any]:
         disposition = "no_op_preserved"
         disposition_detail = "Auto-metabolized as out-of-spine material; preserved without routing."
     elif classification == "review_request":
-        disposition = "packet_candidate"
+        disposition = "recommended_for_review"
         next_stage = routing_target
-        disposition_detail = "Auto-metabolized as a bounded review request candidate."
+        disposition_detail = (
+            "Auto-metabolized as bounded review recommendation. "
+            "Recommended for review is not queued work, not execution, and not authority."
+        )
     else:
-        disposition = "packet_candidate"
+        disposition = "recommended_for_review"
         next_stage = routing_target
-        disposition_detail = "Auto-metabolized as an explicit command candidate without execution."
+        disposition_detail = (
+            "Auto-metabolized as a recommendation for human or bounded packet review; "
+            "no execution implied."
+        )
+
+    # Inferred domain hint, when present, is exposed as a separate signal so
+    # nobody confuses it with routing. Replaces the legacy domain_agent:* string.
+    inferred_domain = likely_domains[0] if likely_domains else ""
 
     envelope_payload = {
         "ingress_id": ingress_id,
@@ -1267,6 +1333,7 @@ def _build_auto_metabolize_plan(doc: dict[str, Any]) -> dict[str, Any]:
         "classification": classification,
         "disposition": disposition,
         "likely_domains": likely_domains,
+        "inferred_domain": inferred_domain,
         "explicit_refs": {
             "loops": refs["loops"],
             "packets": refs["packets"],
@@ -1598,7 +1665,9 @@ def metabolize_operator_ingress(
             f"disposition invalid: '{disposition}' (allowed: {allowed})"
         )
     # Route-bearing dispositions require route data
-    _ROUTED_DISPOSITIONS = {"attached", "packet_candidate"}
+    # Includes legacy `packet_candidate` for read-side compat with OIs minted
+    # before the rename to `recommended_for_review`.
+    _ROUTED_DISPOSITIONS = {"attached", "recommended_for_review", "packet_candidate"}
     has_route = bool(next_stage or downstream_refs)
     if disposition in _ROUTED_DISPOSITIONS and not has_route:
         raise OperatorIngressError(
@@ -1713,7 +1782,9 @@ def metabolize_operator_ingress(
 # ---------------------------------------------------------------------------
 
 # Dispositions eligible for promotion evaluation
-_PROMOTABLE_DISPOSITIONS = {"deferred", "packet_candidate"}
+# Legacy `packet_candidate` retained for read-side compat with OIs minted
+# before the rename to `recommended_for_review`.
+_PROMOTABLE_DISPOSITIONS = {"deferred", "recommended_for_review", "packet_candidate"}
 
 # Classifications that could promote (have a named seam or actionable content)
 _PROMOTABLE_CLASSIFICATIONS = {
@@ -1819,10 +1890,12 @@ def evaluate_oi_promotion(
             "covering_loop": None,
         }
 
-    # packet_candidate items are always eligible for evaluation even without
-    # activation_conditions — they already have a routing target and were
-    # classified as actionable by the metabolizer.
-    if disposition != "packet_candidate" and not activation_conditions.strip():
+    # recommended_for_review items (legacy: packet_candidate) are always
+    # eligible for evaluation even without activation_conditions — they already
+    # have a routing target and were classified as worth review by the
+    # metabolizer. Eligibility means "ready to evaluate against open loops",
+    # not "queued execution"; the hard line still holds.
+    if disposition not in {"recommended_for_review", "packet_candidate"} and not activation_conditions.strip():
         return {
             "eligible": False,
             "action": "stay_deferred",
@@ -2058,7 +2131,7 @@ def process_promotable_operator_ingress(
             continue
 
         activation_conditions = str(doc.get("activation_conditions", ""))
-        if disposition != "packet_candidate" and not activation_conditions.strip():
+        if disposition not in {"recommended_for_review", "packet_candidate"} and not activation_conditions.strip():
             continue
 
         evaluated_count += 1
@@ -2121,7 +2194,25 @@ def process_promotable_operator_ingress(
 # Adoption reconciliation — post-routing truth
 # ---------------------------------------------------------------------------
 
-ADOPTION_STATES = ("unresolved", "adopted", "landed", "orphaned", "review_required")
+ADOPTION_STATES = (
+    "unresolved",
+    "adopted",
+    "landed",
+    "orphaned",
+    "review_required",
+    # historical_inert: OI is parked/no-op preserved, older than the freshness
+    # window, and has no intent-use receipt linking it. The OI is correctly
+    # powerless — not active queue, not work-in-progress. This value separates
+    # "Class 4 truth" from "Class 5 surface" (HUMAN-INPUT-PIPELINE-FULL-TRACE-
+    # RESEARCH-20260502 disease #4).
+    "historical_inert",
+)
+
+# Composite-rule freshness window for historical_inert reconciliation.
+# OIs older than this with disposition in {no_op_preserved, deferred} and no
+# intent-use receipt are reconciled to historical_inert rather than left as
+# unresolved.
+HISTORICAL_INERT_AGE_DAYS = 14
 
 _LOOP_REF_RE = re.compile(r"^LOOP-")
 
@@ -2221,6 +2312,15 @@ def reconcile_operator_ingress_adoption(
     items: list[dict[str, Any]] = []
     now = _iso_utc(_utcnow())
 
+    # historical_inert composite rule (HUMAN-INPUT-PIPELINE-FULL-TRACE-RESEARCH-
+    # 20260502 disease #4): OIs in {no_op_preserved, deferred} older than the
+    # freshness window, with no intent-use receipt binding, are correctly
+    # powerless — they should not surface as `unresolved` active debt. The
+    # rule applies to BOTH routed and classified lifecycle states because
+    # `no_op_preserved` items typically carry `lifecycle_state: classified`.
+    historical_inert_dispositions = {"no_op_preserved", "deferred"}
+    freshness_cutoff = _utcnow() - timedelta(days=HISTORICAL_INERT_AGE_DAYS)
+
     for path in sorted(ingress_dir.glob("OI-*.yaml")):
         try:
             doc = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -2231,15 +2331,127 @@ def reconcile_operator_ingress_adoption(
 
         ingress_id = str(doc.get("ingress_id", path.stem))
         lifecycle_state = str(doc.get("lifecycle_state", "submitted"))
+        disposition = str(doc.get("disposition", ""))
 
-        # Only reconcile routed OIs
+        # Normalize legacy disposition aliases on read so the historical_inert
+        # rule and downstream logic both see the canonical name.
+        canonical_disposition = DISPOSITION_LEGACY_ALIASES.get(disposition, disposition)
+
+        # Vocabulary subtraction: rewrite legacy on-disk fields so the file
+        # carries canonical vocabulary. This is a name-level normalization
+        # (legacy is identical in meaning to canonical), not a membrane-field
+        # meaning mutation. Authorized by LOOP-VOCABULARY-READBACK-SUBTRACTION-
+        # SLICE-2-20260502.
+        legacy_field_changes: list[str] = []
+        if canonical_disposition != disposition:
+            doc["disposition"] = canonical_disposition
+            legacy_field_changes.append(f"disposition {disposition}->{canonical_disposition}")
+            disposition = canonical_disposition
+
+        # domain_agent:* routing strings are retired. Lift the inferred domain
+        # to the separate `inferred_domain` field and clear routing_target so
+        # nothing reads the legacy string as routing evidence.
+        legacy_routing = str(doc.get("routing_target", "") or "")
+        if legacy_routing.startswith("domain_agent:"):
+            parts = legacy_routing.split(":")
+            inferred = parts[1] if len(parts) >= 2 else ""
+            if inferred and not doc.get("inferred_domain"):
+                doc["inferred_domain"] = inferred
+            doc["routing_target"] = None
+            legacy_field_changes.append(
+                f"routing_target {legacy_routing}->null inferred_domain={inferred}"
+            )
+
+        # Historical-inert composite rule, evaluated before the routed-only
+        # filter so classified+{no_op_preserved,deferred} items are reachable.
+        if (
+            lifecycle_state in {"classified", "routed"}
+            and canonical_disposition in historical_inert_dispositions
+        ):
+            submitted_at = _parse_iso_utc(str(doc.get("submitted_at", "")))
+            if submitted_at is not None and submitted_at < freshness_cutoff:
+                # Check whether any intent-use receipt binds this OI.
+                iur_records = _query_intent_use_receipts(doc, state_root=state_root)
+                intent_use_receipt, intent_use_bindings = _binding_intent_use_receipt(
+                    iur_records,
+                    doc,
+                    path=path,
+                )
+                no_iur = not (intent_use_receipt and intent_use_bindings)
+                if no_iur:
+                    new_state = "historical_inert"
+                    reason = (
+                        f"historical_inert: disposition={canonical_disposition}, "
+                        f"age>{HISTORICAL_INERT_AGE_DAYS}d, no intent-use receipt"
+                    )
+                    before_doc = copy.deepcopy(doc)
+                    old_state = doc.get("adoption_state")
+                    changed = old_state != new_state
+                    doc["adoption_state"] = new_state
+                    doc.pop("adoption_ref", None)
+                    doc.pop("adoption_ref_kind", None)
+                    doc.pop("adopted_at", None)
+                    doc.pop("landed_at", None)
+                    doc["reconciled_at"] = now
+                    doc["reconciliation_reason"] = reason
+                    if doc.get("operator_review") == "required":
+                        doc["operator_review"] = "not_required"
+                    doc.pop("review_reason", None)
+                    content = yaml.safe_dump(
+                        doc,
+                        default_flow_style=False,
+                        sort_keys=False,
+                        allow_unicode=True,
+                    )
+                    _atomic_write(path, content)
+                    _append_ingress_lifecycle_event(
+                        state_root=state_root,
+                        event="adoption_reconciled",
+                        ingress_id=ingress_id,
+                        path=path,
+                        before=before_doc,
+                        after=copy.deepcopy(doc),
+                    )
+                    reconciled_count += 1
+                    items.append({
+                        "ingress_id": ingress_id,
+                        "action": "reconciled",
+                        "adoption_state": new_state,
+                        "adoption_ref": "",
+                        "changed": changed,
+                        "reason": reason,
+                    })
+                    continue
+
+        # Only reconcile routed OIs through the loop-adoption path. But if
+        # legacy vocabulary fields were rewritten above, persist that change
+        # before skipping so the file carries canonical vocabulary even when
+        # adoption logic does not run.
         if lifecycle_state != "routed":
-            skipped_count += 1
-            items.append({
-                "ingress_id": ingress_id,
-                "action": "skipped",
-                "reason": f"lifecycle_state={lifecycle_state}, not routed",
-            })
+            if legacy_field_changes:
+                content = yaml.safe_dump(
+                    doc,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                )
+                _atomic_write(path, content)
+                items.append({
+                    "ingress_id": ingress_id,
+                    "action": "vocabulary_normalized",
+                    "reason": (
+                        f"lifecycle_state={lifecycle_state}; legacy fields normalized: "
+                        f"{', '.join(legacy_field_changes)}"
+                    ),
+                })
+                reconciled_count += 1
+            else:
+                skipped_count += 1
+                items.append({
+                    "ingress_id": ingress_id,
+                    "action": "skipped",
+                    "reason": f"lifecycle_state={lifecycle_state}, not routed",
+                })
             continue
 
         loop_candidate = _extract_loop_candidate(doc)
