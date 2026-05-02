@@ -109,7 +109,13 @@ for authority_file in \
   fi
 done
 
-python3 - "$ROOT/ops/capabilities.yaml" "$ROOT/ops/bindings/mailroom.task.worker.contract.yaml" <<'PY'
+python3 - "$ROOT/ops/capabilities.yaml" \
+  "$ROOT/ops/bindings/mailroom.task.worker.contract.yaml" \
+  "$ROOT/ops/bindings/mailroom.bridge.yaml" \
+  "$ROOT/ops/bindings/mailroom.bridge.consumers.yaml" \
+  "$ROOT/ops/bindings/mailroom.bridge.endpoints.yaml" \
+  "$ROOT/ops/bindings/mailroom.inventory.contract.yaml" \
+  "$ROOT/ops/bindings/node.role.contract.yaml" <<'PY'
 import sys
 from pathlib import Path
 
@@ -117,9 +123,27 @@ import yaml
 
 capabilities_path = Path(sys.argv[1])
 worker_contract_path = Path(sys.argv[2])
+bridge_path = Path(sys.argv[3])
+consumers_path = Path(sys.argv[4])
+endpoints_path = Path(sys.argv[5])
+inventory_path = Path(sys.argv[6])
+node_role_path = Path(sys.argv[7])
 
 capabilities = (yaml.safe_load(capabilities_path.read_text(encoding="utf-8")) or {}).get("capabilities") or {}
 worker_contract = yaml.safe_load(worker_contract_path.read_text(encoding="utf-8")) or {}
+authority = worker_contract.get("authority") or {}
+owns = set(authority.get("owns") or [])
+for required in {"claim_semantics", "heartbeat_semantics", "result_failure_semantics", "receipt_linkage", "route_target_taxonomy"}:
+    if required not in owns:
+        raise SystemExit(f"D452 FAIL: mailroom worker authority missing owns={required}")
+does_not_decide = set(authority.get("does_not_decide") or [])
+for required in {"node_admission", "runtime_placement", "backup_authority", "watcher_or_observability_authority", "loop_wave_packet_gap_meaning_or_closeout_authority"}:
+    if required not in does_not_decide:
+        raise SystemExit(f"D452 FAIL: mailroom worker authority missing does_not_decide={required}")
+bounded_by = {item.get("contract") for item in authority.get("bounded_by") or [] if isinstance(item, dict)}
+for required in {"ops/bindings/node.role.contract.yaml", "ops/bindings/launchd.scheduler.registry.yaml", "ops/bindings/dispatch.envelope.contract.yaml"}:
+    if required not in bounded_by:
+        raise SystemExit(f"D452 FAIL: mailroom worker authority missing bounded_by={required}")
 boundary = worker_contract.get("authority_boundary") or {}
 if boundary.get("public_operator_language") != "execution.pickup.status":
     raise SystemExit("D452 FAIL: mailroom worker contract must point public language to execution.pickup.status")
@@ -146,6 +170,20 @@ if bridge.get("scope") != "bounded_readonly_provider_agent":
     raise SystemExit("D452 FAIL: agent_tool bridge scope must remain bounded_readonly_provider_agent")
 if bridge.get("tool_access") != "none" or bridge.get("mutation_access") != "none":
     raise SystemExit("D452 FAIL: bounded agent_tool bridge must not grant tools or mutation access")
+
+for path in (bridge_path, consumers_path, endpoints_path, inventory_path):
+    doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    scope = doc.get("authority_scope") or {}
+    if scope.get("canonical_worker_contract") != "ops/bindings/mailroom.task.worker.contract.yaml":
+        raise SystemExit(f"D452 FAIL: {path.name} must point to canonical worker contract")
+    if "autonomous_worker_runtime_semantics" not in set(scope.get("does_not_decide") or []) and path == endpoints_path:
+        raise SystemExit("D452 FAIL: mailroom.bridge.endpoints must not own worker runtime semantics")
+
+node_role = yaml.safe_load(node_role_path.read_text(encoding="utf-8")) or {}
+execution_host = ((node_role.get("node_types") or {}).get("execution_host") or {})
+realized_by = execution_host.get("realized_by") or []
+if not any(isinstance(item, dict) and item.get("contract") == "ops/bindings/mailroom.task.worker.contract.yaml" for item in realized_by):
+    raise SystemExit("D452 FAIL: execution_host role must reference mailroom task worker realization")
 PY
 
 echo "D452 PASS: execution pickup truth locked"
