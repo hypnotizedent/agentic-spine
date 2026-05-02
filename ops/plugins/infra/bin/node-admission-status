@@ -133,8 +133,37 @@ def load_json_file(path: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _resolve_spine_state() -> Path:
+    """Resolve SPINE_STATE portably across primary checkouts, worktrees, and Linux execution hosts.
+
+    Order:
+      1. SPINE_STATE env var (set by cap.sh / runtime-paths.sh).
+      2. ops/lib/runtime-paths.sh canonical resolver (works for any checkout
+         shape; reads root.authority.contract.yaml + /etc/spine/execution-host.env).
+      3. Last-resort fallback (matches primary-checkout layout only).
+
+    The fallback is preserved for backward compatibility on primary checkouts
+    where SPINE_STATE is unset and runtime-paths.sh sourcing fails.
+    """
+    env_state = os.environ.get("SPINE_STATE")
+    if env_state:
+        return Path(env_state)
+    runtime_paths_sh = ROOT / "ops" / "lib" / "runtime-paths.sh"
+    if runtime_paths_sh.exists():
+        proc = subprocess.run(
+            ["bash", "-c", f". '{runtime_paths_sh}' && spine_runtime_resolve_paths >/dev/null 2>&1 && printf %s \"$SPINE_STATE\""],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        out = proc.stdout.strip()
+        if proc.returncode == 0 and out:
+            return Path(out)
+    return ROOT.parent / ".runtime" / "spine" / "state"
+
+
 def latest_execution_pickup_recovery_drill() -> dict[str, Any]:
-    state_root = Path(os.environ.get("SPINE_STATE") or ROOT.parent / ".runtime" / "spine" / "state")
+    state_root = _resolve_spine_state()
     path = state_root / "domain-state" / "recovery-drills" / "execution-pickup" / "latest.yaml"
     data = load_yaml(path)
     if data:
@@ -609,6 +638,88 @@ def execution_host_promotion_standard_for(node_id: str, runtime_truth: dict[str,
     }
 
 
+def storage_evidence_node_promotion_standard_for(node_id: str) -> dict[str, Any]:
+    """Compose storage_evidence_node promotion standard for a node id.
+
+    Mirrors execution_host_promotion_standard_for. Reads
+    node.role.contract.yaml#storage_evidence_node.promotion_standard. For each
+    of the four required proofs, checks if proof_ref resolves to an existing
+    YAML on disk under $SPINE_STATE; emits status: present | missing.
+
+    A proof is present when:
+      - proof_ref is declared in the contract
+      - the file exists at the resolved path
+      - the receipt's `node` field matches node_id
+
+    candidate_gaps reflects the contract's per-node gap list when present;
+    otherwise falls back to the computed missing list.
+    """
+    node_role = load_yaml(NODE_ROLE_CONTRACT)
+    storage_evidence = ((node_role.get("node_types") or {}).get("storage_evidence_node") or {})
+    standard = storage_evidence.get("promotion_standard") or {}
+    required = standard.get("required_proofs") or {}
+
+    state_root = _resolve_spine_state()
+    proofs: dict[str, Any] = {}
+    for proof_name in ("dataset_substrate_proof", "canonical_root_export_proof", "authority_transfer_proof", "recovery_drill_proof"):
+        proof_def = required.get(proof_name) or {}
+        proof_ref_template = str(proof_def.get("proof_ref") or "").strip()
+        entry: dict[str, Any] = {
+            "status": "missing",
+            "source": proof_def.get("source"),
+            "proof_ref": proof_ref_template or None,
+        }
+        if proof_ref_template:
+            resolved = proof_ref_template.replace("$SPINE_STATE", str(state_root))
+            proof_path = Path(resolved)
+            if proof_path.exists():
+                receipt = load_yaml(proof_path)
+                if isinstance(receipt, dict) and receipt.get("node") == node_id and receipt.get("proof_class") == proof_name:
+                    entry["status"] = "present"
+                    entry["receipt"] = str(proof_path)
+                    entry["generated_at"] = receipt.get("generated_at_utc")
+                else:
+                    entry["status"] = "missing"
+                    entry["note"] = "proof_ref exists but receipt does not match node_id and proof_class"
+            else:
+                entry["note"] = "proof_ref declared but receipt not found on disk"
+        proofs[proof_name] = entry
+
+    missing = [name for name, proof in proofs.items() if proof.get("status") != "present"]
+    candidate_gaps = (standard.get("candidate_gaps") or {}).get(node_id)
+    if candidate_gaps is None:
+        # Not in candidate_gaps; check proofs_present for active candidacy
+        if node_id in (standard.get("proofs_present") or {}):
+            candidate_gaps = missing
+        else:
+            candidate_gaps = []
+    return {
+        "role": "storage_evidence_node",
+        "state": "delivered" if not missing else "incomplete",
+        "standard_source": "ops/bindings/node.role.contract.yaml",
+        "proofs": proofs,
+        "missing_proofs": missing,
+        "candidate_gaps": candidate_gaps,
+        "subtraction_note": "operator-workstation paths are install defaults; delivered storage_evidence_node requires the four proof classes here",
+    }
+
+
+def storage_evidence_candidate_set() -> set[str]:
+    """Set of node_ids that are active storage_evidence_node candidates.
+
+    A node is an active candidate when it appears in candidate_gaps OR
+    proofs_present under storage_evidence_node.promotion_standard. Deferred
+    candidacies are not counted (those live elsewhere; see execution_host
+    deferred_candidates for the symmetric pattern).
+    """
+    node_role = load_yaml(NODE_ROLE_CONTRACT)
+    standard = (((node_role.get("node_types") or {}).get("storage_evidence_node") or {}).get("promotion_standard") or {})
+    candidates: set[str] = set()
+    candidates.update((standard.get("candidate_gaps") or {}).keys())
+    candidates.update((standard.get("proofs_present") or {}).keys())
+    return candidates
+
+
 def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     sources = recovery.get("source_surfaces") or {}
     operator = sources.get("operator_hardware") or {}
@@ -618,9 +729,11 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     estate_truth = recovery.get("estate_truth") or {}
     control = recovery.get("control_plane_truth") or {}
     primary_access = recovery.get("primary_access") or {}
-    runtime_truth = runtime_role_truth_for(str(recovery.get("node_id") or ""))
+    node_id_str = str(recovery.get("node_id") or "")
+    runtime_truth = runtime_role_truth_for(node_id_str)
     recovery["__runtime_role_truth"] = runtime_truth
-    execution_host_standard = execution_host_promotion_standard_for(str(recovery.get("node_id") or ""), runtime_truth)
+    execution_host_standard = execution_host_promotion_standard_for(node_id_str, runtime_truth)
+    storage_evidence_standard = storage_evidence_node_promotion_standard_for(node_id_str)
 
     validate_operator_role_candidacy(str(recovery.get("node_id") or "unknown"), operator)
     role_candidacy = as_list(operator.get("role_candidacy"))
@@ -630,6 +743,14 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         role_candidacy = runtime_truth["roles"]
     if not role_candidacy:
         role_candidacy = ["none"]
+    # Active storage_evidence_node candidacy (per node.role.contract). Deferred
+    # candidacies are not added — they document deferral, not current candidacy.
+    if node_id_str in storage_evidence_candidate_set():
+        role_candidacy = [r for r in role_candidacy if r != "none"]
+        if "storage_evidence_node" not in role_candidacy:
+            role_candidacy.append("storage_evidence_node")
+        if not role_candidacy:
+            role_candidacy = ["storage_evidence_node"]
 
     promotion_stage = first_present(
         operator.get("promotion_stage"),
@@ -699,6 +820,7 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         },
         "role_delivery_proofs": {
             "execution_host": execution_host_standard,
+            "storage_evidence_node": storage_evidence_standard,
         },
         "recovery_planes": recovery.get("recovery_planes") or {},
         "proof_channels": proof_channels,

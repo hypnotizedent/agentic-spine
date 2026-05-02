@@ -349,6 +349,34 @@ if pve_standard.get("state") == "delivered":
 if "role_boundary_conflict_currently_watcher_node" not in (pve_standard.get("candidate_gaps") or []):
     fail("pve-r620 execution_host candidate gaps must name watcher_node role boundary")
 
+# storage_evidence_node assertion: pve must compose the role's promotion standard
+# with dataset_substrate_proof present and the other three proofs missing.
+# Locks the Phase A/B/C output structure so future drift cannot silently flip
+# any proof status without an actual on-disk receipt change.
+proc = subprocess.run(
+    [str(node_admission), "--node", "pve", "--json"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    fail(proc.stderr.strip() or proc.stdout.strip() or "node.admission.status pve storage_evidence sample failed")
+payload = json.loads(proc.stdout)
+pve_row = (payload.get("rows") or [{}])[0]
+pve_storage_standard = ((pve_row.get("role_delivery_proofs") or {}).get("storage_evidence_node")) or {}
+if pve_storage_standard.get("state") == "delivered":
+    fail("pve must not satisfy storage_evidence_node promotion standard while three of four proofs remain missing")
+pve_storage_proofs = pve_storage_standard.get("proofs") or {}
+if (pve_storage_proofs.get("dataset_substrate_proof") or {}).get("status") != "present":
+    fail("pve storage_evidence_node dataset_substrate_proof must read as present (Phase B closed it)")
+for proof_name in ("canonical_root_export_proof", "authority_transfer_proof", "recovery_drill_proof"):
+    if (pve_storage_proofs.get(proof_name) or {}).get("status") != "missing":
+        fail(f"pve storage_evidence_node {proof_name} must read as missing until that phase closes")
+pve_storage_missing = set(pve_storage_standard.get("missing_proofs") or [])
+if pve_storage_missing != {"canonical_root_export_proof", "authority_transfer_proof", "recovery_drill_proof"}:
+    fail(f"pve storage_evidence_node missing_proofs must equal the three deferred phases; got {sorted(pve_storage_missing)}")
+if "storage_evidence_node" not in (pve_row.get("role_candidacy") or []):
+    fail("pve role_candidacy must include storage_evidence_node while Phase A's contract candidacy is active")
+
 proc = subprocess.run(
     [str(node_admission), "--node", "linux-reprovision-1", "--machine-spec", "--json"],
     text=True,

@@ -9,9 +9,28 @@ DOCTOR_SCRIPT="$ROOT/ops/plugins/core/session/bin/spine-doctor"
 
 fail() { echo "D347 FAIL: $*" >&2; exit 1; }
 
+# yq is required to read the contract's required_runtime_tools list.
 command -v yq >/dev/null 2>&1 || fail "required tool missing: yq"
-command -v rg >/dev/null 2>&1 || fail "required tool missing: rg"
 [[ -f "$CONTRACT" ]] || fail "missing bootstrap contract: $CONTRACT"
+
+# Read the canonical required_runtime_tools list from the contract and validate
+# every listed tool is available on the host. This replaces hardcoded
+# `command -v rg` checks with contract-driven validation. Adding or removing a
+# tool from runtime.bootstrap.contract.yaml#bootstrap_preconditions.required_runtime_tools
+# changes which tools D347 checks. No new gate; canonical source is the contract.
+mapfile -t required_runtime_tools < <(
+  yq e -r '.bootstrap_preconditions.required_runtime_tools[]?' "$CONTRACT" 2>/dev/null || true
+)
+(( ${#required_runtime_tools[@]} > 0 )) || fail "contract missing bootstrap_preconditions.required_runtime_tools list"
+missing_tools=()
+for tool in "${required_runtime_tools[@]}"; do
+  [[ -n "$tool" && "$tool" != "null" ]] || continue
+  command -v "$tool" >/dev/null 2>&1 || missing_tools+=("$tool")
+done
+if (( ${#missing_tools[@]} > 0 )); then
+  fail "required runtime tool(s) missing on host: ${missing_tools[*]} (declared in $CONTRACT bootstrap_preconditions.required_runtime_tools)"
+fi
+
 [[ -x "$INIT_SCRIPT" ]] || fail "missing/non-executable script: $INIT_SCRIPT"
 [[ -x "$DOCTOR_SCRIPT" ]] || fail "missing/non-executable script: $DOCTOR_SCRIPT"
 
