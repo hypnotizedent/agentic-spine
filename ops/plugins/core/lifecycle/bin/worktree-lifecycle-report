@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONTROL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+TARGET_ROOT="${SPINE_TARGET_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "${SPINE_REPO:-$PWD}")}"
+export SPINE_CODE="${SPINE_CODE:-$CONTROL_ROOT}"
+export SPINE_REPO="$TARGET_ROOT"
+source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+RECONCILE_SCRIPT="$CONTROL_ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
+
+JSON_MODE=0
+BRIEF_MODE=0
+
+usage() {
+  cat <<'USAGE'
+worktree-lifecycle-report
+
+Usage:
+  worktree-lifecycle-report [--json] [--brief]
+
+Read-only lifecycle inspection for governed worktrees, temp clones, and stashes.
+This replaces using `worktree.lifecycle.cleanup -- --mode report-only` for
+inspection. Archive/delete remains on worktree.lifecycle.cleanup.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_MODE=1; shift ;;
+    --brief) BRIEF_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ ! -x "$RECONCILE_SCRIPT" ]]; then
+  echo "FAIL: reconcile classifier not found: $RECONCILE_SCRIPT" >&2
+  exit 1
+fi
+
+MAIN_BRANCH="main"
+BLOCK_ACTIVE_LEASE="true"
+REQUIRE_MERGED_OR_TOKEN="true"
+REQUIRE_CLEAN_WORKTREE_DELETE="true"
+REQUIRE_CLEAN_TEMP_CLONE_DELETE="true"
+TEMP_CLONE_GRACE_HOURS="24"
+NORMALIZE_ROOT_WHEN_HEAD_MATCHES_MAIN="true"
+MANAGED_WORKTREES_DEFAULT_SURFACE="false"
+MANAGED_WORKTREE_PATH_COUNT="0"
+
+if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
+  MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo "$MAIN_BRANCH")"
+  BLOCK_ACTIVE_LEASE="$(yq e -r '.cleanup.block_if_active_lease // true' "$CONTRACT" 2>/dev/null || echo true)"
+  REQUIRE_MERGED_OR_TOKEN="$(yq e -r '.cleanup.require_branch_merged_or_explicit_token // true' "$CONTRACT" 2>/dev/null || echo true)"
+  REQUIRE_CLEAN_TEMP_CLONE_DELETE="$(yq e -r '.cleanup.require_clean_temp_clone_for_delete // true' "$CONTRACT" 2>/dev/null || echo true)"
+  TEMP_CLONE_GRACE_HOURS="$(yq e -r '.policy.temp_clone_grace_hours // 24' "$CONTRACT" 2>/dev/null || echo "$TEMP_CLONE_GRACE_HOURS")"
+  NORMALIZE_ROOT_WHEN_HEAD_MATCHES_MAIN="$(yq e -r '.cleanup.normalize_root_when_head_matches_main // true' "$CONTRACT" 2>/dev/null || echo true)"
+  MANAGED_WORKTREES_DEFAULT_SURFACE="$(yq e -r '.policy.managed_worktrees_are_default_mutation_surface // false' "$CONTRACT" 2>/dev/null || echo false)"
+  MANAGED_WORKTREE_PATH_COUNT="$(yq e -r '[.policy.managed_worktree_paths[]?] | length' "$CONTRACT" 2>/dev/null || echo 0)"
+fi
+
+if command -v yq >/dev/null 2>&1 && [[ -f "$CONTROL_ROOT/ops/bindings/wave.closeout.contract.yaml" ]]; then
+  REQUIRE_CLEAN_WORKTREE_DELETE="$(yq e -r '.closeout.require_clean_worktree_for_cleanup_delete // true' "$CONTROL_ROOT/ops/bindings/wave.closeout.contract.yaml" 2>/dev/null || echo true)"
+fi
+
+REPORT_PAYLOAD="$(SPINE_TARGET_REPO="$TARGET_ROOT" "$RECONCILE_SCRIPT" --json)"
+
+REPORT_PAYLOAD="$REPORT_PAYLOAD" python3 - "$JSON_MODE" "$BRIEF_MODE" "$BLOCK_ACTIVE_LEASE" "$REQUIRE_MERGED_OR_TOKEN" "$REQUIRE_CLEAN_WORKTREE_DELETE" "$REQUIRE_CLEAN_TEMP_CLONE_DELETE" "$TEMP_CLONE_GRACE_HOURS" "$NORMALIZE_ROOT_WHEN_HEAD_MATCHES_MAIN" "$MAIN_BRANCH" "$MANAGED_WORKTREES_DEFAULT_SURFACE" "$MANAGED_WORKTREE_PATH_COUNT" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+json_mode = sys.argv[1] == "1"
+brief_mode = sys.argv[2] == "1"
+block_active = sys.argv[3].lower() == "true"
+require_merged_or_token = sys.argv[4].lower() == "true"
+require_clean_delete = sys.argv[5].lower() == "true"
+require_clean_temp_clone_delete = sys.argv[6].lower() == "true"
+temp_clone_grace_h = float(sys.argv[7])
+normalize_root = sys.argv[8].lower() == "true"
+main_branch = sys.argv[9]
+managed_default_surface = sys.argv[10].lower() == "true"
+managed_path_count = int(sys.argv[11] or "0")
+
+report = json.loads(os.environ["REPORT_PAYLOAD"])
+rows = report.get("worktrees", [])
+clone_rows = report.get("temp_clones", [])
+stash_rows = report.get("stashes", [])
+root_checkout = report.get("root_checkout") or {}
+
+
+def lease_only_dirty(row):
+    lease = row.get("lease") or {}
+    if lease.get("active"):
+        return False
+    if row.get("owner_type") in {"loop", "wave"} and row.get("owner_state") == "active":
+        return False
+    wt = row.get("path")
+    if not wt or not Path(wt).exists():
+        return False
+    proc = subprocess.run(
+        ["git", "-C", wt, "status", "--porcelain", "--untracked-files=all"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return False
+    lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    return bool(lines) and all(line == "?? .spine-lane-lease.yaml" for line in lines)
+
+
+blocked = []
+delete_candidates = []
+root_violations = []
+for row in rows:
+    reasons = []
+    lease = row.get("lease") or {}
+    if row.get("managed_worktree"):
+        reasons.append("managed_worktree_protected")
+    elif not row.get("canonical_root_ok", True):
+        reasons.append("noncanonical_worktree_root")
+        root_violations.append(row.get("path"))
+    if block_active and lease.get("active"):
+        reasons.append("active_lease")
+    if require_merged_or_token and not row.get("merged_into_main", False):
+        reasons.append("not_merged_no_token")
+    row["cleanup_lease_only_residue"] = False
+    if require_clean_delete and row.get("dirty", False):
+        row["cleanup_lease_only_residue"] = lease_only_dirty(row)
+        if not row["cleanup_lease_only_residue"]:
+            reasons.append("dirty_worktree")
+    if reasons:
+        blocked.append({"path": row.get("path"), "branch": row.get("branch"), "reasons": reasons})
+    else:
+        delete_candidates.append({"path": row.get("path"), "branch": row.get("branch")})
+
+clone_blocked = []
+clone_delete_candidates = []
+for row in clone_rows:
+    reasons = []
+    eligible = False
+    age = row.get("age_hours")
+    if row.get("origin_kind") == "local_path" and row.get("origin_exists") is False:
+        eligible = True
+    if age is not None and age >= temp_clone_grace_h:
+        eligible = True
+    if not eligible:
+        reasons.append("within_grace")
+    if require_clean_temp_clone_delete and row.get("dirty", False):
+        reasons.append("dirty_temp_clone")
+    if reasons:
+        clone_blocked.append({"path": row.get("path"), "branch": row.get("branch"), "reasons": reasons})
+    else:
+        clone_delete_candidates.append({"path": row.get("path"), "branch": row.get("branch")})
+
+stash_blocked = []
+stash_delete_candidates = []
+for row in stash_rows:
+    if row.get("cleanup_candidate"):
+        stash_delete_candidates.append(row)
+    else:
+        stash_blocked.append({**row, "reasons": ["not_cleanup_candidate"]})
+
+root_normalization = {"candidate": None, "blocked": None}
+if root_checkout.get("checked"):
+    if normalize_root and root_checkout.get("normalizable"):
+        root_normalization["candidate"] = {
+            "path": root_checkout.get("path"),
+            "from_branch": root_checkout.get("branch"),
+            "to_branch": root_checkout.get("main_branch") or main_branch,
+        }
+    elif root_checkout.get("issues"):
+        root_normalization["blocked"] = {
+            "path": root_checkout.get("path"),
+            "branch": root_checkout.get("branch"),
+            "reasons": list(root_checkout.get("issues") or []),
+        }
+
+summary = {
+    "surface": "worktree.lifecycle.report",
+    "mode": "report-only",
+    "mutates": False,
+    "replaces_inspection_use_of": "worktree.lifecycle.cleanup -- --mode report-only",
+    "repo": report.get("repo"),
+    "worktree_count": len(rows),
+    "temp_clone_count": len(clone_rows),
+    "cleanable_worktrees": len(delete_candidates),
+    "blocked_worktrees": len(blocked),
+    "temp_clone_delete_candidates": len(clone_delete_candidates),
+    "temp_clone_blocked": len(clone_blocked),
+    "stash_delete_candidates": len(stash_delete_candidates),
+    "stash_blocked": len(stash_blocked),
+    "root_violations": len(root_violations),
+    "root_normalization_candidate_count": 1 if root_normalization["candidate"] else 0,
+    "root_normalization_blocked_count": 1 if root_normalization["blocked"] else 0,
+    "managed_worktrees_are_default_mutation_surface": managed_default_surface,
+    "configured_managed_worktree_paths": managed_path_count,
+}
+
+if managed_default_surface and managed_path_count == 0:
+    summary["managed_sync_note"] = (
+        "No persistent managed worktree paths are configured; managed.sync has "
+        "nothing to sync. Per-lane worktrees are still the default mutation "
+        "surface when created under the canonical worktree root."
+    )
+
+payload = {
+    **report,
+    "summary": summary,
+    "delete_candidates": delete_candidates,
+    "blocked": blocked,
+    "temp_clone_delete_candidates": clone_delete_candidates,
+    "temp_clone_blocked": clone_blocked,
+    "stash_delete_candidates": stash_delete_candidates,
+    "stash_blocked": stash_blocked,
+    "root_normalization": root_normalization,
+    "root_violations": root_violations,
+}
+
+if json_mode:
+    print(json.dumps(payload, indent=2))
+elif brief_mode:
+    print(
+        "PASS "
+        f"worktrees={len(rows)} cleanable={len(delete_candidates)} blocked={len(blocked)} "
+        f"temp_clones={len(clone_rows)} managed_paths={managed_path_count}"
+    )
+else:
+    print("worktree.lifecycle.report")
+    print("mode=report-only")
+    print("mutates=false")
+    print(f"repo={report.get('repo')}")
+    print(f"worktrees={len(rows)}")
+    print(f"cleanable_worktrees={len(delete_candidates)}")
+    print(f"blocked_worktrees={len(blocked)}")
+    print(f"temp_clones={len(clone_rows)}")
+    print(f"stash_delete_candidates={len(stash_delete_candidates)}")
+    print(f"managed_worktrees_are_default_mutation_surface={str(managed_default_surface).lower()}")
+    print(f"configured_managed_worktree_paths={managed_path_count}")
+    if summary.get("managed_sync_note"):
+        print(f"managed_sync_note={summary['managed_sync_note']}")
+    if delete_candidates:
+        print("delete_candidates:")
+        for item in delete_candidates:
+            print(f"  - {item.get('path')} | {item.get('branch')}")
+    if blocked:
+        print("blocked:")
+        for item in blocked:
+            print(f"  - {item.get('path')} | {item.get('branch')} | {','.join(item.get('reasons') or [])}")
+PY

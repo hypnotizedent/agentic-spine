@@ -20,19 +20,22 @@ Policy:
   - carries zero unique commits relative to `origin/main`
   - has no non-prunable worktree attachment
 
-Run inventory only:
+Run governed inventory/readback only:
 
 ```bash
-python3 ./ops/plugins/core/lifecycle/bin/git-worktree-hygiene --brief
+./bin/ops cap run worktree.lifecycle.report -- --json
 ```
 
-Apply safe prune actions:
+Apply explicit cleanup actions only when archive/delete is intended:
 
 ```bash
-python3 ./ops/plugins/core/lifecycle/bin/git-worktree-hygiene --apply --brief
+./bin/ops cap run worktree.lifecycle.cleanup -- --mode archive --json
 ```
 
-Run explicit git maintenance after prune:
+The lower-level hygiene script remains an implementation detail. It is not the
+operator-facing close path.
+
+Run explicit git maintenance only as an expert maintenance action:
 
 ```bash
 python3 ./ops/plugins/core/lifecycle/bin/git-worktree-hygiene --apply --maintenance --brief

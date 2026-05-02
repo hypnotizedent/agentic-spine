@@ -153,7 +153,8 @@ stay on `main` and clean. All wave/feature work happens in managed worktrees.
 - Location: `.runtime/spine/tmp/worktrees/{repo}/{branch-slug}`
 - Open: any time repo mutation is needed
 - Close: prune only when boring (landed on main, zero unique commits, no dirty state)
-- Hygiene: `python3 ./ops/plugins/core/lifecycle/bin/git-worktree-hygiene --apply --brief`
+- Inspect: `./bin/ops cap run worktree.lifecycle.report -- --json`
+- Cleanup: `./bin/ops cap run worktree.lifecycle.cleanup -- --mode archive --json` only when explicit archive/delete cleanup is intended
 - Authority: `docs/governance/GIT_WORKTREE_HYGIENE.md`, `ops/bindings/worktree.lifecycle.contract.yaml`
 
 ## Execution Lifecycles
@@ -316,11 +317,11 @@ Close path is not a separate ceremony; it is the evidence-to-decision-to-receipt
 tail of the same lifecycle. Public readback should report the outcome and
 receipt. Agents use the internal machinery that applies to the work item:
 
-1. **Worktree** — commit, push, merge to main, then: `git-worktree-hygiene --apply --maintenance --brief`
+1. **Worktree** — commit, push, merge to main, then inspect with `worktree.lifecycle.report`; archive/delete only through explicit `worktree.lifecycle.cleanup`
 2. **Execution close** — use the governed close capability for the active lane, such as `wave.finish` or `controller_prompt.close`
 3. **Loop continuity** — close the loop when acceptance is met, or update continuity when more bounded work remains
 4. **Handoff** — emit `session.handoff.create --summary "..." --loops LOOP-ID` only at a real session boundary
-5. **Git hygiene** — `git-worktree-hygiene --apply --brief` and `wave.residue` for stale wave branches
+5. **Git hygiene** — inspect with `worktree.lifecycle.report` and `wave.residue`; use `worktree.lifecycle.cleanup` only for explicit archive/delete cleanup
 
 If the normal wave-finish close path cannot complete and a control-plane recovery close is required, use `./bin/ops cap run orchestration.loop.close`. That is the explicit manual recovery surface. Do not fall through to raw `shared_authority.db` mutation as an operator path.
 

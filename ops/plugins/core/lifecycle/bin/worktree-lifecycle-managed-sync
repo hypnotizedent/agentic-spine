@@ -28,8 +28,9 @@ Usage:
   worktree-lifecycle-managed-sync [--trigger <label>] [--json] [--brief]
 
 Notes:
-  - Fast-forward only sync from local refs/heads/main into contract-managed worktrees.
+  - Mutating fast-forward sync from local refs/heads/main into configured contract-managed worktrees.
   - Dirty or non-fast-forwardable managed worktrees fail loudly and are not mutated.
+  - For read-only inventory, use worktree-lifecycle-report.
 USAGE
 }
 
@@ -65,10 +66,12 @@ done
 MAIN_BRANCH="main"
 MANAGED_WORKTREE_PATHS_CSV="${SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS:-}"
 STALE_HOURS="${SPINE_WORKTREE_LIFECYCLE_STALE_HOURS:-24}"
+MANAGED_WORKTREES_DEFAULT_SURFACE="false"
 
 if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
   STALE_HOURS="$(yq e -r '.policy.managed_worktree_sync_policy.stale_hours // 24' "$CONTRACT" 2>/dev/null || echo "$STALE_HOURS")"
+  MANAGED_WORKTREES_DEFAULT_SURFACE="$(yq e -r '.policy.managed_worktrees_are_default_mutation_surface // false' "$CONTRACT" 2>/dev/null || echo false)"
   if [[ -z "${SPINE_WORKTREE_LIFECYCLE_MANAGED_WORKTREE_PATHS:-}" ]]; then
     managed_paths_accum=""
     while IFS= read -r managed_path; do
@@ -93,7 +96,7 @@ REPORT_JSON="$ARTIFACT_DIR/report.json"
 REPORT_MD="$ARTIFACT_DIR/report.md"
 ACTIONS_LOG="$ARTIFACT_DIR/actions.log"
 
-python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$MANAGED_WORKTREE_PATHS_CSV" "$TRIGGER" "$REPORT_JSON" "$REPORT_MD" "$ACTIONS_LOG" "$JSON_MODE" "$BRIEF_MODE" "$STALE_HOURS" <<'PY'
+python3 - "$TARGET_ROOT" "$MAIN_BRANCH" "$MANAGED_WORKTREE_PATHS_CSV" "$TRIGGER" "$REPORT_JSON" "$REPORT_MD" "$ACTIONS_LOG" "$JSON_MODE" "$BRIEF_MODE" "$STALE_HOURS" "$MANAGED_WORKTREES_DEFAULT_SURFACE" <<'PY'
 import json
 import os
 import subprocess
@@ -111,6 +114,7 @@ actions_log = Path(sys.argv[7])
 json_mode = sys.argv[8] == "1"
 brief_mode = sys.argv[9] == "1"
 stale_hours = int(sys.argv[10]) if len(sys.argv) > 10 else 24
+managed_default_surface = str(sys.argv[11]).lower() == "true" if len(sys.argv) > 11 else False
 
 
 def sh(args, check=True):
@@ -386,6 +390,8 @@ payload = {
         "main_head": main_head,
         "trigger": trigger,
         "managed_worktree_count": len(rows),
+        "configured_managed_worktree_paths": len(managed_paths),
+        "managed_worktrees_are_default_mutation_surface": managed_default_surface,
         "synced_count": synced_count,
         "already_current_count": already_current_count,
         "blocked_count": blocked_count,
@@ -400,6 +406,13 @@ payload = {
     },
 }
 
+if managed_default_surface and not managed_paths:
+    payload["summary"]["zero_managed_paths_note"] = (
+        "No persistent managed worktree paths are configured; managed.sync has "
+        "nothing to sync. Per-lane managed worktrees may still be created under "
+        "the canonical worktree root."
+    )
+
 report_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 actions_log.write_text("\n".join(actions) + ("\n" if actions else ""), encoding="utf-8")
 
@@ -409,6 +422,10 @@ with report_md.open("w", encoding="utf-8") as fh:
     fh.write(f"- trigger: {trigger}\n")
     fh.write(f"- main_branch: {main_branch}\n")
     fh.write(f"- managed_worktrees: {len(rows)}\n")
+    fh.write(f"- configured_managed_worktree_paths: {len(managed_paths)}\n")
+    fh.write(f"- managed_worktrees_are_default_mutation_surface: {str(managed_default_surface).lower()}\n")
+    if payload["summary"].get("zero_managed_paths_note"):
+        fh.write(f"- note: {payload['summary']['zero_managed_paths_note']}\n")
     fh.write(f"- synced: {synced_count}\n")
     fh.write(f"- already_current: {already_current_count}\n")
     fh.write(f"- blocked: {blocked_count}\n")
@@ -439,6 +456,10 @@ else:
     print(f"status={status}")
     print(f"trigger={trigger}")
     print(f"managed_worktrees={len(rows)}")
+    print(f"configured_managed_worktree_paths={len(managed_paths)}")
+    print(f"managed_worktrees_are_default_mutation_surface={str(managed_default_surface).lower()}")
+    if payload["summary"].get("zero_managed_paths_note"):
+        print(f"note={payload['summary']['zero_managed_paths_note']}")
     print(f"synced={synced_count}")
     print(f"already_current={already_current_count}")
     print(f"blocked={blocked_count}")

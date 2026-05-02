@@ -523,9 +523,12 @@ check E13 "cap.sh no silent widen-by-fallback to worker" bash -c '
     fi
 '
 
-warn_check E14 "researcher→worker bridge continuity (active loops have delegation, packet, or handoff)" bash -c '
+# E14 is warning-only. Runtime custody can be proven by delegation/packet/handoff
+# or by current wave/worktree/heartbeat evidence.
+warn_check E14 "active-loop continuity (delegation, packet, handoff, wave/worktree custody, or heartbeat)" bash -c '
     python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
 import json, os, subprocess, sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 root = Path(sys.argv[1])
@@ -537,6 +540,8 @@ if not spine_state:
 state = Path(spine_state)
 prompts_dir = state / "controller-prompts"
 handoffs_dir = state / "handoffs"
+waves_dir = state.parent / "waves"
+loop_heartbeat_dir = state / "loop-heartbeats"
 db_path = state / "shared_authority.db"
 
 if not db_path.is_file():
@@ -559,6 +564,15 @@ for r in rows:
 
 def clean_scalar(value):
     return value.strip().strip(chr(34) + chr(39))
+
+def parse_iso_utc(value):
+    value = str(value or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 # Check which loops have at least one packet
 loops_with_packet = set()
@@ -622,10 +636,95 @@ if delegations_dir.is_dir():
         except Exception:
             pass
 
-# Loops with neither delegation, packet, nor handoff
-uncovered = active_loops - loops_with_delegation - loops_with_packet - loops_with_handoff
+# Check active wave state for loop custody.
+loops_with_wave = set()
+if waves_dir.is_dir():
+    active_states = {"active", "running", "open", "executing"}
+    terminal_states = {"closed", "landed", "cancelled", "canceled", "abandoned", "deferred"}
+    for sf in waves_dir.glob("WAVE-*/state.json"):
+        try:
+            data = json.loads(sf.read_text(encoding="utf-8", errors="ignore"))
+            if not isinstance(data, dict):
+                continue
+            state_value = str(data.get("lifecycle_state") or data.get("status") or "").strip().lower()
+            if state_value in terminal_states:
+                continue
+            if state_value and state_value not in active_states:
+                continue
+            packet = data.get("packet") if isinstance(data.get("packet"), dict) else {}
+            lid = str(data.get("loop_id") or packet.get("loop_id") or "").strip()
+            if lid in active_loops:
+                loops_with_wave.add(lid)
+        except Exception:
+            pass
+
+# Check worktree lease custody. A live worktree lease is continuity even when
+# older delegation/packet/handoff surfaces are absent.
+loops_with_worktree = set()
+try:
+    proc = subprocess.run(
+        ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+        text=True,
+        capture_output=True,
+    )
+    worktree_paths = []
+    if proc.returncode == 0:
+        for raw in proc.stdout.splitlines():
+            if raw.startswith("worktree "):
+                worktree_paths.append(Path(raw.split(" ", 1)[1].strip()))
+    for wt in worktree_paths:
+        lease = wt / ".spine-lane-lease.yaml"
+        if not lease.is_file():
+            continue
+        text = lease.read_text(encoding="utf-8", errors="ignore")
+        lid = ""
+        status = ""
+        for line in text.splitlines():
+            if line.startswith("loop_or_wave_id:"):
+                lid = clean_scalar(line.split(":", 1)[1])
+            elif line.startswith("status:"):
+                status = clean_scalar(line.split(":", 1)[1]).lower()
+        if lid in active_loops and status in {"active", "claimed", "open"}:
+            loops_with_worktree.add(lid)
+except Exception:
+    pass
+
+# Check fresh loop heartbeat custody.
+loops_with_heartbeat = set()
+now = datetime.now(timezone.utc)
+if loop_heartbeat_dir.is_dir():
+    for lid in active_loops:
+        hb_file = loop_heartbeat_dir / ("%s.yaml" % lid.replace("/", "_"))
+        if not hb_file.is_file():
+            continue
+        try:
+            heartbeat_raw = ""
+            ttl_minutes = 15.0
+            text = hb_file.read_text(encoding="utf-8", errors="ignore")
+            for line in text.splitlines():
+                if line.startswith("last_heartbeat_utc:"):
+                    heartbeat_raw = clean_scalar(line.split(":", 1)[1])
+                elif line.startswith("heartbeat_ttl_minutes:"):
+                    raw_ttl = clean_scalar(line.split(":", 1)[1])
+                    ttl_minutes = float(raw_ttl or ttl_minutes)
+            dt = parse_iso_utc(heartbeat_raw)
+            if dt is not None and (now - dt).total_seconds() <= ttl_minutes * 60:
+                loops_with_heartbeat.add(lid)
+        except Exception:
+            pass
+
+# Loops with no known continuity evidence. This remains a warning.
+covered = (
+    loops_with_delegation
+    | loops_with_packet
+    | loops_with_handoff
+    | loops_with_wave
+    | loops_with_worktree
+    | loops_with_heartbeat
+)
+uncovered = active_loops - covered
 if uncovered:
-    print("%d active loop(s) without delegation, packet, or handoff continuity:" % len(uncovered))
+    print("%d active loop(s) without continuity evidence:" % len(uncovered))
     for lid in sorted(uncovered):
         print("  %s" % lid)
     raise SystemExit(1)

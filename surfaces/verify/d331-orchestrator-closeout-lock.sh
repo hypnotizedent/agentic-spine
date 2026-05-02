@@ -51,6 +51,8 @@ for marker in \
   "gaps_status" \
   "proposals_status" \
   "friction_queue_status" \
+  "worktree_report" \
+  "worktree.lifecycle.report -- --json" \
   "worktree_cleanup" \
   "friction.reconcile -- --loop-id" \
   "spine.verify" \
@@ -302,6 +304,9 @@ payload = json.loads(residue_proc.stdout)
 report = payload.get("report", {}) if isinstance(payload, dict) else {}
 items = report.get("items", []) if isinstance(report, dict) else []
 
+# D331 is a hard closeout safety lock, not a general cleanup reminder.
+# Safe-to-sweep stale wave residue stays visible through wave.residue; this
+# gate blocks unsafe/ambiguous residue and cleaned-workspace contradictions.
 blocking: list[str] = []
 for item in items:
     if not isinstance(item, dict):
@@ -311,12 +316,14 @@ for item in items:
     identity = str(item.get("identity") or "")
     reason = str(item.get("ambiguous_reason") or "")
     safe = bool(item.get("safe_to_sweep"))
-    if safe or wave_status == "unknown" or cls == "inconsistent_cleaned_workspace":
+    if wave_status in {"active", "running", "open", "executing"}:
+        continue
+    if (not safe) or wave_status == "unknown" or cls == "inconsistent_cleaned_workspace":
         detail = reason or f"wave_status={wave_status or 'unknown'}"
         blocking.append(f"  - [{cls}] {identity} :: {detail}")
 
 if blocking:
     fail(
-        "repo-local wave/worktree residue detected:\n" + "\n".join(blocking)
+        "unsafe or contradictory repo-local wave/worktree residue detected:\n" + "\n".join(blocking)
     )
 PY
