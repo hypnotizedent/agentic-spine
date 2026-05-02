@@ -1201,7 +1201,25 @@ _route_to_db_authority_if_needed() {
     local cap_safety
     cap_safety="$(yq e ".capabilities.\"${cap_name}\".safety // \"\"" \
         "$SPINE_CODE/ops/capabilities.yaml" 2>/dev/null)"
-    if [[ "$cap_safety" != "mutating" && "$cap_safety" != "destructive" ]]; then
+
+    # Routing decision (D.3c read-path extension):
+    # - mutating/destructive: always route (writes need authority)
+    # - read-only/read-only-with-cache: route only if cap.state_authority == "shared_authority_db"
+    # - other: stay local
+    # Caps without state_authority declared default to local for read-only — but
+    # any DB-backed cap that lacks the annotation will be caught by the
+    # lib-level db_authority_guard and fail closed at sqlite open time, so the
+    # disease cannot land silently. D447 verify enforces the annotation.
+    if [[ "$cap_safety" == "mutating" || "$cap_safety" == "destructive" ]]; then
+        : # route (fall through to SSH dispatch below)
+    elif [[ "$cap_safety" == "read-only" || "$cap_safety" == "read-only-with-cache" ]]; then
+        local cap_state_authority
+        cap_state_authority="$(yq e ".capabilities.\"${cap_name}\".state_authority // \"\"" \
+            "$SPINE_CODE/ops/capabilities.yaml" 2>/dev/null)"
+        if [[ "$cap_state_authority" != "shared_authority_db" ]]; then
+            return 126
+        fi
+    else
         return 126
     fi
 

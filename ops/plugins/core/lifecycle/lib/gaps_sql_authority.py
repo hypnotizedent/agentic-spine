@@ -89,6 +89,9 @@ def resolve_paths(root: Path) -> tuple[Path, Path]:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
+    # D.3c: refuse to auto-create empty stub on consumers when routing is enabled.
+    from db_authority_guard import assert_db_open_safe  # noqa: PLC0415
+    assert_db_open_safe(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row

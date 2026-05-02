@@ -114,6 +114,131 @@ if "_route_to_db_authority_if_needed" not in cap_sh_text:
 if "db_authority.enabled" not in cap_sh_text:
     fail("ops/commands/cap.sh routing function must read db_authority.enabled from contract before routing")
 
+# Phase D.3c: read-path routing extension. cap.sh routing must inspect a cap's
+# state_authority field; the lib-level db_authority_guard must exist; the
+# contract must declare read_routing rules. D.3c closes the silent-empty-stub
+# gap discovered during D.3b cutover (read-only caps fell through to local DB
+# and SQLite auto-created an empty stub, producing false read-success).
+if "state_authority" not in cap_sh_text:
+    fail("ops/commands/cap.sh must reference state_authority field for D.3c read-path routing")
+
+read_routing = db_authority.get("read_routing")
+if read_routing is None:
+    fail("runtime.bootstrap.contract.yaml#db_authority.read_routing block missing (D.3c declares read-path routing semantics)")
+if not isinstance(read_routing, dict):
+    fail("runtime.bootstrap.contract.yaml#db_authority.read_routing must be a mapping")
+for required_rr_field in ("db_backed_caps_must_route_when_enabled",
+                          "non_db_caps_stay_local",
+                          "consumer_db_open_must_fail_closed",
+                          "state_authority_field_required_for_db_caps"):
+    if required_rr_field not in read_routing:
+        fail(f"runtime.bootstrap.contract.yaml#db_authority.read_routing.{required_rr_field} must be explicitly declared")
+    if not isinstance(read_routing.get(required_rr_field), bool):
+        fail(f"runtime.bootstrap.contract.yaml#db_authority.read_routing.{required_rr_field} must be a boolean")
+
+guard_path = root / "ops/plugins/core/lifecycle/lib/db_authority_guard.py"
+if not guard_path.is_file():
+    fail("ops/plugins/core/lifecycle/lib/db_authority_guard.py missing (D.3c lib-level open guard required to prevent SQLite empty-stub creation on consumers)")
+guard_text = guard_path.read_text(encoding="utf-8")
+if "def assert_db_open_safe" not in guard_text:
+    fail("db_authority_guard.py must export assert_db_open_safe function (the canonical open-time guard)")
+if "DbAuthorityRoutingRequired" not in guard_text:
+    fail("db_authority_guard.py must define DbAuthorityRoutingRequired exception class")
+
+# Each primary SQL authority lib must call the guard before sqlite3.connect.
+sql_auth_libs = [
+    "ops/plugins/core/lifecycle/lib/loops_sql_authority.py",
+    "ops/plugins/core/lifecycle/lib/gaps_sql_authority.py",
+    "ops/plugins/core/lifecycle/lib/plans_sql_authority.py",
+    "ops/plugins/core/lifecycle/lib/intent_use_receipts.py",
+]
+for lib_rel in sql_auth_libs:
+    lib_path = root / lib_rel
+    if not lib_path.is_file():
+        fail(f"{lib_rel} missing (D.3c primary SQL authority lib must exist)")
+    lib_text = lib_path.read_text(encoding="utf-8")
+    if "assert_db_open_safe" not in lib_text:
+        fail(f"{lib_rel} must call assert_db_open_safe before sqlite3.connect (D.3c lib-level guard)")
+
+# Every read-only cap whose script chain opens shared_authority.db (directly or
+# via SQL authority libs / ops loops|gaps|wave subcommand delegation) MUST
+# declare state_authority: shared_authority_db. cap.sh routing reads this
+# field to decide whether to route DB-backed read-only caps. Caps without the
+# annotation that ARE DB-backed will fall through to local DB and the lib
+# guard will raise — but that's a runtime catch; the structural promise here
+# is that the annotation is present at land time.
+caps_path = root / "ops/capabilities.yaml"
+caps_text = caps_path.read_text(encoding="utf-8")
+caps_doc = yaml.safe_load(caps_text)
+caps_map = (caps_doc or {}).get("capabilities") or {}
+
+# Static list — the canonical D.3c inventory of DB-backed caps.
+# Source of truth: scripts that match
+#   shared_authority|*_sql_authority|*_receipts|controller_prompt_*|
+#   completion_state_reconciler|delegation_broker|control_loop_status|
+#   ops (loops|gaps|wave|plans) (subcommand delegation)
+# at land time. Adding a new DB-backed cap requires updating this list AND
+# annotating the cap; both are checked here.
+D3C_DB_BACKED_CAPS = {
+    # Read-only DB-backed
+    "completion.state.reconcile",
+    "delegation.status",
+    "entry.compile",
+    "friction.queue.status",
+    "gaps.status",
+    "intent.use.receipt.status",
+    "loops.status",
+    "session.v3.attach",
+    "spine.broker.get_latest_loop",
+    "spine.broker.get_loop_progress",
+    "spine.broker.get_loop_status",
+    "spine.broker.get_request_attestation",
+    "surface.operator.overview.payload",
+    "transition.parity.check",
+    "verify.engine.run",
+    "wave.execute.collect",
+    "wave.execute.status",
+    # Mutating DB-backed (already route via D.3a, but explicit annotation
+    # is defense-in-depth for drift detection).
+    "ai.patch.review.promote",
+    "controller_prompt.amend",
+    "controller_prompt.close",
+    "controller_prompt.create",
+    "delegate.to.execution",
+    "delegation.pickup",
+    "friction.ingest",
+    "friction.reconcile",
+    "intent.use.receipt.write",
+    "loops.create",
+    "orchestration.loop.close",
+    "orchestration.terminal.entry",
+    "orchestration.wave.kickoff",
+    "planning.plans.create",
+    "spine.surface.manifest.generate",
+    "state.shared.reconcile",
+    "terminal.loop.claim",
+    "verify.engine.honesty",
+    "wave.execute",
+    "wave.execute.close",
+    "wave.execute.dispatch",
+    "wave.execute.land",
+    "wave.execute.start",
+    "wave.finish",
+    "worktree.lifecycle.rehydrate",
+}
+unannotated = []
+for cap_name in sorted(D3C_DB_BACKED_CAPS):
+    cap_def = caps_map.get(cap_name)
+    if cap_def is None:
+        # Cap was retired since list was authored — that's a list-update concern,
+        # not a fail. Skip.
+        continue
+    sa = cap_def.get("state_authority")
+    if sa != "shared_authority_db":
+        unannotated.append(cap_name)
+if unannotated:
+    fail("D.3c missing state_authority: shared_authority_db on " + ", ".join(unannotated))
+
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
 # structurally prevents drift like 'pve-730xd' (non-canonical machine identity)
