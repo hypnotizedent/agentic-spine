@@ -72,8 +72,107 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def receipt_refs_from(row: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    run_key = str(row.get("run_key") or "").strip()
+    if run_key:
+        refs.append(run_key)
+    result = str(row.get("result") or "")
+    for token in result.replace(",", " ").split():
+        if token.startswith("run_key="):
+            refs.append(token.split("=", 1)[1])
+        elif token.startswith("receipt="):
+            refs.append(token.split("=", 1)[1])
+    return sorted(set(refs))
+
+
+def kernel_states_for(row: dict[str, Any]) -> dict[str, Any]:
+    pickup_state = str(row.get("pickup_state") or "")
+    source = str(row.get("source") or "")
+    realization = str(row.get("realization") or "")
+    heartbeat_age = row.get("heartbeat_age_seconds")
+    worker = row.get("worker")
+    terminal = pickup_state in TERMINAL_TASK_STATES
+
+    if pickup_state == "not_claimed":
+        claim_status = "unclaimed"
+    elif pickup_state in {"claimed", "stale"}:
+        claim_status = "claimed"
+    elif terminal:
+        claim_status = "terminal"
+    else:
+        claim_status = pickup_state or "unknown"
+
+    if pickup_state == "stale":
+        heartbeat_status = "stale"
+    elif pickup_state == "claimed":
+        heartbeat_status = "fresh" if heartbeat_age is not None and heartbeat_age <= STALE_SECONDS else "unknown"
+    elif pickup_state == "not_claimed":
+        heartbeat_status = "not_applicable_until_claimed"
+    elif terminal:
+        heartbeat_status = "terminal"
+    else:
+        heartbeat_status = "unknown"
+
+    if pickup_state == "done":
+        outcome_status = "success"
+    elif pickup_state == "failed":
+        outcome_status = "failure"
+    elif pickup_state == "cancelled":
+        outcome_status = "blocked"
+    elif pickup_state == "stale":
+        outcome_status = "active_at_risk"
+    else:
+        outcome_status = "pending"
+
+    if pickup_state == "not_claimed":
+        recovery_status = "claim_needed"
+    elif pickup_state == "stale":
+        recovery_status = "worker_recovery_needed"
+    elif pickup_state == "claimed":
+        recovery_status = "worker_has_custody"
+    elif terminal:
+        recovery_status = "terminal_read_receipt"
+    else:
+        recovery_status = "inspect"
+
+    return {
+        "request_state": {
+            "status": "terminal" if terminal else "active",
+            "source": source,
+            "realization": realization,
+            "boundary": "request does not imply claim or execution" if pickup_state == "not_claimed" else "execution request has runtime state",
+        },
+        "claim_state": {
+            "status": claim_status,
+            "worker": worker,
+            "boundary": "claim is custody only; not node admission, role promotion, placement, backup, watcher, or domain authority",
+        },
+        "heartbeat_state": {
+            "status": heartbeat_status,
+            "heartbeat_at": row.get("heartbeat_at"),
+            "age_seconds": heartbeat_age,
+            "stale_after_seconds": STALE_SECONDS if pickup_state in {"claimed", "stale"} else None,
+        },
+        "outcome_state": {
+            "status": outcome_status,
+            "native_state": pickup_state,
+            "result": row.get("result"),
+            "failure_reason": row.get("failure_reason"),
+        },
+        "receipt_refs": receipt_refs_from(row),
+        "recovery_posture": {
+            "status": recovery_status,
+            "public_readback": "execution.pickup.status",
+            "drilldown": "internal task lifecycle" if source == "operational_task" else "delegation.status | orchestration.wave.status | wave.execute.status",
+        },
+    }
+
+
 def add_request(rows: list[dict[str, Any]], **kwargs: Any) -> None:
-    rows.append({k: v for k, v in kwargs.items() if v not in (None, "", [], {})})
+    row = {k: v for k, v in kwargs.items() if v not in (None, "", [], {})}
+    row.update(kernel_states_for(row))
+    rows.append(row)
 
 
 def collect_wave_dispatches(rows: list[dict[str, Any]]) -> None:
@@ -247,6 +346,13 @@ def collect() -> dict[str, Any]:
         "requests": rows,
         "subtraction": {
             "public_language": "execution pickup",
+            "kernel_translation": {
+                "request": "queued or dispatched execution request",
+                "claim": "worker custody, never role/admission/placement authority",
+                "heartbeat": "task/worker liveness only",
+                "result_failure": "terminal task outcome",
+                "receipt": "linked governed run key or close receipt when present",
+            },
             "expert_drilldowns": [
                 "delegation.status",
                 "orchestration.wave.status",
@@ -285,8 +391,9 @@ def render_human(data: dict[str, Any]) -> None:
         print("-" * 96)
         for row in rows:
             request_id = str(row.get("request_id") or "")[:34]
+            kernel = f"{(row.get('claim_state') or {}).get('status','?')}/{(row.get('heartbeat_state') or {}).get('status','?')}/{(row.get('outcome_state') or {}).get('status','?')}"
             detail = row.get("task") or row.get("route_capability") or row.get("packet_id") or ""
-            print(f"{str(row.get('pickup_state'))[:14]:14s} {str(row.get('source'))[:18]:18s} {request_id:34s} {str(detail)[:60]}")
+            print(f"{str(row.get('pickup_state'))[:14]:14s} {str(row.get('source'))[:18]:18s} {request_id:34s} {kernel:24s} {str(detail)[:60]}")
     else:
         print("  no active execution requests")
     print()
