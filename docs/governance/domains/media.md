@@ -23,7 +23,7 @@ Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
 
 ## Spine Engine-Facing Surfaces (retained)
 
-- Capability registrations: `ops/capabilities.yaml` (47 `media.*` IDs, all `implementation_repo: workbench`)
+- Capability registrations: `ops/capabilities.yaml` (47 `media.*` IDs, all `implementation_repo: ~/code/projects/media`)
 - L3 binding compatibility symlinks: none; consumers read `~/code/projects/media/bindings/` directly when they need product-owned media contracts.
 - Scoped domain health readback: `./bin/ops cap run verify.run -- domain media`
 

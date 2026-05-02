@@ -47,5 +47,7 @@ Spine retains 1 thin shim, 13 gates (registry-only), and verify surfaces.
 ## Capability Catalog
 Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 
-_No domain-external capabilities currently map to `communications`._
+| Capability |
+|---|
+| `communications.mailarchiver.restore.drill` |
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->
