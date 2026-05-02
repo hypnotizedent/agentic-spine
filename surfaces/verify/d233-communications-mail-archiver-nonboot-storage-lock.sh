@@ -9,7 +9,7 @@ require_tailscale_for "communications-stack"
 source "$ROOT/ops/lib/ssh-resolve.sh"
 
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
-COMMS_CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/domains/communications/communications.stack.contract.yaml}"
+COMMS_CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$HOME/code/projects/communications/bindings/communications.stack.contract.yaml}"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 
 ERRORS=0
