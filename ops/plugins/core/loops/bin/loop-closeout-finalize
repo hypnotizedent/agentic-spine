@@ -319,6 +319,34 @@ if retired:
         print(f"- {delegation_id}: state=cancelled disposition={disposition} reason={reason}")
 PY
 
+# ─────────────────────────────────────────────────────────────────────
+# Close-hook: when the closing loop was OI-born (archived scope carries
+# a non-empty `human_intent_id`), write an automatic IUR linking the
+# loop closeout receipt back to the human intent. This makes the
+# proof_receipt_ref seam first-class so agents do not need to remember
+# to write the link manually. Origin: LOOP-PROOF-RECEIPT-REF-CLOSE-HOOK-
+# SLICE-3-20260502 (HIP trace disease #8).
+#
+# Fail-soft: a write failure here must not fail the close itself.
+# The close path is the authority for terminal state; the IUR is
+# supporting evidence.
+# ─────────────────────────────────────────────────────────────────────
+HUMAN_INTENT_ID_AT_CLOSE="$(awk -F': ' '/^human_intent_id:/{gsub(/^[ \t]*|[ \t\r]*$/,"",$2); gsub(/^['\''"]|['\''"]$/,"",$2); print $2; exit}' "$ARCHIVED_SCOPE_FILE" 2>/dev/null || true)"
+if [[ -n "$HUMAN_INTENT_ID_AT_CLOSE" && "$HUMAN_INTENT_ID_AT_CLOSE" =~ ^HI- ]]; then
+  if ! python3 "$ROOT/ops/plugins/core/lifecycle/bin/intent-use-receipt-write" \
+      --human-intent-ref "$HUMAN_INTENT_ID_AT_CLOSE" \
+      --used-as design_authority \
+      --destination-type closeout \
+      --destination-ref "$RECEIPT_PATH" \
+      --reason "Loop closeout receipt links back to originating human intent (auto-written by loop.closeout.finalize)." \
+      --proof-ref "$RECEIPT_PATH" \
+      --source-ref "$LOOP_ID" \
+      --capture-mode automatic \
+      --created-by loop.closeout.finalize >/dev/null 2>&1; then
+    echo "loop.closeout.finalize WARN: IUR close-hook write failed for HI=$HUMAN_INTENT_ID_AT_CLOSE; close itself succeeded" >&2
+  fi
+fi
+
 echo "loop.closeout.finalize"
 echo "loop_id=$LOOP_ID"
 echo "disposition=$DISPOSITION"

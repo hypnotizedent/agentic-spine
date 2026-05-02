@@ -138,6 +138,42 @@ def _normalize_materialization_status(
     return current, False
 
 
+def _write_close_intent_use_receipt(
+    *,
+    state_root: str,
+    spine_repo: str,
+    human_intent_ref: str,
+    destination_ref: str,
+    proof_ref: str,
+    source_ref: str,
+) -> None:
+    """Write an automatic IUR linking the close-time receipt back to the HI.
+
+    Uses the existing intent-use-receipt-write CLI rather than re-implementing
+    the SQL write. The CLI is the canonical writer; reusing it keeps schema
+    enforcement and identity rules consistent. Raises subprocess errors on
+    failure; callers should catch and fail soft.
+    """
+    cli = os.path.join(spine_repo, "ops", "plugins", "core", "lifecycle", "bin", "intent-use-receipt-write")
+    if not os.path.isfile(cli):
+        # Soft skip if writer is missing; not an error condition for close.
+        return
+    cmd = [
+        "python3", cli,
+        "--human-intent-ref", human_intent_ref,
+        "--used-as", "design_authority",
+        "--destination-type", "closeout",
+        "--destination-ref", destination_ref,
+        "--reason",
+        "Controller-prompt EXEC_RECEIPT links back to originating human intent (auto-written by controller_prompt.close).",
+        "--proof-ref", proof_ref,
+        "--source-ref", source_ref,
+        "--capture-mode", "automatic",
+        "--created-by", "controller_prompt.close",
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
 class ControllerPromptCloseError(Exception):
     """Raised for validation or write failure during close."""
 
@@ -950,6 +986,35 @@ def close_packet(
             )
         except db.DelegationError as exc:
             retirement_error = str(exc)
+
+    # ── Close-hook: write IUR if packet was OI-born ──────────────
+    # When the closing packet carries a non-empty `human_intent_id`, write
+    # an automatic IUR linking the EXEC_RECEIPT back to the human intent.
+    # This makes the proof_receipt_ref seam first-class so agents do not
+    # need to remember to write the link manually. Fail-soft: a write
+    # failure here must not fail the close itself. The close path is the
+    # authority for terminal state; the IUR is supporting evidence.
+    # Origin: LOOP-PROOF-RECEIPT-REF-CLOSE-HOOK-SLICE-3-20260502
+    # (HIP trace disease #8).
+    if frontmatter_updated:
+        hi_ref = str(fm.get("human_intent_id") or "").strip()
+        if hi_ref.startswith("HI-"):
+            try:
+                _write_close_intent_use_receipt(
+                    state_root=spine_state,
+                    spine_repo=spine_repo,
+                    human_intent_ref=hi_ref,
+                    destination_ref=receipt_path,
+                    proof_ref=receipt_path,
+                    source_ref=packet_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - fail-soft by design
+                # Log to stderr but do not break the close path.
+                import sys
+                sys.stderr.write(
+                    f"controller_prompt.close WARN: IUR close-hook write failed "
+                    f"for HI={hi_ref}: {exc}; packet close itself succeeded\n"
+                )
 
     # ── Result ────────────────────────────────────────────────────
     if frontmatter_updated and not retirement_error:
