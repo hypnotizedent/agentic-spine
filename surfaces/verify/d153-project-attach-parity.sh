@@ -122,12 +122,10 @@ required_fields = [
     "status",
     "owner",
     "source_registry",
-    "managed_by",
     "spine_link_version",
     "project_id",
     "repo_path",
     "domain",
-    "agent_id",
     "gate_pack",
     "verify_command",
     "governance_bundle",
@@ -144,8 +142,11 @@ for attach_path in attach_paths:
     if missing:
         fail(f"{attach_path}: missing required fields: {', '.join(missing)}")
 
-    if str(doc.get("status")).strip() != "generated":
-        fail(f"{attach_path}: status must be generated")
+    status = str(doc.get("status")).strip()
+    if status not in {"generated", "hand_maintained"}:
+        fail(f"{attach_path}: status must be generated or hand_maintained")
+    if status == "generated" and not str(doc.get("managed_by") or "").strip():
+        fail(f"{attach_path}: generated attach files must declare managed_by")
     if str(doc.get("owner")).strip() != "@ronny":
         fail(f"{attach_path}: owner must be @ronny")
     if str(doc.get("source_registry")).strip() != expected_source_registry:
@@ -167,6 +168,10 @@ for attach_path in attach_paths:
     gate_pack = str(doc.get("gate_pack")).strip()
     if gate_pack not in domain_ids and gate_pack not in agent_ids:
       fail(f"{attach_path}: gate_pack '{gate_pack}' does not resolve to domain or agent profile")
+
+    agent_id = str(doc.get("agent_id") or "").strip()
+    if agent_id and agent_id not in agent_ids:
+        fail(f"{attach_path}: agent_id '{agent_id}' does not resolve to an agent profile")
 
     governance_bundle = doc.get("governance_bundle")
     if not isinstance(governance_bundle, list) or not governance_bundle:
