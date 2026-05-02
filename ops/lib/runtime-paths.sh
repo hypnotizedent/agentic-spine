@@ -91,6 +91,44 @@ _spine_runtime_contract_value() {
   printf '%s\n' "$default_value"
 }
 
+_spine_detect_host_os() {
+  local kernel
+  kernel="$(uname -s 2>/dev/null || printf 'unknown')"
+  case "$kernel" in
+    Linux) printf '%s\n' "linux" ;;
+    Darwin) printf '%s\n' "darwin" ;;
+    *) printf '%s\n' "unknown" ;;
+  esac
+}
+
+_spine_env_unquote() {
+  local value="${1:-}"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+_spine_load_execution_host_env() {
+  local env_file="${1:-}"
+  [[ -n "$env_file" && -f "$env_file" ]] || return 1
+
+  local key=""
+  local value=""
+  while IFS='=' read -r key value || [[ -n "$key" ]]; do
+    key="${key%%[[:space:]]*}"
+    [[ -n "$key" ]] || continue
+    [[ "$key" == \#* ]] && continue
+    case "$key" in
+      SPINE_REPO|SPINE_CODE|SPINE_TARGET_REPO|SPINE_WORKSPACE_ROOT|SPINE_RUNTIME_ROOT|SPINE_MAILROOM_ROOT|SPINE_INBOX|SPINE_OUTBOX|SPINE_STATE|SPINE_LOCKS|SPINE_LOGS|SPINE_TMP|SPINE_EVIDENCE_ROOT|SPINE_RECEIPTS|SPINE_VERIFY_ROOT|SPINE_VERIFY_REPORTS_ROOT|SPINE_VERIFY_INDEXES_DIR|SPINE_RECEIPT_INDEX_FILE|SPINE_VERIFY_HISTORY_DIR|SPINE_VERIFY_FAILURE_HISTORY_FILE|SPINE_VERIFY_STATE_ROOT|SPINE_VERIFY_PASS_STREAK_FILE|SPINE_LOOP_CLOSEOUTS_ROOT|SPINE_CENSUS_ROOT|SPINE_CAP_RUNS_ROOT|SPINE_DATA_ROOT|SPINE_BACKUPS_ROOT|SPINE_FOUNDATION_ROOT|SPINE_DOMAIN_STATE|SPINE_AGENT_CONTEXT_ROOT|SPINE_AGENT_CONTEXT_FILE|PATH)
+        value="$(_spine_env_unquote "${value:-}")"
+        export "$key=$value"
+        ;;
+    esac
+  done < "$env_file"
+}
+
 _spine_default_control_root() {
   cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd
 }
@@ -279,6 +317,14 @@ spine_runtime_resolve_paths() {
   [[ -f "$authority_contract" ]] || authority_contract=""
   local authority_paths_enabled=1
   [[ "${SPINE_RUNTIME_PATH_TEST_OVERRIDE:-}" == "1" ]] && authority_paths_enabled=0
+  local host_os="${SPINE_RUNTIME_RESOLVED_HOST_OS:-}"
+  [[ -n "$host_os" ]] || host_os="$(_spine_detect_host_os)"
+  export SPINE_RUNTIME_RESOLVED_HOST_OS="$host_os"
+  local execution_host_env="${SPINE_EXECUTION_HOST_ENV:-/etc/spine/execution-host.env}"
+  if [[ "$host_os" == "linux" && -f "$execution_host_env" ]]; then
+    _spine_load_execution_host_env "$execution_host_env" || true
+    authority_paths_enabled=0
+  fi
   local contract_file=""
   local workspace_root="${SPINE_WORKSPACE_ROOT:-}"
   local runtime_root="${SPINE_RUNTIME_ROOT:-}"

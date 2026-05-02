@@ -18,19 +18,27 @@ EXECUTION_HOST_HOME="${SPINE_EXECUTION_HOST_HOME:-/home/${EXECUTION_HOST_USER}}"
 
 OUTPUT_DIR=""
 JSON_OUTPUT=false
+SELF_CHECK=false
 
-# Portability: detect the Mac-local repo root and workspace root so we can
-# translate absolute paths into environment-variable references in generated units.
-MAC_REPO_ROOT="$ROOT"
-MAC_WORKSPACE_ROOT="$(cd "$ROOT/.." && pwd)"
+# Portability: resolve the current host roots so generated systemd files and
+# execution-host.env describe the target host layout, not the operator laptop.
+HOST_REPO_ROOT="$ROOT"
+HOST_WORKSPACE_ROOT="$(cd "$ROOT/.." && pwd)"
+HOST_RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-${HOST_WORKSPACE_ROOT}/.runtime/spine}"
+HOST_STATE_ROOT="${SPINE_STATE:-${HOST_RUNTIME_ROOT}/state}"
+HOST_MAILROOM_ROOT="${SPINE_MAILROOM_ROOT:-${HOST_RUNTIME_ROOT}/mailroom}"
+HOST_EVIDENCE_ROOT="${SPINE_EVIDENCE_ROOT:-${HOST_WORKSPACE_ROOT}/.evidence/spine}"
+HOST_DATA_ROOT="${SPINE_DATA_ROOT:-${HOST_WORKSPACE_ROOT}/.data}"
+HOST_BACKUPS_ROOT="${SPINE_BACKUPS_ROOT:-${HOST_WORKSPACE_ROOT}/.backups}"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--output-dir DIR] [--json]
+Usage: $(basename "$0") [--output-dir DIR] [--json] [--self-check]
 
 Options:
   --output-dir DIR   Write generated units here (default: \$SPINE_STATE/domain-state/generated/systemd/execution_host)
   --json             Emit summary as JSON to stdout
+  --self-check       Verify local dependencies and path rendering, then exit
   -h|--help          Show this help
 EOF
   exit 0
@@ -40,11 +48,20 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --json) JSON_OUTPUT=true; shift ;;
+    --self-check) SELF_CHECK=true; shift ;;
     -h|--help) usage ;;
     --) shift; break ;;
     *) echo "ERROR: unknown arg: $1" >&2; exit 1 ;;
   esac
 done
+
+if $SELF_CHECK; then
+  command -v yq >/dev/null || { echo "infra.systemd.materialize.execution_host self-check FAIL: missing yq" >&2; exit 1; }
+  command -v jq >/dev/null || { echo "infra.systemd.materialize.execution_host self-check FAIL: missing jq" >&2; exit 1; }
+  [[ -f "$ROOT/ops/bindings/launchd.scheduler.registry.yaml" ]] || { echo "infra.systemd.materialize.execution_host self-check FAIL: missing scheduler registry" >&2; exit 1; }
+  echo "infra.systemd.materialize.execution_host self-check PASS"
+  exit 0
+fi
 
 # Resolve output directory
 if [[ -z "$OUTPUT_DIR" ]]; then
@@ -192,16 +209,16 @@ portability_translate_path() {
   translated="${translated/${HOME}\/\.local\/bin\/spine-ops/\$\{SPINE_REPO\}\/bin\/ops}"
 
   # workbench paths → ${SPINE_FOUNDATION_ROOT}
-  translated="${translated/${MAC_WORKSPACE_ROOT}\/workbench/\$\{SPINE_FOUNDATION_ROOT\}}"
+  translated="${translated/${HOST_WORKSPACE_ROOT}\/workbench/\$\{SPINE_FOUNDATION_ROOT\}}"
 
   # agentic-spine repo paths → ${SPINE_REPO}
-  translated="${translated/${MAC_REPO_ROOT}/\$\{SPINE_REPO\}}"
+  translated="${translated/${HOST_REPO_ROOT}/\$\{SPINE_REPO\}}"
 
   # .runtime/spine paths → ${SPINE_RUNTIME_ROOT}
-  translated="${translated/${MAC_WORKSPACE_ROOT}\/\.runtime\/spine/\$\{SPINE_RUNTIME_ROOT\}}"
+  translated="${translated/${HOST_WORKSPACE_ROOT}\/\.runtime\/spine/\$\{SPINE_RUNTIME_ROOT\}}"
 
   # remaining workspace paths → ${SPINE_WORKSPACE_ROOT}
-  translated="${translated/${MAC_WORKSPACE_ROOT}/\$\{SPINE_WORKSPACE_ROOT\}}"
+  translated="${translated/${HOST_WORKSPACE_ROOT}/\$\{SPINE_WORKSPACE_ROOT\}}"
 
   # home-local bin dir → ${HOME}/.local/bin (remains host-relative via HOME)
   translated="${translated/${HOME}\/\.local\/bin/\$\{HOME\}\/\.local\/bin}"
@@ -453,19 +470,36 @@ ENV_FILE="$OUTPUT_DIR/execution-host.env"
   echo "# All generated .service units reference this file via EnvironmentFile="
   echo ""
   echo "# Spine repo checkout path on this host"
-  echo "SPINE_REPO=${MAC_REPO_ROOT}"
+  echo "SPINE_REPO=${HOST_REPO_ROOT}"
+  echo "SPINE_CODE=${HOST_REPO_ROOT}"
+  echo "SPINE_TARGET_REPO=${HOST_REPO_ROOT}"
   echo ""
   echo "# Workspace root (parent of all repos and runtime roots)"
-  echo "SPINE_WORKSPACE_ROOT=${MAC_WORKSPACE_ROOT}"
+  echo "SPINE_WORKSPACE_ROOT=${HOST_WORKSPACE_ROOT}"
   echo ""
   echo "# Runtime state root"
-  echo "SPINE_RUNTIME_ROOT=${MAC_WORKSPACE_ROOT}/.runtime/spine"
+  echo "SPINE_RUNTIME_ROOT=${HOST_RUNTIME_ROOT}"
   echo ""
   echo "# Canonical shared state slice externalized to execution_host-local storage"
-  echo "SPINE_STATE=/opt/spine-state"
+  echo "SPINE_STATE=${HOST_STATE_ROOT}"
+  echo "SPINE_MAILROOM_ROOT=${HOST_MAILROOM_ROOT}"
+  echo "SPINE_INBOX=${HOST_MAILROOM_ROOT}/inbox"
+  echo "SPINE_OUTBOX=${HOST_MAILROOM_ROOT}/outbox"
+  echo "SPINE_LOCKS=${HOST_RUNTIME_ROOT}/locks"
+  echo "SPINE_LOGS=${HOST_RUNTIME_ROOT}/logs"
+  echo "SPINE_TMP=${HOST_RUNTIME_ROOT}/tmp"
   echo ""
-  echo "# Workbench/foundation repo path (cross-repo dependency for simplefin-daily-sync)"
-  echo "SPINE_FOUNDATION_ROOT=${MAC_WORKSPACE_ROOT}/workbench"
+  echo "# Governed evidence and derived data roots"
+  echo "SPINE_EVIDENCE_ROOT=${HOST_EVIDENCE_ROOT}"
+  echo "SPINE_RECEIPTS=${HOST_EVIDENCE_ROOT}/sessions"
+  echo "SPINE_VERIFY_ROOT=${HOST_EVIDENCE_ROOT}/verify"
+  echo "SPINE_VERIFY_REPORTS_ROOT=${HOST_EVIDENCE_ROOT}/reports/verify"
+  echo "SPINE_DATA_ROOT=${HOST_DATA_ROOT}"
+  echo "SPINE_BACKUPS_ROOT=${HOST_BACKUPS_ROOT}"
+  echo "SPINE_DOMAIN_STATE=${HOST_DATA_ROOT}"
+  echo ""
+  echo "# Workbench/foundation repo path"
+  echo "SPINE_FOUNDATION_ROOT=${HOST_WORKSPACE_ROOT}/workbench"
   echo ""
   echo "# System PATH for workload execution (no macOS-specific entries)"
   echo "PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
