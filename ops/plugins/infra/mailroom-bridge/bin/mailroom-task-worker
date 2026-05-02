@@ -74,6 +74,7 @@ _AGENT_TOOL_REFUSAL = (
     "route_prompt_ref. Generic tool-using AI-agent autonomy remains unavailable."
 )
 V2_1_SCOPE = "tool_using_agent_v2_1_readonly_repo"
+V2_2_SCOPE = "tool_using_agent_v2_2_readonly_capability_calls"
 
 
 def _task_supported(doc: dict[str, Any], *, allowlist: set[str], supported_routes: set[str]) -> tuple[bool, str]:
@@ -229,6 +230,88 @@ def _repo_relative_path(path: Path) -> str:
     return str(path.relative_to(ROOT.resolve()))
 
 
+def _bridge_section(name: str) -> dict[str, Any]:
+    bridge = _agent_bridge_contract()
+    section = bridge.get(name)
+    return section if isinstance(section, dict) else {}
+
+
+def _requested_readonly_capability(payload: dict[str, Any]) -> str:
+    values: list[str] = []
+    for key in (
+        "read_only_capability",
+        "readonly_capability",
+        "route_capability",
+        "capability",
+    ):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            values.append(value)
+    values.extend(_payload_list(payload.get("read_only_capabilities") or payload.get("capabilities")))
+
+    unique = list(dict.fromkeys(values))
+    if len(unique) != 1:
+        raise WorkerError("read_only_capability tool_set requires exactly one requested capability")
+    return unique[0]
+
+
+def _run_readonly_capability_context(worker_id: str, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    capability = _requested_readonly_capability(payload)
+    v2 = _bridge_section("v2_2_read_only_capability_calls")
+    allowlist = {str(item).strip() for item in (v2.get("capability_allowlist") or []) if str(item).strip()}
+    if capability not in allowlist:
+        raise WorkerError(f"read_only_capability {capability} not allowlisted")
+
+    max_stdout_bytes = int(v2.get("max_stdout_bytes") or 12000)
+    if max_stdout_bytes < 1:
+        raise WorkerError("read_only_capability max_stdout_bytes must be positive")
+
+    env = os.environ.copy()
+    env["SPINE_TERMINAL_ID"] = worker_id
+    env["OPS_TERMINAL_ID"] = worker_id
+    env["OPS_TERMINAL_ROLE"] = worker_id
+    env["SPINE_EXECUTION_CLASS"] = "worker"
+    env["SPINE_RUNTIME_ROLE"] = "worker"
+    env["SPINE_SESSION_POSTURE"] = "worker"
+
+    proc = subprocess.run(
+        [str(ROOT / "bin" / "ops"), "cap", "run", capability],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    merged = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
+    merged_bytes = merged.encode("utf-8", errors="replace")
+    chunk = merged_bytes[:max_stdout_bytes]
+    stdout_text = chunk.decode("utf-8", errors="replace")
+    run_keys = list(dict.fromkeys(RUN_KEY_RE.findall(merged)))
+    proof = {
+        "tool_set": "read_only_capability_calls",
+        "tool_access": "bounded_read_only_capability_context",
+        "capabilities_called": [capability],
+        "run_keys": run_keys,
+        "stdout_bytes": len(chunk),
+        "stdout_truncated": len(merged_bytes) > len(chunk),
+        "tool_call_count": 1,
+        "mutation_access": "none",
+    }
+    if proc.returncode != 0:
+        reason = f"read_only_capability={capability} rc={proc.returncode}"
+        if merged:
+            reason = f"{reason} :: {merged.splitlines()[-1][:240]}"
+        raise WorkerError(reason)
+    return (
+        "\n\nREAD_ONLY_CAPABILITY_CONTEXT:\n"
+        "The following read-only capability was run by the mailroom worker before spawn. "
+        "The provider receives only this bounded output and receives no shell, filesystem, git, or ops access.\n\n"
+        f"--- CAPABILITY: {capability} ---\n"
+        f"{stdout_text}\n"
+        f"--- END CAPABILITY: {capability} ---\n",
+        proof,
+    )
+
+
 def _build_readonly_repo_context(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     tool_set = str(payload.get("tool_set") or payload.get("agent_tool_tool_set") or "prompt_only").strip()
     if tool_set in {"", "none"}:
@@ -247,8 +330,7 @@ def _build_readonly_repo_context(payload: dict[str, Any]) -> tuple[str, dict[str
     if not paths:
         raise WorkerError("read_only_repo tool_set requires repo_read_paths")
 
-    bridge = _agent_bridge_contract()
-    v2 = bridge.get("v2_1_read_only_repo_inspection") if isinstance(bridge.get("v2_1_read_only_repo_inspection"), dict) else {}
+    v2 = _bridge_section("v2_1_read_only_repo_inspection")
     max_files = int(v2.get("max_files") or 6)
     max_bytes_per_file = int(v2.get("max_bytes_per_file") or 6000)
     max_total_bytes = int(v2.get("max_total_bytes") or 18000)
@@ -332,7 +414,15 @@ def _resolve_prompt_ref(value: str) -> Path:
     return resolved
 
 
-def _build_agent_prompt(task_id: str, doc: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
+def _build_agent_context(doc: dict[str, Any], worker_id: str) -> tuple[str, dict[str, Any]]:
+    payload = _normalize_payload(doc)
+    tool_set = str(payload.get("tool_set") or payload.get("agent_tool_tool_set") or "prompt_only").strip()
+    if tool_set in {"read_only_capability", "read_only_capability_calls"}:
+        return _run_readonly_capability_context(worker_id, payload)
+    return _build_readonly_repo_context(payload)
+
+
+def _build_agent_prompt(task_id: str, doc: dict[str, Any], worker_id: str) -> tuple[str, Path, dict[str, Any]]:
     payload = _normalize_payload(doc)
     prompt_ref = str(doc.get("route_prompt_ref") or payload.get("route_prompt_ref") or "").strip()
     prompt_path = _resolve_prompt_ref(prompt_ref)
@@ -342,20 +432,20 @@ def _build_agent_prompt(task_id: str, doc: dict[str, Any]) -> tuple[str, Path, d
     if len(encoded) > max_prompt_bytes:
         prompt_text = encoded[:max_prompt_bytes].decode("utf-8", errors="ignore")
     summary = str(doc.get("summary") or task_id).strip()
-    repo_context, tool_proof = _build_readonly_repo_context(payload)
+    tool_context, tool_proof = _build_agent_context(doc, worker_id)
     return (
         "You are a bounded AI agent running under the spine mailroom execution "
         "pickup bridge. You must not claim to mutate files, run shell commands, "
         "use hidden context, or complete work outside this prompt. If a "
-        "READ_ONLY_REPO_CONTEXT block is present, treat it as the only admitted "
-        "repo inspection context for this task. "
+        "READ_ONLY_REPO_CONTEXT or READ_ONLY_CAPABILITY_CONTEXT block is present, "
+        "treat it as the only admitted inspection context for this task. "
         "Return a concise result with three fields: OBSERVED, RESULT, LIMITS.\n\n"
         f"TASK_ID: {task_id}\n"
         f"SUMMARY: {summary}\n"
         f"PROMPT_REF: {prompt_path}\n\n"
         "PROMPT_BODY:\n"
         f"{prompt_text}\n"
-        f"{repo_context}",
+        f"{tool_context}",
         prompt_path,
         tool_proof,
     )
@@ -386,24 +476,33 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
         return {"task_id": task_id, "status": "failed", "error": _AGENT_TOOL_REFUSAL}
 
     try:
-        prompt, prompt_path, tool_proof = _build_agent_prompt(task_id, doc)
+        prompt, prompt_path, tool_proof = _build_agent_prompt(task_id, doc, worker_id)
     except WorkerError as exc:
         payload_tool_set = str(payload.get("tool_set") or payload.get("agent_tool_tool_set") or "prompt_only").strip()
-        scope = V2_1_SCOPE if payload_tool_set == "read_only_repo" else "bounded_readonly_provider_agent"
+        if payload_tool_set == "read_only_repo":
+            scope = V2_1_SCOPE
+        elif payload_tool_set in {"read_only_capability", "read_only_capability_calls"}:
+            scope = V2_2_SCOPE
+            payload_tool_set = "read_only_capability_calls"
+        else:
+            scope = "bounded_readonly_provider_agent"
         reason = str(exc)
+        proof = {
+            "scope": scope,
+            "status": "failed",
+            "failure_reason": reason,
+            "tool_set": payload_tool_set or "prompt_only",
+            "mutation_access": "none",
+            "receipt": "task_envelope_bridge_proof",
+        }
+        if scope == V2_2_SCOPE:
+            requested = reason.split("read_only_capability ", 1)[1].split(" ", 1)[0] if "read_only_capability " in reason else ""
+            if requested:
+                proof["denied_capabilities"] = [requested]
         _fail_task(task_id, reason)
         _write_task_fields(
             _terminal_file(task_id, "failed"),
-            {
-                "bridge_proof": {
-                    "scope": scope,
-                    "status": "failed",
-                    "failure_reason": reason,
-                    "tool_set": payload_tool_set or "prompt_only",
-                    "mutation_access": "none",
-                    "receipt": "task_envelope_bridge_proof",
-                }
-            },
+            {"bridge_proof": proof},
         )
         return {"task_id": task_id, "status": "failed", "route_target": "agent_tool", "error": reason}
     run_id = f"{task_id}-agent"
@@ -463,7 +562,12 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
     if not result_text and merged:
         result_text = merged.splitlines()[-1][:1000]
 
-    scope = V2_1_SCOPE if tool_proof.get("tool_set") == "read_only_repo" else "bounded_readonly_provider_agent"
+    if tool_proof.get("tool_set") == "read_only_repo":
+        scope = V2_1_SCOPE
+    elif tool_proof.get("tool_set") == "read_only_capability_calls":
+        scope = V2_2_SCOPE
+    else:
+        scope = "bounded_readonly_provider_agent"
     base_proof = {
         "scope": scope,
         "provider_requested": provider,
@@ -663,9 +767,15 @@ def main() -> int:
     if "--self-check" in sys.argv:
         try:
             import yaml  # noqa: F401
+            v2_2 = _bridge_section("v2_2_read_only_capability_calls")
+            allowlist = {str(item).strip() for item in (v2_2.get("capability_allowlist") or []) if str(item).strip()}
+            if not allowlist:
+                raise WorkerError("v2_2_read_only_capability_calls capability_allowlist missing")
+            if _requested_readonly_capability({"read_only_capability": sorted(allowlist)[0]}) not in allowlist:
+                raise WorkerError("read_only_capability request parser failed")
             print("mailroom.task.worker.once self-check PASS")
             return 0
-        except ImportError as exc:
+        except (ImportError, WorkerError) as exc:
             print(f"mailroom.task.worker.once self-check FAIL: {exc}", file=sys.stderr)
             return 1
 
