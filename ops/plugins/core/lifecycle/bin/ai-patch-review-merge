@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Merge a retained AI patch review artifact after explicit controller approval."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+WORKSPACE_ROOT = ROOT.parent
+RUNTIME_ROOT = Path(os.environ.get("SPINE_RUNTIME_ROOT") or WORKSPACE_ROOT / ".runtime" / "spine")
+STATE_ROOT = Path(os.environ.get("SPINE_STATE") or RUNTIME_ROOT / "state")
+RECEIPT_ROOT = STATE_ROOT / "domain-state" / "ai-patch-reviews"
+MERGE_ROOT = RUNTIME_ROOT / "tmp" / "worktrees" / "agentic-spine"
+CONTRACT = ROOT / "ops" / "bindings" / "ai.patch.review.contract.yaml"
+DEFAULT_VERIFY_CAPS = ("verify.engine.run", "spine.verify")
+
+
+class MergeError(RuntimeError):
+    pass
+
+
+def now_utc() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run(cmd: list[str], cwd: Path, timeout: int = 600) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise MergeError(f"cannot read YAML {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise MergeError(f"expected mapping in {path}")
+    return payload
+
+
+def write_yaml(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def safe_slug(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-")
+    return slug[:120] or "patch-review"
+
+
+def receipt_path_for(task_id: str) -> Path:
+    return RECEIPT_ROOT / f"{task_id}.yaml"
+
+
+def require_retained_review(task_id: str) -> dict[str, Any]:
+    path = receipt_path_for(task_id)
+    if not path.is_file():
+        raise MergeError(f"review receipt not found: {path}")
+    receipt = load_yaml(path)
+    state = str(receipt.get("review_state") or receipt.get("review_status") or "")
+    if state == "merged_by_controller":
+        raise MergeError("review artifact is already merged_by_controller")
+    if state != "review_artifact_retained":
+        raise MergeError(f"merge requires review_artifact_retained, got {state!r}")
+    if receipt.get("push_performed") is not False or receipt.get("merge_performed") is not False:
+        raise MergeError("pre-merge receipt must show push_performed=false and merge_performed=false")
+    patch_path = Path(str(receipt.get("patch_artifact_path") or ""))
+    if not patch_path.is_file():
+        raise MergeError(f"patch artifact missing: {patch_path}")
+    expected_files = receipt.get("expected_patch_files")
+    actual_files = receipt.get("actual_patch_files")
+    if not isinstance(expected_files, list) or expected_files != actual_files:
+        raise MergeError("expected_patch_files must exactly equal actual_patch_files")
+    if receipt.get("side_effect_files") != []:
+        raise MergeError("side_effect_files must be empty before merge")
+    return receipt
+
+
+def extract_run_key(output: str) -> str:
+    for line in output.splitlines():
+        if line.strip().startswith("Run Key:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def run_verify_caps(worktree: Path, verify_caps: list[str]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for cap in verify_caps:
+        if cap == "verify.engine.run":
+            args = [str(worktree / "bin" / "ops"), "cap", "run", cap, "--", "--json"]
+        else:
+            args = [str(worktree / "bin" / "ops"), "cap", "run", cap]
+        proc = run(args, worktree, timeout=900)
+        result = {
+            "capability": cap,
+            "rc": proc.returncode,
+            "run_key": extract_run_key(proc.stdout),
+        }
+        results.append(result)
+        if proc.returncode != 0:
+            raise MergeError(f"{cap} failed rc={proc.returncode}: {(proc.stderr or proc.stdout)[-1000:]}")
+    return results
+
+
+def merge_review(task_id: str, confirmed_by: str, confirm: str, verify_caps: list[str]) -> dict[str, Any]:
+    if confirm != "MERGE":
+        raise MergeError("--confirm MERGE is required; this is the human/controller approval boundary")
+    if not confirmed_by.strip():
+        raise MergeError("--confirmed-by is required")
+    if not CONTRACT.is_file():
+        raise MergeError(f"contract missing: {CONTRACT}")
+    receipt = require_retained_review(task_id)
+    patch_path = Path(str(receipt["patch_artifact_path"]))
+    expected_files = sorted(str(item) for item in receipt["expected_patch_files"])
+    slug = safe_slug(task_id).upper()
+    merge_worktree = MERGE_ROOT / f"WAVE-AI-PATCH-MERGE-{slug}"
+
+    fetch = run(["git", "fetch", "origin", "main"], ROOT)
+    if fetch.returncode != 0:
+        raise MergeError(f"git fetch origin main failed: {(fetch.stderr or fetch.stdout).strip()}")
+    base = run(["git", "rev-parse", "origin/main"], ROOT)
+    if base.returncode != 0:
+        raise MergeError(f"cannot resolve origin/main: {(base.stderr or base.stdout).strip()}")
+    base_sha = base.stdout.strip()
+
+    if merge_worktree.exists():
+        shutil.rmtree(merge_worktree)
+    MERGE_ROOT.mkdir(parents=True, exist_ok=True)
+    add = run(["git", "worktree", "add", "--detach", str(merge_worktree), "origin/main"], ROOT)
+    if add.returncode != 0:
+        raise MergeError(f"git worktree add failed: {(add.stderr or add.stdout).strip()}")
+    try:
+        check = run(["git", "apply", "--check", str(patch_path)], merge_worktree)
+        if check.returncode != 0:
+            raise MergeError(f"git apply --check failed: {(check.stderr or check.stdout).strip()}")
+        apply = run(["git", "apply", str(patch_path)], merge_worktree)
+        if apply.returncode != 0:
+            raise MergeError(f"git apply failed: {(apply.stderr or apply.stdout).strip()}")
+        diff_check = run(["git", "diff", "--check"], merge_worktree)
+        if diff_check.returncode != 0:
+            raise MergeError(f"git diff --check failed: {(diff_check.stderr or diff_check.stdout).strip()}")
+        status = run(["git", "status", "--short"], merge_worktree)
+        changed = sorted(line[3:] for line in status.stdout.splitlines() if line.strip())
+        if changed != expected_files:
+            raise MergeError(f"merge worktree changed files {changed!r} do not match expected {expected_files!r}")
+        verify_results = run_verify_caps(merge_worktree, verify_caps)
+        add_paths = run(["git", "add", "--", *expected_files], merge_worktree)
+        if add_paths.returncode != 0:
+            raise MergeError(f"git add failed: {(add_paths.stderr or add_paths.stdout).strip()}")
+        commit_msg = (
+            f"Merge AI patch review: {task_id}\n\n"
+            "Bridge-Tier: tool_using_agent_v2_5_patch_apply_sandbox\n"
+            f"Patch-Review-Task: {task_id}\n"
+            f"Confirmed-By: {confirmed_by.strip()}\n"
+            "Merge-Authority: controller-human-confirmed\n"
+            "AI-Authority: none\n"
+        )
+        commit = run(
+            [
+                "git",
+                "-c",
+                "user.name=SPINE-CONTROLLER",
+                "-c",
+                "user.email=spine-controller@localhost",
+                "commit",
+                "-m",
+                commit_msg,
+            ],
+            merge_worktree,
+        )
+        if commit.returncode != 0:
+            raise MergeError(f"git commit failed: {(commit.stderr or commit.stdout).strip()}")
+        rev_parse = run(["git", "rev-parse", "HEAD"], merge_worktree)
+        if rev_parse.returncode != 0:
+            raise MergeError(f"git rev-parse failed: {(rev_parse.stderr or rev_parse.stdout).strip()}")
+        merge_sha = rev_parse.stdout.strip()
+        push = run(["git", "push", "origin", "HEAD:main"], merge_worktree, timeout=900)
+        if push.returncode != 0:
+            raise MergeError(f"git push origin HEAD:main failed: {(push.stderr or push.stdout).strip()}")
+        refresh = run(["git", "fetch", "origin", "main"], ROOT)
+        if refresh.returncode != 0:
+            raise MergeError(f"post-push fetch failed: {(refresh.stderr or refresh.stdout).strip()}")
+
+        updated = dict(receipt)
+        updated.update(
+            {
+                "review_status": "merged_by_controller",
+                "review_state": "merged_by_controller",
+                "merged_at_utc": now_utc(),
+                "confirmed_by": confirmed_by.strip(),
+                "confirmation": "MERGE",
+                "capability": "ai.patch.review.merge",
+                "base_ref": "origin/main",
+                "base_sha": base_sha,
+                "merge_commit": merge_sha,
+                "push_sha": merge_sha,
+                "pushed_ref": "origin/main",
+                "verify_results": verify_results,
+                "push_performed": True,
+                "merge_performed": True,
+                "ai_authority": "none",
+                "mutation_access": "controller_confirmed_merge_only",
+            }
+        )
+        write_yaml(receipt_path_for(task_id), updated)
+        return {"status": "merged", "task_id": task_id, "push_sha": merge_sha, "receipt_path": str(receipt_path_for(task_id))}
+    finally:
+        if merge_worktree.exists():
+            cleanup = run(["git", "worktree", "remove", "--force", str(merge_worktree)], ROOT)
+            if cleanup.returncode != 0:
+                shutil.rmtree(merge_worktree, ignore_errors=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task-id")
+    parser.add_argument("--confirmed-by", default="")
+    parser.add_argument("--confirm", default="")
+    parser.add_argument("--verify-capability", action="append", default=[])
+    parser.add_argument("--self-check", action="store_true")
+    parser.add_argument("--json", action="store_true", dest="json_output")
+    args = parser.parse_args()
+    if args.self_check:
+        if not CONTRACT.is_file():
+            print(f"ai.patch.review.merge self-check FAIL: missing {CONTRACT}")
+            return 1
+        print("ai.patch.review.merge self-check PASS")
+        return 0
+    if not args.task_id:
+        print("ai.patch.review.merge FAIL: --task-id required")
+        return 2
+    verify_caps = args.verify_capability or list(DEFAULT_VERIFY_CAPS)
+    try:
+        result = merge_review(args.task_id, args.confirmed_by, args.confirm, verify_caps)
+    except Exception as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"ai.patch.review.merge FAIL: {exc}")
+        return 1
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print("ai.patch.review.merge")
+        for key, value in result.items():
+            print(f"{key}: {value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

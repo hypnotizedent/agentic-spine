@@ -10,6 +10,7 @@ STATUS_BIN="$ROOT/ops/plugins/core/lifecycle/bin/execution-pickup-status"
 DRILL_BIN="$ROOT/ops/plugins/infra/mailroom-bridge/bin/disaster-drill-execution-pickup"
 PATCH_PROMOTE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/ai-patch-review-promote"
 PATCH_REJECT_BIN="$ROOT/ops/plugins/core/lifecycle/bin/ai-patch-review-reject"
+PATCH_MERGE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/ai-patch-review-merge"
 OPS="$ROOT/bin/ops"
 WAVE_SH="$ROOT/ops/commands/wave.sh"
 WAVE_EXECUTE="$ROOT/ops/plugins/core/orchestration/bin/wave-execute"
@@ -21,6 +22,7 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -x "$DRILL_BIN" ]] || fail "missing execution pickup recovery drill executable"
 [[ -x "$PATCH_PROMOTE_BIN" ]] || fail "missing AI patch review promote executable"
 [[ -x "$PATCH_REJECT_BIN" ]] || fail "missing AI patch review reject executable"
+[[ -x "$PATCH_MERGE_BIN" ]] || fail "missing AI patch review merge executable"
 [[ -x "$OPS" ]] || fail "missing ops entrypoint"
 [[ -x "$WAVE_SH" ]] || fail "missing wave.sh"
 [[ -x "$WAVE_EXECUTE" ]] || fail "missing wave-execute"
@@ -28,6 +30,7 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 "$STATUS_BIN" --self-check >/dev/null
 "$PATCH_PROMOTE_BIN" --self-check >/dev/null
 "$PATCH_REJECT_BIN" --self-check >/dev/null
+"$PATCH_MERGE_BIN" --self-check >/dev/null
 
 tmp_status="$(mktemp)"
 tmp_json="$(mktemp)"
@@ -51,12 +54,14 @@ if grep -q "interactive lane:" "$tmp_status"; then
   fail "ops status must not expose old interactive lane as public operator language"
 fi
 
-python3 - "$tmp_json" <<'PY'
+python3 - "$tmp_json" "$ROOT" <<'PY'
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 path = sys.argv[1]
+root = Path(sys.argv[2])
 data = json.load(open(path, encoding="utf-8"))
 summary = data.get("summary") or {}
 subtraction = data.get("subtraction") or {}
@@ -303,6 +308,16 @@ for row in data.get("requests") or []:
                 patch_artifact = Path(str(row.get("patch_artifact_path") or proof.get("patch_artifact_path") or ""))
                 if row.get("review_state") == "review_artifact_retained" and not patch_artifact.is_file():
                     raise SystemExit("D452 FAIL: review_artifact_retained requires durable patch_artifact_path")
+                if row.get("review_state") == "merged_by_controller":
+                    push_sha = str(row.get("push_sha") or "")
+                    if not push_sha:
+                        raise SystemExit("D452 FAIL: merged_by_controller requires push_sha")
+                    cat = subprocess.run(["git", "cat-file", "-e", f"{push_sha}^{{commit}}"], cwd=str(root), capture_output=True, text=True)
+                    if cat.returncode != 0:
+                        raise SystemExit("D452 FAIL: merged_by_controller push_sha is not a local commit object")
+                    contains = subprocess.run(["git", "branch", "-r", "--contains", push_sha], cwd=str(root), capture_output=True, text=True)
+                    if "origin/main" not in contains.stdout:
+                        raise SystemExit("D452 FAIL: merged_by_controller push_sha must be reachable from origin/main")
     if tier.startswith("tool_using_agent_") and tier not in {"tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_v2_5_patch_apply_sandbox"} and row.get("pickup_state") in {"done", "failed", "cancelled"}:
         proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
         if proof.get("scope") != tier:
@@ -338,6 +353,7 @@ PY
 (cd "$ROOT" && "$OPS" cap list | grep -q "disaster.drill.execution_pickup") || fail "capability registry missing disaster.drill.execution_pickup"
 (cd "$ROOT" && "$OPS" cap list | grep -q "ai.patch.review.promote") || fail "capability registry missing ai.patch.review.promote"
 (cd "$ROOT" && "$OPS" cap list | grep -q "ai.patch.review.reject") || fail "capability registry missing ai.patch.review.reject"
+(cd "$ROOT" && "$OPS" cap list | grep -q "ai.patch.review.merge") || fail "capability registry missing ai.patch.review.merge"
 "$DRILL_BIN" --self-check >/dev/null || fail "execution pickup recovery drill self-check failed"
 
 grep -q -- "--route-capability" "$WAVE_EXECUTE" || fail "wave.execute dispatch must expose --route-capability"
@@ -370,7 +386,8 @@ python3 - "$ROOT/ops/capabilities.yaml" \
   "$ROOT/ops/bindings/mailroom.bridge.endpoints.yaml" \
   "$ROOT/ops/bindings/mailroom.inventory.contract.yaml" \
   "$ROOT/ops/bindings/node.role.contract.yaml" \
-  "$ROOT/ops/bindings/disaster.drill.execution_pickup.contract.yaml" <<'PY'
+  "$ROOT/ops/bindings/disaster.drill.execution_pickup.contract.yaml" \
+  "$ROOT/ops/bindings/ai.patch.review.contract.yaml" <<'PY'
 import sys
 from pathlib import Path
 
@@ -384,9 +401,25 @@ endpoints_path = Path(sys.argv[5])
 inventory_path = Path(sys.argv[6])
 node_role_path = Path(sys.argv[7])
 drill_contract_path = Path(sys.argv[8])
+ai_patch_contract_path = Path(sys.argv[9])
 
 capabilities = (yaml.safe_load(capabilities_path.read_text(encoding="utf-8")) or {}).get("capabilities") or {}
 worker_contract = yaml.safe_load(worker_contract_path.read_text(encoding="utf-8")) or {}
+ai_patch_contract = yaml.safe_load(ai_patch_contract_path.read_text(encoding="utf-8")) or {}
+merge_cap = capabilities.get("ai.patch.review.merge") or {}
+if merge_cap.get("approval") != "manual":
+    raise SystemExit("D452 FAIL: ai.patch.review.merge must require manual approval")
+if merge_cap.get("safety") != "mutating":
+    raise SystemExit("D452 FAIL: ai.patch.review.merge must be mutating")
+merge_approval = ai_patch_contract.get("merge_approval") or {}
+if merge_approval.get("capability") != "ai.patch.review.merge":
+    raise SystemExit("D452 FAIL: ai.patch.review.contract must bind ai.patch.review.merge")
+if merge_approval.get("required_confirmation") != "MERGE":
+    raise SystemExit("D452 FAIL: ai.patch.review.merge must require MERGE confirmation")
+if merge_approval.get("ai_authority") != "none":
+    raise SystemExit("D452 FAIL: ai.patch.review.merge must declare ai_authority none")
+if merge_approval.get("push_ref") != "origin/main":
+    raise SystemExit("D452 FAIL: ai.patch.review.merge must push only origin/main")
 authority = worker_contract.get("authority") or {}
 owns = set(authority.get("owns") or [])
 for required in {"claim_semantics", "heartbeat_semantics", "result_failure_semantics", "receipt_linkage", "route_target_taxonomy"}:

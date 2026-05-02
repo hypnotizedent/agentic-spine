@@ -17,10 +17,10 @@ authority:
     - review_worktree_materialization
     - review_final_state_truth
     - review_rejection_receipts
+    - controller_confirmed_merge_receipts
   does_not_decide:
     - provider_tool_access
     - automatic_merge
-    - git_push
     - production_mutation
     - node_or_runtime_placement
 
@@ -56,9 +56,10 @@ lifecycle:
       mutation_scope: none
       substrate_truth: "terminal rejection receipt exists; no review worktree required."
     merged_by_controller:
-      status: reserved
+      capability: ai.patch.review.merge
       review_state: merged_by_controller
-      note: "Merge requires a later controller/human lane and must not be inferred from patch review."
+      mutation_scope: controller_confirmed_merge_only
+      substrate_truth: "push_sha is recorded and reachable from origin/main; confirmation is explicit; AI authority remains none."
     superseded:
       status: reserved
       review_state: superseded
@@ -84,6 +85,7 @@ receipts:
   active_status: review_worktree_active
   retained_status: review_artifact_retained
   rejected_status: rejected_by_controller
+  merged_status: merged_by_controller
   required_common_fields:
     - review_id
     - task_id
@@ -105,11 +107,34 @@ receipts:
     - patch_artifact_path
   rejected_required_fields:
     - rejection_reason
+  merged_required_fields:
+    - confirmed_by
+    - confirmation
+    - base_sha
+    - merge_commit
+    - push_sha
+    - pushed_ref
+    - verify_results
+
+merge_approval:
+  capability: ai.patch.review.merge
+  required_confirmation: MERGE
+  allowed_source_states:
+    - review_artifact_retained
+  default_verify_capabilities:
+    - verify.engine.run
+    - spine.verify
+  author_name: SPINE-CONTROLLER
+  author_email: spine-controller@localhost
+  push_ref: origin/main
+  ai_authority: none
+  public_readback: execution.pickup.status
 
 stop_lines:
   - "No provider shell/filesystem/git/ops-cap authority."
-  - "No push."
-  - "No merge."
+  - "No AI/provider push."
+  - "No AI/provider merge."
+  - "No merge or push without explicit controller confirmation."
   - "No commit outside the local controller review branch."
   - "No mutation outside the controller review worktree."
   - "Rejected patches write receipts only."
