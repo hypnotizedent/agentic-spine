@@ -27,6 +27,7 @@ STATE_ROOT = Path(os.environ.get("SPINE_STATE") or RUNTIME_ROOT / "state")
 WAVES_ROOT = RUNTIME_ROOT / "waves"
 DELEGATIONS_ROOT = STATE_ROOT / "delegations"
 TASK_ROOT = STATE_ROOT / "agent-tasks"
+PATCH_REVIEW_ROOT = STATE_ROOT / "domain-state" / "ai-patch-reviews"
 SCHEDULER_REGISTRY = ROOT / "ops" / "bindings" / "launchd.scheduler.registry.yaml"
 SSH_RESOLVER = ROOT / "ops" / "lib" / "ssh-resolve.sh"
 STALE_SECONDS = int(os.environ.get("EXECUTION_PICKUP_STALE_SECONDS") or "300")
@@ -74,6 +75,12 @@ def load_yaml(path: Path) -> dict[str, Any]:
     except (OSError, yaml.YAMLError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def patch_review_for(task_id: str) -> dict[str, Any]:
+    if not task_id:
+        return {}
+    return load_yaml(PATCH_REVIEW_ROOT / f"{task_id}.yaml")
 
 
 def normalize_task_payload(value: Any) -> dict[str, Any]:
@@ -302,7 +309,16 @@ def add_request(rows: list[dict[str, Any]], **kwargs: Any) -> None:
     row["safety_tier"] = safety_tier_for(row)
     proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
     if proof.get("scope") == "tool_using_agent_v2_5_patch_apply_sandbox" and row.get("pickup_state") == "done":
-        row["review_state"] = "needs_controller_review_before_merge"
+        review = patch_review_for(str(row.get("request_id") or ""))
+        if review:
+            row["review_state"] = str(review.get("review_state") or review.get("review_status") or "needs_controller_review_before_merge")
+            row["patch_review_receipt"] = str(PATCH_REVIEW_ROOT / f"{row.get('request_id')}.yaml")
+            if review.get("review_worktree"):
+                row["review_worktree"] = review.get("review_worktree")
+            if review.get("review_branch"):
+                row["review_branch"] = review.get("review_branch")
+        else:
+            row["review_state"] = "needs_controller_review_before_merge"
     row.update(kernel_states_for(row))
     rows.append(row)
 
@@ -531,6 +547,22 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ai_agent_bridge = "delivered (tool-using: patch artifact generation)"
     if delivered_v2_5:
         ai_agent_bridge = "delivered (tool-using: patch apply sandbox)"
+    patch_review = {
+        "pending": 0,
+        "promoted_to_review_worktree": 0,
+        "rejected_by_controller": 0,
+        "other": 0,
+    }
+    for row in rows:
+        if row.get("safety_tier") != "tool_using_agent_v2_5_patch_apply_sandbox" or row.get("pickup_state") != "done":
+            continue
+        state = str(row.get("review_state") or "needs_controller_review_before_merge")
+        if state == "needs_controller_review_before_merge":
+            patch_review["pending"] += 1
+        elif state in {"promoted_to_review_worktree", "rejected_by_controller"}:
+            patch_review[state] += 1
+        else:
+            patch_review["other"] += 1
     return {
         "requests_total": len(active_rows),
         "not_claimed": sum(1 for row in active_rows if row.get("pickup_state") == "not_claimed"),
@@ -543,6 +575,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "interactive_worker_handoff": sum(1 for row in active_rows if row.get("realization") == "interactive_worker_handoff"),
         "ai_agent_bridge": ai_agent_bridge,
         "safety_tiers": safety_tiers,
+        "patch_review": patch_review,
     }
 
 

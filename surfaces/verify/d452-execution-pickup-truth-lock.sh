@@ -8,6 +8,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATUS_BIN="$ROOT/ops/plugins/core/lifecycle/bin/execution-pickup-status"
 DRILL_BIN="$ROOT/ops/plugins/infra/mailroom-bridge/bin/disaster-drill-execution-pickup"
+PATCH_PROMOTE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/ai-patch-review-promote"
+PATCH_REJECT_BIN="$ROOT/ops/plugins/core/lifecycle/bin/ai-patch-review-reject"
 OPS="$ROOT/bin/ops"
 WAVE_SH="$ROOT/ops/commands/wave.sh"
 WAVE_EXECUTE="$ROOT/ops/plugins/core/orchestration/bin/wave-execute"
@@ -17,11 +19,15 @@ fail() { echo "D452 FAIL: $*" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -x "$STATUS_BIN" ]] || fail "missing execution pickup status executable"
 [[ -x "$DRILL_BIN" ]] || fail "missing execution pickup recovery drill executable"
+[[ -x "$PATCH_PROMOTE_BIN" ]] || fail "missing AI patch review promote executable"
+[[ -x "$PATCH_REJECT_BIN" ]] || fail "missing AI patch review reject executable"
 [[ -x "$OPS" ]] || fail "missing ops entrypoint"
 [[ -x "$WAVE_SH" ]] || fail "missing wave.sh"
 [[ -x "$WAVE_EXECUTE" ]] || fail "missing wave-execute"
 
 "$STATUS_BIN" --self-check >/dev/null
+"$PATCH_PROMOTE_BIN" --self-check >/dev/null
+"$PATCH_REJECT_BIN" --self-check >/dev/null
 
 tmp_status="$(mktemp)"
 tmp_json="$(mktemp)"
@@ -183,7 +189,7 @@ elif bridge_state == "delivered (tool-using: patch apply sandbox)":
         and row["bridge_proof"].get("merge_performed") is False
         and row["bridge_proof"].get("mutation_access") == "leased_sandbox_worktree_only"
         and row["bridge_proof"].get("receipt") == "task_envelope_bridge_proof"
-        and row.get("review_state") == "needs_controller_review_before_merge"
+        and row.get("review_state") in {"needs_controller_review_before_merge", "promoted_to_review_worktree", "rejected_by_controller"}
     ]
     if not proofs:
         raise SystemExit("D452 FAIL: delivered V2.5 bridge requires completed sandbox patch-apply bridge_proof task envelope")
@@ -194,6 +200,12 @@ if subtraction.get("public_language") != "execution pickup":
 safety_tiers = summary.get("safety_tiers")
 if not isinstance(safety_tiers, dict):
     raise SystemExit("D452 FAIL: execution pickup summary must expose safety_tiers")
+patch_review = summary.get("patch_review")
+if not isinstance(patch_review, dict):
+    raise SystemExit("D452 FAIL: execution pickup summary must expose patch_review")
+for required_review_key in ("pending", "promoted_to_review_worktree", "rejected_by_controller", "other"):
+    if required_review_key not in patch_review:
+        raise SystemExit(f"D452 FAIL: patch_review missing {required_review_key}")
 for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_v2_5_patch_apply_sandbox", "tool_using_agent_reserved", "destructive_manual"):
     if required_tier not in safety_tiers:
         raise SystemExit(f"D452 FAIL: safety_tiers missing {required_tier}")
@@ -265,8 +277,10 @@ for row in data.get("requests") or []:
                 raise SystemExit("D452 FAIL: terminal V2.5 success requires patch apply proof")
             if not isinstance(proof.get("expected_patch_files"), list) or proof.get("expected_patch_files") != proof.get("actual_patch_files") or proof.get("side_effect_files") != []:
                 raise SystemExit("D452 FAIL: terminal V2.5 success must prove expected-vs-actual patch file parity")
-            if row.get("review_state") != "needs_controller_review_before_merge":
-                raise SystemExit("D452 FAIL: terminal V2.5 success must surface controller review state in execution pickup")
+            if row.get("review_state") not in {"needs_controller_review_before_merge", "promoted_to_review_worktree", "rejected_by_controller"}:
+                raise SystemExit("D452 FAIL: terminal V2.5 success must surface valid controller review state in execution pickup")
+            if row.get("review_state") in {"promoted_to_review_worktree", "rejected_by_controller"} and not row.get("patch_review_receipt"):
+                raise SystemExit("D452 FAIL: terminal reviewed V2.5 row must include patch_review_receipt")
     if tier.startswith("tool_using_agent_") and tier not in {"tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_v2_5_patch_apply_sandbox"} and row.get("pickup_state") in {"done", "failed", "cancelled"}:
         proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
         if proof.get("scope") != tier:
@@ -300,6 +314,8 @@ PY
 
 (cd "$ROOT" && "$OPS" cap list | grep -q "execution.pickup.status") || fail "capability registry missing execution.pickup.status"
 (cd "$ROOT" && "$OPS" cap list | grep -q "disaster.drill.execution_pickup") || fail "capability registry missing disaster.drill.execution_pickup"
+(cd "$ROOT" && "$OPS" cap list | grep -q "ai.patch.review.promote") || fail "capability registry missing ai.patch.review.promote"
+(cd "$ROOT" && "$OPS" cap list | grep -q "ai.patch.review.reject") || fail "capability registry missing ai.patch.review.reject"
 "$DRILL_BIN" --self-check >/dev/null || fail "execution pickup recovery drill self-check failed"
 
 grep -q -- "--route-capability" "$WAVE_EXECUTE" || fail "wave.execute dispatch must expose --route-capability"

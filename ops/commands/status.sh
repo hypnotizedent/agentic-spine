@@ -1809,6 +1809,7 @@ def build_seven_questions() -> dict:
             "done_recent": int(pickup_summary.get("done_recent", 0) or 0),
             "failed_recent": int(pickup_summary.get("failed_recent", 0) or 0),
             "safety_tiers": pickup_summary.get("safety_tiers") if isinstance(pickup_summary.get("safety_tiers"), dict) else {},
+            "patch_review": pickup_summary.get("patch_review") if isinstance(pickup_summary.get("patch_review"), dict) else {},
         },
         "Completion": {
             "closed_work_items": len(closed_loops),

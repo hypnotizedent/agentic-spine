@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Reject a V2.5 patch review candidate with a terminal receipt."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+WORKSPACE_ROOT = ROOT.parent
+RUNTIME_ROOT = Path(os.environ.get("SPINE_RUNTIME_ROOT") or WORKSPACE_ROOT / ".runtime" / "spine")
+STATE_ROOT = Path(os.environ.get("SPINE_STATE") or RUNTIME_ROOT / "state")
+TASK_ROOT = STATE_ROOT / "agent-tasks"
+RECEIPT_ROOT = STATE_ROOT / "domain-state" / "ai-patch-reviews"
+CONTRACT = ROOT / "ops" / "bindings" / "ai.patch.review.contract.yaml"
+
+
+class ReviewError(RuntimeError):
+    pass
+
+
+def now_utc() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ReviewError(f"cannot read YAML {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ReviewError(f"expected mapping in {path}")
+    return payload
+
+
+def task_file_for(task_id: str) -> Path:
+    for state in ("done", "failed", "cancelled", "queued", "claimed"):
+        path = TASK_ROOT / state / f"{task_id}.yaml"
+        if path.is_file():
+            return path
+    raise ReviewError(f"task not found: {task_id}")
+
+
+def validate_v2_5(task: dict[str, Any]) -> dict[str, Any]:
+    proof = task.get("bridge_proof")
+    if not isinstance(proof, dict):
+        raise ReviewError("task missing bridge_proof")
+    if proof.get("scope") != "tool_using_agent_v2_5_patch_apply_sandbox":
+        raise ReviewError("only V2.5 patch-apply sandbox tasks can be rejected by this lane")
+    if proof.get("tool_set") != "patch_apply_sandbox":
+        raise ReviewError("V2.5 task must carry patch_apply_sandbox tool_set")
+    return proof
+
+
+def write_yaml(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def reject(task_id: str, reason: str) -> dict[str, Any]:
+    if not CONTRACT.is_file():
+        raise ReviewError(f"contract missing: {CONTRACT}")
+    if not reason.strip():
+        raise ReviewError("rejection reason required")
+    receipt_path = RECEIPT_ROOT / f"{task_id}.yaml"
+    if receipt_path.exists():
+        existing = load_yaml(receipt_path)
+        if existing.get("review_status") == "rejected_by_controller":
+            return {"status": "already_rejected", "receipt_path": str(receipt_path)}
+        raise ReviewError(f"review receipt already exists with status={existing.get('review_status')!r}")
+    task_file = task_file_for(task_id)
+    task = load_yaml(task_file)
+    proof = validate_v2_5(task)
+    receipt = {
+        "review_id": f"REVIEW-{task_id}",
+        "review_status": "rejected_by_controller",
+        "review_state": "rejected_by_controller",
+        "task_id": task_id,
+        "source_task_file": str(task_file),
+        "created_at_utc": now_utc(),
+        "capability": "ai.patch.review.reject",
+        "rejection_reason": reason.strip(),
+        "patch_artifact_path": str(proof.get("patch_artifact_path") or ""),
+        "expected_patch_files": proof.get("expected_patch_files") or [],
+        "actual_patch_files": proof.get("actual_patch_files") or [],
+        "side_effect_files": proof.get("side_effect_files") or [],
+        "push_performed": False,
+        "merge_performed": False,
+        "commit_performed": False,
+        "mutation_access": "none",
+    }
+    write_yaml(receipt_path, receipt)
+    return {"status": "rejected", "receipt_path": str(receipt_path)}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task-id", required=False)
+    parser.add_argument("--reason", default="")
+    parser.add_argument("--self-check", action="store_true")
+    parser.add_argument("--json", action="store_true", dest="json_output")
+    args = parser.parse_args()
+    if args.self_check:
+        if not CONTRACT.is_file():
+            print(f"ai.patch.review.reject self-check FAIL: missing {CONTRACT}", file=sys.stderr)
+            return 1
+        print("ai.patch.review.reject self-check PASS")
+        return 0
+    if not args.task_id:
+        print("ai.patch.review.reject FAIL: --task-id required", file=sys.stderr)
+        return 2
+    try:
+        result = reject(args.task_id, args.reason)
+    except Exception as exc:
+        if args.json_output:
+            print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        else:
+            print(f"ai.patch.review.reject FAIL: {exc}", file=sys.stderr)
+        return 1
+    if args.json_output:
+        print(json.dumps(result, indent=2))
+    else:
+        print("ai.patch.review.reject")
+        for key, value in result.items():
+            print(f"{key}: {value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

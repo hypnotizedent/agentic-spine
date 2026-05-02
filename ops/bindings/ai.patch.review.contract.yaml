@@ -1,0 +1,100 @@
+status: authoritative
+owner: "@human-steward"
+scope: ai-patch-review-promotion
+updated: "2026-05-02"
+
+purpose: >
+  Controller-owned review lane for AI bridge V2.5 patch-apply sandbox receipts.
+  The AI/provider remains text-only. Patch promotion starts from an existing
+  V2.5 task envelope and moves the proven patch into a governed review
+  worktree for controller/human review. This contract does not authorize
+  automatic merge, push, or provider tools.
+
+authority:
+  owns:
+    - v2_5_patch_review_lifecycle
+    - patch_receipt_validation
+    - review_worktree_materialization
+    - review_rejection_receipts
+  does_not_decide:
+    - provider_tool_access
+    - automatic_merge
+    - git_push
+    - production_mutation
+    - node_or_runtime_placement
+
+lifecycle:
+  states:
+    proposed:
+      source: "V2.5 task envelope with bridge_proof.scope=tool_using_agent_v2_5_patch_apply_sandbox"
+    sandbox_verified:
+      required_proof:
+        - patch_apply_status: applied
+        - sandbox_cleanup: removed
+        - sandbox_worktree_retained: false
+        - expected_patch_files_equals_actual_patch_files: true
+        - side_effect_files_empty: true
+        - push_performed: false
+        - merge_performed: false
+    needs_controller_review:
+      public_readback: execution.pickup.status
+      review_state: needs_controller_review_before_merge
+    promoted_to_review_worktree:
+      capability: ai.patch.review.promote
+      review_state: promoted_to_review_worktree
+      mutation_scope: controller_review_worktree_only
+    rejected_by_controller:
+      capability: ai.patch.review.reject
+      review_state: rejected_by_controller
+      mutation_scope: none
+    applied_to_worktree:
+      meaning: "Patch applied to a controller review worktree and committed on the local review branch only; not pushed or merged."
+    verified:
+      allowed_verify_command:
+        - git diff --check
+    merged:
+      status: out_of_scope
+      note: "Merge requires a later controller/human lane."
+
+review_worktree:
+  root: "$SPINE_RUNTIME_ROOT/tmp/worktrees/agentic-spine"
+  source_ref: origin/main
+  wave_prefix: WAVE-AI-PATCH-REVIEW-
+  branch_prefix: codex/WAVE-AI-PATCH-REVIEW-
+  lease_filename: ".spine-lane-lease.yaml"
+  lease_ttl_hours: 24
+  lifecycle_contract: ops/bindings/worktree.lifecycle.contract.yaml
+  creation_surface: "ops wave start"
+  cleanup: "left_clean_for_controller_review_under_canonical_worktree_root_with_wave_state"
+
+receipts:
+  root: "$SPINE_STATE/domain-state/ai-patch-reviews"
+  promoted_status: promoted_to_review_worktree
+  rejected_status: rejected_by_controller
+  required_common_fields:
+    - review_id
+    - task_id
+    - source_task_file
+    - patch_artifact_path
+    - expected_patch_files
+    - actual_patch_files
+    - side_effect_files
+    - push_performed
+    - merge_performed
+  promoted_required_fields:
+    - review_worktree
+    - review_branch
+    - review_commit
+    - verify_command
+    - verify_rc
+    - worktree_status
+  rejected_required_fields:
+    - rejection_reason
+
+stop_lines:
+  - "No provider shell/filesystem/git/ops-cap authority."
+  - "No push."
+  - "No merge."
+  - "No commit outside the local controller review branch."
+  - "No mutation outside the controller review worktree."
+  - "Rejected patches write receipts only."
