@@ -31,6 +31,7 @@ SCHEMA_MIGRATION_ID = "20260323_gaps_authority_v3_friction"
 ENV_DB_PATH = "GAPS_DB_PATH"
 ENV_GAPS_YAML = "GAPS_YAML_PATH"
 DEFAULT_GAPS_PROJECTION_NAME = "operational-gaps.runtime.yaml"
+FRICTION_STATUSES = ("queued", "observed", "matched", "filed", "closed")
 
 
 def utc_now() -> datetime:
@@ -98,6 +99,77 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 # ── Schema ───────────────────────────────────────────────────────
+
+
+def _friction_table_allows_observed_status(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'friction'"
+    ).fetchone()
+    if row is None:
+        return True
+    return "'observed'" in str(row["sql"] or "")
+
+
+def _migrate_friction_observed_status(conn: sqlite3.Connection) -> None:
+    """Widen friction.status to include observed without changing authority."""
+    if _friction_table_allows_observed_status(conn):
+        return
+
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE friction__observed_status_migration (
+              friction_id TEXT PRIMARY KEY,
+              fingerprint TEXT NOT NULL,
+              capability TEXT NOT NULL,
+              expected TEXT NOT NULL,
+              actual TEXT NOT NULL,
+              severity TEXT NOT NULL CHECK(severity IN ('critical','high','medium','low')),
+              status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','observed','matched','filed','closed')),
+              first_seen_utc TEXT NOT NULL,
+              last_seen_utc TEXT NOT NULL,
+              updated_at_utc TEXT NOT NULL,
+              hit_count INTEGER DEFAULT 1,
+              sources_json TEXT,
+              matched_gap_id TEXT,
+              matched_at_utc TEXT,
+              filing_mode TEXT,
+              filed_gap_id TEXT,
+              filed_at_utc TEXT,
+              filed_request_path TEXT,
+              closed_reason TEXT,
+              closed_at_utc TEXT,
+              created_at_utc TEXT NOT NULL
+            );
+
+            INSERT INTO friction__observed_status_migration (
+              friction_id, fingerprint, capability, expected, actual,
+              severity, status, first_seen_utc, last_seen_utc, updated_at_utc,
+              hit_count, sources_json, matched_gap_id, matched_at_utc,
+              filing_mode, filed_gap_id, filed_at_utc, filed_request_path,
+              closed_reason, closed_at_utc, created_at_utc
+            )
+            SELECT
+              friction_id, fingerprint, capability, expected, actual,
+              severity, status, first_seen_utc, last_seen_utc, updated_at_utc,
+              hit_count, sources_json, matched_gap_id, matched_at_utc,
+              filing_mode, filed_gap_id, filed_at_utc, filed_request_path,
+              closed_reason, closed_at_utc, created_at_utc
+            FROM friction;
+
+            DROP TABLE friction;
+            ALTER TABLE friction__observed_status_migration RENAME TO friction;
+
+            CREATE INDEX IF NOT EXISTS idx_friction_status ON friction(status);
+            CREATE INDEX IF NOT EXISTS idx_friction_severity ON friction(severity);
+            CREATE INDEX IF NOT EXISTS idx_friction_fingerprint ON friction(fingerprint);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -168,7 +240,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           expected TEXT NOT NULL,
           actual TEXT NOT NULL,
           severity TEXT NOT NULL CHECK(severity IN ('critical','high','medium','low')),
-          status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','matched','filed','closed')),
+          status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','observed','matched','filed','closed')),
           first_seen_utc TEXT NOT NULL,
           last_seen_utc TEXT NOT NULL,
           updated_at_utc TEXT NOT NULL,
@@ -208,6 +280,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_friction_events_created ON friction_events(created_at_utc);
         """
     )
+    _migrate_friction_observed_status(conn)
     # Migrate existing gap_events tables: add audit columns if missing.
     cols = {row[1] for row in conn.execute("PRAGMA table_info(gap_events)").fetchall()}
     if "run_key" not in cols:
@@ -909,7 +982,7 @@ def upsert_friction(conn: sqlite3.Connection, item: dict[str, Any]) -> None:
 
     raw_st = item.get("status")
     status = str(raw_st).strip().lower() if raw_st else "queued"
-    if status not in ("queued", "matched", "filed", "closed"):
+    if status not in FRICTION_STATUSES:
         status = "queued"
 
     now = utc_now_text()

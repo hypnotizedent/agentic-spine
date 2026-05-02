@@ -2,7 +2,7 @@
 # TRIAGE: verify orchestrator packet contract + wave closeout controls remain fail-closed.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 source "$ROOT/ops/lib/spine-paths.sh"
@@ -14,8 +14,10 @@ MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 CLOSEOUT_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-closeout"
 CLOSEOUT_CAP="coordinator.lane.closeout"
 WAVE_RESIDUE_CAP="wave.residue"
+FRICTION_RECONCILE_CAP="friction.reconcile"
 WAVE_CMD="$ROOT/ops/commands/wave.sh"
 WAVE_CLOSE_BIN="$ROOT/ops/plugins/core/orchestration/bin/wave-close"
+FRICTION_RECONCILE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/friction-reconcile"
 REGRESSION_SCRIPT="$ROOT/surfaces/verify/lib/wave_hardening_regression.py"
 WAVE_RESIDUE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/wave-residue"
 CANONICAL_WT_PREFIX="$(spine_canonical_worktree_prefix "$ROOT")"
@@ -31,6 +33,7 @@ fail() {
 [[ -x "$CLOSEOUT_SCRIPT" ]] || fail "missing closeout script: $CLOSEOUT_SCRIPT"
 [[ -f "$WAVE_CMD" ]] || fail "missing wave command: $WAVE_CMD"
 [[ -x "$WAVE_CLOSE_BIN" ]] || fail "missing wave close script: $WAVE_CLOSE_BIN"
+[[ -x "$FRICTION_RECONCILE_BIN" ]] || fail "missing friction reconcile surface: $FRICTION_RECONCILE_BIN"
 [[ -f "$REGRESSION_SCRIPT" ]] || fail "missing wave regression harness: $REGRESSION_SCRIPT"
 [[ -x "$WAVE_RESIDUE_BIN" ]] || fail "missing wave residue surface: $WAVE_RESIDUE_BIN"
 command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
@@ -42,6 +45,9 @@ rg -n "^[[:space:]]*${CLOSEOUT_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilit
 rg -n "${CLOSEOUT_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $CLOSEOUT_CAP"
 rg -n "^[[:space:]]*${WAVE_RESIDUE_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilities.yaml missing $WAVE_RESIDUE_CAP"
 rg -n "${WAVE_RESIDUE_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $WAVE_RESIDUE_CAP"
+rg -n "^[[:space:]]*${FRICTION_RECONCILE_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilities.yaml missing $FRICTION_RECONCILE_CAP"
+rg -n "${FRICTION_RECONCILE_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $FRICTION_RECONCILE_CAP"
+"$FRICTION_RECONCILE_BIN" --self-check >/dev/null || fail "friction.reconcile self-check failed"
 
 # Closeout chain markers remain deterministic/idempotent.
 for marker in \

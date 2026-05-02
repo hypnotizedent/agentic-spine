@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""friction.reconcile — first-class friction reconciliation.
+
+Friction is an L1 engine diagnostic signal, not a work container. Default
+reconcile observes queued friction and keeps it visible. Explicit --auto-file
+is required to promote friction into governed gaps.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import gaps_sql_authority as authority  # noqa: E402
+
+
+def _state_root() -> Path:
+    env = os.environ.get("SPINE_STATE", "").strip()
+    if env:
+        return Path(env).expanduser()
+    workspace_root = ROOT.parent if ROOT.parent.name == "code" else Path.home() / "code"
+    return workspace_root / ".runtime" / "spine" / "state"
+
+
+def _matches_loop(item: dict[str, Any], loop_id: str) -> bool:
+    if not loop_id:
+        return True
+    sources = item.get("sources") if isinstance(item.get("sources"), list) else []
+    return loop_id in {str(source).strip() for source in sources}
+
+
+def _first_loop_source(item: dict[str, Any]) -> str:
+    sources = item.get("sources") if isinstance(item.get("sources"), list) else []
+    for source in sources:
+        text = str(source).strip()
+        if text.startswith("LOOP-"):
+            return text
+    return ""
+
+
+def _summary(item: dict[str, Any]) -> str:
+    fid = str(item.get("friction_id") or "").strip()
+    cap = str(item.get("capability") or "").strip()
+    expected = str(item.get("expected") or "").strip()
+    actual = str(item.get("actual") or "").strip()
+    return f"{fid}: capability={cap}; expected={expected}; actual={actual}"
+
+
+def _project(conn, state_root: Path, gaps_yaml: Path, *, include_gaps: bool) -> dict[str, Any]:
+    projection = {
+        "friction": authority.project_friction_to_ndjson(conn, state_root / "friction-queue.ndjson"),
+    }
+    if include_gaps:
+        projection["gaps"] = authority.project_to_yaml(conn, gaps_yaml)
+    return projection
+
+
+def reconcile(
+    conn,
+    *,
+    state_root: Path,
+    gaps_yaml: Path,
+    loop_id: str = "",
+    auto_file: bool = False,
+    limit: int = 0,
+    actor: str = "friction.reconcile",
+    run_key: str | None = None,
+) -> dict[str, Any]:
+    authority.ensure_schema(conn)
+    candidates: list[dict[str, Any]] = []
+    for item in authority.list_friction(conn):
+        status = str(item.get("status") or "queued").strip()
+        if auto_file:
+            eligible = status in {"queued", "observed"}
+        else:
+            eligible = status == "queued"
+        if not eligible or not _matches_loop(item, loop_id):
+            continue
+        candidates.append(item)
+        if limit and len(candidates) >= limit:
+            break
+
+    now = authority.utc_now_text()
+    observed = 0
+    filed = 0
+    item_results: list[dict[str, Any]] = []
+
+    for item in candidates:
+        friction_id = str(item.get("friction_id") or "").strip()
+        old_status = str(item.get("status") or "queued").strip()
+        if auto_file:
+            gap_id = authority.next_gap_id(conn)
+            parent_loop = loop_id or _first_loop_source(item)
+            gap = {
+                "id": gap_id,
+                "status": "open",
+                "type": "friction",
+                "classification": "operator_friction",
+                "severity": str(item.get("severity") or "medium").strip(),
+                "description": _summary(item),
+                "parent_loop": parent_loop,
+                "doc": "$SPINE_STATE/friction-queue.ndjson",
+                "owner": "",
+                "notes": [
+                    f"Filed from {friction_id} by friction.reconcile --auto-file at {now}.",
+                ],
+                "evidence": [friction_id],
+            }
+            authority.upsert_gap(conn, gap)
+            authority.insert_event(
+                conn,
+                gap_id=gap_id,
+                event_type="upsert",
+                from_status=None,
+                to_status="open",
+                reason=f"Filed from friction item {friction_id}.",
+                actor=actor,
+                run_key=run_key,
+                mutation_source="governed" if run_key else "direct",
+            )
+            item["status"] = "filed"
+            item["filing_mode"] = "auto_file"
+            item["filed_gap_id"] = gap_id
+            item["filed_at_utc"] = now
+            item["updated_at_utc"] = now
+            authority.upsert_friction(conn, item)
+            authority.insert_friction_event(
+                conn,
+                friction_id=friction_id,
+                event_type="file_gap",
+                from_status=old_status,
+                to_status="filed",
+                reason=f"Explicit --auto-file promoted friction to {gap_id}.",
+                actor=actor,
+                run_key=run_key,
+                mutation_source="governed" if run_key else "direct",
+            )
+            filed += 1
+            item_results.append({"friction_id": friction_id, "action": "filed", "gap_id": gap_id})
+            continue
+
+        item["status"] = "observed"
+        item["updated_at_utc"] = now
+        authority.upsert_friction(conn, item)
+        authority.insert_friction_event(
+            conn,
+            friction_id=friction_id,
+            event_type="observe",
+            from_status=old_status,
+            to_status="observed",
+            reason="Observed by friction.reconcile default mode; not promoted to a gap.",
+            actor=actor,
+            run_key=run_key,
+            mutation_source="governed" if run_key else "direct",
+        )
+        observed += 1
+        item_results.append({"friction_id": friction_id, "action": "observed"})
+
+    conn.commit()
+    projection = _project(conn, state_root, gaps_yaml, include_gaps=auto_file and filed > 0)
+
+    return {
+        "capability": "friction.reconcile",
+        "status": "ok",
+        "authority": "sqlite",
+        "mode": "auto_file" if auto_file else "observe",
+        "loop_id": loop_id,
+        "candidate_count": len(candidates),
+        "observed": observed,
+        "filed": filed,
+        "items": item_results,
+        "projection": projection,
+    }
+
+
+def self_check() -> int:
+    with tempfile.TemporaryDirectory(prefix="friction-reconcile-self-check-") as td:
+        state = Path(td) / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        db_path = state / "shared_authority.db"
+        gaps_yaml = state / "projections" / "operational-gaps.runtime.yaml"
+        conn = authority.connect(db_path)
+        try:
+            authority.ensure_schema(conn)
+            now = authority.utc_now_text()
+            authority.upsert_friction(
+                conn,
+                {
+                    "friction_id": "FR-VERIFY-OBSERVE",
+                    "fingerprint": "verify-observe",
+                    "capability": "verify.friction",
+                    "expected": "queued friction observed by default",
+                    "actual": "queued",
+                    "severity": "medium",
+                    "status": "queued",
+                    "first_seen_utc": now,
+                    "last_seen_utc": now,
+                    "updated_at_utc": now,
+                    "created_at_utc": now,
+                    "hit_count": 1,
+                    "sources": ["LOOP-FRICTION-VERIFY"],
+                },
+            )
+            authority.upsert_friction(
+                conn,
+                {
+                    "friction_id": "FR-VERIFY-FILE",
+                    "fingerprint": "verify-file",
+                    "capability": "verify.friction",
+                    "expected": "explicit auto-file creates a gap",
+                    "actual": "queued",
+                    "severity": "high",
+                    "status": "queued",
+                    "first_seen_utc": now,
+                    "last_seen_utc": now,
+                    "updated_at_utc": now,
+                    "created_at_utc": now,
+                    "hit_count": 1,
+                    "sources": ["LOOP-FRICTION-FILE"],
+                },
+            )
+            conn.commit()
+
+            observed = reconcile(
+                conn,
+                state_root=state,
+                gaps_yaml=gaps_yaml,
+                loop_id="LOOP-FRICTION-VERIFY",
+                auto_file=False,
+                actor="friction.reconcile.self_check",
+            )
+            if observed["observed"] != 1 or authority.get_friction(conn, "FR-VERIFY-OBSERVE")["status"] != "observed":
+                print("friction.reconcile self-check FAIL: observe mode did not mark queued friction observed", file=sys.stderr)
+                return 1
+
+            filed = reconcile(
+                conn,
+                state_root=state,
+                gaps_yaml=gaps_yaml,
+                loop_id="LOOP-FRICTION-FILE",
+                auto_file=True,
+                actor="friction.reconcile.self_check",
+            )
+            filed_item = authority.get_friction(conn, "FR-VERIFY-FILE")
+            if filed["filed"] != 1 or filed_item["status"] != "filed" or not filed_item.get("filed_gap_id"):
+                print("friction.reconcile self-check FAIL: auto-file did not file a gap", file=sys.stderr)
+                return 1
+        finally:
+            conn.close()
+
+    print("friction.reconcile self-check PASS")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Reconcile friction authority without auto-promoting by default.")
+    parser.add_argument("--loop-id", default=os.environ.get("SPINE_LOOP_ID", ""))
+    parser.add_argument("--auto-file", action="store_true", help="Explicitly file eligible friction as gaps.")
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--json", action="store_true", dest="json_output")
+    parser.add_argument("--self-check", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_check:
+        return self_check()
+
+    db_path, gaps_yaml = authority.resolve_paths(ROOT)
+    state_root = _state_root()
+    conn = authority.connect(db_path)
+    try:
+        result = reconcile(
+            conn,
+            state_root=state_root,
+            gaps_yaml=gaps_yaml,
+            loop_id=args.loop_id,
+            auto_file=args.auto_file,
+            limit=max(0, args.limit),
+            run_key=os.environ.get("SPINE_CAP_RUN_KEY", "").strip() or None,
+        )
+    finally:
+        conn.close()
+
+    if args.json_output:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print("friction.reconcile")
+        print("status: ok")
+        print(f"mode: {result['mode']}")
+        print(f"loop_id: {result['loop_id'] or '<all>'}")
+        print(f"observed: {result['observed']}")
+        print(f"filed: {result['filed']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
