@@ -71,6 +71,24 @@ agent_profiles = load_yaml(agent_profiles_path)
 workbench_root_raw = str(contract.get("workbench_root") or "").strip()
 if not workbench_root_raw:
     fail("workbench.ssh.attach.contract workbench_root is required")
+
+# PACKET-587: D153 is role-aware. The contract declares the workbench_root for
+# workbench-owning hosts (MacBook operator_console, ai-cons execution_host).
+# Non-workbench hosts (pve storage_evidence_node, pve-r620 watcher_node) do
+# NOT own workbench and must not fail this gate for a path they don't host.
+# The host's $SPINE_FOUNDATION_ROOT env (set in /etc/spine/execution-host.env
+# on workbench-owning Linux hosts; defaulted from root.authority on Darwin)
+# is the canonical signal: present and existing → this host owns workbench
+# and the gate enforces; absent/empty → this host does not own workbench
+# and the gate skips the workbench presence/parity checks. Per
+# docs/governance/HOST_DRIFT_POLICY.md and PACKET-585 root.authority truth-up,
+# the storage_evidence_node host is not a workbench owner.
+_foundation_root_env = os.environ.get("SPINE_FOUNDATION_ROOT", "").strip()
+_workbench_owner = bool(_foundation_root_env) and Path(_foundation_root_env).is_dir()
+if not _workbench_owner:
+    print("D153 SKIP: this host does not own workbench (SPINE_FOUNDATION_ROOT not set or path absent); workbench parity is enforced on workbench-owning hosts only")
+    sys.exit(0)
+
 workbench_root = Path(workbench_root_raw).expanduser()
 if not workbench_root.is_dir():
     fail(f"workbench root not found: {workbench_root}")
