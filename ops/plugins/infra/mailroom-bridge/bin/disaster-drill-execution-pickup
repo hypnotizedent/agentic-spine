@@ -32,6 +32,8 @@ FIXTURES = [
     "stale_heartbeat",
     "v2_1_readonly_repo_denied_path",
     "v2_2_readonly_capability_denied_unallowlisted",
+    "v2_3_fenced_artifact_denied_outside_fence",
+    "v2_4_patch_artifact_no_worktree_mutation",
 ]
 
 
@@ -310,6 +312,78 @@ def fixture_v2_2_readonly_capability_denied_unallowlisted(run_id: str) -> dict[s
     return {"fixture": "v2_2_readonly_capability_denied_unallowlisted", "worker_once": payload, "terminal": terminal, "passed": passed}
 
 
+def fixture_v2_3_fenced_artifact_denied_outside_fence(run_id: str) -> dict[str, Any]:
+    task_id = f"TASK-{run_id}-v23-artifact-fence"
+    prompt = f"/home/ubuntu/code/.runtime/spine/state/domain-state/recovery-drills/execution-pickup/{run_id}-v23-artifact-fence.md"
+    payload = ssh(
+        remote_prelude()
+        + f"""
+        sudo systemctl stop {UNIT}
+        mkdir -p "$(dirname {prompt})"
+        printf '%s\\n' 'Return OBSERVED/RESULT/LIMITS. Produce a short governed artifact body. Do not claim filesystem access.' > {prompt}
+        ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue --task-id {task_id} --summary 'Recovery drill V2.3 fenced artifact proof' --route-target agent_tool --bridge-allowed --route-prompt-ref {prompt} --payload '{{"provider":"zai","tool_set":"fenced_artifact_write","artifact_name":"../../outside.md","timeout_seconds":90,"max_tokens":256}}' --json >/dev/null
+        SPINE_AGENT_BRIDGE_KEEP_RUNS=1 python3 ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-worker --once --worker-id SPINE-RECOVERY-DRILL --json >/tmp/{task_id}.json || true
+        sudo systemctl start {UNIT}
+        cat /tmp/{task_id}.json
+        """,
+        timeout=180,
+    )
+    terminal = wait_task(task_id, timeout_seconds=60)
+    proof = terminal.get("bridge_proof") if isinstance(terminal.get("bridge_proof"), dict) else {}
+    artifact_path = str(proof.get("artifact_path") or "")
+    artifact_fence = str(proof.get("artifact_fence") or "")
+    passed = (
+        terminal.get("state") == "done"
+        and proof.get("scope") == "tool_using_agent_v2_3_fenced_artifact_write"
+        and proof.get("tool_set") == "fenced_artifact_write"
+        and proof.get("mutation_access") == "fenced_runtime_artifact_only"
+        and artifact_path.startswith(artifact_fence)
+        and "/../" not in artifact_path
+        and int(proof.get("artifact_bytes") or 0) > 0
+    )
+    return {"fixture": "v2_3_fenced_artifact_denied_outside_fence", "worker_once": payload, "terminal": terminal, "passed": passed}
+
+
+def fixture_v2_4_patch_artifact_no_worktree_mutation(run_id: str) -> dict[str, Any]:
+    task_id = f"TASK-{run_id}-v24-patch-artifact"
+    prompt = f"/home/ubuntu/code/.runtime/spine/state/domain-state/recovery-drills/execution-pickup/{run_id}-v24-patch-artifact.md"
+    payload = ssh(
+        remote_prelude()
+        + f"""
+        sudo systemctl stop {UNIT}
+        mkdir -p "$(dirname {prompt})"
+        printf '%s\\n' 'Return a tiny unified diff touching no real file; this is a patch artifact proof only. Do not claim it was applied.' > {prompt}
+        before="$(git status --porcelain=v1 | sha256sum | awk '{{print $1}}')"
+        ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue --task-id {task_id} --summary 'Recovery drill V2.4 patch artifact proof' --route-target agent_tool --bridge-allowed --route-prompt-ref {prompt} --payload '{{"provider":"zai","tool_set":"patch_artifact","patch_artifact_name":"proof.patch","timeout_seconds":90,"max_tokens":256}}' --json >/dev/null
+        SPINE_AGENT_BRIDGE_KEEP_RUNS=1 python3 ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-worker --once --worker-id SPINE-RECOVERY-DRILL --json >/tmp/{task_id}.json || true
+        after="$(git status --porcelain=v1 | sha256sum | awk '{{print $1}}')"
+        sudo systemctl start {UNIT}
+        python3 - <<PY
+import json
+payload=json.loads(open('/tmp/{task_id}.json').read())
+payload['git_status_same'] = ("$before" == "$after")
+print(json.dumps(payload))
+PY
+        """,
+        timeout=180,
+    )
+    terminal = wait_task(task_id, timeout_seconds=60)
+    proof = terminal.get("bridge_proof") if isinstance(terminal.get("bridge_proof"), dict) else {}
+    patch_path = str(proof.get("patch_artifact_path") or "")
+    patch_fence = str(proof.get("patch_artifact_fence") or "")
+    passed = (
+        terminal.get("state") == "done"
+        and proof.get("scope") == "tool_using_agent_v2_4_patch_artifact"
+        and proof.get("tool_set") == "patch_artifact"
+        and proof.get("mutation_access") == "patch_artifact_only"
+        and proof.get("worktree_mutation") is False
+        and patch_path.startswith(patch_fence)
+        and int(proof.get("patch_bytes") or 0) > 0
+        and payload.get("git_status_same") is True
+    )
+    return {"fixture": "v2_4_patch_artifact_no_worktree_mutation", "worker_once": payload, "terminal": terminal, "passed": passed}
+
+
 def write_receipt(payload: dict[str, Any]) -> Path:
     RECEIPT_ROOT.mkdir(parents=True, exist_ok=True)
     path = RECEIPT_ROOT / f"recovery_drill.execution_pickup.{payload['run_id']}.yaml"
@@ -333,6 +407,8 @@ def run_drill() -> tuple[dict[str, Any], Path]:
         fixture_stale_heartbeat(run_id),
         fixture_v2_1_readonly_repo_denied_path(run_id),
         fixture_v2_2_readonly_capability_denied_unallowlisted(run_id),
+        fixture_v2_3_fenced_artifact_denied_outside_fence(run_id),
+        fixture_v2_4_patch_artifact_no_worktree_mutation(run_id),
     ]
     final = service_active()
     payload = {

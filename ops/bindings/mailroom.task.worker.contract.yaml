@@ -245,10 +245,22 @@ task_execution:
           - agent_tool
         meaning: "V2.2 provider-backed agent subprocess with worker-mediated calls to a tiny read-only capability allowlist."
         proof_boundary: "Requires bridge_allowed=true, route_prompt_ref, payload.tool_set=read_only_capability_calls, requested capabilities inside v2_2_read_only_capability_calls.capability_allowlist, bridge_proof scope tool_using_agent_v2_2_readonly_capability_calls, capabilities_called, run_keys, mutation_access none, and terminal task receipt."
+      tool_using_agent_v2_3_fenced_artifact_write:
+        status: realized
+        route_targets:
+          - agent_tool
+        meaning: "V2.3 provider-backed agent subprocess whose result is written by the worker to a governed runtime artifact fence."
+        proof_boundary: "Requires bridge_allowed=true, route_prompt_ref, payload.tool_set=fenced_artifact_write, artifact path under v2_3_fenced_artifact_write.artifact_root, bridge_proof scope tool_using_agent_v2_3_fenced_artifact_write, artifact_path, artifact_fence, artifact_bytes, and no provider filesystem access."
+      tool_using_agent_v2_4_patch_artifact:
+        status: realized
+        route_targets:
+          - agent_tool
+        meaning: "V2.4 provider-backed agent subprocess whose result is saved by the worker as a patch artifact only; no worktree mutation, push, or merge."
+        proof_boundary: "Requires bridge_allowed=true, route_prompt_ref, payload.tool_set=patch_artifact, patch artifact path under v2_4_patch_artifact.patch_artifact_root, bridge_proof scope tool_using_agent_v2_4_patch_artifact, patch_artifact_path, patch_bytes, worktree_mutation false, and terminal task receipt."
       tool_using_agent_reserved:
         status: reserved_empty
         route_targets: []
-        meaning: "Future tool-using agent bridge slots beyond V2.2. Must remain empty until a separately proven bridge tier lands."
+        meaning: "Future tool-using agent bridge slots beyond V2.4. Must remain empty until a separately proven bridge tier lands."
         proof_boundary: "execution.pickup.status summary count must remain zero for this reserved slot until another implementation lands."
       destructive_manual:
         status: reserved_manual
@@ -269,6 +281,8 @@ task_execution:
       - prompt_only
       - read_only_repo
       - read_only_capability_calls
+      - fenced_artifact_write
+      - patch_artifact
     v2_1_read_only_repo_inspection:
       scope: tool_using_agent_v2_1_readonly_repo
       tool_set: read_only_repo
@@ -303,6 +317,43 @@ task_execution:
         - capabilities_called
         - run_keys
         - tool_call_count
+        - mutation_access
+    v2_3_fenced_artifact_write:
+      scope: tool_using_agent_v2_3_fenced_artifact_write
+      tool_set: fenced_artifact_write
+      tool_boundary: "worker-owned artifact write only; provider returns text, and the worker writes that result under the governed artifact fence."
+      artifact_root: "$SPINE_STATE/agent-artifacts/ai-bridge"
+      allowed_extensions:
+        - .md
+        - .txt
+        - .json
+      max_artifact_bytes: 24000
+      mutation_access: fenced_runtime_artifact_only
+      receipt_fields:
+        - scope
+        - tool_set
+        - artifact_path
+        - artifact_fence
+        - artifact_bytes
+        - mutation_access
+    v2_4_patch_artifact:
+      scope: tool_using_agent_v2_4_patch_artifact
+      tool_set: patch_artifact
+      tool_boundary: "worker-owned patch artifact write only; provider returns patch text, and the worker writes a .patch artifact under the governed artifact fence without applying it."
+      patch_artifact_root: "$SPINE_STATE/agent-artifacts/ai-bridge-patches"
+      allowed_extensions:
+        - .patch
+        - .diff
+      max_patch_bytes: 48000
+      worktree_mutation: false
+      mutation_access: patch_artifact_only
+      receipt_fields:
+        - scope
+        - tool_set
+        - patch_artifact_path
+        - patch_artifact_fence
+        - patch_bytes
+        - worktree_mutation
         - mutation_access
     receipt: "terminal task envelope with bridge_proof plus provider run artifacts under ops/plugins/providers/runs"
   packet_closeout:

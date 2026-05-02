@@ -160,6 +160,8 @@ SAFETY_TIERS = (
     "bounded_readonly_provider_agent",
     "tool_using_agent_v2_1_readonly_repo",
     "tool_using_agent_v2_2_readonly_capability_calls",
+    "tool_using_agent_v2_3_fenced_artifact_write",
+    "tool_using_agent_v2_4_patch_artifact",
     "tool_using_agent_reserved",
     "destructive_manual",
 )
@@ -171,6 +173,16 @@ def safety_tier_for(row: dict[str, Any]) -> str:
         bridge_proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         bridge_scope = str(bridge_proof.get("scope") or "").strip()
+        if (
+            bridge_proof.get("scope") == "tool_using_agent_v2_4_patch_artifact"
+            or str(payload.get("tool_set") or "").strip() == "patch_artifact"
+        ):
+            return "tool_using_agent_v2_4_patch_artifact"
+        if (
+            bridge_proof.get("scope") == "tool_using_agent_v2_3_fenced_artifact_write"
+            or str(payload.get("tool_set") or "").strip() == "fenced_artifact_write"
+        ):
+            return "tool_using_agent_v2_3_fenced_artifact_write"
         if (
             bridge_proof.get("scope") == "tool_using_agent_v2_2_readonly_capability_calls"
             or str(payload.get("tool_set") or "").strip() == "read_only_capability_calls"
@@ -465,6 +477,22 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         and (row.get("bridge_proof") or {}).get("scope") == "tool_using_agent_v2_2_readonly_capability_calls"
         for row in rows
     )
+    delivered_v2_3 = any(
+        row.get("pickup_state") == "done"
+        and str(row.get("route_target") or "").strip().lower() == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and (row.get("bridge_proof") or {}).get("status") == "completed"
+        and (row.get("bridge_proof") or {}).get("scope") == "tool_using_agent_v2_3_fenced_artifact_write"
+        for row in rows
+    )
+    delivered_v2_4 = any(
+        row.get("pickup_state") == "done"
+        and str(row.get("route_target") or "").strip().lower() == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and (row.get("bridge_proof") or {}).get("status") == "completed"
+        and (row.get("bridge_proof") or {}).get("scope") == "tool_using_agent_v2_4_patch_artifact"
+        for row in rows
+    )
     delivered_bridge = any(
         row.get("pickup_state") == "done"
         and str(row.get("route_target") or "").strip().lower() == "agent_tool"
@@ -473,6 +501,17 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         and (row.get("bridge_proof") or {}).get("scope") == "bounded_readonly_provider_agent"
         for row in rows
     )
+    ai_agent_bridge = "not_delivered"
+    if delivered_bridge:
+        ai_agent_bridge = "delivered (bounded: readonly provider agent)"
+    if delivered_v2_1:
+        ai_agent_bridge = "delivered (tool-using: read-only repo inspection)"
+    if delivered_v2_2:
+        ai_agent_bridge = "delivered (tool-using: read-only capability calls)"
+    if delivered_v2_3:
+        ai_agent_bridge = "delivered (tool-using: fenced artifact write)"
+    if delivered_v2_4:
+        ai_agent_bridge = "delivered (tool-using: patch artifact generation)"
     return {
         "requests_total": len(active_rows),
         "not_claimed": sum(1 for row in active_rows if row.get("pickup_state") == "not_claimed"),
@@ -483,13 +522,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "wave_dispatch_request_only": sum(1 for row in active_rows if row.get("realization") == "wave_dispatch_request_only"),
         "operational_capability_worker": sum(1 for row in active_rows if row.get("realization") == "operational_capability_worker"),
         "interactive_worker_handoff": sum(1 for row in active_rows if row.get("realization") == "interactive_worker_handoff"),
-        "ai_agent_bridge": (
-            "delivered (tool-using: read-only capability calls)"
-            if delivered_v2_2
-            else ("delivered (tool-using: read-only repo inspection)" if delivered_v2_1
-            else ("delivered (bounded: readonly provider agent)" if delivered_bridge else "not_delivered")
-            )
-        ),
+        "ai_agent_bridge": ai_agent_bridge,
         "safety_tiers": safety_tiers,
     }
 
