@@ -280,11 +280,12 @@ if proc.returncode != 0:
 for expected in [
     "operator ingress is raw human notepad/context, not workflow authority",
     # Updated by LOOP-OPERATOR-INPUT-VS-EVIDENCE-VOCAB-FOLD-20260502:
-    # the legacy assertion was "raw OI/HI remains evidence" — that wording
-    # collapsed unverified operator input with verified proof. The fold
-    # corrected the guide to "raw OI/HI remains operator input ... not
-    # evidence", reserving "evidence" for receipts/probes/runtime
-    # observations/authoritative doc readback.
+    # the legacy assertion was the legacy phrase that collapsed unverified
+    # operator input with verified proof. The fold corrected the guide to
+    # teach the canonical distinction: raw OI/HI is operator input, not
+    # evidence. Evidence is reserved for verified proof — governed
+    # receipt artifacts, live probes, runtime observations, and
+    # authoritative doc readback.
     "raw OI/HI remains operator input",
     "not evidence",
     "raw OI never becomes execution by itself",
