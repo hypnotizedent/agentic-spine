@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# PACKET-586: SPINE_PROJECTS_ROOT controls projects-tree resolution; Darwin path is install default.
+_PROJECTS_ROOT = Path(os.environ.get("SPINE_PROJECTS_ROOT", "/Users/ronnyworks/code/projects"))
 
 import yaml
 
@@ -503,7 +507,7 @@ def validate_cross_surface_policy(root: Path, policy: dict[str, Any]) -> list[Is
                             )
                         )
 
-    media_contract_path = Path("/Users/ronnyworks/code/projects/media/bindings/media.archive.flow.policy.yaml")
+    media_contract_path = _PROJECTS_ROOT / "media/bindings/media.archive.flow.policy.yaml"
     if not media_contract_path.is_file():
         issues.append(Issue("error", "media.archive.flow.policy.yaml missing for cross-surface archive validation"))
         return issues

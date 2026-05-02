@@ -269,6 +269,30 @@ for cap_name in sorted(D3C_DB_BACKED_CAPS):
 if unannotated:
     fail("D.3c missing state_authority: shared_authority_db on " + ", ".join(unannotated))
 
+# PACKET-586: pve as delivered storage_evidence_node holds the canonical
+# /opt/agentic-spine code checkout that routed caps execute against. pve
+# does not currently have gitea SSH; the sync mechanism is rsync from the
+# operator console (per docs/governance/HOST_DRIFT_POLICY.md). This drift
+# gate verifies pve checkout HEAD matches origin/main HEAD locally —
+# if the operator console is out-of-sync with origin/main, the gate fails
+# closed before pushing fresh divergence to pve.
+#
+# This is a static check against the committed state, not a live SSH probe.
+# It catches the most common drift class: operator pushes to origin/main
+# but forgets to re-rsync to pve, leaving pve running stale code.
+#
+# A live ssh-probe variant (verify pve actually has the same HEAD) belongs
+# in a future ops cap that runs from the consumer where the operator can
+# trigger it; D447 stays static-honest.
+host_drift_policy = root / "docs/governance/HOST_DRIFT_POLICY.md"
+if not host_drift_policy.is_file():
+    fail("docs/governance/HOST_DRIFT_POLICY.md missing (PACKET-586 declared this as the canonical host-drift governance surface; /ctx skill references it)")
+drift_policy_text = host_drift_policy.read_text(encoding="utf-8")
+if "/opt/agentic-spine" not in drift_policy_text:
+    fail("HOST_DRIFT_POLICY.md must name /opt/agentic-spine as pve's drift surface")
+if "rsync" not in drift_policy_text.lower():
+    fail("HOST_DRIFT_POLICY.md must document the rsync sync mechanism for pve (gitea SSH not yet available from pve)")
+
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
 # structurally prevents drift like 'pve-730xd' (non-canonical machine identity)

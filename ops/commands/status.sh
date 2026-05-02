@@ -346,7 +346,19 @@ if loops_authority is not None:
         _all_db_loops = loops_authority.list_loops(_loops_conn, status="all")
     except Exception as _exc:
         _all_db_loops = []
-        anomalies.append(f"LOOP AUTHORITY DEGRADED: {_exc}")
+        # PACKET-586: distinguish "authority routed elsewhere" from "authority broken".
+        # When db_authority.enabled=true and the local host is not the authority host,
+        # the local DB is intentionally absent — the canonical DB lives on pve and is
+        # reached via cap.sh routing. The DbAuthorityRoutingRequired exception is the
+        # PACKET-582 guard firing correctly; it is NOT a degraded condition.
+        _exc_name = type(_exc).__name__
+        if _exc_name == "DbAuthorityRoutingRequired":
+            anomalies.append(
+                "LOOP AUTHORITY ROUTED: db_authority.enabled=true; canonical DB on authority host. "
+                "Use 'bin/ops cap run loops.status' for routed read."
+            )
+        else:
+            anomalies.append(f"LOOP AUTHORITY DEGRADED: {_exc}")
     finally:
         if _loops_conn is not None:
             _loops_conn.close()
@@ -739,7 +751,15 @@ def collect_gap_state():
         gaps_authority.ensure_schema(conn)
         gap_rows = gaps_authority.fetch_gaps(conn, status="open")
     except Exception as exc:
-        state["message"] = str(exc)
+        # PACKET-586: distinguish routed-elsewhere from broken (same as loops above).
+        if type(exc).__name__ == "DbAuthorityRoutingRequired":
+            state["status"] = "routed"
+            state["message"] = (
+                "GAP AUTHORITY ROUTED: db_authority.enabled=true; canonical DB on authority host. "
+                "Use 'bin/ops cap run gaps.status' for routed read."
+            )
+        else:
+            state["message"] = str(exc)
         return state
     finally:
         if conn is not None:
@@ -2073,7 +2093,11 @@ if mode != "--expert":
     _attention = []
     _attention.extend(anomalies)
     if not gaps_available:
-        _attention.append(f"GAP AUTHORITY DEGRADED: {gap_state.get('message') or 'open gap count unavailable'}")
+        # PACKET-586: detect routed-elsewhere; don't double-wrap with DEGRADED prefix.
+        if gap_state.get("status") == "routed":
+            _attention.append(gap_state.get("message") or "GAP AUTHORITY ROUTED")
+        else:
+            _attention.append(f"GAP AUTHORITY DEGRADED: {gap_state.get('message') or 'open gap count unavailable'}")
     elif open_gap_count:
         _attention.append(f"OPEN RISK: {open_gap_count} open gap(s)")
     if _blocked_loops:

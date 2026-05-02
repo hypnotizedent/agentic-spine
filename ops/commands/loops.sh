@@ -291,7 +291,14 @@ open_filter_statuses = {"active", "draft", "open"}
 
 
 def _entries_from_sqlite():
-    """Read loop data from SQLite authority. Returns list of entry dicts or None on failure."""
+    """Read loop data from SQLite authority. Returns list of entry dicts or None on failure.
+
+    PACKET-586: When db_authority.enabled=true and the local host is not
+    the authority host, the lib guard raises DbAuthorityRoutingRequired.
+    That is NOT a failure — it's the routing seal firing correctly. Return
+    a sentinel "routed" value so the caller can print a routing pointer
+    instead of a misleading "authority unavailable" error.
+    """
     lib_path = spine_repo / "ops" / "plugins" / "core" / "lifecycle" / "lib"
     sys.path.insert(0, str(lib_path))
     try:
@@ -302,7 +309,9 @@ def _entries_from_sqlite():
         lsa.ensure_schema(conn)
         all_loops = lsa.list_loops(conn)
         conn.close()
-    except Exception:
+    except Exception as exc:
+        if type(exc).__name__ == "DbAuthorityRoutingRequired":
+            return "routed"
         return None
 
     entries = []
@@ -410,6 +419,11 @@ def _entries_from_scope_files():
 
 # SQLite is sole loop authority — no scope-file fallback
 entries = _entries_from_sqlite()
+if entries == "routed":
+    # PACKET-586: routed-elsewhere is the correct seal, not a failure.
+    print("LOOP AUTHORITY ROUTED: db_authority.enabled=true; canonical DB on authority host (pve).", file=sys.stderr)
+    print("Use 'bin/ops cap run loops.status' for routed read.", file=sys.stderr)
+    raise SystemExit(0)
 if entries is None:
     print("ERROR: SQLite loop authority unavailable — cannot list loops", file=sys.stderr)
     raise SystemExit(1)

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
+
+# PACKET-586: SPINE_PROJECTS_ROOT controls projects-tree resolution; Darwin path is install default.
+_PROJECTS_ROOT = Path(os.environ.get("SPINE_PROJECTS_ROOT", "/Users/ronnyworks/code/projects"))
 
 from ops.plugins.infra.lib.content_family_placement import (
     Issue,
@@ -24,13 +28,13 @@ ROOT_SECTION_KEYS = [
 
 def source_paths(root: Path) -> list[Path]:
     return [
-        Path("/Users/ronnyworks/code/projects/media/bindings/content.family.placement.policy.yaml"),
+        _PROJECTS_ROOT / "media/bindings/content.family.placement.policy.yaml",
         root / "ops/bindings/service.data.lifecycle.registry.yaml",
         root / "ops/bindings/services.health.yaml",
         root / "ops/bindings/vm.lifecycle.yaml",
         root / "ops/bindings/service.closure.contract.yaml",
         root / "ops/bindings/relocation.closure.contract.yaml",
-        Path("/Users/ronnyworks/code/projects/media/bindings/media.services.yaml"),
+        _PROJECTS_ROOT / "media/bindings/media.services.yaml",
     ]
 
 
@@ -175,7 +179,7 @@ def evaluate_readiness(root: Path, policy: dict[str, Any]) -> dict[str, Any]:
     vm_lifecycle = load_yaml(root / "ops/bindings/vm.lifecycle.yaml")
     service_closure = load_yaml(root / "ops/bindings/service.closure.contract.yaml")
     relocation_contract = load_yaml(root / "ops/bindings/relocation.closure.contract.yaml")
-    media_services = load_yaml(Path("/Users/ronnyworks/code/projects/media/bindings/media.services.yaml"))
+    media_services = load_yaml(_PROJECTS_ROOT / "media/bindings/media.services.yaml")
 
     service_planes = ensure_dict(policy.get("service_planes"))
     rows: list[dict[str, Any]] = []
