@@ -29,7 +29,7 @@ ops status
 Canonical cold-start read surface for current spine work.
 
 Usage:
-  ops status [--brief|--json|--context|--control-loop|--expert] [--strict]
+  ops status [--brief|--json|--context|--control-loop|--expert|--seven-questions] [--strict]
 
 Flags:
   --brief        Counts-only output for hooks/banners
@@ -37,6 +37,8 @@ Flags:
   --context      L1 visibility view (terminal identity, runtime paths, coherence)
   --control-loop Bounded local-only probe for agent control-loop polling
   --expert       Expert/drilldown view over workflow machinery
+  --seven-questions
+                 Canonical seven-question public readback
   --strict       Exit nonzero when anomalies exist
   -h, --help     Show this help
 
@@ -50,10 +52,19 @@ EOF
 
 MODE=""
 STRICT="0"
+SEVEN_JSON="0"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --brief|--json|--context|--control-loop|--expert)
+    --brief|--context|--control-loop|--expert|--seven-questions)
       MODE="$1"
+      shift
+      ;;
+    --json)
+      if [[ "$MODE" == "--seven-questions" ]]; then
+        SEVEN_JSON="1"
+      else
+        MODE="$1"
+      fi
       shift
       ;;
     --strict)
@@ -72,6 +83,7 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+export OPS_STATUS_SEVEN_JSON="$SEVEN_JSON"
 
 # ── Control-loop mode (bounded local probe) ──────────────────────────────
 # Distinct from --json (full status), --brief (counts), --context (L1 view),
@@ -1768,6 +1780,64 @@ if temporal_truth is not None:
 
 # ── Output ────────────────────────────────────────────────────────────────
 
+def build_seven_questions() -> dict:
+    sp_summary = standing_program_health.get("summary") if isinstance(standing_program_health.get("summary"), dict) else {}
+    pickup_summary = execution_pickup_status.get("summary") if isinstance(execution_pickup_status.get("summary"), dict) else {}
+    pickup_worker = execution_pickup_status.get("worker") if isinstance(execution_pickup_status.get("worker"), dict) else {}
+    recovery_age = execution_recovery_drill_status.get("age_minutes")
+    latest_receipt = execution_recovery_drill_status.get("receipt") or ""
+    return {
+        "Work": {
+            "open": len(open_loops),
+            "runnable_now": sum(1 for loop in open_loops if loop.get("horizon", "now") == "now" and loop.get("execution_readiness", "runnable") == "runnable"),
+            "deferred_or_blocked": sum(1 for loop in open_loops if not (loop.get("horizon", "now") == "now" and loop.get("execution_readiness", "runnable") == "runnable")),
+        },
+        "Claim": {
+            "claimed_or_running": int(pickup_summary.get("claimed_or_running", 0) or 0),
+            "not_claimed": int(pickup_summary.get("not_claimed", 0) or 0),
+            "stale": int(pickup_summary.get("stale", 0) or 0),
+        },
+        "Liveness": {
+            "worker_fresh": bool(pickup_worker.get("fresh")),
+            "standing_programs_healthy": int(sp_summary.get("healthy", 0) or 0),
+            "standing_programs_degraded": sum(int(sp_summary.get(key, 0) or 0) for key in ("stale", "failed", "unreachable", "never_run", "unknown")),
+            "engine_verify": joined_state_summary.get("engine_verify_status", "unknown"),
+            "spine_verify": joined_state_summary.get("spine_verify_status", "unknown"),
+        },
+        "Execution": {
+            "active_requests": int(pickup_summary.get("requests_total", 0) or 0),
+            "done_recent": int(pickup_summary.get("done_recent", 0) or 0),
+            "failed_recent": int(pickup_summary.get("failed_recent", 0) or 0),
+            "safety_tiers": pickup_summary.get("safety_tiers") if isinstance(pickup_summary.get("safety_tiers"), dict) else {},
+        },
+        "Completion": {
+            "closed_work_items": len(closed_loops),
+            "open_gaps": open_gap_count,
+            "unlinked_gaps": unlinked_gap_count,
+        },
+        "Receipt": {
+            "latest_recovery_drill_receipt": latest_receipt,
+            "recovery_drill_status": execution_recovery_drill_status.get("status"),
+            "recovery_drill_age_minutes": recovery_age,
+        },
+        "Recovery": {
+            "execution_pickup_drill_fresh": bool(execution_recovery_drill_status.get("fresh")),
+            "execution_pickup_drill_status": execution_recovery_drill_status.get("status"),
+            "node_recovery_posture": "status-derived; see node.recovery.status",
+        },
+    }
+
+
+seven_questions = build_seven_questions()
+
+if mode == "--seven-questions":
+    if os.environ.get("OPS_STATUS_SEVEN_JSON") == "1":
+        print(json.dumps(seven_questions, indent=2))
+    else:
+        for key in ("Work", "Claim", "Liveness", "Execution", "Completion", "Receipt", "Recovery"):
+            print(f"{key}: {json.dumps(seven_questions[key], sort_keys=True, separators=(',', ':'))}")
+    sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)
+
 if mode == "--json":
     print(json.dumps({
         "mode": "json",
@@ -2054,24 +2124,21 @@ if mode != "--expert":
         print(f"  - ... {len(open_loops) - 5} more")
     print()
 
-    print("RISK")
+    print("CLAIM")
     print("-" * 72)
-    if gaps_available:
-        print(f"  open gaps:         {open_gap_count}")
-        print(f"  unlinked gaps:     {unlinked_gap_count}")
-    else:
-        print("  open gaps:         unknown")
-        print(f"  authority:         {gap_state.get('status', 'degraded')}")
-    print(f"  blocked work:      {len(_blocked_loops)}")
+    print(f"  claimed/running:   {_pickup_running}")
+    print(f"  not claimed:       {_pickup_unclaimed}")
+    print(f"  stale:             {_pickup_stale}")
     print(f"  custody:           {terminal_telemetry_status} ({mapped_open_loops}/{len(open_loops)} open work item(s) mapped)")
-    if worktree_cleanup_state.get("status") == "unavailable":
-        print("  worktree cleanup:  unavailable")
-    else:
-        print(f"  worktree cleanup:  {_wt_cleanable} cleanable, {_wt_dirty_blocked} dirty blocked")
     print()
 
-    print("AUTOMATION")
+    print("LIVENESS")
     print("-" * 72)
+    print(f"  capability worker: {_pickup_worker_status}{' fresh' if _pickup_worker_fresh else ' not fresh'}")
+    if _sp_total:
+        print(f"  standing programs: {_sp_total} total, {_sp_healthy} healthy, {_sp_degraded} degraded")
+    else:
+        print("  standing programs: unavailable")
     if _watcher_inputs_total:
         if _watcher_inputs_status_only:
             print(f"  watcher inputs:    {_watcher_inputs_total} total, {_watcher_inputs_ok} ok, {_watcher_inputs_status_only} status-only, {_watcher_inputs_attention} attention")
@@ -2079,31 +2146,53 @@ if mode != "--expert":
             print(f"  watcher inputs:    {_watcher_inputs_total} total, {_watcher_inputs_ok} ok, {_watcher_inputs_attention} attention")
     else:
         print("  watcher inputs:    unavailable")
-    if _sp_total:
-        print(f"  standing programs: {_sp_total} total, {_sp_healthy} healthy, {_sp_degraded} degraded")
-    else:
-        print("  standing programs: unavailable")
+    print(f"  engine verify:     {joined_state_summary.get('engine_verify_status', 'unknown')}")
+    print(f"  spine verify:      {joined_state_summary.get('spine_verify_status', 'unknown')}")
+    print()
+
+    print("EXECUTION")
+    print("-" * 72)
     _dt_summary = durable_transfer_status.get("summary") if isinstance(durable_transfer_status.get("summary"), dict) else {}
     _dt_total = int(_dt_summary.get("total", 0) or 0)
     if _dt_total:
         print(f"  durable transfers: {_dt_total} total, {int(_dt_summary.get('active', 0) or 0)} active, {int(_dt_summary.get('stale', 0) or 0)} attention")
     print(f"  execution pickup:  {_pickup_total} request(s), {_pickup_running} claimed/running, {_pickup_unclaimed} not claimed, {_pickup_stale} stale")
     print(f"  safety tiers:      {_pickup_safety_line}")
-    print(f"  capability worker: {_pickup_worker_status}{' fresh' if _pickup_worker_fresh else ' not fresh'}")
+    print(f"  done/failed recent:{int(_pickup_summary.get('done_recent', 0) or 0)}/{int(_pickup_summary.get('failed_recent', 0) or 0)}")
     print(f"  AI agent bridge:   {_pickup_summary.get('ai_agent_bridge', 'not_delivered')}")
+    print()
+
+    print("COMPLETION")
+    print("-" * 72)
+    if gaps_available:
+        print(f"  open gaps:         {open_gap_count}")
+        print(f"  unlinked gaps:     {unlinked_gap_count}")
+    else:
+        print("  open gaps:         unknown")
+        print(f"  authority:         {gap_state.get('status', 'degraded')}")
+    print(f"  closed work items: {len(closed_loops)}")
+    print(f"  blocked work:      {len(_blocked_loops)}")
+    if worktree_cleanup_state.get("status") == "unavailable":
+        print("  worktree cleanup:  unavailable")
+    else:
+        print(f"  worktree cleanup:  {_wt_cleanable} cleanable, {_wt_dirty_blocked} dirty blocked")
+    print()
+
+    print("RECEIPT")
+    print("-" * 72)
     if _recovery_drill_status.get("status") == "missing":
-        print("  recovery drill:    missing")
+        print("  latest recovery:   missing")
     else:
         _age = _recovery_drill_status.get("age_minutes")
         _age_text = f"{_age:.1f}m" if isinstance(_age, (int, float)) else "unknown age"
-        print(f"  recovery drill:    {_recovery_drill_status.get('status', 'unknown')} ({'fresh' if _recovery_drill_status.get('fresh') else 'stale'}, {_age_text})")
+        print(f"  latest recovery:   {_recovery_drill_status.get('receipt', '')}")
+        print(f"  recovery status:   {_recovery_drill_status.get('status', 'unknown')} ({'fresh' if _recovery_drill_status.get('fresh') else 'stale'}, {_age_text})")
     print()
 
-    print("HEALTH")
+    print("RECOVERY")
     print("-" * 72)
-    print(f"  engine verify:     {joined_state_summary.get('engine_verify_status', 'unknown')}")
-    print(f"  spine verify:      {joined_state_summary.get('spine_verify_status', 'unknown')}")
-    print(f"  secondary verify:  {joined_state_summary.get('secondary_verify_status', 'unknown')} (scoped)")
+    print(f"  execution pickup:  {'fresh drill' if _recovery_drill_status.get('fresh') else 'drill attention'}")
+    print("  node recovery:     status-derived; see node.recovery.status")
     print(f"  coherence:         {'attention' if joined_state_summary.get('coherence_attention') else 'ok'}")
     print()
 

@@ -25,9 +25,11 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 
 tmp_status="$(mktemp)"
 tmp_json="$(mktemp)"
-trap 'rm -f "$tmp_status" "$tmp_json"' EXIT
+tmp_seven="$(mktemp)"
+trap 'rm -f "$tmp_status" "$tmp_json" "$tmp_seven"' EXIT
 
 (cd "$ROOT" && "$OPS" status >"$tmp_status")
+(cd "$ROOT" && "$OPS" status --seven-questions --json >"$tmp_seven")
 "$STATUS_BIN" --json >"$tmp_json"
 
 grep -q "execution pickup:" "$tmp_status" || fail "ops status must expose execution pickup"
@@ -100,6 +102,19 @@ for row in data.get("requests") or []:
     if row.get("source") == "wave_dispatch" and row.get("realization") == "wave_dispatch_request_only":
         if row.get("pickup_state") != "not_claimed":
             raise SystemExit("D452 FAIL: dispatch-only wave row must be not_claimed")
+PY
+
+python3 - "$tmp_seven" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = ["Work", "Claim", "Liveness", "Execution", "Completion", "Receipt", "Recovery"]
+if list(data.keys()) != expected:
+    raise SystemExit(f"D452 FAIL: seven-question readback keys must be exactly {expected}, got {list(data.keys())}")
+for key in expected:
+    if not isinstance(data.get(key), dict):
+        raise SystemExit(f"D452 FAIL: seven-question {key} value must be an object")
 PY
 
 (cd "$ROOT" && "$OPS" cap list | grep -q "execution.pickup.status") || fail "capability registry missing execution.pickup.status"
