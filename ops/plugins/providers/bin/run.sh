@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUNS="${ROOT}/runs"
-STATUS_BIN="${ROOT}/plugins/providers/bin/providers-status"
-ENV_BIN="${ROOT}/plugins/providers/bin/providers-launch-env"
+PROVIDER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+RUNS="${PROVIDER_ROOT}/runs"
+STATUS_BIN="${SPINE_ROOT}/ops/plugins/providers/bin/providers-status"
+ENV_BIN="${SPINE_ROOT}/ops/plugins/providers/bin/providers-launch-env"
 
 usage() {
   cat <<EOF
@@ -47,13 +48,13 @@ for candidate in "${ready_candidates[@]}"; do
 
   case "${SPINE_PROVIDER_BACKEND:-}" in
     openai_compatible)
-      provider_script="${ROOT}/engine/openai.sh"
+      provider_script="${PROVIDER_ROOT}/bin/openai.sh"
       ;;
     anthropic)
-      provider_script="${ROOT}/engine/claude.sh"
+      provider_script="${PROVIDER_ROOT}/bin/claude.sh"
       ;;
     local_echo)
-      provider_script="${ROOT}/engine/local_echo.sh"
+      provider_script="${PROVIDER_ROOT}/bin/local_echo.sh"
       ;;
     *)
       echo "FAIL: unsupported engine backend for provider ${candidate}: ${SPINE_PROVIDER_BACKEND:-unknown}" >&2
