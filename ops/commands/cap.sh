@@ -1145,6 +1145,102 @@ PY
     fi
 }
 
+# Phase D.3a: DB authority routing (INERT BY DEFAULT).
+#
+# Reads runtime.bootstrap.contract.yaml#db_authority. When `enabled: false`
+# (the D.3a default state), this function returns 126 immediately and all
+# capabilities run locally — identical to pre-D.3 behavior.
+#
+# When the operator flips db_authority.enabled to true (Phase D.3b cutover),
+# this function evaluates whether the local host should route the cap:
+#   - If local hostname matches any entry in db_authority.authority_hostnames,
+#     the local host IS the authority; runs locally (return 126).
+#   - If the cap's safety class is read-only or read-only-with-cache, runs
+#     locally (return 126).
+#   - Otherwise, executes the cap on the authority host via SSH and returns
+#     the routed cap's exit code. The remote host writes its own RCAP receipt
+#     locally on the authority host.
+#
+# Return code convention:
+#   126 = NOT routed (caller should run locally — fall through to existing path)
+#   any other code = routed; this is the routed-cap's actual exit code; caller
+#   should propagate it without writing a local receipt.
+#
+# Failure semantics: if SSH is unreachable AND db_authority.enabled is true,
+# this function returns a non-126 non-zero code and the caller propagates it
+# — there is NO silent fallback to local DB writes.
+_route_to_db_authority_if_needed() {
+    local cap_name="$1"
+    shift || true
+    local cap_args=("$@")
+
+    local contract="$SPINE_CODE/ops/bindings/runtime.bootstrap.contract.yaml"
+    if [[ ! -f "$contract" ]]; then
+        return 126
+    fi
+    if ! command -v yq >/dev/null 2>&1; then
+        return 126
+    fi
+
+    local enabled
+    enabled="$(yq e '.db_authority.enabled // false' "$contract" 2>/dev/null)"
+    if [[ "$enabled" != "true" ]]; then
+        return 126
+    fi
+
+    local local_hostname
+    local_hostname="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "")"
+
+    local authority_hostnames
+    authority_hostnames="$(yq e '.db_authority.authority_hostnames // [] | join(",")' "$contract" 2>/dev/null)"
+    if [[ -n "$authority_hostnames" && "$authority_hostnames" != "null" \
+          && ",${authority_hostnames}," == *",${local_hostname},"* ]]; then
+        return 126
+    fi
+
+    local cap_safety
+    cap_safety="$(yq e ".capabilities.\"${cap_name}\".safety // \"\"" \
+        "$SPINE_CODE/ops/capabilities.yaml" 2>/dev/null)"
+    if [[ "$cap_safety" != "mutating" && "$cap_safety" != "destructive" ]]; then
+        return 126
+    fi
+
+    local user host_addr code_path key_path
+    user="${SPINE_DB_AUTHORITY_USER:-$(yq e '.db_authority.user // "root"' "$contract" 2>/dev/null)}"
+    host_addr="${SPINE_DB_AUTHORITY_HOST_ADDR:-$(yq e '.db_authority.host_addr_lan // ""' "$contract" 2>/dev/null)}"
+    code_path="${SPINE_DB_AUTHORITY_CODE:-$(yq e '.db_authority.code_path // "/opt/agentic-spine"' "$contract" 2>/dev/null)}"
+    key_path="${SPINE_DB_AUTHORITY_SSH_KEY:-$(yq e ".db_authority.per_host_ssh_key.\"${local_hostname}\" // \"\"" "$contract" 2>/dev/null)}"
+    local connect_timeout
+    connect_timeout="$(yq e '.db_authority.ssh_connect_timeout_seconds // 10' "$contract" 2>/dev/null)"
+
+    if [[ -z "$host_addr" || "$host_addr" == "null" ]]; then
+        echo "cap.sh: db_authority routing enabled but host_addr is empty (db_authority.host_addr_lan)" >&2
+        return 1
+    fi
+
+    local quoted_args=""
+    local arg
+    for arg in "${cap_args[@]}"; do
+        quoted_args+=" $(printf %q "$arg")"
+    done
+    local remote_cmd
+    remote_cmd="cd $(printf %q "$code_path") && ./bin/ops cap run $(printf %q "$cap_name")${quoted_args}"
+
+    local routed_rc=0
+    set +e
+    if [[ -n "$key_path" && "$key_path" != "null" ]]; then
+        ssh -i "$key_path" -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
+            "${user}@${host_addr}" "${remote_cmd}"
+    else
+        ssh -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
+            "${user}@${host_addr}" "${remote_cmd}"
+    fi
+    routed_rc=$?
+    set -e
+
+    return "$routed_rc"
+}
+
 build_command_string() {
     local base="$1"
     shift || true
@@ -1251,6 +1347,18 @@ run_cap() {
     fi
 
     validate_cap_target "$name" "$cmd" "$script_path" "$cwd"
+
+    # Phase D.3a: DB authority routing (INERT BY DEFAULT). When db_authority.enabled
+    # is true and the local host is not the authority and the cap is mutating, this
+    # call SSH-routes the cap to the authority host and returns the routed exit
+    # code. Otherwise returns 126 (sentinel) and we fall through to local execution.
+    set +e
+    _route_to_db_authority_if_needed "$name" "${args[@]}"
+    local _route_rc=$?
+    set -e
+    if [[ "$_route_rc" != "126" ]]; then
+        return "$_route_rc"
+    fi
 
     local ts rand run_key
     ts="$(date +%Y%m%d-%H%M%S)"

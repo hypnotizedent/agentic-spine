@@ -79,6 +79,41 @@ for proof_name in ("dataset_substrate_proof", "canonical_root_export_proof", "au
     if proof_name not in storage_required_proofs:
         fail(f"storage_evidence_node promotion_standard missing {proof_name}")
 
+# Phase D.3a: db_authority block structural honesty.
+# When the contract declares db_authority routing, every field that downstream
+# consumers (cap.sh, future verify gates) read MUST be present and explicit.
+# This check enforces the structural shape regardless of whether enabled is
+# true or false — it prevents drift where the block is partially declared and
+# cap.sh falls through to legacy behavior because of missing fields.
+runtime_bootstrap_contract = load_yaml(root / "ops/bindings/runtime.bootstrap.contract.yaml")
+db_authority = runtime_bootstrap_contract.get("db_authority")
+if db_authority is None:
+    fail("runtime.bootstrap.contract.yaml#db_authority block missing (declares Phase D.3 routing target)")
+if not isinstance(db_authority, dict):
+    fail("runtime.bootstrap.contract.yaml#db_authority must be a mapping")
+if "enabled" not in db_authority:
+    fail("runtime.bootstrap.contract.yaml#db_authority.enabled must be explicitly declared (true|false)")
+if not isinstance(db_authority.get("enabled"), bool):
+    fail("runtime.bootstrap.contract.yaml#db_authority.enabled must be a boolean")
+for required_field in ("host", "user", "host_addr_lan", "code_path", "authority_hostnames", "per_host_ssh_key", "routing_safety_classes"):
+    if required_field not in db_authority:
+        fail(f"runtime.bootstrap.contract.yaml#db_authority.{required_field} missing")
+if not isinstance(db_authority.get("authority_hostnames"), list) or not db_authority.get("authority_hostnames"):
+    fail("runtime.bootstrap.contract.yaml#db_authority.authority_hostnames must be a non-empty list")
+if not isinstance(db_authority.get("per_host_ssh_key"), dict):
+    fail("runtime.bootstrap.contract.yaml#db_authority.per_host_ssh_key must be a mapping")
+if not isinstance(db_authority.get("routing_safety_classes"), list) or not db_authority.get("routing_safety_classes"):
+    fail("runtime.bootstrap.contract.yaml#db_authority.routing_safety_classes must be a non-empty list (cap.sh selects which safety classes route)")
+
+# When enabled=false (Phase D.3a default), routing code is inert. cap.sh's
+# _route_to_db_authority_if_needed function MUST exist (the routing path is
+# present even when disabled — D.3a lands code, D.3b flips enabled=true).
+cap_sh_text = (root / "ops/commands/cap.sh").read_text(encoding="utf-8")
+if "_route_to_db_authority_if_needed" not in cap_sh_text:
+    fail("ops/commands/cap.sh missing _route_to_db_authority_if_needed routing function (D.3a contract requires routing code present, even when enabled=false)")
+if "db_authority.enabled" not in cap_sh_text:
+    fail("ops/commands/cap.sh routing function must read db_authority.enabled from contract before routing")
+
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
 # structurally prevents drift like 'pve-730xd' (non-canonical machine identity)

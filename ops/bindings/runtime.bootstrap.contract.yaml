@@ -93,6 +93,43 @@ bootstrap_preconditions:
     - aof_contract_ack
     - runtime_role_override_for_mutating_capabilities
 
+# Phase D.3a: DB authority routing declaration. Routing code in
+# ops/commands/cap.sh reads `enabled` first; when false, the routing path is
+# inert and all caps run locally (legacy behavior). When the operator flips
+# enabled to true (Phase D.3b cutover), mutating capabilities invoked from
+# non-authority hosts route via SSH to the canonical authority host so writes
+# happen on the canonical shared_authority.db. Read-only caps stay local.
+#
+# This block is the single canonical declaration of where the DB authority
+# lives and how to reach it. Env vars (SPINE_DB_AUTHORITY_*) override per-call
+# but the contract is the source of truth for the cutover state.
+db_authority:
+  enabled: false
+  enabled_history:
+    - state: false
+      effective_at_utc: "2026-05-02T19:00:00Z"
+      reason: "D.3a inert code landing — routing path implemented but disabled by contract until D.3b cutover approval"
+  host: pve
+  user: root
+  host_addr_lan: 192.168.1.184
+  host_addr_tailscale: 100.96.211.33
+  code_path: /opt/agentic-spine
+  authority_hostnames:
+    - pve
+    - pve.local
+  per_host_ssh_key:
+    ai-consolidation: /home/ubuntu/.ssh/spine_machine_ed25519
+    macbook-2016-pro: ""
+  routing_safety_classes:
+    - mutating
+    - destructive
+  routing_local_safety_classes:
+    - read-only
+    - read-only-with-cache
+  ssh_connect_timeout_seconds: 10
+  fail_closed_on_unreachable: true
+  no_silent_fallback_to_local_db_writes: true
+
 canonical_bootstrap_sequence:
   - step_id: S1
     command: ./bin/ops cap run spine.doctor -- --json
