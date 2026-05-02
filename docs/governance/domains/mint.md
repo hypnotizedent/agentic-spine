@@ -2,7 +2,7 @@
 
 Canonical domain boundary for `mint`.
 
-**Mint product and runtime authority live in [`mint-modules`](https://github.com/hypnotizedent/mint-modules), not in spine.**
+**Mint product and runtime authority live in [`mint-modules`](https://git.ronny.works/ronny/mint-modules), not in spine.**
 Spine retains only the governed shim/readback boundary. Mint-owned contracts
 are read from their product homes directly, not through spine compatibility
 symlinks.
