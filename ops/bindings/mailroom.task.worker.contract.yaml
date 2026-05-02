@@ -257,10 +257,16 @@ task_execution:
           - agent_tool
         meaning: "V2.4 provider-backed agent subprocess whose result is saved by the worker as a patch artifact only; no worktree mutation, push, or merge."
         proof_boundary: "Requires bridge_allowed=true, route_prompt_ref, payload.tool_set=patch_artifact, patch artifact path under v2_4_patch_artifact.patch_artifact_root, bridge_proof scope tool_using_agent_v2_4_patch_artifact, patch_artifact_path, patch_bytes, worktree_mutation false, and terminal task receipt."
+      tool_using_agent_v2_5_patch_apply_sandbox:
+        status: realized
+        route_targets:
+          - agent_tool
+        meaning: "V2.5 provider-backed agent subprocess whose patch result is applied only by the worker inside a leased sandbox worktree under governed runtime state; no push or merge."
+        proof_boundary: "Requires bridge_allowed=true, route_prompt_ref, payload.tool_set=patch_apply_sandbox, bridge_proof scope tool_using_agent_v2_5_patch_apply_sandbox, patch_apply_status applied, worktree_mutation_scope leased_sandbox_only, sandbox_cleanup removed, push_performed false, merge_performed false, and terminal task receipt."
       tool_using_agent_reserved:
         status: reserved_empty
         route_targets: []
-        meaning: "Future tool-using agent bridge slots beyond V2.4. Must remain empty until a separately proven bridge tier lands."
+        meaning: "Future tool-using agent bridge slots beyond V2.5. Must remain empty until a separately proven bridge tier lands."
         proof_boundary: "execution.pickup.status summary count must remain zero for this reserved slot until another implementation lands."
       destructive_manual:
         status: reserved_manual
@@ -283,6 +289,7 @@ task_execution:
       - read_only_capability_calls
       - fenced_artifact_write
       - patch_artifact
+      - patch_apply_sandbox
     v2_1_read_only_repo_inspection:
       scope: tool_using_agent_v2_1_readonly_repo
       tool_set: read_only_repo
@@ -354,6 +361,55 @@ task_execution:
         - patch_artifact_fence
         - patch_bytes
         - worktree_mutation
+        - mutation_access
+    v2_5_patch_apply_sandbox:
+      scope: tool_using_agent_v2_5_patch_apply_sandbox
+      tool_set: patch_apply_sandbox
+      tool_boundary: "worker-owned patch apply only; provider returns patch text, and the worker applies it inside a temporary leased worktree under governed runtime state."
+      worktree_lifecycle_contract: ops/bindings/worktree.lifecycle.contract.yaml
+      sandbox_root: "$SPINE_STATE/agent-worktrees/ai-bridge"
+      patch_artifact_root: "$SPINE_STATE/agent-artifacts/ai-bridge-patches"
+      patch_format: unified_diff
+      parser_validator: git_apply_check
+      max_patch_bytes: 48000
+      apply_timeout_seconds: 60
+      lease_filename: ".spine-lane-lease.yaml"
+      lease_ttl_hours: 24
+      verify_command:
+        - git
+        - diff
+        - --check
+      allowed_verify_commands:
+        - "git diff --check"
+      worktree_mutation: true
+      worktree_mutation_scope: leased_sandbox_only
+      sandbox_cleanup: removed
+      side_effect_policy: "expected_patch_files must equal actual changed files, excluding the lease file; mismatch fails the task with receipt."
+      review_surface: execution.pickup.status
+      review_state: needs_controller_review_before_merge
+      commit_identity_policy: "If a later controller lane promotes the patch, the commit author is the worker/controller identity with provider/model/bridge-tier trailers; V2.5 itself never commits."
+      recovery_policy: "If the worker dies mid-apply, the lease TTL and worktree lifecycle hygiene own cleanup; the task remains non-terminal/stale until failed or reconciled by governed recovery."
+      push_performed: false
+      merge_performed: false
+      mutation_access: leased_sandbox_worktree_only
+      receipt_fields:
+        - scope
+        - tool_set
+        - patch_artifact_path
+        - patch_bytes
+        - sandbox_root
+        - worktree_lifecycle_contract
+        - lease_filename
+        - lease_ttl_hours
+        - sandbox_worktree_retained
+        - sandbox_cleanup
+        - patch_apply_status
+        - worktree_mutation_scope
+        - expected_patch_files
+        - actual_patch_files
+        - side_effect_files
+        - push_performed
+        - merge_performed
         - mutation_access
     receipt: "terminal task envelope with bridge_proof plus provider run artifacts under ops/plugins/providers/runs"
   packet_closeout:

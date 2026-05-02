@@ -77,6 +77,7 @@ V2_1_SCOPE = "tool_using_agent_v2_1_readonly_repo"
 V2_2_SCOPE = "tool_using_agent_v2_2_readonly_capability_calls"
 V2_3_SCOPE = "tool_using_agent_v2_3_fenced_artifact_write"
 V2_4_SCOPE = "tool_using_agent_v2_4_patch_artifact"
+V2_5_SCOPE = "tool_using_agent_v2_5_patch_apply_sandbox"
 
 
 def _task_supported(doc: dict[str, Any], *, allowlist: set[str], supported_routes: set[str]) -> tuple[bool, str]:
@@ -301,6 +302,216 @@ def _write_bounded_artifact(
     return target, root, len(chunk), len(encoded) > len(chunk)
 
 
+def _extract_patch_text(result_text: str) -> str:
+    text = result_text.strip()
+    fenced = re.search(r"```(?:diff|patch)?\s*\n(.*?)\n```", text, flags=re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    start_markers = ("diff --git ", "--- ")
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith(start_markers):
+            return "\n".join(lines[index:]).strip() + "\n"
+    return text + ("\n" if text else "")
+
+
+def _patch_paths(patch_text: str) -> list[str]:
+    paths: list[str] = []
+    for line in patch_text.splitlines():
+        if line.startswith("+++ b/"):
+            paths.append(line.removeprefix("+++ b/").strip())
+        elif line.startswith("--- a/"):
+            paths.append(line.removeprefix("--- a/").strip())
+        elif line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4 and parts[3].startswith("b/"):
+                paths.append(parts[3].removeprefix("b/").strip())
+    blocked = {"", "/dev/null"}
+    return sorted(set(path for path in paths if path not in blocked and not path.startswith("../") and "/../" not in path))
+
+
+def _status_paths(status_lines: list[str]) -> list[str]:
+    paths: list[str] = []
+    for line in status_lines:
+        if not line.strip():
+            continue
+        path = line[3:] if len(line) > 3 else line.strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        paths.append(path.strip())
+    return sorted(set(paths))
+
+
+def _write_sandbox_lease(worktree: Path, task_id: str, ttl_hours: int) -> Path:
+    lease_path = worktree / ".spine-lane-lease.yaml"
+    lease = {
+        "status": "active",
+        "owner": "mailroom.patch_apply_sandbox",
+        "task_id": task_id,
+        "created_at": _now(),
+        "heartbeat_at": _now(),
+        "ttl_hours": ttl_hours,
+        "source_contract": "ops/bindings/worktree.lifecycle.contract.yaml",
+        "cleanup": "remove worktree after task terminal receipt",
+    }
+    lease_path.write_text(yaml.safe_dump(lease, sort_keys=False), encoding="utf-8")
+    return lease_path
+
+
+def _sandbox_patch_apply(task_id: str, payload: dict[str, Any], patch_text: str) -> dict[str, Any]:
+    v2 = _bridge_section("v2_5_patch_apply_sandbox")
+    root = _resolve_artifact_root(str(v2.get("sandbox_root") or ""), "$SPINE_STATE/agent-worktrees/ai-bridge")
+    root.mkdir(parents=True, exist_ok=True)
+    worktree = (root / task_id).resolve()
+    try:
+        worktree.relative_to(root)
+    except ValueError as exc:
+        raise WorkerError(f"sandbox worktree outside governed fence: {worktree}") from exc
+    if worktree.exists():
+        raise WorkerError(f"sandbox worktree already exists: {worktree}")
+
+    timeout = int(v2.get("apply_timeout_seconds") or 60)
+    verify_command = payload.get("sandbox_verify_command") or v2.get("verify_command") or []
+    if not isinstance(verify_command, list):
+        verify_command = []
+    verify_command = [str(item) for item in verify_command if str(item).strip()]
+    if verify_command:
+        allowed_verify = [str(item) for item in (v2.get("allowed_verify_commands") or []) if str(item).strip()]
+        if verify_command not in [item.split(" ") for item in allowed_verify]:
+            joined = " ".join(verify_command)
+            if joined not in allowed_verify:
+                raise WorkerError(f"sandbox verify command not allowlisted: {joined}")
+
+    patch = _extract_patch_text(patch_text)
+    if not patch.strip():
+        raise WorkerError("patch_apply_sandbox requires non-empty patch text")
+    expected_patch_files = _patch_paths(patch)
+    if not expected_patch_files:
+        raise WorkerError("patch_apply_sandbox requires parseable unified diff file paths")
+    max_patch_bytes = int(v2.get("max_patch_bytes") or 48000)
+    encoded = patch.encode("utf-8", errors="replace")
+    if len(encoded) > max_patch_bytes:
+        raise WorkerError(f"patch_apply_sandbox patch exceeds max_patch_bytes={max_patch_bytes}")
+
+    patch_file = _resolve_artifact_root(
+        str(v2.get("patch_artifact_root") or ""),
+        "$SPINE_STATE/agent-artifacts/ai-bridge-patches",
+    ) / task_id / "applied.patch"
+    patch_file.parent.mkdir(parents=True, exist_ok=True)
+    patch_file.write_bytes(encoded)
+
+    added = False
+    try:
+        add_proc = subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree), "HEAD"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+        if add_proc.returncode != 0:
+            raise WorkerError(add_proc.stderr.strip() or add_proc.stdout.strip() or "git worktree add failed")
+        added = True
+        lease_ttl_hours = int(v2.get("lease_ttl_hours") or 24)
+        lease_path = _write_sandbox_lease(worktree, task_id, lease_ttl_hours)
+
+        check_proc = subprocess.run(
+            ["git", "apply", "--check", str(patch_file)],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+        if check_proc.returncode != 0:
+            raise WorkerError(check_proc.stderr.strip() or check_proc.stdout.strip() or "git apply --check failed")
+
+        apply_proc = subprocess.run(
+            ["git", "apply", str(patch_file)],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+        if apply_proc.returncode != 0:
+            raise WorkerError(apply_proc.stderr.strip() or apply_proc.stdout.strip() or "git apply failed")
+
+        status_proc = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+        if status_proc.returncode != 0:
+            raise WorkerError(status_proc.stderr.strip() or status_proc.stdout.strip() or "git status failed")
+        status_lines = [line for line in status_proc.stdout.splitlines() if line.strip()]
+        actual_files = [path for path in _status_paths(status_lines) if path != lease_path.name]
+        side_effect_files = sorted(set(actual_files) - set(expected_patch_files))
+        missing_files = sorted(set(expected_patch_files) - set(actual_files))
+        if side_effect_files or missing_files:
+            raise WorkerError(f"patch side-effect mismatch side_effects={side_effect_files} missing={missing_files}")
+
+        verify_rc: int | None = None
+        verify_stdout = ""
+        verify_stderr = ""
+        if verify_command:
+            verify_proc = subprocess.run(
+                verify_command,
+                cwd=str(worktree),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+            verify_rc = verify_proc.returncode
+            verify_stdout = verify_proc.stdout[-2000:]
+            verify_stderr = verify_proc.stderr[-2000:]
+            if verify_proc.returncode != 0:
+                raise WorkerError(f"sandbox verify command rc={verify_proc.returncode}: {(verify_proc.stderr or verify_proc.stdout).splitlines()[-1][:240] if (verify_proc.stderr or verify_proc.stdout).splitlines() else ''}")
+
+        return {
+            "patch_artifact_path": str(patch_file),
+            "patch_bytes": len(encoded),
+            "sandbox_root": str(root),
+            "sandbox_worktree": task_id,
+            "sandbox_worktree_retained": False,
+            "sandbox_cleanup": "removed",
+            "worktree_lifecycle_contract": "ops/bindings/worktree.lifecycle.contract.yaml",
+            "lease_filename": lease_path.name,
+            "lease_ttl_hours": lease_ttl_hours,
+            "patch_apply_check": True,
+            "patch_apply_status": "applied",
+            "worktree_mutation": True,
+            "worktree_mutation_scope": "leased_sandbox_only",
+            "push_performed": False,
+            "merge_performed": False,
+            "worktree_status": status_lines,
+            "expected_patch_files": expected_patch_files,
+            "actual_patch_files": actual_files,
+            "side_effect_files": side_effect_files,
+            "verify_command": verify_command,
+            "verify_rc": verify_rc,
+            "verify_stdout_excerpt": verify_stdout,
+            "verify_stderr_excerpt": verify_stderr,
+        }
+    finally:
+        if added:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(worktree)],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+        if worktree.exists():
+            shutil.rmtree(worktree, ignore_errors=True)
+
+
 def _requested_readonly_capability(payload: dict[str, Any]) -> str:
     values: list[str] = []
     for key in (
@@ -484,7 +695,7 @@ def _build_agent_context(doc: dict[str, Any], worker_id: str) -> tuple[str, dict
     tool_set = str(payload.get("tool_set") or payload.get("agent_tool_tool_set") or "prompt_only").strip()
     if tool_set in {"read_only_capability", "read_only_capability_calls"}:
         return _run_readonly_capability_context(worker_id, payload)
-    if tool_set in {"fenced_artifact_write", "patch_artifact"}:
+    if tool_set in {"fenced_artifact_write", "patch_artifact", "patch_apply_sandbox"}:
         return "", {
             "tool_set": tool_set,
             "tool_access": "none",
@@ -561,6 +772,8 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
             scope = V2_3_SCOPE
         elif payload_tool_set == "patch_artifact":
             scope = V2_4_SCOPE
+        elif payload_tool_set == "patch_apply_sandbox":
+            scope = V2_5_SCOPE
         else:
             scope = "bounded_readonly_provider_agent"
         reason = str(exc)
@@ -647,6 +860,8 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
         scope = V2_3_SCOPE
     elif tool_proof.get("tool_set") == "patch_artifact":
         scope = V2_4_SCOPE
+    elif tool_proof.get("tool_set") == "patch_apply_sandbox":
+        scope = V2_5_SCOPE
     else:
         scope = "bounded_readonly_provider_agent"
     base_proof = {
@@ -712,6 +927,35 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
                     "patch_truncated": patch_truncated,
                     "worktree_mutation": False,
                     "mutation_access": "patch_artifact_only",
+                }
+            )
+        elif scope == V2_5_SCOPE:
+            try:
+                sandbox_proof = _sandbox_patch_apply(task_id, payload, result_text)
+            except WorkerError as exc:
+                reason = str(exc)
+                base_proof.update(
+                    {
+                        "tool_set": "patch_apply_sandbox",
+                        "status": "failed",
+                        "failure_reason": reason,
+                        "mutation_access": "leased_sandbox_worktree_only",
+                        "worktree_mutation_scope": "leased_sandbox_only",
+                        "push_performed": False,
+                        "merge_performed": False,
+                    }
+                )
+                _fail_task(task_id, reason)
+                _write_task_fields(_terminal_file(task_id, "failed"), {"bridge_proof": base_proof})
+                if os.environ.get("SPINE_AGENT_BRIDGE_KEEP_RUNS", "0") != "1":
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                return {"task_id": task_id, "status": "failed", "route_target": "agent_tool", "error": reason}
+            base_proof.update(
+                sandbox_proof
+                | {
+                    "tool_set": "patch_apply_sandbox",
+                    "tool_access": "none",
+                    "mutation_access": "leased_sandbox_worktree_only",
                 }
             )
     if base_proof["provider_run_retained"]:
@@ -906,6 +1150,8 @@ def main() -> int:
                 raise WorkerError("v2_3_fenced_artifact_write scope missing")
             if _bridge_section("v2_4_patch_artifact").get("scope") != V2_4_SCOPE:
                 raise WorkerError("v2_4_patch_artifact scope missing")
+            if _bridge_section("v2_5_patch_apply_sandbox").get("scope") != V2_5_SCOPE:
+                raise WorkerError("v2_5_patch_apply_sandbox scope missing")
             print("mailroom.task.worker.once self-check PASS")
             return 0
         except (ImportError, WorkerError) as exc:

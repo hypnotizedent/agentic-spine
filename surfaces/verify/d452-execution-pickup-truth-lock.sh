@@ -155,6 +155,38 @@ elif bridge_state == "delivered (tool-using: patch artifact generation)":
     ]
     if not proofs:
         raise SystemExit("D452 FAIL: delivered V2.4 bridge requires completed patch artifact bridge_proof task envelope")
+elif bridge_state == "delivered (tool-using: patch apply sandbox)":
+    proofs = [
+        row for row in data.get("requests") or []
+        if row.get("pickup_state") == "done"
+        and row.get("route_target") == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and row["bridge_proof"].get("status") == "completed"
+        and row["bridge_proof"].get("scope") == "tool_using_agent_v2_5_patch_apply_sandbox"
+        and row["bridge_proof"].get("tool_set") == "patch_apply_sandbox"
+        and row["bridge_proof"].get("spawn") == "subprocess"
+        and row["bridge_proof"].get("prompt_injection") == "route_prompt_ref"
+        and int(row["bridge_proof"].get("heartbeats_emitted") or 0) >= 1
+        and row["bridge_proof"].get("patch_artifact_path")
+        and int(row["bridge_proof"].get("patch_bytes") or 0) >= 1
+        and row["bridge_proof"].get("patch_apply_status") == "applied"
+        and row["bridge_proof"].get("worktree_mutation") is True
+        and row["bridge_proof"].get("worktree_mutation_scope") == "leased_sandbox_only"
+        and row["bridge_proof"].get("worktree_lifecycle_contract") == "ops/bindings/worktree.lifecycle.contract.yaml"
+        and row["bridge_proof"].get("lease_filename") == ".spine-lane-lease.yaml"
+        and isinstance(row["bridge_proof"].get("expected_patch_files"), list)
+        and row["bridge_proof"].get("expected_patch_files") == row["bridge_proof"].get("actual_patch_files")
+        and row["bridge_proof"].get("side_effect_files") == []
+        and row["bridge_proof"].get("sandbox_cleanup") == "removed"
+        and row["bridge_proof"].get("sandbox_worktree_retained") is False
+        and row["bridge_proof"].get("push_performed") is False
+        and row["bridge_proof"].get("merge_performed") is False
+        and row["bridge_proof"].get("mutation_access") == "leased_sandbox_worktree_only"
+        and row["bridge_proof"].get("receipt") == "task_envelope_bridge_proof"
+        and row.get("review_state") == "needs_controller_review_before_merge"
+    ]
+    if not proofs:
+        raise SystemExit("D452 FAIL: delivered V2.5 bridge requires completed sandbox patch-apply bridge_proof task envelope")
 else:
     raise SystemExit(f"D452 FAIL: unknown AI agent bridge state: {bridge_state!r}")
 if subtraction.get("public_language") != "execution pickup":
@@ -162,7 +194,7 @@ if subtraction.get("public_language") != "execution pickup":
 safety_tiers = summary.get("safety_tiers")
 if not isinstance(safety_tiers, dict):
     raise SystemExit("D452 FAIL: execution pickup summary must expose safety_tiers")
-for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_reserved", "destructive_manual"):
+for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_v2_5_patch_apply_sandbox", "tool_using_agent_reserved", "destructive_manual"):
     if required_tier not in safety_tiers:
         raise SystemExit(f"D452 FAIL: safety_tiers missing {required_tier}")
 if int(safety_tiers.get("tool_using_agent_reserved") or 0) != 0:
@@ -214,7 +246,28 @@ for row in data.get("requests") or []:
                 raise SystemExit("D452 FAIL: terminal V2.4 success must prove patch artifact only and no worktree mutation")
             if not proof.get("patch_artifact_path") or not proof.get("patch_artifact_fence") or int(proof.get("patch_bytes") or 0) < 1:
                 raise SystemExit("D452 FAIL: terminal V2.4 success requires patch artifact proof")
-    if tier.startswith("tool_using_agent_") and tier not in {"tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact"} and row.get("pickup_state") in {"done", "failed", "cancelled"}:
+    if tier == "tool_using_agent_v2_5_patch_apply_sandbox" and row.get("pickup_state") in {"done", "failed", "cancelled"}:
+        proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
+        if proof.get("scope") != "tool_using_agent_v2_5_patch_apply_sandbox":
+            raise SystemExit("D452 FAIL: terminal V2.5 patch apply row requires V2.5 bridge_proof")
+        if proof.get("tool_set") != "patch_apply_sandbox":
+            raise SystemExit("D452 FAIL: terminal V2.5 row must carry patch_apply_sandbox tool_set")
+        if row.get("pickup_state") == "done":
+            if proof.get("mutation_access") != "leased_sandbox_worktree_only" or proof.get("worktree_mutation_scope") != "leased_sandbox_only":
+                raise SystemExit("D452 FAIL: terminal V2.5 success must prove leased sandbox mutation only")
+            if proof.get("worktree_lifecycle_contract") != "ops/bindings/worktree.lifecycle.contract.yaml" or proof.get("lease_filename") != ".spine-lane-lease.yaml":
+                raise SystemExit("D452 FAIL: terminal V2.5 success must prove worktree lifecycle lease semantics")
+            if proof.get("push_performed") is not False or proof.get("merge_performed") is not False:
+                raise SystemExit("D452 FAIL: terminal V2.5 success must prove no push or merge")
+            if proof.get("sandbox_cleanup") != "removed" or proof.get("sandbox_worktree_retained") is not False:
+                raise SystemExit("D452 FAIL: terminal V2.5 success must prove sandbox cleanup")
+            if proof.get("patch_apply_status") != "applied" or not proof.get("patch_artifact_path") or int(proof.get("patch_bytes") or 0) < 1:
+                raise SystemExit("D452 FAIL: terminal V2.5 success requires patch apply proof")
+            if not isinstance(proof.get("expected_patch_files"), list) or proof.get("expected_patch_files") != proof.get("actual_patch_files") or proof.get("side_effect_files") != []:
+                raise SystemExit("D452 FAIL: terminal V2.5 success must prove expected-vs-actual patch file parity")
+            if row.get("review_state") != "needs_controller_review_before_merge":
+                raise SystemExit("D452 FAIL: terminal V2.5 success must surface controller review state in execution pickup")
+    if tier.startswith("tool_using_agent_") and tier not in {"tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_v2_5_patch_apply_sandbox"} and row.get("pickup_state") in {"done", "failed", "cancelled"}:
         proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
         if proof.get("scope") != tier:
             raise SystemExit(f"D452 FAIL: terminal {tier} row must carry matching bridge_proof scope")
@@ -329,7 +382,7 @@ if missing:
 task_execution = worker_contract.get("task_execution") or {}
 routes = set(task_execution.get("execute_route_targets") or [])
 taxonomy = ((task_execution.get("route_target_taxonomy") or {}).get("safety_tiers") or {})
-for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_reserved", "destructive_manual"):
+for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_v2_5_patch_apply_sandbox", "tool_using_agent_reserved", "destructive_manual"):
     if required_tier not in taxonomy:
         raise SystemExit(f"D452 FAIL: mailroom worker route_target_taxonomy missing {required_tier}")
 if taxonomy["tool_using_agent_reserved"].get("status") != "reserved_empty":
@@ -344,6 +397,8 @@ if taxonomy["tool_using_agent_v2_3_fenced_artifact_write"].get("status") != "rea
     raise SystemExit("D452 FAIL: V2.3 fenced artifact tier must be realized")
 if taxonomy["tool_using_agent_v2_4_patch_artifact"].get("status") != "realized":
     raise SystemExit("D452 FAIL: V2.4 patch artifact tier must be realized")
+if taxonomy["tool_using_agent_v2_5_patch_apply_sandbox"].get("status") != "realized":
+    raise SystemExit("D452 FAIL: V2.5 patch apply sandbox tier must be realized")
 if "agent_tool" not in routes:
     raise SystemExit("D452 FAIL: bounded agent_tool bridge must be an explicit execute_route_target")
 bridge = task_execution.get("agent_tool_bridge") or {}
@@ -359,6 +414,8 @@ if "fenced_artifact_write" not in set(bridge.get("supported_tool_sets") or []):
     raise SystemExit("D452 FAIL: agent_tool bridge must declare fenced_artifact_write supported_tool_sets for V2.3")
 if "patch_artifact" not in set(bridge.get("supported_tool_sets") or []):
     raise SystemExit("D452 FAIL: agent_tool bridge must declare patch_artifact supported_tool_sets for V2.4")
+if "patch_apply_sandbox" not in set(bridge.get("supported_tool_sets") or []):
+    raise SystemExit("D452 FAIL: agent_tool bridge must declare patch_apply_sandbox supported_tool_sets for V2.5")
 v2_1 = bridge.get("v2_1_read_only_repo_inspection") or {}
 if v2_1.get("scope") != "tool_using_agent_v2_1_readonly_repo":
     raise SystemExit("D452 FAIL: V2.1 read-only repo bridge scope missing")
@@ -406,6 +463,31 @@ if v2_4.get("mutation_access") != "patch_artifact_only":
     raise SystemExit("D452 FAIL: V2.4 must declare patch artifact mutation only")
 if "$SPINE_STATE" not in str(v2_4.get("patch_artifact_root") or ""):
     raise SystemExit("D452 FAIL: V2.4 patch artifact root must live under $SPINE_STATE")
+v2_5 = bridge.get("v2_5_patch_apply_sandbox") or {}
+if v2_5.get("scope") != "tool_using_agent_v2_5_patch_apply_sandbox":
+    raise SystemExit("D452 FAIL: V2.5 patch apply sandbox bridge scope missing")
+if v2_5.get("tool_set") != "patch_apply_sandbox":
+    raise SystemExit("D452 FAIL: V2.5 patch apply sandbox bridge tool_set missing")
+if v2_5.get("worktree_mutation_scope") != "leased_sandbox_only":
+    raise SystemExit("D452 FAIL: V2.5 must declare leased sandbox mutation only")
+if v2_5.get("worktree_lifecycle_contract") != "ops/bindings/worktree.lifecycle.contract.yaml":
+    raise SystemExit("D452 FAIL: V2.5 must reuse worktree lifecycle contract")
+if v2_5.get("patch_format") != "unified_diff" or v2_5.get("parser_validator") != "git_apply_check":
+    raise SystemExit("D452 FAIL: V2.5 must declare unified diff format and git apply validator")
+if v2_5.get("lease_filename") != ".spine-lane-lease.yaml" or int(v2_5.get("lease_ttl_hours") or 0) < 1:
+    raise SystemExit("D452 FAIL: V2.5 must declare worktree lease file and TTL")
+if v2_5.get("sandbox_cleanup") != "removed":
+    raise SystemExit("D452 FAIL: V2.5 must declare sandbox cleanup")
+if v2_5.get("review_surface") != "execution.pickup.status":
+    raise SystemExit("D452 FAIL: V2.5 review surface must remain execution.pickup.status")
+if v2_5.get("push_performed") is not False or v2_5.get("merge_performed") is not False:
+    raise SystemExit("D452 FAIL: V2.5 must declare no push or merge")
+if v2_5.get("mutation_access") != "leased_sandbox_worktree_only":
+    raise SystemExit("D452 FAIL: V2.5 must declare leased sandbox mutation access only")
+if "$SPINE_STATE" not in str(v2_5.get("sandbox_root") or ""):
+    raise SystemExit("D452 FAIL: V2.5 sandbox root must live under $SPINE_STATE")
+if "$SPINE_STATE" not in str(v2_5.get("patch_artifact_root") or ""):
+    raise SystemExit("D452 FAIL: V2.5 patch artifact root must live under $SPINE_STATE")
 
 for path in (bridge_path, consumers_path, endpoints_path, inventory_path):
     doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -438,6 +520,8 @@ if "v2_3_fenced_artifact_denied_outside_fence" not in fixtures:
     raise SystemExit("D452 FAIL: recovery drill must cover V2.3 denied outside-fence artifact")
 if "v2_4_patch_artifact_no_worktree_mutation" not in fixtures:
     raise SystemExit("D452 FAIL: recovery drill must cover V2.4 no-worktree-mutation proof")
+if "v2_5_patch_apply_sandbox_no_push_merge" not in fixtures:
+    raise SystemExit("D452 FAIL: recovery drill must cover V2.5 no-push/no-merge sandbox proof")
 PY
 
 echo "D452 PASS: execution pickup truth locked"

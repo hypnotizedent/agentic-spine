@@ -34,6 +34,7 @@ FIXTURES = [
     "v2_2_readonly_capability_denied_unallowlisted",
     "v2_3_fenced_artifact_denied_outside_fence",
     "v2_4_patch_artifact_no_worktree_mutation",
+    "v2_5_patch_apply_sandbox_no_push_merge",
 ]
 
 
@@ -384,6 +385,57 @@ PY
     return {"fixture": "v2_4_patch_artifact_no_worktree_mutation", "worker_once": payload, "terminal": terminal, "passed": passed}
 
 
+def fixture_v2_5_patch_apply_sandbox_no_push_merge(run_id: str) -> dict[str, Any]:
+    task_id = f"TASK-{run_id}-v25-patch-apply-sandbox"
+    prompt = f"/home/ubuntu/code/.runtime/spine/state/domain-state/recovery-drills/execution-pickup/{run_id}-v25-patch-apply-sandbox.md"
+    payload = ssh(
+        remote_prelude()
+        + f"""
+        sudo systemctl stop {UNIT}
+        mkdir -p "$(dirname {prompt})"
+        cat > {prompt} <<'PROMPT'
+Return only this unified diff. Do not claim shell, git, filesystem, push, or merge access.
+
+diff --git a/docs/reference/AI_BRIDGE_V25_SANDBOX_PROOF.md b/docs/reference/AI_BRIDGE_V25_SANDBOX_PROOF.md
+new file mode 100644
+--- /dev/null
++++ b/docs/reference/AI_BRIDGE_V25_SANDBOX_PROOF.md
+@@ -0,0 +1 @@
++V2.5 sandbox apply proof.
+PROMPT
+        before="$(git status --porcelain=v1 | sha256sum | awk '{{print $1}}')"
+        ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue --task-id {task_id} --summary 'Recovery drill V2.5 patch apply sandbox proof' --route-target agent_tool --bridge-allowed --route-prompt-ref {prompt} --payload '{{"provider":"zai","tool_set":"patch_apply_sandbox","timeout_seconds":90,"max_tokens":256}}' --json >/dev/null
+        SPINE_AGENT_BRIDGE_KEEP_RUNS=1 python3 ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-worker --once --worker-id SPINE-RECOVERY-DRILL --json >/tmp/{task_id}.json || true
+        after="$(git status --porcelain=v1 | sha256sum | awk '{{print $1}}')"
+        sudo systemctl start {UNIT}
+        python3 - <<PY
+import json
+payload=json.loads(open('/tmp/{task_id}.json').read())
+payload['git_status_same'] = ("$before" == "$after")
+print(json.dumps(payload))
+PY
+        """,
+        timeout=180,
+    )
+    terminal = wait_task(task_id, timeout_seconds=60)
+    proof = terminal.get("bridge_proof") if isinstance(terminal.get("bridge_proof"), dict) else {}
+    passed = (
+        terminal.get("state") == "done"
+        and proof.get("scope") == "tool_using_agent_v2_5_patch_apply_sandbox"
+        and proof.get("tool_set") == "patch_apply_sandbox"
+        and proof.get("mutation_access") == "leased_sandbox_worktree_only"
+        and proof.get("worktree_mutation_scope") == "leased_sandbox_only"
+        and proof.get("patch_apply_status") == "applied"
+        and proof.get("sandbox_cleanup") == "removed"
+        and proof.get("sandbox_worktree_retained") is False
+        and proof.get("push_performed") is False
+        and proof.get("merge_performed") is False
+        and int(proof.get("patch_bytes") or 0) > 0
+        and payload.get("git_status_same") is True
+    )
+    return {"fixture": "v2_5_patch_apply_sandbox_no_push_merge", "worker_once": payload, "terminal": terminal, "passed": passed}
+
+
 def write_receipt(payload: dict[str, Any]) -> Path:
     RECEIPT_ROOT.mkdir(parents=True, exist_ok=True)
     path = RECEIPT_ROOT / f"recovery_drill.execution_pickup.{payload['run_id']}.yaml"
@@ -409,6 +461,7 @@ def run_drill() -> tuple[dict[str, Any], Path]:
         fixture_v2_2_readonly_capability_denied_unallowlisted(run_id),
         fixture_v2_3_fenced_artifact_denied_outside_fence(run_id),
         fixture_v2_4_patch_artifact_no_worktree_mutation(run_id),
+        fixture_v2_5_patch_apply_sandbox_no_push_merge(run_id),
     ]
     final = service_active()
     payload = {

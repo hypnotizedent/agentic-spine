@@ -162,6 +162,7 @@ SAFETY_TIERS = (
     "tool_using_agent_v2_2_readonly_capability_calls",
     "tool_using_agent_v2_3_fenced_artifact_write",
     "tool_using_agent_v2_4_patch_artifact",
+    "tool_using_agent_v2_5_patch_apply_sandbox",
     "tool_using_agent_reserved",
     "destructive_manual",
 )
@@ -173,6 +174,11 @@ def safety_tier_for(row: dict[str, Any]) -> str:
         bridge_proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         bridge_scope = str(bridge_proof.get("scope") or "").strip()
+        if (
+            bridge_proof.get("scope") == "tool_using_agent_v2_5_patch_apply_sandbox"
+            or str(payload.get("tool_set") or "").strip() == "patch_apply_sandbox"
+        ):
+            return "tool_using_agent_v2_5_patch_apply_sandbox"
         if (
             bridge_proof.get("scope") == "tool_using_agent_v2_4_patch_artifact"
             or str(payload.get("tool_set") or "").strip() == "patch_artifact"
@@ -294,6 +300,9 @@ def kernel_states_for(row: dict[str, Any]) -> dict[str, Any]:
 def add_request(rows: list[dict[str, Any]], **kwargs: Any) -> None:
     row = {k: v for k, v in kwargs.items() if v not in (None, "", [], {})}
     row["safety_tier"] = safety_tier_for(row)
+    proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
+    if proof.get("scope") == "tool_using_agent_v2_5_patch_apply_sandbox" and row.get("pickup_state") == "done":
+        row["review_state"] = "needs_controller_review_before_merge"
     row.update(kernel_states_for(row))
     rows.append(row)
 
@@ -493,6 +502,14 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         and (row.get("bridge_proof") or {}).get("scope") == "tool_using_agent_v2_4_patch_artifact"
         for row in rows
     )
+    delivered_v2_5 = any(
+        row.get("pickup_state") == "done"
+        and str(row.get("route_target") or "").strip().lower() == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and (row.get("bridge_proof") or {}).get("status") == "completed"
+        and (row.get("bridge_proof") or {}).get("scope") == "tool_using_agent_v2_5_patch_apply_sandbox"
+        for row in rows
+    )
     delivered_bridge = any(
         row.get("pickup_state") == "done"
         and str(row.get("route_target") or "").strip().lower() == "agent_tool"
@@ -512,6 +529,8 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ai_agent_bridge = "delivered (tool-using: fenced artifact write)"
     if delivered_v2_4:
         ai_agent_bridge = "delivered (tool-using: patch artifact generation)"
+    if delivered_v2_5:
+        ai_agent_bridge = "delivered (tool-using: patch apply sandbox)"
     return {
         "requests_total": len(active_rows),
         "not_claimed": sum(1 for row in active_rows if row.get("pickup_state") == "not_claimed"),
