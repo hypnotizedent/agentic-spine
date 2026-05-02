@@ -1056,6 +1056,46 @@ def collect_execution_pickup_status():
     return result
 
 
+def collect_execution_recovery_drill_status():
+    result = {
+        "status": "missing",
+        "fresh": False,
+        "freshness_window_hours": 168,
+        "receipt": "",
+    }
+    latest = state_root / "domain-state" / "recovery-drills" / "execution-pickup" / "latest.yaml"
+    if not latest.is_file():
+        return result
+    try:
+        import yaml as _yaml_recovery  # type: ignore
+        data = _yaml_recovery.safe_load(latest.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        result.update({"status": "unreadable", "error": str(exc), "receipt": str(latest)})
+        return result
+    generated = str(data.get("generated_at") or "").strip()
+    generated_dt = parse_iso_utc(generated)
+    age_minutes = age_minutes_from(generated_dt, telemetry_now_utc)
+    window_hours = int(data.get("freshness_window_hours") or result["freshness_window_hours"])
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    status = str(data.get("status") or "unknown").strip()
+    fresh = (
+        status == "pass"
+        and age_minutes is not None
+        and age_minutes <= window_hours * 60
+    )
+    result.update({
+        "status": status,
+        "fresh": fresh,
+        "generated_at": generated,
+        "age_minutes": age_minutes,
+        "freshness_window_hours": window_hours,
+        "receipt": str(latest),
+        "summary": summary,
+        "fixtures": data.get("fixtures") if isinstance(data.get("fixtures"), list) else [],
+    })
+    return result
+
+
 gap_state = collect_gap_state()
 gaps_available = gap_state.get("status") == "ok"
 open_gaps = gap_state.get("open_gaps", []) if gaps_available else []
@@ -1069,6 +1109,7 @@ watcher_input_projection = collect_watcher_input_projection()
 worktree_cleanup_state = collect_worktree_cleanup_state()
 delegation_summary = collect_delegation_summary()
 execution_pickup_status = collect_execution_pickup_status()
+execution_recovery_drill_status = collect_execution_recovery_drill_status()
 
 # ── Parse inbox lanes ─────────────────────────────────────────────────────
 
@@ -1775,6 +1816,7 @@ if mode == "--json":
         "worktree_cleanup": worktree_cleanup_state,
         "delegations": delegation_summary,
         "execution_pickup": execution_pickup_status,
+        "execution_recovery_drill": execution_recovery_drill_status,
         "execution_lane_truth": {
             "capability_worker": "operational_capability_worker",
             "agent_tool_bridge": execution_pickup_status.get("summary", {}).get("ai_agent_bridge", "not_delivered") if isinstance(execution_pickup_status.get("summary"), dict) else "not_delivered",
@@ -1812,6 +1854,7 @@ if mode == "--json":
             "execution_not_claimed": int((execution_pickup_status.get("summary") or {}).get("not_claimed", 0) or 0),
             "execution_claimed_or_running": int((execution_pickup_status.get("summary") or {}).get("claimed_or_running", 0) or 0),
             "execution_stale": int((execution_pickup_status.get("summary") or {}).get("stale", 0) or 0),
+            "execution_recovery_drill_fresh": bool(execution_recovery_drill_status.get("fresh")),
             "background_loops": sum(1 for loop in open_loops if loop.get("execution_mode") == "background"),
             "stale_background_loops": stale_background_count,
             "planned_loops": len(planned_loops),
@@ -1944,6 +1987,7 @@ if mode != "--expert":
         for key, value in _pickup_safety_tiers.items()
         if int(value or 0) > 0
     ) or "none active/recent"
+    _recovery_drill_status = execution_recovery_drill_status
     _blocked_loops = [
         loop for loop in open_loops
         if loop.get("execution_readiness", "runnable") == "blocked"
@@ -1977,6 +2021,10 @@ if mode != "--expert":
         _attention.append(f"EXECUTION PICKUP: {_pickup_unclaimed} request(s) not claimed")
     if _pickup_stale:
         _attention.append(f"EXECUTION PICKUP STALE: {_pickup_stale} claimed request(s) stale")
+    if _recovery_drill_status.get("status") == "missing":
+        _attention.append("RECOVERY DRILL MISSING: execution pickup has no recovery drill receipt")
+    elif not _recovery_drill_status.get("fresh"):
+        _attention.append("RECOVERY DRILL STALE: execution pickup recovery drill is not fresh")
     if joined_state_summary.get("coherence_attention"):
         _attention.append("HEALTH DRIFT: engine coherence needs attention")
     if inbox_actionable:
@@ -2043,6 +2091,12 @@ if mode != "--expert":
     print(f"  safety tiers:      {_pickup_safety_line}")
     print(f"  capability worker: {_pickup_worker_status}{' fresh' if _pickup_worker_fresh else ' not fresh'}")
     print(f"  AI agent bridge:   {_pickup_summary.get('ai_agent_bridge', 'not_delivered')}")
+    if _recovery_drill_status.get("status") == "missing":
+        print("  recovery drill:    missing")
+    else:
+        _age = _recovery_drill_status.get("age_minutes")
+        _age_text = f"{_age:.1f}m" if isinstance(_age, (int, float)) else "unknown age"
+        print(f"  recovery drill:    {_recovery_drill_status.get('status', 'unknown')} ({'fresh' if _recovery_drill_status.get('fresh') else 'stale'}, {_age_text})")
     print()
 
     print("HEALTH")
@@ -2183,6 +2237,17 @@ if int(_expert_pickup_summary.get("requests_total", 0) or 0):
         if detail:
             bits.append(detail[:80])
         print(f"  {str(row.get('request_id') or '?')[:32]:32s} {' | '.join(bits)}")
+    print()
+
+if execution_recovery_drill_status.get("status") != "missing":
+    print("EXECUTION RECOVERY DRILL")
+    print("-" * 72)
+    print(f"  status:             {execution_recovery_drill_status.get('status', 'unknown')}")
+    print(f"  fresh:              {'yes' if execution_recovery_drill_status.get('fresh') else 'no'}")
+    print(f"  receipt:            {execution_recovery_drill_status.get('receipt', '')}")
+    _drill_summary = execution_recovery_drill_status.get("summary") if isinstance(execution_recovery_drill_status.get("summary"), dict) else {}
+    if _drill_summary:
+        print(f"  fixtures:           {int(_drill_summary.get('passed', 0) or 0)}/{int(_drill_summary.get('total', 0) or 0)} passed")
     print()
 
 _sp_summary = standing_program_health.get("summary") if isinstance(standing_program_health.get("summary"), dict) else {}

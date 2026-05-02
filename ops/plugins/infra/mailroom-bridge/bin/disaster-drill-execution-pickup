@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""Run the execution pickup recovery drill against the standing worker host."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import shutil
+import subprocess
+import sys
+import textwrap
+import time
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+STATE_ROOT = Path(os.environ.get("SPINE_STATE") or ROOT.parent / ".runtime" / "spine" / "state")
+RECEIPT_ROOT = STATE_ROOT / "domain-state" / "recovery-drills" / "execution-pickup"
+REMOTE_HOST = "ubuntu@100.71.17.29"
+REMOTE_ROOT = "/home/ubuntu/code/agentic-spine"
+UNIT = "spine-mailroom-task-worker.service"
+FIXTURES = ["idle_restart", "queued_restart", "provider_failure", "timeout", "stale_heartbeat"]
+
+
+def now_utc() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run(cmd: list[str], *, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def ssh(script: str, *, timeout: int = 180) -> dict[str, Any]:
+    wrapped = f"set -euo pipefail\ncd {REMOTE_ROOT}\n{script}\n"
+    proc = run(
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            REMOTE_HOST,
+            wrapped,
+        ],
+        timeout=timeout,
+    )
+    out = proc.stdout.strip()
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout[-2000:],
+            "stderr": proc.stderr[-2000:],
+        }
+    if not out:
+        return {"ok": True}
+    try:
+        payload = json.loads(out.splitlines()[-1])
+    except json.JSONDecodeError:
+        return {"ok": True, "stdout": out[-2000:]}
+    payload.setdefault("ok", True)
+    return payload
+
+
+def remote_prelude() -> str:
+    return textwrap.dedent(
+        """
+        if [[ -f /etc/spine/execution-host.env ]]; then
+          set -a
+          source /etc/spine/execution-host.env
+          set +a
+        fi
+        export SPINE_AGENT_BRIDGE_KEEP_RUNS=1
+        """
+    )
+
+
+def service_active() -> dict[str, Any]:
+    return ssh(
+        remote_prelude()
+        + f"""
+        active="$(sudo systemctl is-active {UNIT} || true)"
+        tmp_status="$(mktemp)"
+        ./ops/plugins/core/lifecycle/bin/execution-pickup-status --json >"$tmp_status"
+        worker_fresh="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("worker",{{}}).get("fresh"))' "$tmp_status")"
+        rm -f "$tmp_status"
+        python3 - <<PY
+import json
+print(json.dumps({{"service_active": "$active", "worker_fresh": "$worker_fresh"}}))
+PY
+        """
+    )
+
+
+def wait_task(task_id: str, *, timeout_seconds: int = 90) -> dict[str, Any]:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        payload = ssh(
+            remote_prelude()
+            + f"""
+            python3 - <<'PY'
+import json, yaml
+from pathlib import Path
+root=Path('/home/ubuntu/code/.runtime/spine/state/agent-tasks')
+tid={task_id!r}
+for state in ('done','failed','running','queued'):
+    p=root/state/f"{{tid}}.yaml"
+    if p.exists():
+        data=yaml.safe_load(p.read_text()) or {{}}
+        print(json.dumps({{"task_id": tid, "state": state, "result": data.get("result"), "failure_reason": data.get("failure_reason"), "bridge_proof": data.get("bridge_proof")}}))
+        raise SystemExit(0)
+print(json.dumps({{"task_id": tid, "state": "missing"}}))
+PY
+            """
+        )
+        if payload.get("state") in {"done", "failed"}:
+            return payload
+        time.sleep(3)
+    return {"task_id": task_id, "state": "timeout_waiting"}
+
+
+def fixture_idle_restart() -> dict[str, Any]:
+    payload = ssh(
+        remote_prelude()
+        + f"""
+        sudo systemctl restart {UNIT}
+        sleep 3
+        active="$(sudo systemctl is-active {UNIT} || true)"
+        tmp_status="$(mktemp)"
+        ./ops/plugins/core/lifecycle/bin/execution-pickup-status --json >"$tmp_status"
+        python3 - "$tmp_status" <<PY
+import json, sys
+p=json.load(open(sys.argv[1]))
+print(json.dumps({{"service_active": "$active", "worker": p.get("worker", {{}})}}))
+PY
+        rm -f "$tmp_status"
+        """
+    )
+    payload["fixture"] = "idle_restart"
+    payload["passed"] = payload.get("service_active") == "active" and bool((payload.get("worker") or {}).get("fresh"))
+    return payload
+
+
+def fixture_queued_restart(run_id: str) -> dict[str, Any]:
+    task_id = f"TASK-{run_id}-queued-restart"
+    payload = ssh(
+        remote_prelude()
+        + f"""
+        sudo systemctl stop {UNIT}
+        ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue --task-id {task_id} --summary 'Recovery drill queued restart proof' --route-target capability --route-capability proposals.status --json >/dev/null
+        test -f /home/ubuntu/code/.runtime/spine/state/agent-tasks/queued/{task_id}.yaml
+        sudo systemctl start {UNIT}
+        python3 - <<PY
+import json
+print(json.dumps({{"task_id": "{task_id}", "queued_while_stopped": True}}))
+PY
+        """,
+        timeout=120,
+    )
+    terminal = wait_task(task_id, timeout_seconds=120)
+    return {"fixture": "queued_restart", **payload, "terminal": terminal, "passed": terminal.get("state") == "done"}
+
+
+def fixture_provider_failure(run_id: str) -> dict[str, Any]:
+    task_id = f"TASK-{run_id}-provider-failure"
+    prompt = f"/home/ubuntu/code/.runtime/spine/state/domain-state/recovery-drills/execution-pickup/{run_id}-provider-failure.md"
+    payload = ssh(
+        remote_prelude()
+        + f"""
+        sudo systemctl stop {UNIT}
+        mkdir -p "$(dirname {prompt})"
+        printf '%s\\n' 'Return OBSERVED/RESULT/LIMITS. This provider is intentionally invalid.' > {prompt}
+        ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue --task-id {task_id} --summary 'Recovery drill provider failure proof' --route-target agent_tool --bridge-allowed --route-prompt-ref {prompt} --payload '{{"provider":"not_a_real_provider"}}' --json >/dev/null
+        SPINE_AGENT_BRIDGE_KEEP_RUNS=1 python3 ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-worker --once --worker-id SPINE-RECOVERY-DRILL --json >/tmp/{task_id}.json || true
+        sudo systemctl start {UNIT}
+        cat /tmp/{task_id}.json
+        """,
+        timeout=120,
+    )
+    terminal = wait_task(task_id, timeout_seconds=30)
+    passed = terminal.get("state") == "failed" and isinstance(terminal.get("bridge_proof"), dict)
+    return {"fixture": "provider_failure", "worker_once": payload, "terminal": terminal, "passed": passed}
+
+
+def fixture_timeout(run_id: str) -> dict[str, Any]:
+    task_id = f"TASK-{run_id}-timeout"
+    prompt = f"/home/ubuntu/code/.runtime/spine/state/domain-state/recovery-drills/execution-pickup/{run_id}-timeout.md"
+    payload = ssh(
+        remote_prelude()
+        + f"""
+        sudo systemctl stop {UNIT}
+        mkdir -p "$(dirname {prompt})"
+        printf '%s\\n' 'Return OBSERVED/RESULT/LIMITS. This is the timeout fixture.' > {prompt}
+        ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue --task-id {task_id} --summary 'Recovery drill timeout proof' --route-target agent_tool --bridge-allowed --route-prompt-ref {prompt} --payload '{{"provider":"zai","timeout_seconds":1}}' --json >/dev/null
+        SPINE_AGENT_BRIDGE_KEEP_RUNS=1 python3 ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-worker --once --worker-id SPINE-RECOVERY-DRILL --json >/tmp/{task_id}.json || true
+        sudo systemctl start {UNIT}
+        cat /tmp/{task_id}.json
+        """,
+        timeout=120,
+    )
+    terminal = wait_task(task_id, timeout_seconds=30)
+    reason = str(terminal.get("failure_reason") or "")
+    passed = terminal.get("state") == "failed" and ("timed out" in reason or "agent_tool provider=" in reason)
+    return {"fixture": "timeout", "worker_once": payload, "terminal": terminal, "passed": passed}
+
+
+def fixture_stale_heartbeat(run_id: str) -> dict[str, Any]:
+    task_id = f"TASK-{run_id}-stale-heartbeat"
+    payload = ssh(
+        remote_prelude()
+        + f"""
+        sudo systemctl stop {UNIT}
+        ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-enqueue --task-id {task_id} --summary 'Recovery drill stale heartbeat proof' --route-target capability --route-capability proposals.status --json >/dev/null
+        ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-claim --task-id {task_id} --worker SPINE-RECOVERY-DRILL --json >/dev/null
+        python3 - <<'PY'
+import yaml
+from pathlib import Path
+p=Path('/home/ubuntu/code/.runtime/spine/state/agent-tasks/running/{task_id}.yaml')
+d=yaml.safe_load(p.read_text()) or {{}}
+d['heartbeat_at']='2000-01-01T00:00:00Z'
+d['updated_at']='2000-01-01T00:00:00Z'
+p.write_text(yaml.safe_dump(d, sort_keys=False))
+PY
+        status_json="$(./ops/plugins/core/lifecycle/bin/execution-pickup-status --json)"
+        stale_count="$(printf '%s' "$status_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("summary",{{}}).get("stale"))')"
+        ./ops/plugins/infra/mailroom-bridge/bin/mailroom-task-fail --task-id {task_id} --reason 'recovery drill stale heartbeat fixture cleanup' --json >/dev/null
+        sudo systemctl start {UNIT}
+        python3 - <<PY
+import json
+print(json.dumps({{"task_id": "{task_id}", "stale_count": int("$stale_count")}}))
+PY
+        """,
+        timeout=120,
+    )
+    return {"fixture": "stale_heartbeat", **payload, "passed": int(payload.get("stale_count") or 0) >= 1}
+
+
+def write_receipt(payload: dict[str, Any]) -> Path:
+    RECEIPT_ROOT.mkdir(parents=True, exist_ok=True)
+    path = RECEIPT_ROOT / f"recovery_drill.execution_pickup.{payload['run_id']}.yaml"
+    tmp = path.with_suffix(".yaml.tmp")
+    tmp.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    os.replace(tmp, path)
+    latest = RECEIPT_ROOT / "latest.yaml"
+    latest_tmp = latest.with_suffix(".yaml.tmp")
+    latest_tmp.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    os.replace(latest_tmp, latest)
+    return path
+
+
+def run_drill() -> tuple[dict[str, Any], Path]:
+    run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    fixtures = [
+        fixture_idle_restart(),
+        fixture_queued_restart(run_id),
+        fixture_provider_failure(run_id),
+        fixture_timeout(run_id),
+        fixture_stale_heartbeat(run_id),
+    ]
+    final = service_active()
+    payload = {
+        "receipt_class": "recovery_drill",
+        "drill_id": "disaster.drill.execution_pickup",
+        "run_id": run_id,
+        "generated_at": now_utc(),
+        "target_host": "ai-consolidation",
+        "service_unit": UNIT,
+        "fixtures": fixtures,
+        "summary": {
+            "total": len(fixtures),
+            "passed": sum(1 for item in fixtures if item.get("passed")),
+            "failed": sum(1 for item in fixtures if not item.get("passed")),
+            "service_active_after": final.get("service_active"),
+            "worker_fresh_after": final.get("worker_fresh"),
+        },
+        "freshness_window_hours": 168,
+    }
+    payload["status"] = "pass" if payload["summary"]["failed"] == 0 and final.get("service_active") == "active" else "fail"
+    path = write_receipt(payload)
+    return payload, path
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run the execution pickup recovery drill.")
+    parser.add_argument("--record", action="store_true", help="Run live fixtures and write receipt.")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--self-check", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_check:
+        missing = [name for name in ("ssh", "python3") if shutil.which(name) is None]
+        if missing:
+            print(f"disaster.drill.execution_pickup self-check FAIL: missing {', '.join(missing)}")
+            return 1
+        print("disaster.drill.execution_pickup self-check PASS")
+        return 0
+
+    if not args.record:
+        payload = {
+            "capability": "disaster.drill.execution_pickup",
+            "mode": "dry-run",
+            "would_target": "ai-consolidation",
+            "would_restart_unit": UNIT,
+            "fixtures": FIXTURES,
+            "receipt_root": str(RECEIPT_ROOT),
+        }
+        print(json.dumps(payload, indent=2) if args.json else yaml.safe_dump(payload, sort_keys=False))
+        return 0
+
+    payload, path = run_drill()
+    payload["receipt_path"] = str(path)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("disaster.drill.execution_pickup")
+        print(f"status: {payload['status']}")
+        print(f"receipt: {path}")
+        for item in payload["fixtures"]:
+            print(f"- {item['fixture']}: {'pass' if item.get('passed') else 'fail'}")
+    return 0 if payload["status"] == "pass" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

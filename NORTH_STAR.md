@@ -141,8 +141,10 @@ Documented is not done.
 
 LAN-only reachable is not done.
 
-Done means tested console, tested power control, and at least one completed
-disaster drill.
+Done means tested console, tested power control, and current recovery-drill
+receipts. For the execution pickup artery, the governed drill is
+`disaster.drill.execution_pickup`; its `recovery_drill` receipt is read back by
+`ops status`.
 
 ### I2. The Operator Workstation Is A Client, Never Substrate
 

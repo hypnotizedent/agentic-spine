@@ -7,6 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATUS_BIN="$ROOT/ops/plugins/core/lifecycle/bin/execution-pickup-status"
+DRILL_BIN="$ROOT/ops/plugins/infra/mailroom-bridge/bin/disaster-drill-execution-pickup"
 OPS="$ROOT/bin/ops"
 WAVE_SH="$ROOT/ops/commands/wave.sh"
 WAVE_EXECUTE="$ROOT/ops/plugins/core/orchestration/bin/wave-execute"
@@ -15,6 +16,7 @@ fail() { echo "D452 FAIL: $*" >&2; exit 1; }
 
 command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -x "$STATUS_BIN" ]] || fail "missing execution pickup status executable"
+[[ -x "$DRILL_BIN" ]] || fail "missing execution pickup recovery drill executable"
 [[ -x "$OPS" ]] || fail "missing ops entrypoint"
 [[ -x "$WAVE_SH" ]] || fail "missing wave.sh"
 [[ -x "$WAVE_EXECUTE" ]] || fail "missing wave-execute"
@@ -101,6 +103,8 @@ for row in data.get("requests") or []:
 PY
 
 (cd "$ROOT" && "$OPS" cap list | grep -q "execution.pickup.status") || fail "capability registry missing execution.pickup.status"
+(cd "$ROOT" && "$OPS" cap list | grep -q "disaster.drill.execution_pickup") || fail "capability registry missing disaster.drill.execution_pickup"
+"$DRILL_BIN" --self-check >/dev/null || fail "execution pickup recovery drill self-check failed"
 
 grep -q -- "--route-capability" "$WAVE_EXECUTE" || fail "wave.execute dispatch must expose --route-capability"
 grep -q -- "--route-capability" "$WAVE_SH" || fail "ops wave dispatch must accept --route-capability"
@@ -131,7 +135,8 @@ python3 - "$ROOT/ops/capabilities.yaml" \
   "$ROOT/ops/bindings/mailroom.bridge.consumers.yaml" \
   "$ROOT/ops/bindings/mailroom.bridge.endpoints.yaml" \
   "$ROOT/ops/bindings/mailroom.inventory.contract.yaml" \
-  "$ROOT/ops/bindings/node.role.contract.yaml" <<'PY'
+  "$ROOT/ops/bindings/node.role.contract.yaml" \
+  "$ROOT/ops/bindings/disaster.drill.execution_pickup.contract.yaml" <<'PY'
 import sys
 from pathlib import Path
 
@@ -144,6 +149,7 @@ consumers_path = Path(sys.argv[4])
 endpoints_path = Path(sys.argv[5])
 inventory_path = Path(sys.argv[6])
 node_role_path = Path(sys.argv[7])
+drill_contract_path = Path(sys.argv[8])
 
 capabilities = (yaml.safe_load(capabilities_path.read_text(encoding="utf-8")) or {}).get("capabilities") or {}
 worker_contract = yaml.safe_load(worker_contract_path.read_text(encoding="utf-8")) or {}
@@ -208,6 +214,16 @@ execution_host = ((node_role.get("node_types") or {}).get("execution_host") or {
 realized_by = execution_host.get("realized_by") or []
 if not any(isinstance(item, dict) and item.get("contract") == "ops/bindings/mailroom.task.worker.contract.yaml" for item in realized_by):
     raise SystemExit("D452 FAIL: execution_host role must reference mailroom task worker realization")
+
+drill_contract = yaml.safe_load(drill_contract_path.read_text(encoding="utf-8")) or {}
+if drill_contract.get("capability") != "disaster.drill.execution_pickup":
+    raise SystemExit("D452 FAIL: recovery drill contract must bind disaster.drill.execution_pickup")
+if drill_contract.get("receipt_class") != "recovery_drill":
+    raise SystemExit("D452 FAIL: recovery drill contract must emit recovery_drill receipts")
+fixtures = {item.get("id") for item in drill_contract.get("fixtures") or [] if isinstance(item, dict)}
+for required in {"idle_restart", "queued_restart", "provider_failure", "timeout", "stale_heartbeat"}:
+    if required not in fixtures:
+        raise SystemExit(f"D452 FAIL: recovery drill missing fixture={required}")
 PY
 
 echo "D452 PASS: execution pickup truth locked"

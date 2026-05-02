@@ -1,0 +1,51 @@
+---
+status: authoritative
+owner: "@human-steward"
+scope: execution-pickup-recovery-drill
+version: 1
+updated_at: "2026-05-02"
+
+capability: disaster.drill.execution_pickup
+public_readback: ops status
+receipt_class: recovery_drill
+receipt_root: "$SPINE_STATE/domain-state/recovery-drills/execution-pickup"
+freshness_window_hours: 168
+
+authority_boundary:
+  owns:
+    - execution_pickup_worker_restart_proof
+    - queued_task_survives_worker_restart_proof
+    - bounded_agent_failure_receipt_proof
+    - bounded_agent_timeout_receipt_proof
+    - stale_heartbeat_readback_proof
+  does_not_decide:
+    - node_admission
+    - runtime_placement
+    - backup_authority
+    - watcher_authority
+    - domain_truth
+    - tool_using_agent_bridge_delivery
+
+target:
+  host_ref: ai-consolidation
+  service_unit: spine-mailroom-task-worker.service
+  worker_contract: ops/bindings/mailroom.task.worker.contract.yaml
+  status_surface: execution.pickup.status
+
+fixtures:
+  - id: idle_restart
+    proof: stop and start the standing worker while the queue is idle; worker status returns fresh.
+  - id: queued_restart
+    proof: queue a no-op capability task while the worker is stopped; start service; task reaches terminal state with receipt.
+  - id: provider_failure
+    proof: enqueue a bounded agent_tool task with an impossible provider; task fails with bridge_proof receipt.
+  - id: timeout
+    proof: enqueue a bounded agent_tool task with timeout_seconds=1; task fails through timeout or provider failure receipt.
+  - id: stale_heartbeat
+    proof: create claimed running custody with an old heartbeat; execution.pickup.status exposes stale, then cleanup fails the fixture task.
+
+closure_rule:
+  - "The receipt must contain all five fixture ids."
+  - "The service must be active at the end of the drill."
+  - "execution.pickup.status must be readable at the end of the drill."
+  - "A failed fixture means the drill failed; it does not silently degrade to status-only."
