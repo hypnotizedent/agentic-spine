@@ -75,6 +75,8 @@ _AGENT_TOOL_REFUSAL = (
 )
 V2_1_SCOPE = "tool_using_agent_v2_1_readonly_repo"
 V2_2_SCOPE = "tool_using_agent_v2_2_readonly_capability_calls"
+V2_3_SCOPE = "tool_using_agent_v2_3_fenced_artifact_write"
+V2_4_SCOPE = "tool_using_agent_v2_4_patch_artifact"
 
 
 def _task_supported(doc: dict[str, Any], *, allowlist: set[str], supported_routes: set[str]) -> tuple[bool, str]:
@@ -234,6 +236,69 @@ def _bridge_section(name: str) -> dict[str, Any]:
     bridge = _agent_bridge_contract()
     section = bridge.get(name)
     return section if isinstance(section, dict) else {}
+
+
+def _state_root() -> Path:
+    if STATE_ROOT:
+        return Path(STATE_ROOT)
+    raise WorkerError("SPINE_STATE not set; fenced AI bridge artifact writes require governed runtime state")
+
+
+def _resolve_artifact_root(raw: str, fallback: str) -> Path:
+    value = raw or fallback
+    value = value.replace("$SPINE_STATE", str(_state_root()))
+    return Path(value).expanduser().resolve()
+
+
+def _safe_artifact_name(task_id: str, raw_name: str, *, default_suffix: str, allowed_extensions: set[str]) -> str:
+    name = str(raw_name or "").strip() or f"{task_id}{default_suffix}"
+    name = name.replace("\\", "/").split("/")[-1]
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")
+    if not name:
+        name = f"{task_id}{default_suffix}"
+    suffix = Path(name).suffix
+    if suffix not in allowed_extensions:
+        name = f"{Path(name).stem or task_id}{default_suffix}"
+    return name
+
+
+def _write_bounded_artifact(
+    *,
+    task_id: str,
+    payload: dict[str, Any],
+    result_text: str,
+    section_name: str,
+    root_key: str,
+    fallback_root: str,
+    max_bytes_key: str,
+    default_max_bytes: int,
+    allowed_extensions: set[str],
+    default_suffix: str,
+    name_keys: tuple[str, ...],
+) -> tuple[Path, Path, int, bool]:
+    section = _bridge_section(section_name)
+    root = _resolve_artifact_root(str(section.get(root_key) or ""), fallback_root)
+    root.mkdir(parents=True, exist_ok=True)
+    raw_name = ""
+    for key in name_keys:
+        raw_name = str(payload.get(key) or "").strip()
+        if raw_name:
+            break
+    name = _safe_artifact_name(task_id, raw_name, default_suffix=default_suffix, allowed_extensions=allowed_extensions)
+    target = (root / task_id / name).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise WorkerError(f"artifact path outside governed fence: {target}") from exc
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    max_bytes = int(section.get(max_bytes_key) or default_max_bytes)
+    if max_bytes < 1:
+        raise WorkerError(f"{section_name} {max_bytes_key} must be positive")
+    encoded = result_text.encode("utf-8", errors="replace")
+    chunk = encoded[:max_bytes]
+    target.write_bytes(chunk)
+    return target, root, len(chunk), len(encoded) > len(chunk)
 
 
 def _requested_readonly_capability(payload: dict[str, Any]) -> str:
@@ -419,6 +484,12 @@ def _build_agent_context(doc: dict[str, Any], worker_id: str) -> tuple[str, dict
     tool_set = str(payload.get("tool_set") or payload.get("agent_tool_tool_set") or "prompt_only").strip()
     if tool_set in {"read_only_capability", "read_only_capability_calls"}:
         return _run_readonly_capability_context(worker_id, payload)
+    if tool_set in {"fenced_artifact_write", "patch_artifact"}:
+        return "", {
+            "tool_set": tool_set,
+            "tool_access": "none",
+            "tool_call_count": 0,
+        }
     return _build_readonly_repo_context(payload)
 
 
@@ -439,6 +510,8 @@ def _build_agent_prompt(task_id: str, doc: dict[str, Any], worker_id: str) -> tu
         "use hidden context, or complete work outside this prompt. If a "
         "READ_ONLY_REPO_CONTEXT or READ_ONLY_CAPABILITY_CONTEXT block is present, "
         "treat it as the only admitted inspection context for this task. "
+        "For artifact or patch tasks, return the artifact or patch text only; "
+        "the worker writes it after you return. "
         "Return a concise result with three fields: OBSERVED, RESULT, LIMITS.\n\n"
         f"TASK_ID: {task_id}\n"
         f"SUMMARY: {summary}\n"
@@ -484,6 +557,10 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
         elif payload_tool_set in {"read_only_capability", "read_only_capability_calls"}:
             scope = V2_2_SCOPE
             payload_tool_set = "read_only_capability_calls"
+        elif payload_tool_set == "fenced_artifact_write":
+            scope = V2_3_SCOPE
+        elif payload_tool_set == "patch_artifact":
+            scope = V2_4_SCOPE
         else:
             scope = "bounded_readonly_provider_agent"
         reason = str(exc)
@@ -566,6 +643,10 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
         scope = V2_1_SCOPE
     elif tool_proof.get("tool_set") == "read_only_capability_calls":
         scope = V2_2_SCOPE
+    elif tool_proof.get("tool_set") == "fenced_artifact_write":
+        scope = V2_3_SCOPE
+    elif tool_proof.get("tool_set") == "patch_artifact":
+        scope = V2_4_SCOPE
     else:
         scope = "bounded_readonly_provider_agent"
     base_proof = {
@@ -585,6 +666,54 @@ def _execute_agent_tool(task_id: str, doc: dict[str, Any], worker_id: str) -> di
         "usage": provider_info.get("usage") or {},
     }
     base_proof.update(tool_proof)
+    if proc.returncode == 0 and not timed_out:
+        if scope == V2_3_SCOPE:
+            artifact_path, artifact_fence, artifact_bytes, artifact_truncated = _write_bounded_artifact(
+                task_id=task_id,
+                payload=payload,
+                result_text=result_text,
+                section_name="v2_3_fenced_artifact_write",
+                root_key="artifact_root",
+                fallback_root="$SPINE_STATE/agent-artifacts/ai-bridge",
+                max_bytes_key="max_artifact_bytes",
+                default_max_bytes=24000,
+                allowed_extensions={".md", ".txt", ".json"},
+                default_suffix=".md",
+                name_keys=("artifact_name", "artifact_path"),
+            )
+            base_proof.update(
+                {
+                    "artifact_path": str(artifact_path),
+                    "artifact_fence": str(artifact_fence),
+                    "artifact_bytes": artifact_bytes,
+                    "artifact_truncated": artifact_truncated,
+                    "mutation_access": "fenced_runtime_artifact_only",
+                }
+            )
+        elif scope == V2_4_SCOPE:
+            patch_path, patch_fence, patch_bytes, patch_truncated = _write_bounded_artifact(
+                task_id=task_id,
+                payload=payload,
+                result_text=result_text,
+                section_name="v2_4_patch_artifact",
+                root_key="patch_artifact_root",
+                fallback_root="$SPINE_STATE/agent-artifacts/ai-bridge-patches",
+                max_bytes_key="max_patch_bytes",
+                default_max_bytes=48000,
+                allowed_extensions={".patch", ".diff"},
+                default_suffix=".patch",
+                name_keys=("patch_artifact_name", "patch_artifact_path", "artifact_name"),
+            )
+            base_proof.update(
+                {
+                    "patch_artifact_path": str(patch_path),
+                    "patch_artifact_fence": str(patch_fence),
+                    "patch_bytes": patch_bytes,
+                    "patch_truncated": patch_truncated,
+                    "worktree_mutation": False,
+                    "mutation_access": "patch_artifact_only",
+                }
+            )
     if base_proof["provider_run_retained"]:
         base_proof.update(
             {
@@ -773,6 +902,10 @@ def main() -> int:
                 raise WorkerError("v2_2_read_only_capability_calls capability_allowlist missing")
             if _requested_readonly_capability({"read_only_capability": sorted(allowlist)[0]}) not in allowlist:
                 raise WorkerError("read_only_capability request parser failed")
+            if _bridge_section("v2_3_fenced_artifact_write").get("scope") != V2_3_SCOPE:
+                raise WorkerError("v2_3_fenced_artifact_write scope missing")
+            if _bridge_section("v2_4_patch_artifact").get("scope") != V2_4_SCOPE:
+                raise WorkerError("v2_4_patch_artifact scope missing")
             print("mailroom.task.worker.once self-check PASS")
             return 0
         except (ImportError, WorkerError) as exc:

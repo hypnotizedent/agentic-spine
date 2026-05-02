@@ -114,6 +114,47 @@ elif bridge_state == "delivered (tool-using: read-only capability calls)":
     ]
     if not proofs:
         raise SystemExit("D452 FAIL: delivered V2.2 bridge requires completed read-only capability-call bridge_proof task envelope")
+elif bridge_state == "delivered (tool-using: fenced artifact write)":
+    proofs = [
+        row for row in data.get("requests") or []
+        if row.get("pickup_state") == "done"
+        and row.get("route_target") == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and row["bridge_proof"].get("status") == "completed"
+        and row["bridge_proof"].get("scope") == "tool_using_agent_v2_3_fenced_artifact_write"
+        and row["bridge_proof"].get("tool_set") == "fenced_artifact_write"
+        and row["bridge_proof"].get("spawn") == "subprocess"
+        and row["bridge_proof"].get("prompt_injection") == "route_prompt_ref"
+        and int(row["bridge_proof"].get("heartbeats_emitted") or 0) >= 1
+        and row["bridge_proof"].get("artifact_path")
+        and row["bridge_proof"].get("artifact_fence")
+        and int(row["bridge_proof"].get("artifact_bytes") or 0) >= 1
+        and row["bridge_proof"].get("mutation_access") == "fenced_runtime_artifact_only"
+        and row["bridge_proof"].get("receipt") == "task_envelope_bridge_proof"
+    ]
+    if not proofs:
+        raise SystemExit("D452 FAIL: delivered V2.3 bridge requires completed fenced artifact bridge_proof task envelope")
+elif bridge_state == "delivered (tool-using: patch artifact generation)":
+    proofs = [
+        row for row in data.get("requests") or []
+        if row.get("pickup_state") == "done"
+        and row.get("route_target") == "agent_tool"
+        and isinstance(row.get("bridge_proof"), dict)
+        and row["bridge_proof"].get("status") == "completed"
+        and row["bridge_proof"].get("scope") == "tool_using_agent_v2_4_patch_artifact"
+        and row["bridge_proof"].get("tool_set") == "patch_artifact"
+        and row["bridge_proof"].get("spawn") == "subprocess"
+        and row["bridge_proof"].get("prompt_injection") == "route_prompt_ref"
+        and int(row["bridge_proof"].get("heartbeats_emitted") or 0) >= 1
+        and row["bridge_proof"].get("patch_artifact_path")
+        and row["bridge_proof"].get("patch_artifact_fence")
+        and int(row["bridge_proof"].get("patch_bytes") or 0) >= 1
+        and row["bridge_proof"].get("worktree_mutation") is False
+        and row["bridge_proof"].get("mutation_access") == "patch_artifact_only"
+        and row["bridge_proof"].get("receipt") == "task_envelope_bridge_proof"
+    ]
+    if not proofs:
+        raise SystemExit("D452 FAIL: delivered V2.4 bridge requires completed patch artifact bridge_proof task envelope")
 else:
     raise SystemExit(f"D452 FAIL: unknown AI agent bridge state: {bridge_state!r}")
 if subtraction.get("public_language") != "execution pickup":
@@ -121,7 +162,7 @@ if subtraction.get("public_language") != "execution pickup":
 safety_tiers = summary.get("safety_tiers")
 if not isinstance(safety_tiers, dict):
     raise SystemExit("D452 FAIL: execution pickup summary must expose safety_tiers")
-for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_reserved", "destructive_manual"):
+for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_reserved", "destructive_manual"):
     if required_tier not in safety_tiers:
         raise SystemExit(f"D452 FAIL: safety_tiers missing {required_tier}")
 if int(safety_tiers.get("tool_using_agent_reserved") or 0) != 0:
@@ -151,7 +192,29 @@ for row in data.get("requests") or []:
                 raise SystemExit("D452 FAIL: terminal V2.2 success requires capabilities_called proof")
             if not isinstance(proof.get("run_keys"), list) or not proof.get("run_keys"):
                 raise SystemExit("D452 FAIL: terminal V2.2 success requires run_keys proof")
-    if tier.startswith("tool_using_agent_") and tier not in {"tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls"} and row.get("pickup_state") in {"done", "failed", "cancelled"}:
+    if tier == "tool_using_agent_v2_3_fenced_artifact_write" and row.get("pickup_state") in {"done", "failed", "cancelled"}:
+        proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
+        if proof.get("scope") != "tool_using_agent_v2_3_fenced_artifact_write":
+            raise SystemExit("D452 FAIL: terminal V2.3 fenced artifact row requires V2.3 bridge_proof")
+        if proof.get("tool_set") != "fenced_artifact_write":
+            raise SystemExit("D452 FAIL: terminal V2.3 row must carry fenced_artifact_write tool_set")
+        if row.get("pickup_state") == "done":
+            if proof.get("mutation_access") != "fenced_runtime_artifact_only":
+                raise SystemExit("D452 FAIL: terminal V2.3 success must prove fenced runtime artifact mutation only")
+            if not proof.get("artifact_path") or not proof.get("artifact_fence") or int(proof.get("artifact_bytes") or 0) < 1:
+                raise SystemExit("D452 FAIL: terminal V2.3 success requires artifact proof")
+    if tier == "tool_using_agent_v2_4_patch_artifact" and row.get("pickup_state") in {"done", "failed", "cancelled"}:
+        proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
+        if proof.get("scope") != "tool_using_agent_v2_4_patch_artifact":
+            raise SystemExit("D452 FAIL: terminal V2.4 patch artifact row requires V2.4 bridge_proof")
+        if proof.get("tool_set") != "patch_artifact":
+            raise SystemExit("D452 FAIL: terminal V2.4 row must carry patch_artifact tool_set")
+        if row.get("pickup_state") == "done":
+            if proof.get("mutation_access") != "patch_artifact_only" or proof.get("worktree_mutation") is not False:
+                raise SystemExit("D452 FAIL: terminal V2.4 success must prove patch artifact only and no worktree mutation")
+            if not proof.get("patch_artifact_path") or not proof.get("patch_artifact_fence") or int(proof.get("patch_bytes") or 0) < 1:
+                raise SystemExit("D452 FAIL: terminal V2.4 success requires patch artifact proof")
+    if tier.startswith("tool_using_agent_") and tier not in {"tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact"} and row.get("pickup_state") in {"done", "failed", "cancelled"}:
         proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
         if proof.get("scope") != tier:
             raise SystemExit(f"D452 FAIL: terminal {tier} row must carry matching bridge_proof scope")
@@ -266,7 +329,7 @@ if missing:
 task_execution = worker_contract.get("task_execution") or {}
 routes = set(task_execution.get("execute_route_targets") or [])
 taxonomy = ((task_execution.get("route_target_taxonomy") or {}).get("safety_tiers") or {})
-for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_reserved", "destructive_manual"):
+for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_v2_1_readonly_repo", "tool_using_agent_v2_2_readonly_capability_calls", "tool_using_agent_v2_3_fenced_artifact_write", "tool_using_agent_v2_4_patch_artifact", "tool_using_agent_reserved", "destructive_manual"):
     if required_tier not in taxonomy:
         raise SystemExit(f"D452 FAIL: mailroom worker route_target_taxonomy missing {required_tier}")
 if taxonomy["tool_using_agent_reserved"].get("status") != "reserved_empty":
@@ -277,6 +340,10 @@ if taxonomy["tool_using_agent_v2_1_readonly_repo"].get("status") != "realized":
     raise SystemExit("D452 FAIL: V2.1 read-only repo tier must be realized")
 if taxonomy["tool_using_agent_v2_2_readonly_capability_calls"].get("status") != "realized":
     raise SystemExit("D452 FAIL: V2.2 read-only capability tier must be realized")
+if taxonomy["tool_using_agent_v2_3_fenced_artifact_write"].get("status") != "realized":
+    raise SystemExit("D452 FAIL: V2.3 fenced artifact tier must be realized")
+if taxonomy["tool_using_agent_v2_4_patch_artifact"].get("status") != "realized":
+    raise SystemExit("D452 FAIL: V2.4 patch artifact tier must be realized")
 if "agent_tool" not in routes:
     raise SystemExit("D452 FAIL: bounded agent_tool bridge must be an explicit execute_route_target")
 bridge = task_execution.get("agent_tool_bridge") or {}
@@ -288,6 +355,10 @@ if "read_only_repo" not in set(bridge.get("supported_tool_sets") or []):
     raise SystemExit("D452 FAIL: agent_tool bridge must declare read_only_repo supported_tool_sets for V2.1")
 if "read_only_capability_calls" not in set(bridge.get("supported_tool_sets") or []):
     raise SystemExit("D452 FAIL: agent_tool bridge must declare read_only_capability_calls supported_tool_sets for V2.2")
+if "fenced_artifact_write" not in set(bridge.get("supported_tool_sets") or []):
+    raise SystemExit("D452 FAIL: agent_tool bridge must declare fenced_artifact_write supported_tool_sets for V2.3")
+if "patch_artifact" not in set(bridge.get("supported_tool_sets") or []):
+    raise SystemExit("D452 FAIL: agent_tool bridge must declare patch_artifact supported_tool_sets for V2.4")
 v2_1 = bridge.get("v2_1_read_only_repo_inspection") or {}
 if v2_1.get("scope") != "tool_using_agent_v2_1_readonly_repo":
     raise SystemExit("D452 FAIL: V2.1 read-only repo bridge scope missing")
@@ -315,6 +386,26 @@ for cap in v2_2_allowlist:
         raise SystemExit(f"D452 FAIL: V2.2 allowlisted capability must be read-only: {cap}")
 if int(v2_2.get("max_calls") or 0) != 1:
     raise SystemExit("D452 FAIL: V2.2 read-only capability bridge must allow exactly one worker-mediated call for this proof tier")
+v2_3 = bridge.get("v2_3_fenced_artifact_write") or {}
+if v2_3.get("scope") != "tool_using_agent_v2_3_fenced_artifact_write":
+    raise SystemExit("D452 FAIL: V2.3 fenced artifact bridge scope missing")
+if v2_3.get("tool_set") != "fenced_artifact_write":
+    raise SystemExit("D452 FAIL: V2.3 fenced artifact bridge tool_set missing")
+if v2_3.get("mutation_access") != "fenced_runtime_artifact_only":
+    raise SystemExit("D452 FAIL: V2.3 must declare fenced runtime artifact mutation only")
+if "$SPINE_STATE" not in str(v2_3.get("artifact_root") or ""):
+    raise SystemExit("D452 FAIL: V2.3 artifact root must live under $SPINE_STATE")
+v2_4 = bridge.get("v2_4_patch_artifact") or {}
+if v2_4.get("scope") != "tool_using_agent_v2_4_patch_artifact":
+    raise SystemExit("D452 FAIL: V2.4 patch artifact bridge scope missing")
+if v2_4.get("tool_set") != "patch_artifact":
+    raise SystemExit("D452 FAIL: V2.4 patch artifact bridge tool_set missing")
+if v2_4.get("worktree_mutation") is not False:
+    raise SystemExit("D452 FAIL: V2.4 must declare no worktree mutation")
+if v2_4.get("mutation_access") != "patch_artifact_only":
+    raise SystemExit("D452 FAIL: V2.4 must declare patch artifact mutation only")
+if "$SPINE_STATE" not in str(v2_4.get("patch_artifact_root") or ""):
+    raise SystemExit("D452 FAIL: V2.4 patch artifact root must live under $SPINE_STATE")
 
 for path in (bridge_path, consumers_path, endpoints_path, inventory_path):
     doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -343,6 +434,10 @@ if "v2_1_readonly_repo_denied_path" not in fixtures:
     raise SystemExit("D452 FAIL: recovery drill must cover V2.1 denied read-only repo path")
 if "v2_2_readonly_capability_denied_unallowlisted" not in fixtures:
     raise SystemExit("D452 FAIL: recovery drill must cover V2.2 denied unallowlisted capability")
+if "v2_3_fenced_artifact_denied_outside_fence" not in fixtures:
+    raise SystemExit("D452 FAIL: recovery drill must cover V2.3 denied outside-fence artifact")
+if "v2_4_patch_artifact_no_worktree_mutation" not in fixtures:
+    raise SystemExit("D452 FAIL: recovery drill must cover V2.4 no-worktree-mutation proof")
 PY
 
 echo "D452 PASS: execution pickup truth locked"
