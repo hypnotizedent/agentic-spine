@@ -19,6 +19,7 @@ NODE_ROLE_CONTRACT = ROOT / "ops/bindings/node.role.contract.yaml"
 ALERTING_RULES = ROOT / "ops/bindings/alerting.rules.yaml"
 OPERATOR_HARDWARE_INVENTORY = ROOT / "ops/bindings/operator.hardware.inventory.yaml"
 APPLIANCE_IDENTITY_CONTRACT = ROOT / "ops/bindings/appliance.identity.contract.yaml"
+RUNTIME_BOOTSTRAP_CONTRACT = ROOT / "ops/bindings/runtime.bootstrap.contract.yaml"
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -130,6 +131,15 @@ def load_json_file(path: str | None) -> dict[str, Any]:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def latest_execution_pickup_recovery_drill() -> dict[str, Any]:
+    state_root = Path(os.environ.get("SPINE_STATE") or ROOT.parent / ".runtime" / "spine" / "state")
+    path = state_root / "domain-state" / "recovery-drills" / "execution-pickup" / "latest.yaml"
+    data = load_yaml(path)
+    if data:
+        data["__path"] = str(path)
+    return data
 
 
 def durable_identifiers(recovery: dict[str, Any]) -> dict[str, Any]:
@@ -536,6 +546,69 @@ def runtime_role_truth_for(node_id: str) -> dict[str, Any]:
     }
 
 
+def execution_host_promotion_standard_for(node_id: str, runtime_truth: dict[str, Any]) -> dict[str, Any]:
+    node_role = load_yaml(NODE_ROLE_CONTRACT)
+    execution_host = ((node_role.get("node_types") or {}).get("execution_host") or {})
+    standard = execution_host.get("promotion_standard") or {}
+    required = standard.get("required_proofs") or {}
+    labels = [
+        item for item in runtime_truth.get("labels") or []
+        if item.get("role") == "execution_host"
+    ]
+    placement_refs = [item for item in labels if item.get("proof")]
+    runtime_placement = {
+        "status": "present" if placement_refs else "missing",
+        "source": ((required.get("runtime_placement_proof") or {}).get("source") or "ops/bindings/launchd.scheduler.registry.yaml"),
+        "evidence": placement_refs,
+    }
+
+    scheduler = load_yaml(LAUNCHD_SCHEDULER_REGISTRY)
+    runtime_bootstrap = load_yaml(RUNTIME_BOOTSTRAP_CONTRACT)
+    env_file = str(((scheduler.get("paths") or {}).get("linux_execution_host_env_file")) or "")
+    linux_bootstrap = ((runtime_bootstrap.get("path_roots") or {}).get("linux_execution_host") or {})
+    current_delivered_host = str(standard.get("current_delivered_host") or "")
+    path_resolution_present = (
+        bool(env_file)
+        and str(linux_bootstrap.get("source") or "") == env_file
+        and node_id == current_delivered_host
+    )
+    path_resolution = {
+        "status": "present" if path_resolution_present else "missing",
+        "source": env_file or "/etc/spine/execution-host.env",
+        "proof_ref": ((required.get("path_resolution_proof") or {}).get("proof_ref")),
+    }
+
+    recovery = latest_execution_pickup_recovery_drill()
+    recovery_summary = recovery.get("summary") if isinstance(recovery.get("summary"), dict) else {}
+    recovery_present = (
+        recovery.get("status") == "pass"
+        and recovery.get("target_host") == node_id
+        and int(recovery_summary.get("failed", 1)) == 0
+    )
+    recovery_drill = {
+        "status": "present" if recovery_present else "missing",
+        "source": ((required.get("recovery_drill_proof") or {}).get("source") or "ops/bindings/disaster.drill.execution_pickup.contract.yaml"),
+        "receipt": recovery.get("__path") or ((required.get("recovery_drill_proof") or {}).get("proof_ref")),
+        "generated_at": recovery.get("generated_at"),
+    }
+
+    proofs = {
+        "runtime_placement_proof": runtime_placement,
+        "path_resolution_proof": path_resolution,
+        "recovery_drill_proof": recovery_drill,
+    }
+    missing = [name for name, proof in proofs.items() if proof.get("status") != "present"]
+    return {
+        "role": "execution_host",
+        "state": "delivered" if not missing else "incomplete",
+        "standard_source": "ops/bindings/node.role.contract.yaml",
+        "proofs": proofs,
+        "missing_proofs": missing,
+        "candidate_gaps": (standard.get("candidate_gaps") or {}).get(node_id, missing),
+        "subtraction_note": "active_runtime_host is observation; delivered execution_host requires the three proof classes here",
+    }
+
+
 def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     sources = recovery.get("source_surfaces") or {}
     operator = sources.get("operator_hardware") or {}
@@ -547,6 +620,7 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     primary_access = recovery.get("primary_access") or {}
     runtime_truth = runtime_role_truth_for(str(recovery.get("node_id") or ""))
     recovery["__runtime_role_truth"] = runtime_truth
+    execution_host_standard = execution_host_promotion_standard_for(str(recovery.get("node_id") or ""), runtime_truth)
 
     validate_operator_role_candidacy(str(recovery.get("node_id") or "unknown"), operator)
     role_candidacy = as_list(operator.get("role_candidacy"))
@@ -622,6 +696,9 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
             "active_runtime_roles": runtime_truth.get("roles") or [],
             "active_runtime_labels": runtime_truth.get("labels") or [],
             "note": placement_truth.get("note"),
+        },
+        "role_delivery_proofs": {
+            "execution_host": execution_host_standard,
         },
         "recovery_planes": recovery.get("recovery_planes") or {},
         "proof_channels": proof_channels,

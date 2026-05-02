@@ -122,6 +122,12 @@ Current delivery posture:
 - `storage_evidence_node`: defined, not yet delivered
 - `translator_node`: explicitly later, not part of the current MVP
 
+`execution_host` delivery is now governed by the standard in
+`ops/bindings/node.role.contract.yaml`. Active runtime labels are observation;
+delivered execution_host status requires runtime placement proof, Linux path
+resolution proof, and a fresh execution-pickup recovery drill receipt. Today the
+only host meeting that standard is `ai-consolidation`.
+
 This is the smallest node kit that proves the spine is engineering a real governed multi-node system rather than a laptop-plus-VM improvisation.
 
 ## Role Delivery Is More Important Than Machine Count

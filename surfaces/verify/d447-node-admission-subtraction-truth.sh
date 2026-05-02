@@ -62,6 +62,23 @@ if cap.get("safety") != "read-only":
 if cap.get("script_path") != "./ops/plugins/infra/bin/node-admission-status":
     fail("node.admission.status script_path must point at node-admission-status")
 
+node_role_contract = load_yaml(root / "ops/bindings/node.role.contract.yaml")
+execution_host_standard = (((node_role_contract.get("node_types") or {}).get("execution_host") or {}).get("promotion_standard") or {})
+if execution_host_standard.get("current_delivered_host") != "ai-consolidation":
+    fail("execution_host promotion_standard must name ai-consolidation as the current delivered host")
+required_proofs = execution_host_standard.get("required_proofs") or {}
+for proof_name in ("runtime_placement_proof", "path_resolution_proof", "recovery_drill_proof"):
+    if proof_name not in required_proofs:
+        fail(f"execution_host promotion_standard missing {proof_name}")
+standard_text = (root / "ops/plugins/infra/bin/node-admission-status").read_text(encoding="utf-8")
+for required_snippet in [
+    "execution_host_promotion_standard_for",
+    "active_runtime_host is observation",
+    "recovery_drill_proof",
+]:
+    if required_snippet not in standard_text:
+        fail(f"node.admission.status must compose execution_host promotion standard: missing {required_snippet}")
+
 operator_inventory = load_yaml(root / "ops/bindings/operator.hardware.inventory.yaml")
 appliance_identity = load_yaml(root / "ops/bindings/appliance.identity.contract.yaml")
 allowed_role_candidacy = set(operator_inventory.get("role_candidacy_values") or [])
@@ -180,6 +197,7 @@ required_fields = [
     "access_path",
     "placement_truth",
     "runtime_obligations",
+    "role_delivery_proofs",
     "recovery_planes",
     "proof_channels",
     "freshness",
@@ -248,6 +266,43 @@ if spec_row.get("role_suitability", {}).get("assignment_made") is not False:
 setup = spec_row.get("setup_correctness") or {}
 if "activation_statement" not in setup:
     fail("machine-spec readback must state it is evidence only, not activation")
+
+proc = subprocess.run(
+    [str(node_admission), "--node", "ai-consolidation", "--json"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    fail(proc.stderr.strip() or proc.stdout.strip() or "node.admission.status ai-consolidation sample failed")
+payload = json.loads(proc.stdout)
+rows = payload.get("rows") or []
+if len(rows) != 1:
+    fail("ai-consolidation readback must emit exactly one row")
+execution_standard = (((rows[0].get("role_delivery_proofs") or {}).get("execution_host")) or {})
+if execution_standard.get("state") != "delivered":
+    fail("ai-consolidation must satisfy execution_host promotion standard")
+if execution_standard.get("missing_proofs"):
+    fail("ai-consolidation execution_host standard must have no missing proofs")
+proofs = execution_standard.get("proofs") or {}
+for proof_name in ("runtime_placement_proof", "path_resolution_proof", "recovery_drill_proof"):
+    if (proofs.get(proof_name) or {}).get("status") != "present":
+        fail(f"ai-consolidation execution_host proof missing: {proof_name}")
+if "active_runtime_host is observation" not in execution_standard.get("subtraction_note", ""):
+    fail("execution_host standard must state active_runtime_host is observation, not ratification")
+
+proc = subprocess.run(
+    [str(node_admission), "--node", "pve-r620", "--json"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    fail(proc.stderr.strip() or proc.stdout.strip() or "node.admission.status pve-r620 execution standard sample failed")
+payload = json.loads(proc.stdout)
+pve_standard = (((payload.get("rows") or [{}])[0].get("role_delivery_proofs") or {}).get("execution_host")) or {}
+if pve_standard.get("state") == "delivered":
+    fail("pve-r620 must not satisfy execution_host promotion standard while it is watcher_node")
+if "role_boundary_conflict_currently_watcher_node" not in (pve_standard.get("candidate_gaps") or []):
+    fail("pve-r620 execution_host candidate gaps must name watcher_node role boundary")
 
 proc = subprocess.run(
     [str(node_admission), "--node", "linux-reprovision-1", "--machine-spec", "--json"],
