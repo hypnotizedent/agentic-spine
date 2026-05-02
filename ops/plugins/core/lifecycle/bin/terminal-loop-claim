@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""terminal-loop-claim — first-class mid-session loop custody binding.
+
+Sets, releases, or reads the live terminal heartbeat's loop_id so an
+already-running governed terminal can bind to a loop that opened after
+launch (or release that binding). Subtractive: replaces inference-feel
+with an explicit custody fact. No branch-name fallback. No new doctrine
+shelf. No D-gate.
+
+The cap.sh heartbeat refresh prefers a non-empty file-resident loop_id
+over the launch-time env, so a claim survives subsequent cap runs in the
+same session (subject to the existing loop_id_is_live_for_custody
+guard).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+def emit(payload: dict, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for k, v in payload.items():
+            print(f"{k}: {v}")
+
+
+def die(payload: dict, json_output: bool, code: int = 1) -> int:
+    payload.setdefault("status", "error")
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True), file=sys.stderr)
+    else:
+        for k, v in payload.items():
+            print(f"{k}: {v}", file=sys.stderr)
+    return code
+
+
+def loop_is_open(state_root: Path, loop_id: str) -> tuple[bool, str]:
+    """Return (is_open, reason). Honors the loops table in shared_authority.db."""
+    db = state_root / "shared_authority.db"
+    if not db.is_file():
+        return (False, f"shared_authority.db not found at {db}")
+    try:
+        conn = sqlite3.connect(str(db))
+        cur = conn.cursor()
+        cur.execute("SELECT status FROM loops WHERE loop_id = ?", (loop_id,))
+        row = cur.fetchone()
+        conn.close()
+    except Exception as exc:
+        return (False, f"loops query failed: {exc}")
+    if row is None:
+        return (False, f"loop_id not found in loops table: {loop_id}")
+    status = (row[0] or "").strip().lower()
+    if status in ("open", "active", "runnable"):
+        return (True, f"status={status}")
+    return (False, f"status={status} (not open)")
+
+
+def heartbeat_is_fresh(doc: dict, ttl_minutes: int = 45) -> tuple[bool, str]:
+    raw = str(doc.get("heartbeat_at") or "").strip()
+    if not raw:
+        return (False, "heartbeat_at missing")
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception as exc:
+        return (False, f"heartbeat_at unparseable: {exc}")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 60.0
+    if age <= ttl_minutes:
+        return (True, f"age={age:.1f}m, ttl={ttl_minutes}m")
+    return (False, f"age={age:.1f}m exceeds ttl={ttl_minutes}m (heartbeat stale; run any ops cap to refresh)")
+
+
+def write_loop_id(hb_path: Path, new_loop_id: str) -> dict:
+    """Read heartbeat YAML, set loop_id, write back preserving other fields."""
+    text = hb_path.read_text(encoding="utf-8")
+    doc = yaml.safe_load(text) or {}
+    if not isinstance(doc, dict):
+        raise ValueError(f"heartbeat is not a YAML mapping: {hb_path}")
+    prior = doc.get("loop_id", "")
+    doc["loop_id"] = new_loop_id
+    # Preserve the cap.sh writer's exact key ordering for diff hygiene:
+    ordered_keys = [
+        "version", "terminal_id", "role", "execution_class", "runtime_role",
+        "scope", "normalized_scope", "protected_hotspot_scope", "loop_id",
+        "repo_root", "checkout_root", "branch", "lane_type",
+        "git_common_dir", "git_index_path", "status", "pid", "hostname",
+        "heartbeat_at", "expires_at",
+    ]
+    out_doc = {}
+    for k in ordered_keys:
+        if k in doc:
+            out_doc[k] = doc[k]
+    for k, v in doc.items():
+        if k not in out_doc:
+            out_doc[k] = v
+    # Match cap.sh literal-quoting style (every value double-quoted, except pid which is bare int).
+    lines = ["version: 1"]
+    for k, v in out_doc.items():
+        if k == "version":
+            continue
+        if k == "pid":
+            lines.append(f"pid: {v}")
+        else:
+            sval = "" if v is None else str(v)
+            lines.append(f'{k}: "{sval}"')
+    hb_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"prior_loop_id": prior, "new_loop_id": new_loop_id}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="terminal-loop-claim",
+        description="First-class mid-session loop custody binding for the live terminal.",
+    )
+    g = parser.add_mutually_exclusive_group(required=True)
+    g.add_argument("--loop", help="Loop ID to claim (must be open).")
+    g.add_argument("--release", action="store_true", help="Release any current claim.")
+    g.add_argument("--status", action="store_true", help="Read-only: print current claim.")
+    g.add_argument("--self-check", action="store_true", help="Verify deps and exit.")
+    parser.add_argument("--json", action="store_true", dest="json_output", help="JSON output.")
+    args = parser.parse_args()
+
+    if args.self_check:
+        try:
+            import yaml as _y  # noqa: F401
+            print("terminal.loop.claim self-check PASS")
+            return 0
+        except ImportError as exc:
+            print(f"terminal.loop.claim self-check FAIL: {exc}", file=sys.stderr)
+            return 1
+
+    json_out = args.json_output
+
+    terminal_id = (os.environ.get("SPINE_TERMINAL_ID") or "").strip()
+    if not terminal_id:
+        return die({"error": "SPINE_TERMINAL_ID not set; run inside a governed terminal-launch session"}, json_out)
+
+    state_root = (os.environ.get("SPINE_STATE") or "").strip()
+    if not state_root:
+        return die({"error": "SPINE_STATE not set"}, json_out)
+
+    hb_env = (os.environ.get("SPINE_HEARTBEAT_FILE") or "").strip()
+    hb_path = Path(hb_env) if hb_env else Path(state_root) / "terminal-heartbeats" / f"{terminal_id}.yaml"
+
+    if not hb_path.is_file():
+        return die({"error": f"heartbeat file not found: {hb_path}", "hint": "run any ops cap to write the first heartbeat"}, json_out)
+
+    try:
+        hb_doc = yaml.safe_load(hb_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        return die({"error": f"heartbeat parse failed: {exc}"}, json_out)
+
+    if not isinstance(hb_doc, dict):
+        return die({"error": f"heartbeat is not a YAML mapping: {hb_path}"}, json_out)
+
+    if args.status:
+        emit({
+            "status": "ok",
+            "terminal_id": terminal_id,
+            "current_loop_id": hb_doc.get("loop_id", "") or "",
+            "heartbeat_at": hb_doc.get("heartbeat_at", "") or "",
+            "heartbeat_file": str(hb_path),
+        }, json_out)
+        return 0
+
+    fresh, fresh_reason = heartbeat_is_fresh(hb_doc)
+    if not fresh:
+        return die({
+            "error": "terminal heartbeat is stale; cannot claim or release",
+            "reason": fresh_reason,
+            "hint": "run any read-only ops cap to refresh, or relaunch the terminal",
+        }, json_out)
+
+    if args.release:
+        result = write_loop_id(hb_path, "")
+        emit({
+            "status": "ok",
+            "action": "release",
+            "terminal_id": terminal_id,
+            "prior_loop_id": result["prior_loop_id"],
+            "current_loop_id": "",
+            "heartbeat_file": str(hb_path),
+        }, json_out)
+        return 0
+
+    # --loop X
+    target = (args.loop or "").strip()
+    if not target:
+        return die({"error": "--loop value is empty"}, json_out)
+    if not target.startswith("LOOP-"):
+        return die({"error": f"--loop must be a LOOP-* id; got: {target}"}, json_out)
+
+    open_ok, open_reason = loop_is_open(Path(state_root), target)
+    if not open_ok:
+        return die({
+            "error": f"loop is not open; refusing to claim: {target}",
+            "reason": open_reason,
+            "hint": "open the loop with loops.create, or pick a different one",
+        }, json_out)
+
+    result = write_loop_id(hb_path, target)
+    emit({
+        "status": "ok",
+        "action": "claim",
+        "terminal_id": terminal_id,
+        "prior_loop_id": result["prior_loop_id"],
+        "current_loop_id": target,
+        "loop_status": open_reason,
+        "heartbeat_file": str(hb_path),
+        "note": "Subsequent ops cap runs preserve this loop_id (cap.sh prefers file when env empty), subject to loop_id_is_live_for_custody guard.",
+    }, json_out)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -693,6 +693,16 @@ write_terminal_custody_heartbeat() {
     if [[ -z "$loop_id" && "${OPS_WORKTREE_IDENTITY:-}" == LOOP-* ]]; then
         loop_id="${OPS_WORKTREE_IDENTITY:-}"
     fi
+    # Mid-session claim preservation: a non-empty loop_id already on disk
+    # represents the most recent governed claim (terminal.loop.claim) and
+    # outranks the launch-time env. The liveness guard below still fires.
+    if [[ -f "$heartbeat_file" ]]; then
+        local file_loop_id
+        file_loop_id="$(awk -F': ' '/^loop_id:/{gsub(/"/,"",$2); print $2; exit}' "$heartbeat_file" 2>/dev/null)"
+        if [[ -n "$file_loop_id" ]]; then
+            loop_id="$file_loop_id"
+        fi
+    fi
     if [[ -n "$loop_id" ]] && ! loop_id_is_live_for_custody "$loop_id"; then
         loop_id=""
     fi
