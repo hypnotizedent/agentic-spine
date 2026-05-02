@@ -26,7 +26,8 @@ FAILURES=0
 # Check for repo-local mailroom directory
 if [[ -e "$ROOT/mailroom" ]]; then
   echo "D423 FAIL: repo-local mailroom directory exists at $ROOT/mailroom/" >&2
-  echo "  Runtime state must live under /Users/ronnyworks/code/.runtime/spine/mailroom/" >&2
+  echo "  Runtime state must live outside the repo under governed runtime roots." >&2
+  echo "  Operational task state lives under \$SPINE_STATE/agent-tasks; logical mailroom inbox/outbox paths resolve externally." >&2
   echo "  See: root.authority.contract.yaml" >&2
   FAILURES=$((FAILURES + 1))
 fi
