@@ -314,10 +314,27 @@ _REALIZATION_CATEGORIES = (
 
 # Workspace home roots checked for project/product realization.
 def _workspace_root() -> Path:
-    # Resolve the parent of the spine code root, which is conventionally `~/code`.
+    """Resolve `~/code/` (or equivalent) — the parent that holds projects/, products/, agentic-spine/.
+
+    When run from a worktree, SPINE_CODE may point at the worktree path; its
+    parent would be the worktree-parent dir, not `~/code/`. Probe candidates
+    in order and pick the first one that contains a `projects/` directory.
+    """
+    candidates: list[Path] = []
     spine_code = os.environ.get("SPINE_CODE", "")
     if spine_code:
-        return Path(spine_code).expanduser().parent
+        sc = Path(spine_code).expanduser().resolve()
+        # Walk up parents to find the workspace root that holds projects/.
+        for ancestor in [sc.parent] + list(sc.parents):
+            if (ancestor / "projects").is_dir():
+                candidates.append(ancestor)
+                break
+    # Standard convention.
+    candidates.append(Path.home() / "code")
+    for c in candidates:
+        if (c / "projects").is_dir():
+            return c
+    # Last-resort fallback: the conventional path even if it does not exist.
     return Path.home() / "code"
 
 
@@ -333,6 +350,79 @@ def _project_home_candidates(domain: str) -> list[Path]:
         # reading inferred_domain="mint" should resolve to mint-modules.
         root / "mint-modules" if domain in {"mint", "mint-modules"} else root / "_unused__not_a_real_path__",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Reverse-index: project/product proof.source_oi → OI realization
+# ---------------------------------------------------------------------------
+# LOOP-OI-REALIZATION-PROJECT-PROOF-REVERSE-INDEX-20260502: project and
+# product home contracts already carry a back-pointer to the originating OI
+# in their `proof.source_oi` field (convention used by health, travel,
+# investment as of 2026-05-02). The realization fold's evidence check looked
+# only at OI-side proof_receipt_ref / adoption_ref. This module adds a
+# read-side scan that walks ~/code/projects/*/app.contract.yaml and
+# ~/code/products/*/app.contract.yaml and builds an in-memory index from
+# OI ingress_id to project home path + admission_status. The index is
+# consulted FIRST in _derive_realization_state so OIs claimed by a real
+# project home read `realized` even when the OI itself has no proof_receipt_ref.
+#
+# Read-only. No on-disk mutation. No new field on OI YAML or app.contract.yaml.
+
+# Module-level cache so a single status run does not re-scan per item.
+_PROJECT_PROOF_INDEX_CACHE: dict[str, dict[str, Any]] | None = None
+
+
+def _scan_project_proof_index() -> dict[str, dict[str, Any]]:
+    """Walk project/product app.contract.yaml files and index OI back-pointers.
+
+    Returns: {ingress_id: {"home_path": str, "admission_status": str,
+                           "contract_path": str}}.
+    Cached per process. Idempotent.
+    """
+    global _PROJECT_PROOF_INDEX_CACHE
+    if _PROJECT_PROOF_INDEX_CACHE is not None:
+        return _PROJECT_PROOF_INDEX_CACHE
+
+    index: dict[str, dict[str, Any]] = {}
+    root = _workspace_root()
+    scan_roots = [root / "projects", root / "products"]
+
+    for base in scan_roots:
+        if not base.is_dir():
+            continue
+        for sub in sorted(base.iterdir()):
+            if not sub.is_dir():
+                continue
+            contract = sub / "app.contract.yaml"
+            if not contract.is_file():
+                continue
+            try:
+                doc = yaml.safe_load(contract.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError):
+                continue
+            if not isinstance(doc, dict):
+                continue
+            proof = doc.get("proof")
+            if not isinstance(proof, dict):
+                continue
+            source_oi = str(proof.get("source_oi") or "").strip().strip('"').strip("'")
+            if not source_oi or not source_oi.startswith("OI-"):
+                continue
+            admission_status = str(proof.get("admission_status") or "").strip()
+            index[source_oi] = {
+                "home_path": str(sub),
+                "admission_status": admission_status,
+                "contract_path": str(contract),
+            }
+
+    _PROJECT_PROOF_INDEX_CACHE = index
+    return index
+
+
+def _reset_project_proof_index_cache() -> None:
+    """Test/utility hook to clear the module-level cache."""
+    global _PROJECT_PROOF_INDEX_CACHE
+    _PROJECT_PROOF_INDEX_CACHE = None
 
 
 def _resolve_realization_evidence(
@@ -389,6 +479,67 @@ def _derive_realization_state(item: dict[str, Any]) -> dict[str, Any]:
     promotion_condition = ""
     why_not_realized = ""
     state = "unresolved"
+
+    # Reverse-index check FIRST. If a project/product home contract claims this
+    # OI as proof.source_oi, the OI is realized — regardless of the classifier's
+    # disposition guess or the OI's own missing proof_receipt_ref. The project
+    # home's claim IS the proof.
+    ingress_id = str(item.get("ingress_id") or "").strip()
+    if ingress_id:
+        proof_index = _scan_project_proof_index()
+        match = proof_index.get(ingress_id)
+        if match:
+            home_path = match.get("home_path", "")
+            admission = match.get("admission_status", "")
+            contract_path = match.get("contract_path", "")
+            if admission in {"proved"}:
+                state = "realized"
+                realized_as = home_path
+                why_not_realized = ""
+                # Surface the contract path so consumers can verify the claim.
+                return {
+                    "realization_state": state,
+                    "realized_as": realized_as or "none",
+                    "promotion_condition": "",
+                    "why_not_realized": "",
+                    "realized_via_project_proof": contract_path,
+                    "project_admission_status": admission,
+                }
+            elif admission in {"materializing"}:
+                # Bound to a real home with active build but not yet proved.
+                # Honest signal: the project claims this OI; build is in flight.
+                state = "realized"
+                realized_as = home_path
+                why_not_realized = (
+                    f"Project home claims this OI; admission_status: "
+                    f"{admission} (build in flight, not yet proved)."
+                )
+                return {
+                    "realization_state": state,
+                    "realized_as": realized_as or "none",
+                    "promotion_condition": "",
+                    "why_not_realized": why_not_realized,
+                    "realized_via_project_proof": contract_path,
+                    "project_admission_status": admission,
+                }
+            else:
+                # Project has a back-pointer but admission_status is something
+                # else (e.g., empty, retired). Treat as attached_to_existing
+                # so the link surfaces but doesn't claim full realization.
+                state = "attached_to_existing"
+                realized_as = home_path
+                why_not_realized = (
+                    f"Project home claims this OI but admission_status is "
+                    f"'{admission or 'unknown'}'; not a full realized state."
+                )
+                return {
+                    "realization_state": state,
+                    "realized_as": realized_as,
+                    "promotion_condition": "",
+                    "why_not_realized": why_not_realized,
+                    "realized_via_project_proof": contract_path,
+                    "project_admission_status": admission,
+                }
 
     if adoption_state == "historical_inert":
         state = "historical_inert"
