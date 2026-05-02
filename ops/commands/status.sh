@@ -1938,6 +1938,12 @@ if mode != "--expert":
     _pickup_worker = execution_pickup_status.get("worker") if isinstance(execution_pickup_status.get("worker"), dict) else {}
     _pickup_worker_status = str(_pickup_worker.get("status") or "unknown")
     _pickup_worker_fresh = bool(_pickup_worker.get("fresh"))
+    _pickup_safety_tiers = _pickup_summary.get("safety_tiers") if isinstance(_pickup_summary.get("safety_tiers"), dict) else {}
+    _pickup_safety_line = ", ".join(
+        f"{key}={value}"
+        for key, value in _pickup_safety_tiers.items()
+        if int(value or 0) > 0
+    ) or "none active/recent"
     _blocked_loops = [
         loop for loop in open_loops
         if loop.get("execution_readiness", "runnable") == "blocked"
@@ -2034,6 +2040,7 @@ if mode != "--expert":
     if _dt_total:
         print(f"  durable transfers: {_dt_total} total, {int(_dt_summary.get('active', 0) or 0)} active, {int(_dt_summary.get('stale', 0) or 0)} attention")
     print(f"  execution pickup:  {_pickup_total} request(s), {_pickup_running} claimed/running, {_pickup_unclaimed} not claimed, {_pickup_stale} stale")
+    print(f"  safety tiers:      {_pickup_safety_line}")
     print(f"  capability worker: {_pickup_worker_status}{' fresh' if _pickup_worker_fresh else ' not fresh'}")
     print(f"  AI agent bridge:   {_pickup_summary.get('ai_agent_bridge', 'not_delivered')}")
     print()
@@ -2151,6 +2158,10 @@ if int(_expert_pickup_summary.get("requests_total", 0) or 0):
     print(f"  claimed/running:    {int(_expert_pickup_summary.get('claimed_or_running', 0) or 0)}")
     print(f"  stale:              {int(_expert_pickup_summary.get('stale', 0) or 0)}")
     print(f"  AI agent bridge:    {_expert_pickup_summary.get('ai_agent_bridge', 'not_delivered')}")
+    _expert_safety_tiers = _expert_pickup_summary.get("safety_tiers") if isinstance(_expert_pickup_summary.get("safety_tiers"), dict) else {}
+    if _expert_safety_tiers:
+        _expert_safety_line = ", ".join(f"{key}={value}" for key, value in _expert_safety_tiers.items() if int(value or 0) > 0) or "none active/recent"
+        print(f"  safety tiers:       {_expert_safety_line}")
     _expert_pickup_worker = execution_pickup_status.get("worker") if isinstance(execution_pickup_status.get("worker"), dict) else {}
     print(
         "  capability worker:  "

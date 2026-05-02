@@ -140,6 +140,34 @@ def receipt_refs_from(row: dict[str, Any]) -> list[str]:
     return sorted(set(refs))
 
 
+SAFETY_TIERS = (
+    "capability",
+    "bounded_readonly_provider_agent",
+    "tool_using_agent_reserved",
+    "destructive_manual",
+)
+
+
+def safety_tier_for(row: dict[str, Any]) -> str:
+    route_target = str(row.get("route_target") or "").strip().lower()
+    if route_target == "agent_tool":
+        bridge_proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
+        if (
+            bridge_proof.get("scope") == "bounded_readonly_provider_agent"
+            or row.get("bridge_allowed") is True
+            or row.get("route_prompt_ref")
+        ):
+            return "bounded_readonly_provider_agent"
+        return "capability"
+    if route_target == "capability" or row.get("route_capability"):
+        return "capability"
+    if row.get("realization") == "operational_capability_worker":
+        return "capability"
+    if row.get("source") in {"wave_dispatch", "delegation"}:
+        return "capability"
+    return "capability"
+
+
 def kernel_states_for(row: dict[str, Any]) -> dict[str, Any]:
     pickup_state = str(row.get("pickup_state") or "")
     source = str(row.get("source") or "")
@@ -225,6 +253,7 @@ def kernel_states_for(row: dict[str, Any]) -> dict[str, Any]:
 
 def add_request(rows: list[dict[str, Any]], **kwargs: Any) -> None:
     row = {k: v for k, v in kwargs.items() if v not in (None, "", [], {})}
+    row["safety_tier"] = safety_tier_for(row)
     row.update(kernel_states_for(row))
     rows.append(row)
 
@@ -332,6 +361,7 @@ def collect_task_dir(rows: list[dict[str, Any]], state_name: str) -> None:
             route_target=doc.get("route_target"),
             route_capability=doc.get("route_capability"),
             route_prompt_ref=doc.get("route_prompt_ref"),
+            bridge_allowed=doc.get("bridge_allowed"),
             bridge_proof=doc.get("bridge_proof") if isinstance(doc.get("bridge_proof"), dict) else None,
             task=str(doc.get("summary") or "")[:180],
             result=doc.get("result"),
@@ -384,6 +414,12 @@ def worker_status() -> dict[str, Any]:
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     active_rows = [row for row in rows if row.get("pickup_state") not in TERMINAL_TASK_STATES]
+    safety_tiers = {tier: 0 for tier in SAFETY_TIERS}
+    for row in rows:
+        tier = str(row.get("safety_tier") or "").strip()
+        if tier not in safety_tiers:
+            safety_tiers[tier] = 0
+        safety_tiers[tier] += 1
     delivered_bridge = any(
         row.get("pickup_state") == "done"
         and str(row.get("route_target") or "").strip().lower() == "agent_tool"
@@ -403,6 +439,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "operational_capability_worker": sum(1 for row in active_rows if row.get("realization") == "operational_capability_worker"),
         "interactive_worker_handoff": sum(1 for row in active_rows if row.get("realization") == "interactive_worker_handoff"),
         "ai_agent_bridge": "delivered (bounded: readonly provider agent)" if delivered_bridge else "not_delivered",
+        "safety_tiers": safety_tiers,
     }
 
 
@@ -454,6 +491,10 @@ def render_human(data: dict[str, Any]) -> None:
     print(f"  done recent:       {summary['done_recent']}")
     print(f"  failed recent:     {summary['failed_recent']}")
     print(f"  AI agent bridge:   {summary['ai_agent_bridge']}")
+    safety_tiers = summary.get("safety_tiers") if isinstance(summary.get("safety_tiers"), dict) else {}
+    if safety_tiers:
+        realized = ", ".join(f"{key}={value}" for key, value in safety_tiers.items() if value)
+        print(f"  safety tiers:      {realized or 'none active/recent'}")
     worker_line = worker.get("status", "unknown")
     if worker.get("generated_at"):
         worker_line += f" ({worker.get('generated_at')}, age={worker.get('age_seconds')}s)"

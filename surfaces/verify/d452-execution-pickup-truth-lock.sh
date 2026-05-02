@@ -72,6 +72,22 @@ else:
     raise SystemExit(f"D452 FAIL: unknown AI agent bridge state: {bridge_state!r}")
 if subtraction.get("public_language") != "execution pickup":
     raise SystemExit("D452 FAIL: public language must be execution pickup")
+safety_tiers = summary.get("safety_tiers")
+if not isinstance(safety_tiers, dict):
+    raise SystemExit("D452 FAIL: execution pickup summary must expose safety_tiers")
+for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_reserved", "destructive_manual"):
+    if required_tier not in safety_tiers:
+        raise SystemExit(f"D452 FAIL: safety_tiers missing {required_tier}")
+if int(safety_tiers.get("tool_using_agent_reserved") or 0) != 0:
+    raise SystemExit("D452 FAIL: tool_using_agent_reserved must remain empty until a proven V2 lands")
+for row in data.get("requests") or []:
+    tier = row.get("safety_tier")
+    if tier not in safety_tiers:
+        raise SystemExit(f"D452 FAIL: request has unknown safety_tier={tier!r}")
+    if tier == "bounded_readonly_provider_agent" and row.get("pickup_state") in {"done", "failed", "cancelled"}:
+        proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
+        if proof.get("scope") != "bounded_readonly_provider_agent":
+            raise SystemExit("D452 FAIL: terminal bounded_readonly_provider_agent row requires bounded bridge_proof")
 
 demoted = set(subtraction.get("demoted_public_terms") or [])
 for term in ("mailroom lane", "mailroom bridge", "dispatch means executing"):
@@ -163,6 +179,14 @@ if missing:
     raise SystemExit(f"D452 FAIL: worker capability allowlist has unregistered entries: {', '.join(missing)}")
 task_execution = worker_contract.get("task_execution") or {}
 routes = set(task_execution.get("execute_route_targets") or [])
+taxonomy = ((task_execution.get("route_target_taxonomy") or {}).get("safety_tiers") or {})
+for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_using_agent_reserved", "destructive_manual"):
+    if required_tier not in taxonomy:
+        raise SystemExit(f"D452 FAIL: mailroom worker route_target_taxonomy missing {required_tier}")
+if taxonomy["tool_using_agent_reserved"].get("status") != "reserved_empty":
+    raise SystemExit("D452 FAIL: tool_using_agent_reserved must be reserved_empty")
+if taxonomy["tool_using_agent_reserved"].get("route_targets") not in ([], None):
+    raise SystemExit("D452 FAIL: tool_using_agent_reserved route_targets must be empty")
 if "agent_tool" not in routes:
     raise SystemExit("D452 FAIL: bounded agent_tool bridge must be an explicit execute_route_target")
 bridge = task_execution.get("agent_tool_bridge") or {}
