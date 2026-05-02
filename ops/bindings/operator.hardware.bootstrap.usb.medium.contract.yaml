@@ -48,14 +48,45 @@ medium_contract:
       payload_embedded: false
     iso_plus_cidata_partition:
       description: >
-        Raw dd of installer ISO followed by creation of a small FAT partition
-        labeled CIDATA containing rendered autoinstall user-data and meta-data.
-        Ubuntu installer detects the CIDATA volume via the NoCloud datasource
-        and applies autoinstall automatically on first boot.
-      mechanism: "dd ISO then diskutil/mkfs.fat CIDATA partition"
+        Three-step write to produce a turn-key autoinstall USB on Ubuntu
+        Server 22.04+: (1) raw dd of installer ISO to medium (creates ISO9660 +
+        ESP partitions on a hybrid ISO), (2) format the third partition slot
+        the hybrid ISO leaves at the end of the disk as vfat labeled CIDATA
+        and populate it with rendered autoinstall user-data and meta-data,
+        (3) modify /boot/grub/grub.cfg inside the ISO9660 partition in place
+        to add the kernel command line `autoinstall ds=nocloud\;s=/cidata/`
+        to every linux entry. All three are load-bearing: subiquity treats
+        CIDATA as defaults-to-confirm (interactive installer with values
+        pre-filled) unless the kernel command line carries the autoinstall
+        flag. The in-place GRUB modification is what makes the USB unattended.
+      mechanism: |
+        Linux (canonical execution surface, e.g. on pve):
+          1. `wipefs -a /dev/<usb>` (clears any prior partition signatures)
+          2. `dd if=<iso> of=/dev/<usb> bs=4M conv=fsync` then `sync`
+          3. `blockdev --rereadpt /dev/<usb>` (no `partprobe` needed)
+          4. `mkfs.vfat -n CIDATA /dev/<usb>3` (the 300K hybrid-ISO slot)
+          5. mount `/dev/<usb>3`, copy rendered `user-data` and `meta-data`
+             from the autoinstall payload directory, sync, unmount.
+          6. Find iso9660 LBA of `/boot/grub/grub.cfg` via
+             `xorriso -indev "stdio:/dev/<usb>1" -find /boot/grub/grub.cfg
+             -exec report_lba` (returns startlba and filesize).
+          7. Author a replacement grub.cfg that adds
+             `autoinstall ds=nocloud\;s=/cidata/` between each
+             `/casper/vmlinuz` (and `/casper/hwe-vmlinuz`) and the trailing
+             `---`. Drop cosmetic lines (loadfont, menu_color_*) to keep the
+             replacement byte length <= original. Pad with trailing whitespace
+             to exactly the original byte length.
+          8. `dd if=<replacement> of=/dev/<usb>1 bs=1 seek=<lba*2048>
+             count=<original-length> conv=notrunc` then `sync`.
+        macOS write path: same conceptual sequence using `diskutil` and `dd`.
       payload_embedded: true
-      embedding_standard: "cloud-init NoCloud datasource (labeled CIDATA volume)"
-      platform_note: "macOS write path uses diskutil for partition management."
+      embedding_standard: "cloud-init NoCloud datasource (labeled CIDATA volume) plus kernel-command-line autoinstall trigger"
+      autoinstall_trigger_required: true
+      kernel_cmdline_addition: "autoinstall ds=nocloud\\;s=/cidata/"
+      verification:
+        - "lsblk <usb-device> shows exactly 3 partitions: ISO9660, ESP (5M vfat), CIDATA (300K vfat). Any 4th `writable`/ext4 persistence partition is non-canonical tooling residue (Startup Disk Creator, mkusb) and must be subtracted before use."
+        - "mount /dev/<usb>1 RO; grep `autoinstall ds=nocloud` in /boot/grub/grub.cfg; must match on both `/casper/vmlinuz` and `/casper/hwe-vmlinuz` linux lines."
+        - "mount /dev/<usb>3 RO; confirm `user-data` username and hostname match the rendered autoinstall payload; confirm `meta-data` instance-id present."
 
   preferred_strategy_by_class:
     old_macbook: usb
