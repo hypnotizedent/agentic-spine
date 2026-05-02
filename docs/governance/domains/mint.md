@@ -3,20 +3,21 @@
 Canonical domain boundary for `mint`.
 
 **Mint product and runtime authority live in [`mint-modules`](https://github.com/hypnotizedent/mint-modules), not in spine.**
-Spine retains only the governed shim/readback boundary plus compatibility paths
-to Mint-owned product contracts.
+Spine retains only the governed shim/readback boundary. Mint-owned contracts
+are read from their product homes directly, not through spine compatibility
+symlinks.
 
 - Authority: `docs/governance/SPINE.md`
-- Spine domain bundle: `ops/bindings/domains/mint.bundle.yaml`
+- Spine domain bundle: retained capability catalog/readback metadata only.
 - Product/runtime contract home: `~/code/mint-modules/contracts/`
 - Spine routing shims: `ops/plugins/domains/mint/bin/`
-- Mint-owned product contract compatibility paths:
-  - `ops/bindings/domains/mint/mint.operator.storage.contract.yaml`
-  - `ops/bindings/domains/mint/mint.secrets.promotion.contract.yaml`
-  - `ops/bindings/domains/mint/mint.storage.findings.map.yaml`
-  - `ops/bindings/domains/mint/mint.storage.guard.policy.yaml`
-  - `ops/bindings/domains/microsoft/microsoft.tenant.boring.contract.yaml`
-  - `ops/bindings/domains/microsoft/microsoft.entra.admin.app.contract.yaml`
+- Mint-owned product contract homes:
+  - `/Users/ronnyworks/code/products/mint-os/bindings/mint.operator.storage.contract.yaml`
+  - `/Users/ronnyworks/code/products/mint-os/bindings/mint.secrets.promotion.contract.yaml`
+  - `/Users/ronnyworks/code/products/mint-os/bindings/mint.storage.findings.map.yaml`
+  - `/Users/ronnyworks/code/products/mint-os/bindings/mint.storage.guard.policy.yaml`
+  - `/Users/ronnyworks/code/products/mint-os/bindings/microsoft.tenant.boring.contract.yaml`
+  - `/Users/ronnyworks/code/products/mint-os/bindings/microsoft.entra.admin.app.contract.yaml`
 - Scoped domain health readback: `./bin/ops cap run verify.run -- domain mint`
 
 ## Registered Capabilities (5 of 5)
@@ -32,8 +33,8 @@ All 5 registered Mint capabilities delegate to `mint-modules`:
 
 L3 move-out is complete for Mint product/runtime authority. Spine keeps:
 - 5 thin capability-routing shims in `ops/plugins/domains/mint/bin/`
-- thin product authority pointers under `ops/bindings/domains/mint/`
-- Microsoft tenant compatibility paths for Mint-owned contracts
+- no product authority pointers under `ops/bindings/domains/mint/`
+- no Microsoft tenant compatibility symlinks for Mint-owned contracts
 
 Workbench `agents/mint-agent/` may retain operator tooling, but it is not the
 owner of Mint runtime truth.
@@ -44,7 +45,7 @@ external to the repo and is not part of the Mint authority move-out question.
 ## Order Truth
 
 **Canonical business truth for future order-facing modules**:
-- Read `ops/bindings/domains/mint/mint.order.truth.authority.yaml` (spine pointer to `mint-modules` authority)
+- Read `/Users/ronnyworks/code/mint-modules/contracts/mint.order.truth.authority.yaml`
 - Use it for order vs quote vs revision vs artwork-binding semantics
 - Do not infer business order truth from seed IDs, artwork job IDs, legacy `visual_id`, or code presence
 

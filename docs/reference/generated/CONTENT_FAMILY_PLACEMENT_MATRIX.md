@@ -6,7 +6,7 @@ scope: content-family-placement
 
 # Content Family Placement Matrix
 
-Generated from `ops/bindings/domains/media/content.family.placement.policy.yaml`.
+Generated from `/Users/ronnyworks/code/projects/media/bindings/content.family.placement.policy.yaml`.
 
 | Family | Hot / Active | Stage | Hold | Archive | Rehydrate | Backup Primary | Backup Secondary | Blocking Dependencies |
 |---|---|---|---|---|---|---|---|---|

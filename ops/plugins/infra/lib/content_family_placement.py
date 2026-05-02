@@ -247,7 +247,7 @@ def build_projection(policy: dict[str, Any], *, source_sha256: str, generated_at
         "version": 1,
         "status": "projection",
         "authority_state": "projection",
-        "projection_of": "ops/bindings/domains/media/content.family.placement.policy.yaml",
+        "projection_of": "/Users/ronnyworks/code/projects/media/bindings/content.family.placement.policy.yaml",
         "source_capability": "content.family.placement.projection.build",
         "source_sha256": source_sha256,
         "generated_at_utc": generated_at_utc,
@@ -269,7 +269,7 @@ def render_markdown(projection: dict[str, Any]) -> str:
         "",
         "# Content Family Placement Matrix",
         "",
-        "Generated from `ops/bindings/domains/media/content.family.placement.policy.yaml`.",
+        "Generated from `/Users/ronnyworks/code/projects/media/bindings/content.family.placement.policy.yaml`.",
         "",
         "| Family | Hot / Active | Stage | Hold | Archive | Rehydrate | Backup Primary | Backup Secondary | Blocking Dependencies |",
         "|---|---|---|---|---|---|---|---|---|",
@@ -503,7 +503,7 @@ def validate_cross_surface_policy(root: Path, policy: dict[str, Any]) -> list[Is
                             )
                         )
 
-    media_contract_path = root / "ops/bindings/domains/media/media.archive.flow.policy.yaml"
+    media_contract_path = Path("/Users/ronnyworks/code/projects/media/bindings/media.archive.flow.policy.yaml")
     if not media_contract_path.is_file():
         issues.append(Issue("error", "media.archive.flow.policy.yaml missing for cross-surface archive validation"))
         return issues

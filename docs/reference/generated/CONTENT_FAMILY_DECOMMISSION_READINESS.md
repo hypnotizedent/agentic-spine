@@ -6,7 +6,7 @@ scope: content-family-decommission-readiness
 
 # Content Family Decommission Readiness
 
-Generated from `ops/bindings/domains/media/content.family.placement.policy.yaml` and the linked lifecycle/closure surfaces.
+Generated from `/Users/ronnyworks/code/projects/media/bindings/content.family.placement.policy.yaml` and the linked lifecycle/closure surfaces.
 
 | Plane | Type | Required By | Optional Only | Planned Only | Residual Only | Safe Now? | Blocking Dependencies | Required Preconditions |
 |---|---|---|---|---|---|---|---|---|

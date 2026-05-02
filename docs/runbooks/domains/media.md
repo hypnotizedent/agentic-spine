@@ -9,7 +9,7 @@ Primary recovery flow for domain `media`.
 
 ## Diagnose
 1. Review latest failing run key receipt in `~/code/.evidence/spine/sessions/`.
-2. Review `ops/bindings/domains/media/media.path.authority.contract.yaml`, `ops/bindings/domains/media/media.archive.flow.policy.yaml`, and `ops/bindings/media.quality.policy.yaml` before touching any historical migration packet or profile policy.
+2. Review `/Users/ronnyworks/code/projects/media/bindings/media.path.authority.contract.yaml`, `/Users/ronnyworks/code/projects/media/bindings/media.archive.flow.policy.yaml`, and `ops/bindings/media.quality.policy.yaml` before touching any historical migration packet or profile policy.
 3. Review domain contract and plugin scripts for the failing surface.
 4. Confirm runtime path usage resolves through `ops/lib/spine-paths.sh`.
 

@@ -2,8 +2,8 @@
 status: superseded_historical
 last_verified: 2026-03-20
 superseded_by:
-  - ops/bindings/domains/media/media.path.authority.contract.yaml
-  - ops/bindings/domains/media/media.archive.flow.policy.yaml
+  - /Users/ronnyworks/code/projects/media/bindings/media.path.authority.contract.yaml
+  - /Users/ronnyworks/code/projects/media/bindings/media.archive.flow.policy.yaml
 ---
 
 # Media Shop-to-Home Migration Transaction Packet

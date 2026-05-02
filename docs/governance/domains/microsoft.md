@@ -9,8 +9,8 @@ readback, but Mint owns the tenant operating contracts.
 
 - Authority: `docs/governance/SPINE.md`
 - Runtime bundle: `ops/bindings/domains/microsoft.bundle.yaml`
-- Mint customer mailbox operating contract: `ops/bindings/domains/mint/mint.customer.mailbox.standard.contract.yaml`
-- Mint tenant boringness contract: `ops/bindings/domains/microsoft/microsoft.tenant.boring.contract.yaml`
+- Mint customer mailbox operating contract: `/Users/ronnyworks/code/mint-modules/contracts/mint.customer.mailbox.standard.contract.yaml`
+- Mint tenant boringness contract: `/Users/ronnyworks/code/products/mint-os/bindings/microsoft.tenant.boring.contract.yaml`
 - Product contract home: `~/code/products/mint-os/bindings/`
 - Scoped domain health readback: `./bin/ops cap run verify.run -- domain microsoft`
 
@@ -41,7 +41,7 @@ The Mint tenant should stay small on purpose.
 
 Directory cleanup should be boring too.
 
-- The tenant-owned automation app contract lives at `ops/bindings/domains/microsoft/microsoft.entra.admin.app.contract.yaml`, a compatibility path to the Mint product contract home.
+- The tenant-owned automation app contract lives at `/Users/ronnyworks/code/products/mint-os/bindings/microsoft.entra.admin.app.contract.yaml` in the Mint product contract home.
 - Its governed token wrapper is `./ops/plugins/providers/microsoft/bin/microsoft-entra-admin-token-exec`.
 - The one deprecation command is `./ops/plugins/providers/microsoft/bin/microsoft-tenant-boring-deprecate`.
 - By default, the Entra lane may reuse `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` if that live app token already carries the required Graph application permissions.

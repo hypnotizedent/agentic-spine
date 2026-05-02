@@ -63,6 +63,12 @@ def fail(message: str, *, exit_code: int = 1) -> None:
     raise SystemExit(exit_code)
 
 
+def resolve_authority_path(root: Path, raw_path: str) -> Path:
+    if raw_path.startswith("ops/bindings/domains/media/"):
+        return Path("/Users/ronnyworks/code/projects/media/bindings") / Path(raw_path).name
+    return Path(raw_path) if Path(raw_path).is_absolute() else root / raw_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="content-family-placement-projection-build")
     parser.add_argument("--root", help="Target checkout root.")
@@ -75,8 +81,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     root = resolve_target_root(args.root)
-    policy_path = Path(os.environ.get("CONTENT_FAMILY_PLACEMENT_POLICY", root / "ops/bindings/domains/media/content.family.placement.policy.yaml"))
-    projection_path = Path(os.environ.get("CONTENT_FAMILY_PLACEMENT_PROJECTION", root / "ops/bindings/domains/media/content.family.placement.projected.yaml"))
+    policy_path = Path(os.environ.get("CONTENT_FAMILY_PLACEMENT_POLICY", Path("/Users/ronnyworks/code/projects/media/bindings/content.family.placement.policy.yaml")))
+    projection_path = Path(os.environ.get("CONTENT_FAMILY_PLACEMENT_PROJECTION", Path("/Users/ronnyworks/code/projects/media/bindings/content.family.placement.projected.yaml")))
     matrix_path = root / "docs/reference/generated/CONTENT_FAMILY_PLACEMENT_MATRIX.md"
     source_paths = [policy_path]
 
@@ -97,7 +103,7 @@ def main() -> None:
             "# Content Family Placement Projection",
             "# Non-secret. Spine-native.",
             "# Status: projection",
-            "# projection_of: ops/bindings/domains/media/content.family.placement.policy.yaml",
+            "# projection_of: /Users/ronnyworks/code/projects/media/bindings/content.family.placement.policy.yaml",
             "# Do NOT edit manually. Rebuild with: ./bin/ops cap run content.family.placement.projection.build",
             "",
         ]
@@ -116,7 +122,7 @@ def main() -> None:
                     if text and text not in required_paths:
                         required_paths.append(text)
         for rel_path in required_paths:
-            path = root / rel_path
+            path = resolve_authority_path(root, rel_path)
             if not path.exists():
                 fail(f"missing referenced authority path: {rel_path}")
 

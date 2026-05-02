@@ -11,8 +11,8 @@ source "$_D235_ROOT/ops/lib/ssh-resolve.sh"
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 STORAGE_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
-MAP_FILE="$ROOT/ops/bindings/domains/mint/mint.storage.findings.map.yaml"
-GUARD_POLICY="$ROOT/ops/bindings/domains/mint/mint.storage.guard.policy.yaml"
+MAP_FILE="/Users/ronnyworks/code/products/mint-os/bindings/mint.storage.findings.map.yaml"
+GUARD_POLICY="/Users/ronnyworks/code/products/mint-os/bindings/mint.storage.guard.policy.yaml"
 
 MODE=""
 while [[ $# -gt 0 ]]; do

@@ -89,8 +89,8 @@ if not isinstance(master_by_id.get("authority.payload.custody.readback"), dict):
 for rel in [
     "ops/bindings/shop.storage.map.yaml",
     "ops/bindings/home.storage.map.yaml",
-    "ops/bindings/domains/media/media.capacity.snapshot.yaml",
-    "ops/bindings/domains/media/media.content.snapshot.yaml",
+    "/Users/ronnyworks/code/projects/media/bindings/media.capacity.snapshot.yaml",
+    "/Users/ronnyworks/code/projects/media/bindings/media.content.snapshot.yaml",
 ]:
     text = (root / rel).read_text(encoding="utf-8")
     if "payload.custody.status" not in text:
