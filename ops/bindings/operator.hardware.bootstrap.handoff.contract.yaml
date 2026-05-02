@@ -91,6 +91,42 @@ handoff_contract:
     realized_operator_user: "Actual operator user observed on the remote host during firstboot claim, separate from the operator-supplied SSH username."
     machine_facts: "Read-only host facts captured through the same trustworthy SSH proof path: CPU, memory, storage, NIC, firmware, OS, and kernel. These facts support admission/readiness only; they do not assign placement or activate roles."
 
+  field_grammar:
+    description: >
+      Vocabulary constraints on otherwise-free-string fields. Tightens the
+      handoff so admission readback cannot be poisoned by ad-hoc values that
+      drift away from the canonical bootstrap path. Validation is enforced at
+      handoff emission by host.operator-hardware.firstboot.claim.
+    device_id:
+      pattern: "^[a-z0-9][a-z0-9-]{1,62}$"
+      notes: >
+        DNS-label-shaped identifier that doubles as canonical hostname after
+        post-boot normalize. Lowercase alphanumeric and hyphen, 2-63 chars,
+        must start with alphanumeric. Existing admitted shapes
+        (optiplex-9020-001, shuttle-xpc-xc60j-001, macbook-2016-pro) fit.
+        Sequence-only shapes (e.g. shuttle1) are not legal: they cannot
+        identify the device class without out-of-band context.
+    operator_user:
+      canonical_default: ubuntu
+      notes: >
+        Default operator user for target Linux hosts. Matches the fleet baseline
+        for all admitted operator-owned hardware. Bootstrap renderer scripts
+        default to this value; overrides require explicit --operator-user flag.
+    installer_provenance:
+      pattern: "^[a-z0-9][a-z0-9._+-]*:[a-z0-9_]+:[a-z0-9._-]+$"
+      source_prefixes:
+        - operator-declared
+        - usb-autoinstall-render
+        - post-boot-normalize
+        - pve-lan-postboot-normalize
+      notes: >
+        Three-segment lineage string: <source>:<bootstrap-method>:<distro-version>.
+        Source prefix must come from the enumerated set above and identifies
+        which Stage 0 path produced the bootstrap. The middle segment is the
+        bootstrap_method value. The third segment is <distro>-<version> matching
+        target_distro and target_distro_version. Adapter modifiers may be
+        joined to the source prefix with '+' (e.g. pve-lan-postboot-normalize+tailscale-enrolled).
+
   stage_boundary:
     produces: "Stage 0 first-touch bootstrap handoff object"
     produced_by:

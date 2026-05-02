@@ -134,6 +134,10 @@ done
 [[ -n "$HOSTNAME" ]] || fail "--hostname is required"
 [[ -n "$SSH_PROOF_ENDPOINT" ]] || fail "--ssh-proof-endpoint is required"
 
+# Contract field_grammar: device_id must be DNS-label-shaped (handoff contract :field_grammar.device_id).
+[[ "$DEVICE" =~ ^[a-z0-9][a-z0-9-]{1,62}$ ]] \
+    || fail "device_id violates handoff contract field_grammar.device_id pattern (^[a-z0-9][a-z0-9-]{1,62}\$): $DEVICE"
+
 need yq
 need jq
 need timeout
@@ -179,6 +183,16 @@ esac
 if [[ -z "$INSTALLER_PROVENANCE" ]]; then
     INSTALLER_PROVENANCE="operator-declared:${BOOTSTRAP_METHOD}:${TARGET_DISTRO}-${TARGET_DISTRO_VERSION}"
 fi
+
+# Contract field_grammar: installer_provenance must be <source>:<method>:<distro-version> with enumerated source prefix.
+provenance_source="${INSTALLER_PROVENANCE%%:*}"
+provenance_source_root="${provenance_source%%+*}"
+case "$provenance_source_root" in
+    operator-declared|usb-autoinstall-render|post-boot-normalize|pve-lan-postboot-normalize) ;;
+    *) fail "installer_provenance source prefix '$provenance_source_root' is not in handoff contract field_grammar.installer_provenance.source_prefixes" ;;
+esac
+[[ "$INSTALLER_PROVENANCE" =~ ^[a-z0-9][a-z0-9._+-]*:[a-z0-9_]+:[a-z0-9._-]+$ ]] \
+    || fail "installer_provenance violates handoff contract field_grammar.installer_provenance pattern: $INSTALLER_PROVENANCE"
 
 # Require actual non-interactive SSH access, not just an open TCP/22 port.
 remote_probe="$(
