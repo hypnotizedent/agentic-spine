@@ -36,7 +36,7 @@ Target steady state:
 ## In Scope
 
 1. Consolidate communications authority into `projects/communications`
-2. Consolidate media authority into `workbench/agents/media`
+2. Consolidate media authority into `projects/media`
 3. Decide whether `agentic-foundation` is:
    - merged into `workbench`, or
    - narrowed to a non-overlapping infra-primitives repo
@@ -69,7 +69,7 @@ As of 2026-04-09:
 
 ### Phase 2 — Media Consolidation
 
-- move canonical media scripts/contracts from `media-domain` into `workbench/agents/media`
+- move canonical media scripts/contracts from `media-domain` into `projects/media`
 - repoint spine media shims/seams to workbench
 - leave shared media rails in spine
 - only after all callers are truthful may `media-domain` be archived

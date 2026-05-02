@@ -4,7 +4,7 @@ Canonical domain pointer for `media`.
 
 ## Canonical Product Authority Home
 
-**`~/code/workbench/agents/media/`**
+**`~/code/projects/media/`**
 
 As of 2026-03-30, canonical L3 media product authority lives in the workbench media home.
 Spine retains engine-facing registrations, routing, gates, and a thin mix of local authority bindings plus compatibility pointers only.
@@ -14,11 +14,11 @@ Parent loop: `LOOP-MEDIA-SPLIT-AUTHORITY-CANONICALIZATION-20260322`
 
 ## Authority Surfaces (workbench canonical)
 
-- Product bindings: `~/code/workbench/agents/media/bindings/` (20 files)
-- Product archive: `~/code/workbench/agents/media/archive/` (3 files)
-- Runtime-first truth: `~/code/workbench/agents/media/docs/runtime/`
-- Compose/deploy: `~/code/workbench/agents/media/compose/` (consolidated 2026-04-14)
-- Agent contract: `~/code/workbench/agents/media/AGENT.md`
+- Product bindings: `~/code/projects/media/bindings/` (20 files)
+- Product archive: `~/code/projects/media/archive/` (3 files)
+- Runtime-first truth: `~/code/projects/media/docs/runtime/`
+- Compose/deploy: `~/code/projects/media/compose/` (consolidated 2026-04-14)
+- Agent contract: `~/code/projects/media/AGENT.md`
 
 ## Spine Engine-Facing Surfaces (retained)
 
