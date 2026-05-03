@@ -13,9 +13,14 @@ Emits a JSON compiled assignment object to stdout containing:
   loop_id, packet_id, context_sources, active_artifacts,
   stop_condition, mutation_ground, handoff_target
 
-If canonical DB cannot answer (missing/corrupt/unreachable), returns
-compilation_state: clean_start. Does NOT silently substitute scope-file
-projection as authority.
+If canonical DB read SUCCEEDED but returned zero open loops, emits
+compilation_state: clean_start.
+
+If canonical DB read FAILED (missing/corrupt/unreachable), emits
+compilation_state: authority_unavailable with sanitized
+authority_error_class. Does NOT silently substitute scope-file projection
+as authority. Does NOT collapse "no work" and "broken authority" into
+the same downstream state (PACKET-635).
 
 Read-only. Never mutates state.
 """
@@ -97,18 +102,28 @@ def _normalize_string_list(value: object) -> list[str]:
 
 # Authority: SQLite via loops_sql_authority. Scope files are projections,
 # not independent policy (see loops_sql_authority library docstring).
-# When canonical DB cannot answer, downstream consumers gracefully
-# degrade (compile_assignment returns compilation_state: "clean_start"
-# on None). Scope-file projection MUST NOT be substituted as authority
-# (PACKET-630 / F2 canonical fix from engine packet/loop/wave forensic;
-# same disease class as PACKET-625 Slice 4, one layer deeper in the
-# entry-truth chain).
+# Two distinct return shapes for "no active loop":
+#   - None              => canonical DB read succeeded; zero open loops.
+#                          compile_assignment turns this into clean_start.
+#   - {_authority_unavailable: True, reason: ...} => DB read FAILED
+#                          (missing/corrupt/unreachable). compile_assignment
+#                          turns this into compilation_state: authority_unavailable.
+# This distinction (PACKET-635) eradicates the authority-unavailable-as-
+# clean-start ambiguity that survived PACKET-630 F2: previously, any
+# exception during the SQLite path collapsed into the same None/clean_start
+# downstream as "no active loops." Downstream consumers can now tell
+# "authority is broken" from "no work pending."
+# Scope-file projection MUST NOT be substituted as authority (PACKET-630).
 def _find_active_loop(state_root: str) -> dict | None:
     """Find the active loop from SQLite authority.
 
-    Returns the active loop, an ambiguous marker, or None.
-    Does NOT fall back to scope-file projection. If canonical DB cannot
-    answer, returns None and lets downstream gracefully degrade.
+    Returns one of:
+      - active loop dict (single live loop)
+      - {"_ambiguous": True, "_candidates": [...]} (multiple live loops)
+      - None (DB read succeeded; zero live loops)
+      - {"_authority_unavailable": True, "reason": "..."} (DB read FAILED)
+
+    Does NOT fall back to scope-file projection.
     """
     db_path = os.path.join(state_root, "shared_authority.db")
     try:
@@ -136,10 +151,16 @@ def _find_active_loop(state_root: str) -> dict | None:
             return {"_ambiguous": True, "_candidates": candidates}
         return None
 
-    except Exception:
+    except Exception as exc:
         # Canonical DB unavailable. Do NOT substitute scope-file projection
-        # as authority. Return None; downstream produces clean_start.
-        return None
+        # as authority. Return a distinct marker so compile_assignment can
+        # emit compilation_state: authority_unavailable instead of flattening
+        # into clean_start. Reason is sanitized to error class only — no
+        # path/value details that could leak runtime information.
+        return {
+            "_authority_unavailable": True,
+            "reason": f"{type(exc).__name__}",
+        }
 
 
 def _find_execution_tracker(state_root: str, loop_id: str | None = None) -> dict | None:
@@ -387,6 +408,23 @@ def compile_assignment(state_root: str) -> dict:
 
     # Step 1: Find active loop
     loop_result = _find_active_loop(state_root)
+
+    # PACKET-635: distinguish "DB read failed" from "DB read succeeded
+    # with zero loops." Both used to flatten into clean_start; now they
+    # emit different compilation_state values so downstream cannot mistake
+    # authority outage for honest empty.
+    if isinstance(loop_result, dict) and loop_result.get("_authority_unavailable"):
+        assignment["compilation_state"] = "authority_unavailable"
+        assignment["loop_id"] = None
+        assignment["packet_id"] = None
+        assignment["context_sources"] = None
+        assignment["active_artifacts"] = None
+        assignment["stop_condition"] = None
+        assignment["mutation_ground"] = None
+        assignment["handoff_target"] = None
+        # Sanitized — error class only, no values/paths/messages
+        assignment["authority_error_class"] = str(loop_result.get("reason", "")).strip() or "unknown"
+        return assignment
 
     if loop_result is None:
         assignment["compilation_state"] = "clean_start"
