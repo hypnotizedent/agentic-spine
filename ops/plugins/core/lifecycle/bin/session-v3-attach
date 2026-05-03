@@ -71,6 +71,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ── Machine-mode predicate ─────────────────────────────────────────────────
+# When --emit-env or --emit-assignment is set, suppress all human banner
+# sections so the underlying script emits machine-only output. Compute blocks
+# (entry-compile, posture resolve, routing, provenance, handoff continuity)
+# still run because their results populate the JSON/env emission below.
+machine_mode() {
+    [[ "$EMIT_ASSIGNMENT" -eq 1 || "$EMIT_ENV" -eq 1 ]]
+}
+
 # ── Source posture helper (best-effort) ────────────────────────────────────
 POSTURE_HELPER="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/session_posture.sh"
 # shellcheck source=/dev/null
@@ -97,19 +106,21 @@ print_work_intake_policy() {
     echo "  worker windows: exceptional; prefer headless/background lanes with telemetry"
 }
 
-echo "── admission ───────────────────────────────────────────────────"
-if [[ "$ADMISSION_STATUS" == "admitted" ]]; then
-    echo "  status:          ADMITTED (via terminal launch)"
-    echo "  terminal id:     ${TERMINAL_ID}"
-    echo "  execution class: ${EXECUTION_CLASS}"
-    echo "  loop:            ${SPINE_LOOP_ID:-<none>}"
-else
-    echo "  status:          UNBOUND — orientation only, not governed admission"
-    echo "  terminal id:     ${TERMINAL_ID:-<unset>}"
-    echo "  execution class: ${EXECUTION_CLASS:-<unset>}"
-    echo "  note:            use 'ops terminal launch' for governed session start"
+if ! machine_mode; then
+    echo "── admission ───────────────────────────────────────────────────"
+    if [[ "$ADMISSION_STATUS" == "admitted" ]]; then
+        echo "  status:          ADMITTED (via terminal launch)"
+        echo "  terminal id:     ${TERMINAL_ID}"
+        echo "  execution class: ${EXECUTION_CLASS}"
+        echo "  loop:            ${SPINE_LOOP_ID:-<none>}"
+    else
+        echo "  status:          UNBOUND — orientation only, not governed admission"
+        echo "  terminal id:     ${TERMINAL_ID:-<unset>}"
+        echo "  execution class: ${EXECUTION_CLASS:-<unset>}"
+        echo "  note:            use 'ops terminal launch' for governed session start"
+    fi
+    echo ""
 fi
-echo ""
 
 if [[ "$EXPERT" -eq 0 && "$EMIT_ENV" -eq 0 && "$EMIT_ASSIGNMENT" -eq 0 ]]; then
     echo "── ops status ─────────────────────────────────────────────────"
@@ -122,20 +133,22 @@ if [[ "$EXPERT" -eq 0 && "$EMIT_ENV" -eq 0 && "$EMIT_ASSIGNMENT" -eq 0 ]]; then
     exit 0
 fi
 
-# ── Context banner ─────────────────────────────────────────────────────────
-# Best-effort: never block terminal birth
-"$SPINE_ROOT/bin/ops" status --context 2>/dev/null || true
+if ! machine_mode; then
+    # ── Context banner ─────────────────────────────────────────────────────────
+    # Best-effort: never block terminal birth
+    "$SPINE_ROOT/bin/ops" status --context 2>/dev/null || true
 
-# ── Status one-liner ───────────────────────────────────────────────────────
-echo ""
-"$SPINE_ROOT/bin/ops" status --brief 2>/dev/null || true
-echo ""
+    # ── Status one-liner ───────────────────────────────────────────────────────
+    echo ""
+    "$SPINE_ROOT/bin/ops" status --brief 2>/dev/null || true
+    echo ""
+fi
 
 # ── Repo hygiene snapshot (best-effort, non-blocking) ─────────────────────
 WORKTREE_STATUS_BIN="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/worktree-session-status"
 if [[ -x "$WORKTREE_STATUS_BIN" ]]; then
     WORKTREE_STATUS_BRIEF="$("$WORKTREE_STATUS_BIN" --brief 2>/dev/null || true)"
-    if [[ -n "$WORKTREE_STATUS_BRIEF" ]]; then
+    if [[ -n "$WORKTREE_STATUS_BRIEF" ]] && ! machine_mode; then
         echo "── repo hygiene ────────────────────────────────────────────────"
         echo "  $WORKTREE_STATUS_BRIEF"
         if [[ "$WORKTREE_STATUS_BRIEF" == FAIL* ]]; then
@@ -240,47 +253,53 @@ PYPROV
     fi
 fi
 
-echo "── provenance ──────────────────────────────────────────────────"
-if [[ -n "$PROV_CURRENT_PACKET" ]]; then
-    if [[ -n "$PROV_CHECKPOINT_ID" ]]; then
-        echo "  checkpoint:      ${PROV_CHECKPOINT_ID}"
-        echo "  packet:          ${PROV_CHECKPOINT_PACKET}"
-        echo "  recorded:        ${PROV_CHECKPOINT_RECORDED}"
+if ! machine_mode; then
+    echo "── provenance ──────────────────────────────────────────────────"
+    if [[ -n "$PROV_CURRENT_PACKET" ]]; then
+        if [[ -n "$PROV_CHECKPOINT_ID" ]]; then
+            echo "  checkpoint:      ${PROV_CHECKPOINT_ID}"
+            echo "  packet:          ${PROV_CHECKPOINT_PACKET}"
+            echo "  recorded:        ${PROV_CHECKPOINT_RECORDED}"
+        else
+            echo "  checkpoint:      none"
+            echo "  packet:          ${PROV_CURRENT_PACKET}"
+            echo "  action:          ops cap run session.packet.provenance.capture"
+        fi
     else
         echo "  checkpoint:      none"
-        echo "  packet:          ${PROV_CURRENT_PACKET}"
-        echo "  action:          ops cap run session.packet.provenance.capture"
+        echo "  packet:          none"
+        echo "  note:            no current packet in compiled entry"
     fi
-else
-    echo "  checkpoint:      none"
-    echo "  packet:          none"
-    echo "  note:            no current packet in compiled entry"
+    echo ""
 fi
-echo ""
 
 # ── Session posture (best-effort, non-blocking) ────────────────────────────
 POSTURE_OK=0
 if command -v session_posture_resolve >/dev/null 2>&1; then
     if session_posture_resolve "${TERMINAL_ID:-}" "" "${EXECUTION_CLASS:-}" 2>/dev/null; then
         POSTURE_OK=1
-        echo "── session posture ─────────────────────────────────────────────"
-        echo "  node type:       ${__SP_NODE_TYPE:-unknown}"
-        echo "  session posture: ${__SP_POSTURE:-unknown}"
-        echo "  posture source:  ${__SP_SOURCE:-unknown}"
-        echo "  execution class: ${EXECUTION_CLASS:-unset}"
-        echo "  verify cmd:      ./bin/ops cap run verify.engine.run && ./bin/ops cap run spine.verify"
-        echo "  control loop:    ./bin/ops status --control-loop"
-        echo ""
+        if ! machine_mode; then
+            echo "── session posture ─────────────────────────────────────────────"
+            echo "  node type:       ${__SP_NODE_TYPE:-unknown}"
+            echo "  session posture: ${__SP_POSTURE:-unknown}"
+            echo "  posture source:  ${__SP_SOURCE:-unknown}"
+            echo "  execution class: ${EXECUTION_CLASS:-unset}"
+            echo "  verify cmd:      ./bin/ops cap run verify.engine.run && ./bin/ops cap run spine.verify"
+            echo "  control loop:    ./bin/ops status --control-loop"
+            echo ""
+        fi
 
         # Recovery posture (best-effort, non-blocking)
         if command -v session_recovery_posture_resolve >/dev/null 2>&1; then
             if session_recovery_posture_resolve 2>/dev/null; then
-                echo "── recovery posture ───────────────────────────────────────────"
-                echo "  operator site:   ${__SP_OPERATOR_SITE:-unknown}"
-                echo "  recovery:        ${__SP_RECOVERY_POSTURE:-unknown}"
-                echo "  recovery ready:  ${__SP_RECOVERY_READY:-false}"
-                echo "  detection basis: ${__SP_SITE_DETECTION_BASIS:-unavailable}"
-                echo ""
+                if ! machine_mode; then
+                    echo "── recovery posture ───────────────────────────────────────────"
+                    echo "  operator site:   ${__SP_OPERATOR_SITE:-unknown}"
+                    echo "  recovery:        ${__SP_RECOVERY_POSTURE:-unknown}"
+                    echo "  recovery ready:  ${__SP_RECOVERY_READY:-false}"
+                    echo "  detection basis: ${__SP_SITE_DETECTION_BASIS:-unavailable}"
+                    echo ""
+                fi
             fi
         fi
     fi
@@ -315,7 +334,7 @@ for i, c in enumerate(cands):
 print(f'_RT_CAND_COUNT={len(cands)}')
 " <<< "$ROUTING_JSON" 2>/dev/null)" || true
 
-    if [[ -n "${_RT_STATE:-}" ]]; then
+    if [[ -n "${_RT_STATE:-}" ]] && ! machine_mode; then
         echo "── workflow routing ────────────────────────────────────────────"
         echo "  routing state:   ${_RT_STATE}"
         echo "  next action:     ${_RT_ACTION}"
@@ -340,10 +359,12 @@ print(f'_RT_CAND_COUNT={len(cands)}')
     fi
 fi
 
-print_work_intake_policy
-echo ""
+if ! machine_mode; then
+    print_work_intake_policy
+    echo ""
+fi
 
-if [[ -n "$ENTRY_COMPILE_STATE" ]]; then
+if [[ -n "$ENTRY_COMPILE_STATE" ]] && ! machine_mode; then
     echo "── compiled entry ──────────────────────────────────────────────"
     echo "  compilation:     ${ENTRY_COMPILE_STATE}"
     echo "  loop:            ${ENTRY_COMPILE_LOOP}"
@@ -474,7 +495,7 @@ if [[ -n "$CONTINUITY_VARS" ]]; then
     eval "$CONTINUITY_VARS"
 fi
 
-if [[ "${CONT_ACTIVE_HANDOFFS:-0}" != "0" ]]; then
+if [[ "${CONT_ACTIVE_HANDOFFS:-0}" != "0" ]] && ! machine_mode; then
     echo "── handoff continuity ──────────────────────────────────────────"
     echo "  active handoffs: ${CONT_ACTIVE_HANDOFFS:-0} total"
     if [[ -n "${CONT_LIVE_LOOP_SET:-}" ]]; then
@@ -521,7 +542,6 @@ fi
 # No new computation — just structured capture of what the banner already knows.
 # Packet-level fields remain null until compiled entry truth fills them.
 if [[ "$EMIT_ASSIGNMENT" -eq 1 ]]; then
-    echo "── compiled assignment ──────────────────────────────────────────"
     SPINE_ROOT_EXPORT="$SPINE_ROOT" ENTRY_COMPILE_JSON="${ENTRY_COMPILE_JSON:-}" python3 - \
         "${TERMINAL_ID:-}" \
         "${EXECUTION_CLASS:-}" \
