@@ -335,6 +335,18 @@ def write_receipt(payload: dict[str, Any], placement: dict[str, Any]) -> tuple[P
     latest.write_text(text, encoding="utf-8")
     stamped.write_text(text, encoding="utf-8")
     canonical = mirror_canonical_receipt(placement, latest_name, stamped_name, text)
+    payload["canonical_receipt"] = canonical
+    final_text = yaml.safe_dump(payload, sort_keys=False)
+    latest.write_text(final_text, encoding="utf-8")
+    stamped.write_text(final_text, encoding="utf-8")
+    if canonical.get("status") == "mirrored":
+        target = str(canonical.get("target") or "")
+        latest_path = str(canonical.get("latest_path") or "")
+        stamped_path = str(canonical.get("stamped_path") or "")
+        if target and latest_path:
+            write_remote_text(target, latest_path, final_text)
+        if target and stamped_path:
+            write_remote_text(target, stamped_path, final_text)
     return latest, canonical
 
 
@@ -376,7 +388,6 @@ def main() -> int:
     }
     receipt, canonical_receipt = write_receipt(payload, placement)
     payload["receipt"] = str(receipt)
-    payload["canonical_receipt"] = canonical_receipt
     if canonical_receipt.get("status") == "failed":
         payload["overall_status"] = "attention"
 
