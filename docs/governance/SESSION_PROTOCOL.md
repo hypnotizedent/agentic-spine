@@ -134,7 +134,11 @@ uses the governed lifecycle capability for that artifact class. If telemetry is
 wrongly shaped, blocked, duplicate, stale, or non-promotable, file or attach
 friction and use an existing amend/promote/close/cleanup capability. If no such
 capability exists, the missing governed repair path is the work; raw filesystem
-surgery is not an acceptable substitute.
+surgery is not an acceptable substitute. For loops specifically, lifecycle
+repair (horizon/status/priority/readiness/execution_mode) goes through
+`loops.amend` — never delete a `.scope.md` to repair lifecycle state. A
+suggestion to delete/recreate/move telemetry to repair state files as friction
+with `--capability telemetry_surgery_attempt`.
 
 Human intent is provenance and acceptance input, not standalone authority.
 Before mutation, resolve the owning canonical surface, confirm the request fits

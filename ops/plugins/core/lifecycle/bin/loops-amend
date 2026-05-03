@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# loops.amend — Smallest governed lifecycle repair primitive for loops.
+#
+# Mutates lifecycle metadata on an existing governed loop without deleting,
+# rewriting, or recreating the scope projection or DB row. Telemetry-preserving
+# by design: scope file body is never touched; only governed frontmatter
+# lifecycle keys are updated in place. SQLite authority row is updated via the
+# loops-authority-bridge upsert delta. Capability receipt is emitted by cap.sh;
+# this script also writes a narrative amend-receipt YAML with before/after
+# values under domain-state/engine-loop-lifecycle/.
+#
+# Allowed transitions (this slice):
+#   horizon: now|later|future        (status follows: now=>active, else=>planned)
+#   priority: low|medium|high
+#   readiness: runnable|blocked      (frontmatter key: execution_readiness)
+#   execution-mode: single_worker|orchestrator_subagents
+#
+# Refused:
+#   - terminal/closed states (closed, archived, landed, abandoned, deferred, completed)
+#     resurrection is a separate primitive not in this slice
+#   - body/objective/success/DOD edits
+#   - missing --reason
+#   - missing --loop-id
+#   - unknown loop_id (DB row absent or scope file absent)
+#   - no-op call (no lifecycle field actually changes)
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$ROOT/ops/lib/spine-paths.sh"
+spine_paths_init
+source "$ROOT/ops/lib/posture-guard.sh"
+source "$ROOT/ops/lib/git-lock.sh"
+SCOPES_DIR="$SPINE_STATE/loop-scopes"
+LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+
+# Portable in-place sed wrapper (BSD/GNU).
+sed_inplace() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
+
+usage() {
+  cat <<'USAGE'
+loops.amend — Mutate lifecycle fields on an existing governed loop.
+
+Usage:
+  loops-amend --loop-id LOOP-... --reason "why" \
+              [--horizon now|later|future] \
+              [--priority high|medium|low] \
+              [--readiness runnable|blocked] \
+              [--execution-mode single_worker|orchestrator_subagents] \
+              [--dry-run] [--json]
+
+Required:
+  --loop-id   Existing loop identity (LOOP-NAME-YYYYMMDD).
+  --reason    Free-form justification; recorded in receipt. No reason, no mutation.
+
+Refused:
+  - Closed/archived/landed/abandoned/deferred/completed loops.
+  - Body/objective/success/DOD edits (lifecycle metadata only).
+  - No-op invocations.
+
+Telemetry preservation:
+  - Scope file body is never rewritten; only frontmatter lifecycle keys.
+  - DB row updated via governed bridge upsert; no raw SQLite mutation.
+  - Capability receipt + narrative amend-receipt YAML record before/after.
+USAGE
+}
+
+LOOP_ID=""
+REASON=""
+NEW_HORIZON=""
+NEW_PRIORITY=""
+NEW_READINESS=""
+NEW_EXEC_MODE=""
+DRY_RUN=0
+JSON_OUTPUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --loop-id)        LOOP_ID="${2:?--loop-id requires a value}"; shift 2 ;;
+    --reason)         REASON="${2:?--reason requires a value}"; shift 2 ;;
+    --horizon)        NEW_HORIZON="${2:?--horizon requires a value}"; shift 2 ;;
+    --priority)       NEW_PRIORITY="${2:?--priority requires a value}"; shift 2 ;;
+    --readiness)      NEW_READINESS="${2:?--readiness requires a value}"; shift 2 ;;
+    --execution-mode) NEW_EXEC_MODE="${2:?--execution-mode requires a value}"; shift 2 ;;
+    --dry-run)        DRY_RUN=1; shift ;;
+    --json)           JSON_OUTPUT=1; shift ;;
+    -h|--help)        usage; exit 0 ;;
+    *) echo "FAIL: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || { echo "FAIL: --loop-id required" >&2; exit 2; }
+[[ -n "$REASON"  ]] || { echo "FAIL: --reason required (no reason, no mutation)" >&2; exit 2; }
+
+# Validate enum inputs early.
+case "$NEW_HORIZON" in ""|now|later|future) ;; *) echo "FAIL: --horizon must be now, later, or future (got '$NEW_HORIZON')" >&2; exit 2 ;; esac
+case "$NEW_PRIORITY" in ""|low|medium|high) ;; *) echo "FAIL: --priority must be low, medium, or high (got '$NEW_PRIORITY')" >&2; exit 2 ;; esac
+case "$NEW_READINESS" in ""|runnable|blocked) ;; *) echo "FAIL: --readiness must be runnable or blocked (got '$NEW_READINESS')" >&2; exit 2 ;; esac
+case "$NEW_EXEC_MODE" in ""|single_worker|orchestrator_subagents) ;; *) echo "FAIL: --execution-mode must be single_worker or orchestrator_subagents (got '$NEW_EXEC_MODE')" >&2; exit 2 ;; esac
+
+if [[ -z "$NEW_HORIZON$NEW_PRIORITY$NEW_READINESS$NEW_EXEC_MODE" ]]; then
+  echo "FAIL: no lifecycle fields provided; supply at least one of --horizon, --priority, --readiness, --execution-mode" >&2
+  exit 2
+fi
+
+SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+ARCHIVED_SCOPE_FILE="$SPINE_STATE/archive/closed-loop-scopes/${LOOP_ID}.scope.md"
+
+if [[ ! -f "$SCOPE_FILE" ]]; then
+  if [[ -f "$ARCHIVED_SCOPE_FILE" ]]; then
+    echo "FAIL: loop $LOOP_ID is archived (closed); resurrection is a separate primitive not in this slice" >&2
+    exit 1
+  fi
+  echo "FAIL: scope file not found: $SCOPE_FILE" >&2
+  exit 1
+fi
+
+# --- Read DB row (canonical authority) ---
+if [[ ! -x "$LOOPS_BRIDGE" ]]; then
+  echo "FAIL: loops-authority-bridge not found or not executable at $LOOPS_BRIDGE" >&2
+  exit 1
+fi
+
+DB_ROW_JSON="$(python3 "$LOOPS_BRIDGE" query --id "$LOOP_ID" 2>/dev/null || true)"
+if [[ -z "$DB_ROW_JSON" ]]; then
+  echo "FAIL: loop $LOOP_ID has scope file but no DB row; refusing to mutate (cross-plane truth disagreement; file friction)" >&2
+  exit 1
+fi
+
+# --- Extract current values (frontmatter + DB), refuse terminal states ---
+read_current() {
+python3 - "$SCOPE_FILE" "$DB_ROW_JSON" <<'PY'
+import json, re, sys
+scope_path = sys.argv[1]
+db_row = json.loads(sys.argv[2])
+with open(scope_path, "r", encoding="utf-8") as f:
+    content = f.read()
+m = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+if not m:
+    print("FAIL: scope file has no YAML frontmatter", file=sys.stderr)
+    sys.exit(1)
+fm = m.group(1)
+def fmval(key):
+    mm = re.search(rf"^{re.escape(key)}:\s*(.+?)\s*$", fm, re.MULTILINE)
+    return mm.group(1).strip().strip('"') if mm else ""
+out = {
+    "fm_status":     fmval("status"),
+    "fm_horizon":    fmval("horizon"),
+    "fm_priority":   fmval("priority"),
+    "fm_readiness":  fmval("execution_readiness"),
+    "fm_exec_mode":  fmval("execution_mode"),
+    "db_status":     str(db_row.get("status") or ""),
+    "db_horizon":    str(db_row.get("horizon") or ""),
+    "db_priority":   str(db_row.get("priority") or ""),
+    "db_readiness":  str(db_row.get("execution_readiness") or ""),
+    "db_exec_mode":  str(db_row.get("execution_mode") or ""),
+    "db_disposition":str(db_row.get("disposition") or ""),
+    "db_completion": str(db_row.get("completion_level") or ""),
+}
+for k, v in out.items():
+    print(f"{k}={v}")
+PY
+}
+
+CURRENT="$(read_current)" || { echo "$CURRENT" >&2; exit 1; }
+eval "$CURRENT"
+
+# Refuse terminal/closed states. Resurrection is a separate primitive.
+TERMINAL_STATES=("closed" "archived" "landed" "abandoned" "deferred" "completed")
+for s in "${TERMINAL_STATES[@]}"; do
+  if [[ "$db_status" == "$s" ]]; then
+    echo "FAIL: loop $LOOP_ID is in terminal state '$db_status'; resurrection is a separate primitive not in this slice (refused: would re-open closed work)" >&2
+    exit 1
+  fi
+done
+
+# --- Compute new values, derive status from horizon ---
+RESOLVED_HORIZON="${NEW_HORIZON:-$db_horizon}"
+RESOLVED_PRIORITY="${NEW_PRIORITY:-$db_priority}"
+RESOLVED_READINESS="${NEW_READINESS:-$db_readiness}"
+RESOLVED_EXEC_MODE="${NEW_EXEC_MODE:-$db_exec_mode}"
+
+# Status follows horizon (boundary model: active loops must be horizon=now).
+if [[ "$RESOLVED_HORIZON" == "now" ]]; then
+  RESOLVED_STATUS="active"
+else
+  RESOLVED_STATUS="planned"
+fi
+
+# Compute change summary; refuse if no-op.
+declare -a CHANGES=()
+[[ "$db_horizon"   != "$RESOLVED_HORIZON"   ]] && CHANGES+=("horizon: $db_horizon -> $RESOLVED_HORIZON")
+[[ "$db_status"    != "$RESOLVED_STATUS"    ]] && CHANGES+=("status: $db_status -> $RESOLVED_STATUS")
+[[ "$db_priority"  != "$RESOLVED_PRIORITY"  ]] && CHANGES+=("priority: $db_priority -> $RESOLVED_PRIORITY")
+[[ "$db_readiness" != "$RESOLVED_READINESS" ]] && CHANGES+=("execution_readiness: $db_readiness -> $RESOLVED_READINESS")
+[[ "$db_exec_mode" != "$RESOLVED_EXEC_MODE" ]] && CHANGES+=("execution_mode: $db_exec_mode -> $RESOLVED_EXEC_MODE")
+
+if (( ${#CHANGES[@]} == 0 )); then
+  echo "NOOP: no lifecycle field changed for $LOOP_ID; refusing to write a no-op receipt" >&2
+  exit 0
+fi
+
+if (( DRY_RUN )); then
+  echo "DRY-RUN: would amend $LOOP_ID:"
+  for c in "${CHANGES[@]}"; do echo "  $c"; done
+  echo "  reason: $REASON"
+  exit 0
+fi
+
+# --- Mutate scope file frontmatter (lifecycle keys only) ---
+TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+cp "$SCOPE_FILE" "$TMP"
+
+update_fm_field() {
+  local key="$1" value="$2"
+  # Match lines like `key: value` or `key: "value"` inside frontmatter, replace with key: value (unquoted).
+  # Frontmatter block is delimited by leading `---` and the next `---`. Use Python to be robust to BSD/GNU sed differences.
+  python3 - "$TMP" "$key" "$value" <<'PY'
+import re, sys
+path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, "r", encoding="utf-8") as f:
+    content = f.read()
+m = re.match(r"^(---\n)(.*?)(\n---)", content, re.DOTALL)
+if not m:
+    sys.exit("frontmatter delimiter missing; refusing to mutate")
+fm = m.group(2)
+pat = re.compile(rf"^({re.escape(key)}:)\s*.*$", re.MULTILINE)
+if not pat.search(fm):
+    # If the key is missing entirely (e.g., legacy file without execution_readiness),
+    # append it just before the closing delimiter.
+    fm_new = fm + f"\n{key}: {value}"
+else:
+    fm_new = pat.sub(rf"\1 {value}", fm)
+new_content = m.group(1) + fm_new + m.group(3) + content[m.end():]
+with open(path, "w", encoding="utf-8") as f:
+    f.write(new_content)
+PY
+}
+
+update_fm_field "horizon"             "$RESOLVED_HORIZON"
+update_fm_field "status"              "$RESOLVED_STATUS"
+update_fm_field "priority"            "$RESOLVED_PRIORITY"
+update_fm_field "execution_readiness" "$RESOLVED_READINESS"
+update_fm_field "execution_mode"      "$RESOLVED_EXEC_MODE"
+
+# Verify scope file body did not change outside frontmatter.
+verify_body_unchanged() {
+python3 - "$SCOPE_FILE" "$TMP" <<'PY'
+import re, sys
+def body(p):
+    with open(p, "r", encoding="utf-8") as f:
+        c = f.read()
+    m = re.match(r"^---\n.*?\n---", c, re.DOTALL)
+    return c[m.end():] if m else c
+b1 = body(sys.argv[1])
+b2 = body(sys.argv[2])
+if b1 != b2:
+    sys.exit("BODY CHANGED — refusing to commit telemetry surgery")
+PY
+}
+verify_body_unchanged
+
+# Atomic move into place.
+mv "$TMP" "$SCOPE_FILE"
+trap - EXIT
+
+# --- Update DB row via governed bridge upsert ---
+DELTA_JSON="$(python3 - <<PY
+import json
+delta = {"loop_id": "$LOOP_ID"}
+delta["horizon"] = "$RESOLVED_HORIZON"
+delta["status"] = "$RESOLVED_STATUS"
+delta["priority"] = "$RESOLVED_PRIORITY"
+delta["execution_readiness"] = "$RESOLVED_READINESS"
+delta["execution_mode"] = "$RESOLVED_EXEC_MODE"
+print(json.dumps(delta))
+PY
+)"
+
+if ! python3 "$LOOPS_BRIDGE" upsert --json "$DELTA_JSON" --actor "loops.amend" >&2; then
+  echo "FAIL: bridge upsert failed; scope file was updated but DB write failed — file friction immediately" >&2
+  exit 1
+fi
+
+# --- Write narrative amend-receipt YAML ---
+RECEIPTS_DIR="$SPINE_STATE/domain-state/engine-loop-lifecycle"
+mkdir -p "$RECEIPTS_DIR"
+RECEIPT_PATH="$RECEIPTS_DIR/loops-amend-${LOOP_ID}-${TS//[:Z]/}.yaml"
+RUN_KEY="${SPINE_CAP_RUN_KEY:-loops-amend-direct}"
+
+python3 - "$RECEIPT_PATH" "$LOOP_ID" "$REASON" "$TS" "$RUN_KEY" \
+  "$db_horizon" "$db_status" "$db_priority" "$db_readiness" "$db_exec_mode" \
+  "$RESOLVED_HORIZON" "$RESOLVED_STATUS" "$RESOLVED_PRIORITY" "$RESOLVED_READINESS" "$RESOLVED_EXEC_MODE" \
+  <<'PY'
+import sys, yaml
+(_, path, loop_id, reason, ts, run_key,
+ b_horizon, b_status, b_priority, b_readiness, b_exec_mode,
+ a_horizon, a_status, a_priority, a_readiness, a_exec_mode) = sys.argv
+doc = {
+    "receipt_class": "loops_amend",
+    "loop_id": loop_id,
+    "amended_at_utc": ts,
+    "actor": "loops.amend",
+    "reason": reason,
+    "run_key": run_key,
+    "before": {
+        "horizon": b_horizon,
+        "status": b_status,
+        "priority": b_priority,
+        "execution_readiness": b_readiness,
+        "execution_mode": b_exec_mode,
+    },
+    "after": {
+        "horizon": a_horizon,
+        "status": a_status,
+        "priority": a_priority,
+        "execution_readiness": a_readiness,
+        "execution_mode": a_exec_mode,
+    },
+    "telemetry_preservation": {
+        "scope_file_body_unchanged": True,
+        "scope_file_deleted_or_recreated": False,
+        "raw_sqlite_mutation": False,
+        "resurrection_attempted": False,
+    },
+}
+with open(path, "w", encoding="utf-8") as f:
+    yaml.safe_dump(doc, f, sort_keys=False)
+PY
+
+# --- Final report ---
+if (( JSON_OUTPUT )); then
+python3 - "$LOOP_ID" "$RECEIPT_PATH" "$REASON" \
+  "$db_horizon" "$db_status" "$db_priority" "$db_readiness" "$db_exec_mode" \
+  "$RESOLVED_HORIZON" "$RESOLVED_STATUS" "$RESOLVED_PRIORITY" "$RESOLVED_READINESS" "$RESOLVED_EXEC_MODE" <<'PY'
+import json, sys
+(_, lid, rp, reason,
+ b_h, b_s, b_p, b_r, b_e,
+ a_h, a_s, a_p, a_r, a_e) = sys.argv
+print(json.dumps({
+    "loop_id": lid,
+    "receipt": rp,
+    "reason": reason,
+    "before": {"horizon": b_h, "status": b_s, "priority": b_p, "execution_readiness": b_r, "execution_mode": b_e},
+    "after":  {"horizon": a_h, "status": a_s, "priority": a_p, "execution_readiness": a_r, "execution_mode": a_e},
+}, indent=2))
+PY
+else
+  echo "OK: amended $LOOP_ID"
+  for c in "${CHANGES[@]}"; do echo "  $c"; done
+  echo "  reason: $REASON"
+  echo "  receipt: $RECEIPT_PATH"
+fi

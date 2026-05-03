@@ -4459,6 +4459,47 @@ capabilities:
         - flag: --dod
           description: Definition of done item (repeatable)
     layer: L1_engine
+  loops.amend:
+    description: Smallest governed lifecycle repair primitive for loops. Mutates lifecycle metadata (horizon, status follows, priority, execution_readiness, execution_mode) on an existing governed loop without deleting, rewriting, or recreating the scope projection or DB row. Telemetry-preserving by design — scope file body is never touched, only governed frontmatter lifecycle keys are updated in place; SQLite authority row is updated via the loops-authority-bridge upsert delta. Refuses closed/archived/landed/abandoned/deferred/completed loops (resurrection is a separate primitive not in this slice). Refuses body/objective/success/DOD edits. Refuses no-op invocations. Requires --loop-id and --reason; no reason, no mutation. Writes capability receipt plus a narrative amend-receipt YAML under domain-state/engine-loop-lifecycle/ with before/after lifecycle values.
+    tags:
+      - loops
+      - lifecycle
+      - workflow
+      - repair
+    command: ./ops/plugins/core/lifecycle/bin/loops-amend
+    script_path: ./ops/plugins/core/lifecycle/bin/loops-amend
+    cwd: $SPINE_CODE
+    safety: mutating
+    state_authority: shared_authority_db
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+      - stdout
+      - $SPINE_STATE/loop-scopes/
+      - $SPINE_STATE/domain-state/engine-loop-lifecycle/
+    domain: core
+    plane: fabric
+    args:
+      required:
+        - flag: --loop-id
+          description: Existing loop identity (LOOP-NAME-YYYYMMDD)
+        - flag: --reason
+          description: Free-form justification recorded in receipt; no reason, no mutation
+      optional:
+        - flag: --horizon
+          description: "Time horizon: now, later, or future (status follows: now=>active, else=>planned)"
+        - flag: --priority
+          description: "Priority level: high, medium, or low"
+        - flag: --readiness
+          description: "Execution readiness: runnable or blocked"
+        - flag: --execution-mode
+          description: "Execution mode: single_worker or orchestrator_subagents"
+        - flag: --dry-run
+          description: Show what would change without mutating
+        - flag: --json
+          description: Emit machine-readable result
+    layer: L1_engine
   worktree.lease.heartbeat:
     description: Refresh or create the managed worktree lease marker and keep it excluded from git status.
     tags:
