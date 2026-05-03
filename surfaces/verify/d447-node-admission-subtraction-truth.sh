@@ -297,6 +297,8 @@ placement_text = placement_contract.read_text(encoding="utf-8")
 for token in [
     "canonical_update_capability: infra.host.code.deploy.update",
     "canonical_drift_readback_capability: infra.host.code.drift.status",
+    "canonical_receipt_root: /md1400/spine/state/domain-state/host-code-deploy",
+    "canonical_receipt_ssh_targets:",
     "macbook_to_pve_rsync_as_normal_sync",
     "watcher_node_witness_independence_no_checkout",
     "git_pull_ff_only",
@@ -337,7 +339,16 @@ if not deploy_cap_script.is_file():
 if not os.access(str(deploy_cap_script), os.X_OK):
     fail("host-code-deploy-update must be executable")
 deploy_cap_text = deploy_cap_script.read_text(encoding="utf-8")
-for token in ["infra.host.code.deploy.update", "runtime.checkout.placement.yaml", "dirty_blocked", "ahead_or_diverged_blocked", "git pull --ff-only origin main"]:
+for token in [
+    "infra.host.code.deploy.update",
+    "runtime.checkout.placement.yaml",
+    "dirty_blocked",
+    "ahead_or_diverged_blocked",
+    "git pull --ff-only origin main",
+    "mirror_canonical_receipt",
+    "canonical_receipt_root",
+    "canonical_receipt_ssh_targets",
+]:
     if token not in deploy_cap_text:
         fail(f"host-code-deploy-update missing PACKET-616 token: {token}")
 caps_doc_deploy = (caps_map.get("infra.host.code.deploy.update") or {})
@@ -352,6 +363,13 @@ if "infra/host/bin/host-code-drift-status" not in status_sh_text:
     fail("ops/commands/status.sh brief output must integrate host-code-drift-status (PACKET-589 ops status --brief deliverable)")
 if "Code drift:" not in status_sh_text:
     fail("ops/commands/status.sh must emit 'Code drift:' field in --brief output (PACKET-589)")
+
+loops_bridge = root / "ops/plugins/core/lifecycle/bin/loops-authority-bridge"
+if not loops_bridge.is_file():
+    fail("loops-authority-bridge missing")
+bridge_text = loops_bridge.read_text(encoding="utf-8")
+if "SPINE_STATE is required" not in bridge_text or "shadow shared_authority.db writes" not in bridge_text:
+    fail("loops-authority-bridge must fail closed when SPINE_STATE is missing; no ~/code/.runtime shadow authority fallback")
 
 # PACKET-592 immediate item 1: authority reachability classifier must exist,
 # be wired into capabilities.yaml, and integrate into ops status --brief.

@@ -82,6 +82,17 @@ def ssh_base(checkout: dict[str, Any], target: str) -> list[str]:
     return cmd
 
 
+def generic_ssh_base(target: str) -> list[str]:
+    return [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={CONNECT_TIMEOUT_SECONDS}",
+        target,
+    ]
+
+
 def remote_script(path: str, action: str) -> str:
     q_path = shlex.quote(path)
     if action == "inspect":
@@ -244,16 +255,87 @@ def update_checkout(checkout: dict[str, Any], dry_run: bool) -> dict[str, Any]:
     return record
 
 
-def write_receipt(payload: dict[str, Any]) -> Path:
+def write_remote_text(target: str, path: str, text: str) -> tuple[int, str, str]:
+    script = f"mkdir -p {shlex.quote(str(Path(path).parent))} && cat > {shlex.quote(path)}"
+    try:
+        proc = subprocess.run(
+            generic_ssh_base(target) + [script],
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", "canonical receipt write timed out"
+
+
+def mirror_canonical_receipt(placement: dict[str, Any], latest_name: str, stamped_name: str, text: str) -> dict[str, Any]:
+    policy = placement.get("policy") or {}
+    canonical_root = str(policy.get("canonical_receipt_root") or "").strip()
+    targets = policy.get("canonical_receipt_ssh_targets") or []
+    result: dict[str, Any] = {
+        "attempted": bool(canonical_root),
+        "status": "not_configured",
+        "canonical_root": canonical_root or None,
+        "target": None,
+        "latest_path": None,
+        "stamped_path": None,
+    }
+    if not canonical_root:
+        return result
+
+    canonical_latest = str(Path(canonical_root) / latest_name)
+    canonical_stamped = str(Path(canonical_root) / stamped_name)
+    local_root = receipt_dir().resolve()
+    if local_root == Path(canonical_root):
+        result.update(
+            {
+                "status": "local_canonical",
+                "latest_path": canonical_latest,
+                "stamped_path": canonical_stamped,
+            }
+        )
+        return result
+
+    last_error = ""
+    for target in targets:
+        rc1, out1, err1 = write_remote_text(target, canonical_latest, text)
+        if rc1 != 0:
+            last_error = (err1 or out1).strip()[:500]
+            continue
+        rc2, out2, err2 = write_remote_text(target, canonical_stamped, text)
+        if rc2 != 0:
+            last_error = (err2 or out2).strip()[:500]
+            continue
+        result.update(
+            {
+                "status": "mirrored",
+                "target": target,
+                "latest_path": canonical_latest,
+                "stamped_path": canonical_stamped,
+            }
+        )
+        return result
+
+    result.update({"status": "failed", "error": last_error or "no canonical receipt target succeeded"})
+    return result
+
+
+def write_receipt(payload: dict[str, Any], placement: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
     root = receipt_dir()
     root.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
-    latest = root / "runtime-checkout-deploy-latest.yaml"
-    stamped = root / f"runtime-checkout-deploy-{stamp}.yaml"
+    latest_name = "runtime-checkout-deploy-latest.yaml"
+    stamped_name = f"runtime-checkout-deploy-{stamp}.yaml"
+    latest = root / latest_name
+    stamped = root / stamped_name
+    payload["local_receipt"] = str(latest)
     text = yaml.safe_dump(payload, sort_keys=False)
     latest.write_text(text, encoding="utf-8")
     stamped.write_text(text, encoding="utf-8")
-    return latest
+    canonical = mirror_canonical_receipt(placement, latest_name, stamped_name, text)
+    return latest, canonical
 
 
 def main() -> int:
@@ -292,20 +374,25 @@ def main() -> int:
         "overall_status": overall,
         "records": records,
     }
-    receipt = write_receipt(payload)
+    receipt, canonical_receipt = write_receipt(payload, placement)
     payload["receipt"] = str(receipt)
+    payload["canonical_receipt"] = canonical_receipt
+    if canonical_receipt.get("status") == "failed":
+        payload["overall_status"] = "attention"
 
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
         print("infra.host.code.deploy.update")
-        print(f"overall: {overall}")
+        print(f"overall: {payload['overall_status']}")
         print(f"receipt: {receipt}")
+        if canonical_receipt.get("latest_path"):
+            print(f"canonical_receipt: {canonical_receipt.get('latest_path')}")
         for record in records:
             before = (record.get("pre_head") or "-")[:8]
             after = (record.get("post_head") or record.get("pre_head") or "-")[:8]
             print(f"  {record['host_id']:<22} {record['status']:<28} {before} -> {after}")
-    return 1 if overall == "attention" else 0
+    return 1 if payload["overall_status"] == "attention" else 0
 
 
 if __name__ == "__main__":
