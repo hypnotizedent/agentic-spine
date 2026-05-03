@@ -131,6 +131,37 @@ def remote_run(user: str, host: str, command: str, timeout: int = 12) -> tuple[i
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
+class ProbeFailure(RuntimeError):
+    """Raised when the remote probe is non-authoritative (SSH failed,
+    base_path missing, or find errored). PACKET-607 contract: when
+    raised, the cap MUST NOT write a receipt — silently writing a
+    "missing" receipt overwrites known-good state on transient network
+    flap. Caller handles by exiting non-zero with diagnostic."""
+
+    def __init__(self, summary: str, diagnostics: dict[str, Any]) -> None:
+        super().__init__(summary)
+        self.summary = summary
+        self.diagnostics = diagnostics
+
+
+def probe_base_path_exists(base_path: str) -> dict[str, Any]:
+    """Pre-flight check that the canonical backup base_path is reachable
+    on pve and is a directory. PACKET-607: separates "ssh failed / path
+    missing" from "directory exists, no artifacts." Without this
+    distinction, a transient Tailscale flap silently rewrites the
+    receipt to 'missing.'
+    """
+    cmd = f"test -d {shlex.quote(base_path)} && echo OK || echo MISSING"
+    rc, out, err = remote_run(PVE_USER, PVE_HOST_TAILSCALE, cmd)
+    return {
+        "rc": rc,
+        "stderr": err,
+        "stdout": out,
+        "ssh_ok": rc == 0,
+        "path_exists": (rc == 0 and out.strip() == "OK"),
+    }
+
+
 def enumerate_artifacts(base_path: str, vmid: int) -> list[dict[str, Any]]:
     """SSH to pve and list backup artifacts matching the declared pattern.
     Read-only. Returns sorted list of {name, size_bytes, mtime_iso}.
@@ -138,18 +169,28 @@ def enumerate_artifacts(base_path: str, vmid: int) -> list[dict[str, Any]]:
     The declared artifact shape is `vzdump-qemu-{vmid}-*.vma.zst` (Proxmox
     cold-canonical lane). We list both .vma.zst (image) and .log (sibling
     metadata) to surface the full evidence trail.
+
+    PACKET-607: raises ProbeFailure when the SSH probe is
+    non-authoritative (rc != 0 or stderr non-empty). Caller refuses to
+    write the receipt in that case so transient network flaps do NOT
+    overwrite the previously-known-good state.
     """
     artifacts: list[dict[str, Any]] = []
     # `find` returns one record per file with size + mtime. ISO-format the
-    # timestamp on the remote side to avoid timezone surprises.
+    # timestamp on the remote side to avoid timezone surprises. We DO NOT
+    # suppress find's stderr here (PACKET-607): find errors must surface
+    # so the caller can refuse to write the receipt on probe failure.
     cmd = (
         f"find {shlex.quote(base_path)} -maxdepth 1 -type f "
         f"-name {shlex.quote(f'vzdump-qemu-{vmid}-*')} "
-        "-printf '%f\\t%s\\t%TY-%Tm-%TdT%TH:%TM:%TSZ\\n' 2>/dev/null"
+        "-printf '%f\\t%s\\t%TY-%Tm-%TdT%TH:%TM:%TSZ\\n'"
     )
     rc, out, err = remote_run(PVE_USER, PVE_HOST_TAILSCALE, cmd)
     if rc != 0:
-        return artifacts
+        raise ProbeFailure(
+            f"enumerate_artifacts probe failed (rc={rc})",
+            {"rc": rc, "stderr": err, "stdout": out, "command": cmd},
+        )
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) < 3:
@@ -260,6 +301,30 @@ def build_proof() -> dict[str, Any]:
             "classification": restore_target_block.get("classification"),
         }
 
+    # PACKET-607 probe-failure discipline: pre-flight check that the
+    # canonical base_path is reachable on pve. If SSH fails or the
+    # directory doesn't exist remotely, the probe is non-authoritative
+    # — raise ProbeFailure so main() can refuse to overwrite a known-good
+    # receipt. Without this check, a transient Tailscale flap silently
+    # writes 'missing' over 'fresh_evidence' and the readback lies.
+    base_path_check = probe_base_path_exists(base_path) if base_path else {
+        "ssh_ok": False,
+        "path_exists": False,
+        "stderr": "no base_path declared in shop.storage.map.yaml",
+    }
+    if base_path and not base_path_check.get("ssh_ok"):
+        raise ProbeFailure(
+            f"forge.backup_restore.status: SSH probe to {PVE_HOST_TAILSCALE} failed; "
+            f"refusing to overwrite receipt with non-authoritative state",
+            {"phase": "base_path_check", **base_path_check},
+        )
+    if base_path and not base_path_check.get("path_exists"):
+        raise ProbeFailure(
+            f"forge.backup_restore.status: base_path {base_path} does not exist on pve; "
+            f"refusing to overwrite receipt with non-authoritative state",
+            {"phase": "base_path_check", **base_path_check},
+        )
+
     artifacts: list[dict[str, Any]] = []
     if base_path:
         artifacts = enumerate_artifacts(base_path, DEV_TOOLS_VMID)
@@ -335,6 +400,16 @@ def build_proof() -> dict[str, Any]:
                 "at_least_one_fresh_artifact_present" if not image_artifacts else None
             ),
         },
+        "_diagnostics": {
+            "probe_authoritative": True,
+            "base_path_check": base_path_check,
+            "packet_607_note": (
+                "Probe-failure discipline applied: base_path existence pre-checked, "
+                "find errors surfaced. If you see image_count=0, the directory exists "
+                "and contains no matching artifacts (truthful 'missing'), NOT a silent "
+                "SSH failure."
+            ),
+        },
     }
     return proof
 
@@ -397,7 +472,27 @@ def main() -> int:
         print("forge.backup_restore.status self-check PASS")
         return 0
 
-    proof = build_proof()
+    try:
+        proof = build_proof()
+    except ProbeFailure as exc:
+        # PACKET-607: probe is non-authoritative. Refuse to overwrite the
+        # receipt — silent overwrite with "missing" state would lie when
+        # SSH transients or path-resolution errors hit. Existing receipt
+        # (if any) is preserved.
+        existing_receipt = Path(args.out) if args.out else RECEIPT_LATEST
+        receipt_age_note = (
+            f"existing receipt at {existing_receipt} preserved (mtime kept)"
+            if existing_receipt.is_file()
+            else "no existing receipt to preserve"
+        )
+        print(
+            f"forge.backup_restore.status: PROBE FAILED — receipt NOT written.\n"
+            f"  reason:  {exc.summary}\n"
+            f"  details: {json.dumps(exc.diagnostics, default=str)}\n"
+            f"  state:   {receipt_age_note}",
+            file=sys.stderr,
+        )
+        return 3
 
     if not args.no_write:
         out_path = Path(args.out) if args.out else RECEIPT_LATEST

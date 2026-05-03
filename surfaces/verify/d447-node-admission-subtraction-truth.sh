@@ -553,6 +553,15 @@ if "forge.backup_restore.status" not in forge_br_text or "backup_restore_proof" 
 for required_term in ("resolve_runtime_body", "resolve_vm_lifecycle_entry", "resolve_backup_lane", "enumerate_artifacts", "classify_freshness", "restore_path_shape"):
     if required_term not in forge_br_text:
         fail(f"forge-backup-restore-status must implement {required_term} (Stage 1 read-only probe set)")
+# PACKET-607 probe-failure discipline: cap MUST distinguish "ssh failed /
+# path missing" from "directory exists, no artifacts." Without this guard,
+# a transient Tailscale flap silently overwrites a known-good receipt with
+# 'missing' state. The cap must implement probe_base_path_exists +
+# ProbeFailure exception and refuse to write the receipt on
+# non-authoritative probe.
+for required_term in ("ProbeFailure", "probe_base_path_exists", "probe_authoritative", "PROBE FAILED"):
+    if required_term not in forge_br_text:
+        fail(f"forge-backup-restore-status must implement {required_term} (PACKET-607 probe-failure discipline)")
 caps_doc_forge_br = (caps_map.get("forge.backup_restore.status") or {})
 if caps_doc_forge_br.get("safety") != "read-only":
     fail("forge.backup_restore.status must be safety: read-only (PACKET-602 — Stage 1 must not mutate forge state, must not create backups, must not run restore)")
