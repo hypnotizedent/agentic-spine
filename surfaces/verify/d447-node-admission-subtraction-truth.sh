@@ -96,7 +96,7 @@ if "enabled" not in db_authority:
     fail("runtime.bootstrap.contract.yaml#db_authority.enabled must be explicitly declared (true|false)")
 if not isinstance(db_authority.get("enabled"), bool):
     fail("runtime.bootstrap.contract.yaml#db_authority.enabled must be a boolean")
-for required_field in ("host", "user", "host_addr_lan", "code_path", "authority_hostnames", "per_host_ssh_key", "routing_safety_classes"):
+for required_field in ("host", "user", "host_addr_lan", "host_addr_tailscale", "code_path", "authority_hostnames", "per_host_ssh_key", "routing_safety_classes"):
     if required_field not in db_authority:
         fail(f"runtime.bootstrap.contract.yaml#db_authority.{required_field} missing")
 if not isinstance(db_authority.get("authority_hostnames"), list) or not db_authority.get("authority_hostnames"):
@@ -114,6 +114,10 @@ if "_route_to_db_authority_if_needed" not in cap_sh_text:
     fail("ops/commands/cap.sh missing _route_to_db_authority_if_needed routing function (D.3a contract requires routing code present, even when enabled=false)")
 if "db_authority.enabled" not in cap_sh_text:
     fail("ops/commands/cap.sh routing function must read db_authority.enabled from contract before routing")
+if "host_addr_tailscale" not in cap_sh_text or "SPINE_DB_AUTHORITY_HOST_ADDR_TAILSCALE" not in cap_sh_text:
+    fail("ops/commands/cap.sh routing function must support automatic Tailscale fallback for db_authority routing")
+if "SPINE_DB_AUTHORITY_ROUTE" not in cap_sh_text:
+    fail("ops/commands/cap.sh routing function must support route-order override/auto-selection for off-LAN db_authority routing")
 
 # Phase D.3c: read-path routing extension. cap.sh routing must inspect a cap's
 # state_authority field; the lib-level db_authority_guard must exist; the

@@ -37,6 +37,7 @@ db_authority:
   host: pve
   user: root
   host_addr_lan: "$host_addr"
+  host_addr_tailscale: "$host_addr"
   code_path: /opt/agentic-spine
   authority_hostnames:
     - pve

@@ -1166,9 +1166,9 @@ PY
 #   any other code = routed; this is the routed-cap's actual exit code; caller
 #   should propagate it without writing a local receipt.
 #
-# Failure semantics: if SSH is unreachable AND db_authority.enabled is true,
-# this function returns a non-126 non-zero code and the caller propagates it
-# — there is NO silent fallback to local DB writes.
+# Failure semantics: if all declared SSH authority routes are unreachable AND
+# db_authority.enabled is true, this function returns a non-126 non-zero code
+# and the caller propagates it — there is NO silent fallback to local DB writes.
 _route_to_db_authority_if_needed() {
     local cap_name="$1"
     shift || true
@@ -1223,9 +1223,10 @@ _route_to_db_authority_if_needed() {
         return 126
     fi
 
-    local user host_addr code_path key_path
+    local user host_addr host_addr_tailscale code_path key_path
     user="${SPINE_DB_AUTHORITY_USER:-$(yq e '.db_authority.user // "root"' "$contract" 2>/dev/null)}"
     host_addr="${SPINE_DB_AUTHORITY_HOST_ADDR:-$(yq e '.db_authority.host_addr_lan // ""' "$contract" 2>/dev/null)}"
+    host_addr_tailscale="${SPINE_DB_AUTHORITY_HOST_ADDR_TAILSCALE:-$(yq e '.db_authority.host_addr_tailscale // ""' "$contract" 2>/dev/null)}"
     code_path="${SPINE_DB_AUTHORITY_CODE:-$(yq e '.db_authority.code_path // "/opt/agentic-spine"' "$contract" 2>/dev/null)}"
     key_path="${SPINE_DB_AUTHORITY_SSH_KEY:-$(yq e ".db_authority.per_host_ssh_key.\"${local_hostname}\" // \"\"" "$contract" 2>/dev/null)}"
     local connect_timeout
@@ -1244,17 +1245,63 @@ _route_to_db_authority_if_needed() {
     local remote_cmd
     remote_cmd="cd $(printf %q "$code_path") && ./bin/ops cap run $(printf %q "$cap_name")${quoted_args}"
 
-    local routed_rc=0
-    set +e
-    if [[ -n "$key_path" && "$key_path" != "null" ]]; then
-        ssh -i "$key_path" -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
-            "${user}@${host_addr}" "${remote_cmd}"
-    else
-        ssh -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
-            "${user}@${host_addr}" "${remote_cmd}"
+    local routed_rc=0 route_addr route_label attempted_routes=()
+    local route_addrs=("$host_addr")
+    local route_labels=("lan")
+    if [[ -n "$host_addr_tailscale" && "$host_addr_tailscale" != "null" && "$host_addr_tailscale" != "$host_addr" ]]; then
+        route_addrs+=("$host_addr_tailscale")
+        route_labels+=("tailscale")
     fi
-    routed_rc=$?
-    set -e
+
+    if [[ "${SPINE_DB_AUTHORITY_ROUTE:-auto}" == "tailscale" && "${#route_addrs[@]}" -gt 1 ]]; then
+        route_addrs=("$host_addr_tailscale" "$host_addr")
+        route_labels=("tailscale" "lan")
+    elif [[ "${SPINE_DB_AUTHORITY_ROUTE:-auto}" == "auto" && "${#route_addrs[@]}" -gt 1 ]]; then
+        # If the LAN address would route through a tunnel interface, the client
+        # is off-LAN. Try Tailscale first so normal routed caps do not sit on a
+        # LAN connect timeout before doing the only reachable thing.
+        local lan_route=""
+        if command -v route >/dev/null 2>&1; then
+            lan_route="$(route get "$host_addr" 2>/dev/null || true)"
+        elif command -v ip >/dev/null 2>&1; then
+            lan_route="$(ip route get "$host_addr" 2>/dev/null || true)"
+        fi
+        if [[ "$lan_route" == *"utun"* || "$lan_route" == *"tailscale"* || "$lan_route" == *"tailscale0"* ]]; then
+            route_addrs=("$host_addr_tailscale" "$host_addr")
+            route_labels=("tailscale" "lan")
+        fi
+    fi
+
+    local idx
+    for idx in "${!route_addrs[@]}"; do
+        route_addr="${route_addrs[$idx]}"
+        route_label="${route_labels[$idx]}"
+        attempted_routes+=("${route_label}:${route_addr}")
+        set +e
+        if [[ -n "$key_path" && "$key_path" != "null" ]]; then
+            ssh -i "$key_path" -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
+                "${user}@${route_addr}" "${remote_cmd}"
+        else
+            ssh -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
+                "${user}@${route_addr}" "${remote_cmd}"
+        fi
+        routed_rc=$?
+        set -e
+
+        if [[ "$routed_rc" -eq 0 ]]; then
+            return 0
+        fi
+
+        # SSH transport failures should try the next declared authority route.
+        # Remote cap failures are real results from the authority host and must
+        # not be retried on a different route.
+        case "$routed_rc" in
+            255) ;;
+            *) return "$routed_rc" ;;
+        esac
+    done
+
+    echo "cap.sh: db_authority routing failed via all declared routes: ${attempted_routes[*]}" >&2
 
     return "$routed_rc"
 }
