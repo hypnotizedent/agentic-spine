@@ -464,7 +464,21 @@ def collect_gap_state(paths: dict[str, Path], loop_status_index: dict[str, str])
         state["orphaned"] = orphaned_rows
         return state
     except Exception as exc:
-        state["message"] = str(exc)
+        # PACKET-596: distinguish "authority routed elsewhere" from "authority broken".
+        # Same pattern as PACKET-586 already applied to loops in status.sh:
+        # DbAuthorityRoutingRequired (raised by db_authority_guard.assert_db_open_safe
+        # when db_authority.enabled=true and the local host is not the authority host)
+        # is the PACKET-582 guard firing correctly. Routed gap reads work via
+        # cap.sh routing — gaps.status returns canonical truth — so the gap
+        # authority is "routed" (operational), not "degraded" (broken).
+        if type(exc).__name__ == "DbAuthorityRoutingRequired":
+            state["status"] = "routed"
+            state["message"] = (
+                "db_authority.enabled=true; canonical gaps DB on authority host. "
+                "Use 'bin/ops cap run gaps.status' for routed read."
+            )
+        else:
+            state["message"] = str(exc)
         return state
     finally:
         if conn is not None:
@@ -1199,18 +1213,27 @@ def build_engine_coherence_summary(
     orphaned_wave_count = len(orphaned_waves) if orphaned_waves else 0
     force_close_count = len(override_signals.get("force_close", []))
     dod_override_count = len(override_signals.get("dod_override", []))
+    # PACKET-596: routed authority is operational, not coherence attention.
     historical_override_only = bool(
-        gap_authority_status == "ok"
+        gap_authority_status in {"ok", "routed"}
         and not signal_rows
         and orphaned_wave_count == 0
         and (force_close_count > 0 or dod_override_count > 0)
     )
+    # PACKET-596: routed authority is operational, not coherence attention.
+    # Pre-cutover, gap_authority_status was "ok" or "degraded". Post-cutover
+    # (PACKET-583+), consumer hosts see "routed" when gap reads correctly
+    # route to the canonical authority host via cap.sh. "routed" is the
+    # expected post-migration state for any host that is not the authority
+    # host itself and must not fire engine coherence attention on its own.
+    gap_authority_operational = gap_authority_status in {"ok", "routed"}
     return {
         "signal_gap_ids": sorted(ENGINE_COHERENCE_GAP_IDS),
         "open_gap_signals": signal_rows,
         "open_gap_signal_ids": [row.get("id", "") for row in signal_rows],
         "monitoring_loop_ids": sorted(loop_id for loop_id in monitoring_loop_ids if loop_id),
         "gap_authority_status": gap_authority_status,
+        "gap_authority_operational": gap_authority_operational,
         "gap_projection_parity": gap_state.get("projection_parity", {}),
         "recent_force_close_count": force_close_count,
         "recent_dod_override_count": dod_override_count,
@@ -1218,7 +1241,7 @@ def build_engine_coherence_summary(
         "orphaned_wave_count": orphaned_wave_count,
         "historical_override_only": historical_override_only,
         "needs_attention": bool(
-            gap_authority_status != "ok"
+            (not gap_authority_operational)
             or signal_rows
             or orphaned_wave_count > 0
         ),

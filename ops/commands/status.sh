@@ -334,6 +334,10 @@ closed_loops = []
 planned_loops = []
 all_scopes = []
 anomalies = []
+# PACKET-596: routed authority is operational, not anomalous. Track separately
+# from anomalies so downstream renderers can surface "Loops: routed" without
+# inflating the anomaly count.
+_loops_authority_routed = False
 
 if loops_authority is not None:
     _prior_spine_state = os.environ.get("SPINE_STATE")
@@ -351,12 +355,12 @@ if loops_authority is not None:
         # the local DB is intentionally absent — the canonical DB lives on pve and is
         # reached via cap.sh routing. The DbAuthorityRoutingRequired exception is the
         # PACKET-582 guard firing correctly; it is NOT a degraded condition.
+        # PACKET-596: routed authority is operational, not anomalous. Record the
+        # routed flag in a dedicated variable so downstream renderers can show
+        # "Loops: routed" without inflating the anomaly count.
         _exc_name = type(_exc).__name__
         if _exc_name == "DbAuthorityRoutingRequired":
-            anomalies.append(
-                "LOOP AUTHORITY ROUTED: db_authority.enabled=true; canonical DB on authority host. "
-                "Use 'bin/ops cap run loops.status' for routed read."
-            )
+            _loops_authority_routed = True
         else:
             anomalies.append(f"LOOP AUTHORITY DEGRADED: {_exc}")
     finally:
@@ -1976,10 +1980,13 @@ if mode == "--brief":
     later_count = sum(1 for loop in open_loops if loop.get("horizon", "now") == "later")
     future_count = sum(1 for loop in open_loops if loop.get("horizon", "now") == "future")
     joined_open_loops = int(joined_state_summary.get("open_loops", len(open_loops)) or len(open_loops))
-    # PACKET-586 follow-on: detect routed-elsewhere from the anomalies signal
-    # set when loops_authority.connect raised DbAuthorityRoutingRequired.
-    # Avoid showing misleading "0 open" when DB is just routed elsewhere.
-    _loops_routed = any("LOOP AUTHORITY ROUTED" in str(a) for a in anomalies)
+    # PACKET-586 follow-on: detect routed-elsewhere when loops_authority.connect
+    # raised DbAuthorityRoutingRequired. Avoid showing misleading "0 open" when
+    # DB is just routed elsewhere.
+    # PACKET-596: read from the dedicated _loops_authority_routed flag instead
+    # of scanning the anomalies list — the routed state is operational, not
+    # anomalous, so it no longer pollutes the anomaly count.
+    _loops_routed = _loops_authority_routed
     if _loops_routed and joined_open_loops == 0:
         loop_part = "Loops: routed (use 'bin/ops cap run loops.status')"
     else:
