@@ -97,9 +97,16 @@ warn_check() {
 [[ "$json_mode" -eq 1 ]] || echo "=== ENGINE SMOKE ==="
 [[ "$json_mode" -eq 1 ]] || echo "Scope: plumbing exists (entrypoint, registry, authority). For orchestration proof, use: verify-run honesty"
 
-# E1: bin/ops entrypoint smoke
+# E1: bin/ops entrypoint smoke + engine-cap self-check coverage.
+# PACKET-599 extension: also exercise loops.create --self-check so the
+# BSD-vs-GNU sed divergence (the bug this packet retired) cannot silently
+# recur. Adding new in-place sed sites to loops-create without using the
+# sed_inplace wrapper will fail E1 on whichever platform isn't BSD-by-default.
+# Self-checks invoked here must be: read-only, side-effect-free, sub-second.
 check E1 "bin/ops entrypoint smoke" bash -c "
-    '$ROOT/bin/ops' --help >/dev/null 2>&1 && '$ROOT/bin/ops' cap list >/dev/null 2>&1
+    '$ROOT/bin/ops' --help >/dev/null 2>&1 \
+        && '$ROOT/bin/ops' cap list >/dev/null 2>&1 \
+        && '$ROOT/ops/plugins/core/lifecycle/bin/loops-create' --self-check >/dev/null 2>&1
 "
 
 # E2: ops status --json exits clean

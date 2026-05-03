@@ -17,6 +17,21 @@ source "$ROOT/ops/lib/git-lock.sh"
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
 ARCHIVE_DIR="$SPINE_STATE/archive/closed-loop-scopes"
 
+# Portable in-place sed wrapper. BSD sed (Darwin) requires `-i ''` while GNU
+# sed (Linux) requires `-i` with no argument; mixing the two strands the cap
+# on whichever platform it wasn't authored on. PACKET-599 surfaced this when
+# loops.create routed to pve (Linux) failed with `sed: can't read ...: No
+# such file or directory` because the empty-string was treated as a script
+# argument by GNU sed. Use this wrapper for every in-place edit; do NOT
+# call `sed -i` directly anywhere else in this script.
+sed_inplace() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
+
 # Posture enforcement: reject loop creation during converge posture.
 posture_guard_reject_growth "loops.create"
 TEMPLATE="$ROOT/ops/plugins/core/lifecycle/templates/loop-scope.template.md"
@@ -48,6 +63,49 @@ while [[ $# -gt 0 ]]; do
     --dod)       DOD_ITEMS+=("${2:?--dod requires a value}"); shift 2 ;;
     --force)     FORCE=1; shift ;;
     --json)      JSON_OUTPUT=1; shift ;;
+    --self-check)
+      # Exercise every sed_inplace call shape against a tmp file. Catches
+      # BSD/GNU sed divergence (PACKET-599 root cause) without needing a
+      # live loop birth. Runs on any host that has sed + python3.
+      tmp="$(mktemp)"
+      cat > "$tmp" <<'TMPL'
+horizon: now
+status: active
+execution_readiness: runnable
+execution_mode: single_worker
+human_intent_id: HI-PLACEHOLDER
+TMPL
+      sed_inplace "s/^horizon: now$/horizon: later/" "$tmp"
+      sed_inplace "s/^status: active$/status: planned/" "$tmp"
+      sed_inplace "s/^execution_readiness: runnable$/execution_readiness: blocked/" "$tmp"
+      sed_inplace "s/^execution_mode: single_worker$/execution_mode: orchestrator_subagents/" "$tmp"
+      # Multi-line append (the exact shape that broke on Linux):
+      sed_inplace "/^execution_mode:/a\\
+source_ref: \"self-check\"
+" "$tmp"
+      sed_inplace "/^human_intent_id:/a\\
+driven_by_intents:\\
+  - HI-PLACEHOLDER
+" "$tmp"
+      # Validate every expected line is present after editing.
+      for expected in \
+        "^horizon: later$" \
+        "^status: planned$" \
+        "^execution_readiness: blocked$" \
+        "^execution_mode: orchestrator_subagents$" \
+        "^source_ref: " \
+        "^driven_by_intents:$"
+      do
+        if ! grep -qE "$expected" "$tmp"; then
+          echo "loops.create self-check FAIL: missing expected line: $expected" >&2
+          rm -f "$tmp"
+          exit 1
+        fi
+      done
+      rm -f "$tmp"
+      echo "loops.create self-check PASS (sed_inplace portable on $(uname -s))"
+      exit 0
+      ;;
     -h|--help)
       echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low]"
       echo "       [--horizon now|later|future] [--readiness runnable|blocked]"
@@ -229,15 +287,15 @@ sed \
 
 # Override horizon/readiness if non-default values specified
 if [[ "$HORIZON" != "now" ]]; then
-  sed -i '' "s/^horizon: now$/horizon: ${HORIZON}/" "$SCOPE_FILE_TMP"
+  sed_inplace "s/^horizon: now$/horizon: ${HORIZON}/" "$SCOPE_FILE_TMP"
   # Boundary model: deferred loops get status=planned, not active
-  sed -i '' "s/^status: active$/status: planned/" "$SCOPE_FILE_TMP"
+  sed_inplace "s/^status: active$/status: planned/" "$SCOPE_FILE_TMP"
 fi
 if [[ "$READINESS" != "runnable" ]]; then
-  sed -i '' "s/^execution_readiness: runnable$/execution_readiness: ${READINESS}/" "$SCOPE_FILE_TMP"
+  sed_inplace "s/^execution_readiness: runnable$/execution_readiness: ${READINESS}/" "$SCOPE_FILE_TMP"
 fi
 if [[ "$EXEC_MODE" != "single_worker" ]]; then
-  sed -i '' "s/^execution_mode: single_worker$/execution_mode: ${EXEC_MODE}/" "$SCOPE_FILE_TMP"
+  sed_inplace "s/^execution_mode: single_worker$/execution_mode: ${EXEC_MODE}/" "$SCOPE_FILE_TMP"
 fi
 yaml_quote() {
   python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"
@@ -247,7 +305,7 @@ insert_frontmatter_field_after_execution_mode() {
   local value="$2"
   local quoted
   quoted="$(yaml_quote "$value")"
-  sed -i '' "/^execution_mode:/a\\
+  sed_inplace "/^execution_mode:/a\\
 ${key}: ${quoted}
 " "$SCOPE_FILE_TMP"
 }
@@ -256,7 +314,7 @@ if [[ -n "$SOURCE_REF" ]]; then
 fi
 if [[ -n "$HUMAN_INTENT_ID" ]]; then
   insert_frontmatter_field_after_execution_mode "human_intent_id" "$HUMAN_INTENT_ID"
-  sed -i '' "/^human_intent_id:/a\\
+  sed_inplace "/^human_intent_id:/a\\
 driven_by_intents:\\
   - ${HUMAN_INTENT_ID}
 " "$SCOPE_FILE_TMP"
