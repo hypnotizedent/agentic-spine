@@ -299,7 +299,31 @@ node_types:
             stage_2_enforcement: future
             stage_2_blocked_until: structural_enforcement_landed_with_agent_identity_separation
         runner_cache_boundary_proof:
-          requirement: "Runner caches and ephemeral runner state cannot leak across jobs/branches/repos. Proof: cache-scope readback + clean-room job demonstration that no prior-job artifact bleeds into a fresh job."
+          source:
+            - ops/plugins/infra/host/bin/forge-runner-cache-boundary-status
+            - ops/bindings/node.role.contract.yaml
+          requirement: |
+            Two-stage proof. Stage 1 (read-only enumeration + cache-scope
+            classification): runner registration metadata enumerated with
+            scope (per_repo / per_owner_global / instance_global) — token_hash
+            and token_salt EXPLICITLY excluded; runner data dir stat-only
+            because /data/.runner contains a registration token; cache
+            directory layout enumerated (file/dir names + sizes only — no
+            content reads) for /root/.cache/act and /root/.cache/actcache;
+            volume mounts inspected (docker.sock visibility is load-bearing);
+            action_run history counted. Cache scope classified as
+            isolated_per_job / shared_per_runner / unbounded with named gaps.
+            Stage 2 (mutating clean-room job demonstration, FUTURE): two
+            synthetic jobs are spawned and proven to leak no artifact between
+            them; runner caches and ephemeral runner state are demonstrated
+            to NOT cross job/branch/repo boundaries. Stage 1 is the current
+            proof_ref artifact. Stage 2 advances when clean-room
+            demonstration produces a passing receipt.
+          proof_ref: "$SPINE_STATE/domain-state/forge-node/runner-cache-boundary-proof-latest.yaml"
+          staged_delivery:
+            stage_1_enumeration: present_when_proof_ref_artifact_exists
+            stage_2_clean_room_demo: future
+            stage_2_blocked_until: clean_room_job_demonstration_runs_two_synthetic_jobs_with_no_observed_leak
         branch_protection_readback_proof:
           source:
             - ops/plugins/infra/host/bin/forge-branch-protection-status
@@ -312,9 +336,9 @@ node_types:
           - branch_protection_readback_proof
           - backup_restore_proof
           - agent_boundary_proof
-      candidate_gaps:
-        dev-tools:
           - runner_cache_boundary_proof
+      candidate_gaps:
+        dev-tools: []
     physical_separation_posture:
       operator_console: permitted_no_preference
       execution_host: preferred

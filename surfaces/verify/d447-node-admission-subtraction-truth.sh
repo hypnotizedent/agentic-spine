@@ -616,6 +616,62 @@ if "agent_boundary_proof" not in present_for_devtools:
 if "agent_boundary_proof" in gaps_for_devtools:
     fail("agent_boundary_proof must be removed from candidate_gaps.dev-tools when present in proofs_present (no double-listing)")
 
+# PACKET-605 (runner_cache_boundary_proof Stage 1): the fifth and final
+# proof on the forge_node Stage 1 ladder. Stage 1 is read-only enumeration
+# of runner registration scope + cache layout + volume mounts + action_run
+# history; Stage 2 (mutating clean-room job demonstration, FUTURE) is
+# explicitly out of scope. Locks: cap script exists + executable + self-
+# identifies as Stage 1; cap is registered safety: read-only; cap NEVER
+# reads /data/.runner contents (token-bearing) or token_hash/token_salt;
+# runner_cache_boundary_proof has a proof_ref pointing at the receipt
+# path; the proof is listed in proofs_present.dev-tools and removed from
+# candidate_gaps; the requirement text declares the staged_delivery block
+# (operator-approved 2026-05-02 staged-delivery model). Subtraction:
+# runner_cache_boundary_proof retired from candidate_gaps -> proofs_present
+# (closing the Stage 1 ladder to 5/5). Extension of D447 only — NO new D-gate.
+forge_rc_script = root / "ops/plugins/infra/host/bin/forge-runner-cache-boundary-status"
+if not forge_rc_script.is_file():
+    fail("ops/plugins/infra/host/bin/forge-runner-cache-boundary-status missing (PACKET-605 runner_cache_boundary_proof Stage 1)")
+if not os.access(str(forge_rc_script), os.X_OK):
+    fail("forge-runner-cache-boundary-status must be executable")
+forge_rc_text = forge_rc_script.read_text(encoding="utf-8")
+if "forge.runner_cache_boundary.status" not in forge_rc_text or "runner_cache_boundary_proof" not in forge_rc_text:
+    fail("forge-runner-cache-boundary-status must self-identify as forge.runner_cache_boundary.status capability and emit runner_cache_boundary_proof Stage 1 receipts")
+for required_term in ("probe_runner_registration_metadata", "probe_runner_data_dir", "probe_cache_layout", "probe_volume_mounts", "classify_cache_scope"):
+    if required_term not in forge_rc_text:
+        fail(f"forge-runner-cache-boundary-status must implement {required_term} (Stage 1 read-only probe set)")
+# Token-redaction discipline locks: the cap MUST NOT read /data/.runner
+# contents (file contains a registration token) and MUST NOT read
+# token_hash/token_salt fields from action_runner.
+for forbidden_pattern in ("cat /data/.runner", "cat \"/data/.runner\""):
+    if forbidden_pattern in forge_rc_text:
+        fail(f"forge-runner-cache-boundary-status must NOT read /data/.runner contents (token-bearing); found pattern: {forbidden_pattern}")
+if "token_hash" in forge_rc_text and "EXPLICITLY excluded" not in forge_rc_text:
+    fail("forge-runner-cache-boundary-status references token_hash without an EXPLICITLY excluded boundary comment — token-redaction discipline must be visible")
+caps_doc_forge_rc = (caps_map.get("forge.runner_cache_boundary.status") or {})
+if caps_doc_forge_rc.get("safety") != "read-only":
+    fail("forge.runner_cache_boundary.status must be safety: read-only (PACKET-605 — Stage 1 must not mutate forge state, must not run jobs)")
+if caps_doc_forge_rc.get("script_path") != "./ops/plugins/infra/host/bin/forge-runner-cache-boundary-status":
+    fail("forge.runner_cache_boundary.status script_path must point at ops/plugins/infra/host/bin/forge-runner-cache-boundary-status")
+forge_rc_required = (forge_required_proofs.get("runner_cache_boundary_proof") or {})
+if not forge_rc_required.get("proof_ref"):
+    fail("forge_node.required_proofs.runner_cache_boundary_proof must declare proof_ref (PACKET-605 Stage 1 receipt pointer)")
+expected_rc_ref = "$SPINE_STATE/domain-state/forge-node/runner-cache-boundary-proof-latest.yaml"
+if forge_rc_required.get("proof_ref") != expected_rc_ref:
+    fail(f"runner_cache_boundary_proof.proof_ref must equal {expected_rc_ref}")
+rc_staged = forge_rc_required.get("staged_delivery") or {}
+if not rc_staged.get("stage_1_enumeration") or not rc_staged.get("stage_2_clean_room_demo"):
+    fail("runner_cache_boundary_proof.staged_delivery must declare stage_1_enumeration and stage_2_clean_room_demo (operator-approved staged delivery model)")
+if "runner_cache_boundary_proof" not in present_for_devtools:
+    fail("forge_node.promotion_standard.proofs_present.dev-tools must list runner_cache_boundary_proof (PACKET-605 Stage 1 ladder closure to 5/5)")
+if "runner_cache_boundary_proof" in gaps_for_devtools:
+    fail("runner_cache_boundary_proof must be removed from candidate_gaps.dev-tools when present in proofs_present (no double-listing)")
+# Stage-1 ladder closure is honest only when forge_node remains
+# delivered: false until Stage 2 enforcement lands. Operator's instruction:
+# "do not immediately claim forge is 'done' in the human sense."
+if forge_promotion.get("delivered") is True:
+    fail("forge_node.promotion_standard.delivered must remain false until Stage 2 enforcement is delivered (PACKET-605: Stage 1 ladder closed at 5/5 ≠ role delivered)")
+
 # node-role-candidate-status must derive contract status from node.role.contract.yaml
 # so the readback flips from candidate-only to contracted/not-delivered when
 # the nameplate lands. This is the load-bearing piece that makes Phase 4

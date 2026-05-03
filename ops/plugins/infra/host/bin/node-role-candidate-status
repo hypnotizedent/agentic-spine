@@ -250,13 +250,22 @@ def derive_contract_status(node_type_block: dict[str, Any] | None) -> dict[str, 
         pending = list(candidate_gaps.get(candidate_host) or [])
     if not pending and required:
         pending = [p for p in required if p not in proofs_present]
-    delivered = bool(explicit_delivered) or (
-        bool(required) and not pending and len(proofs_present) >= len(required)
-    )
+    # Honor an explicit `delivered:` field over derivation. PACKET-605
+    # surfaced this: forge_node has all 5 Stage 1 proofs present but the
+    # contract keeps `delivered: false` because Stage 2 enforcement is
+    # outstanding. Operator's instruction: "do not immediately claim
+    # forge is 'done' in the human sense" — so an explicit `false` must
+    # NOT be overridden by proof-coverage derivation.
+    if explicit_delivered is True:
+        delivered = True
+    elif explicit_delivered is False:
+        delivered = False
+    else:
+        delivered = (
+            bool(required) and not pending and len(proofs_present) >= len(required)
+        )
     if delivered:
         status_label = "delivered"
-    elif explicit_delivered is False or pending:
-        status_label = "contracted_not_delivered"
     else:
         status_label = "contracted_not_delivered"
     return {
@@ -348,6 +357,8 @@ def compute_next_action(
             "delivered; subsequent work is normal-mode operation, not promotion."
         )
     pending = contract_status.get("proofs_pending") or []
+    required = contract_status.get("required_proofs") or []
+    present = contract_status.get("proofs_present") or []
     if pending:
         # Pick the read-only proof first (status / readback) before
         # mutating proofs (restore drill, agent boundary). Heuristic: any
@@ -356,9 +367,20 @@ def compute_next_action(
         first = (readonly_first or pending)[0]
         return (
             f"{candidate_name} is contracted, not delivered. Proof ladder: "
-            f"{len(contract_status.get('proofs_present') or [])}/{len(contract_status.get('required_proofs') or [])} met. "
+            f"{len(present)}/{len(required)} met. "
             f"Next slice: materialize '{first}' as a read-only governed cap with a fresh receipt. "
             "Boring first proof; no runtime mutation."
+        )
+    # All required proofs present but contract still says delivered: false.
+    # This is the "Stage 1 ladder closed" state — Stage 2 enforcement work
+    # is the natural next move.
+    if required and len(present) >= len(required):
+        return (
+            f"{candidate_name} Stage 1 ladder closed ({len(present)}/{len(required)} read-only proofs "
+            f"present) but contract keeps `delivered: false`. Next slice: pick a Stage 2 enforcement "
+            "step from the staged_delivery blocks (e.g., real backup/restore drill, structural agent-"
+            "boundary enforcement, branch-protection tightening, runner clean-room demonstration). "
+            "Stage 2 is mutating — operator decides which Stage 2 to run first."
         )
     found_packets = [ip for ip in intent_packets if ip.get("found")]
     if not found_packets:

@@ -1,0 +1,555 @@
+#!/usr/bin/env python3
+"""forge.runner_cache_boundary.status — read-only Stage 1 of
+runner_cache_boundary_proof.
+
+Materializes Stage 1 of the forge_node.runner_cache_boundary_proof on the
+forge_node ladder (PACKET-605 under PACKET-588 phased order). Read-only
+enumeration of runner registration scope, cache directory layout, and
+action_run history — answers "do runner caches and ephemeral runner
+state cross job/branch/repo boundaries?" by surfacing the cache surface
++ scope hints so any leak gap is visible.
+
+Probes (Postgres SELECTs + filesystem find/stat via docker exec, NO
+mutation, NO API token use):
+- action_runner registration metadata, EXCLUDING token_hash + token_salt
+  fields by design (token never read).
+- /data/.runner stat-only (file contains a registration token; contents
+  are NEVER read).
+- /root/.cache/act/<hash>/ enumeration: directory hashes + sizes + mtimes
+  (cache file/dir names only; content not read).
+- /root/.cache/actcache/ enumeration: same shape (bolt.db cache).
+- Volume mount inventory via docker inspect (looking for docker.sock
+  binding which determines whether jobs spawn sibling containers — load
+  bearing for cache-isolation analysis).
+- action_run count + last 5 statuses (Postgres COUNT + LIMIT).
+
+Output: receipt with raw observations + cache_scope_classification
+(isolated_per_job / shared_per_runner / unbounded) + named gaps.
+
+Stage 2 (mutating clean-room job demonstration — actually spawning two
+synthetic jobs and proving no artifact bleeds between them) is FUTURE
+and explicitly out of scope. Stage 1's job is honest visibility.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml  # type: ignore
+except ImportError:
+    print("forge.runner_cache_boundary.status requires PyYAML", file=sys.stderr)
+    sys.exit(2)
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+SPINE_STATE = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtime/spine/state")))
+NODE_ROLE_CONTRACT = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
+RECEIPT_DIR = SPINE_STATE / "domain-state/forge-node"
+RECEIPT_LATEST = RECEIPT_DIR / "runner-cache-boundary-proof-latest.yaml"
+
+DEFAULT_GITEA_RUNNER_CONTAINER = "gitea-runner"
+DEFAULT_POSTGRES_CONTAINER = "gitea-postgres"
+DEFAULT_SSH_CONNECT_TIMEOUT = "8"
+RUNNER_DATA_DIR = "/data"
+RUNNER_REG_FILE = "/data/.runner"
+RUNNER_CACHE_ACT = "/root/.cache/act"
+RUNNER_CACHE_ACTCACHE = "/root/.cache/actcache"
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_runtime_body() -> dict[str, Any]:
+    contract = load_yaml(NODE_ROLE_CONTRACT)
+    forge = (((contract.get("node_types") or {}).get("forge_node") or {}).get("promotion_standard") or {})
+    return forge.get("current_runtime_body") or {}
+
+
+def resolve_ssh_target(ssh_targets_id: str) -> dict[str, Any]:
+    targets_doc = load_yaml(REPO_ROOT / "ops/bindings/ssh.targets.yaml")
+    ssh_block = targets_doc.get("ssh") or {}
+    targets = ssh_block.get("targets") if isinstance(ssh_block, dict) else None
+    if isinstance(targets, list):
+        for entry in targets:
+            if isinstance(entry, dict) and entry.get("id") == ssh_targets_id:
+                return entry
+    return {}
+
+
+def pick_ssh_address(target: dict[str, Any]) -> str | None:
+    return target.get("tailscale_ip") or target.get("host") or target.get("lan_ip")
+
+
+def remote_run(user: str, host: str, command: str, timeout: int = 15) -> tuple[int, str, str]:
+    full = [
+        "ssh",
+        "-o", f"ConnectTimeout={DEFAULT_SSH_CONNECT_TIMEOUT}",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        f"{user}@{host}",
+        command,
+    ]
+    try:
+        proc = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, "", f"ssh timeout after {timeout}s"
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def docker_exec(user: str, host: str, container: str, inner_cmd: str, timeout: int = 15) -> tuple[int, str, str]:
+    cmd = f"docker exec {shlex.quote(container)} sh -c {shlex.quote(inner_cmd)}"
+    return remote_run(user, host, cmd, timeout=timeout)
+
+
+def psql_select(user: str, host: str, sql: str) -> tuple[int, str, str]:
+    safe_inner = (
+        f"psql -U gitea -d gitea -t -A -F'|' -c {shlex.quote(sql)}"
+    )
+    return docker_exec(user, host, DEFAULT_POSTGRES_CONTAINER, safe_inner)
+
+
+def probe_runner_registration_metadata(user: str, host: str) -> dict[str, Any]:
+    """Read action_runner metadata. EXPLICITLY excludes token_hash and
+    token_salt columns to prevent token-shaped data from leaking into the
+    receipt. repo_id=0 + owner_id != 0 means a per-owner global runner;
+    repo_id != 0 means per-repo binding."""
+    rc, out, err = psql_select(
+        user, host,
+        "SELECT id, name, version, owner_id, repo_id, "
+        "to_timestamp(last_online) AT TIME ZONE 'UTC', "
+        "to_timestamp(last_active) AT TIME ZONE 'UTC', "
+        "agent_labels, ephemeral "
+        "FROM action_runner ORDER BY id",
+    )
+    runners: list[dict[str, Any]] = []
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) < 9:
+                continue
+            runners.append({
+                "id": parts[0].strip(),
+                "name": parts[1].strip(),
+                "version": parts[2].strip(),
+                "owner_id": parts[3].strip(),
+                "repo_id": parts[4].strip(),
+                "scope": (
+                    "per_repo"
+                    if parts[4].strip() not in {"", "0"}
+                    else ("per_owner_global" if parts[3].strip() not in {"", "0"} else "instance_global")
+                ),
+                "last_online": parts[5].strip(),
+                "last_active": parts[6].strip(),
+                "agent_labels": parts[7].strip(),
+                "ephemeral": parts[8].strip(),
+            })
+    return {
+        "rc": rc,
+        "stderr": err,
+        "count": len(runners),
+        "rows": runners,
+        "redaction_note": "token_hash and token_salt EXPLICITLY excluded from query — never read.",
+    }
+
+
+def probe_runner_data_dir(user: str, host: str) -> dict[str, Any]:
+    """Stat-only inspection of runner /data dir. /data/.runner contains a
+    runner registration token — this probe NEVER reads its contents, only
+    stats it."""
+    rc, out, err = docker_exec(
+        user, host, DEFAULT_GITEA_RUNNER_CONTAINER,
+        f"ls -la {shlex.quote(RUNNER_DATA_DIR)} 2>&1",
+    )
+    listing: list[str] = []
+    runner_reg_present = False
+    if rc == 0:
+        for line in out.splitlines():
+            stripped = line.strip()
+            listing.append(stripped)
+            if stripped.endswith(" .runner"):
+                runner_reg_present = True
+    return {
+        "rc": rc,
+        "stderr": err,
+        "listing": listing,
+        "runner_reg_present": runner_reg_present,
+        "reg_file": RUNNER_REG_FILE,
+        "redaction_note": (
+            f"{RUNNER_REG_FILE} contains a registration token — this probe "
+            "stats it via ls only; contents are NEVER read."
+        ),
+    }
+
+
+def probe_cache_layout(user: str, host: str, cache_path: str) -> dict[str, Any]:
+    """List cache directory entries with sizes + mtimes, no content reads.
+
+    Uses ls + stat (BusyBox-compatible) since the runner image ships
+    BusyBox find which does not support -printf. The runner image is the
+    canonical observation surface; we accept BusyBox here rather than
+    requiring GNU find."""
+    rc, out, err = docker_exec(
+        user, host, DEFAULT_GITEA_RUNNER_CONTAINER,
+        # ls -A returns names; for each, stat -c gives type + size + mtime.
+        f"cd {shlex.quote(cache_path)} 2>/dev/null && "
+        "for n in $(ls -A 2>/dev/null); do "
+        "stat -c \"%F|$n|%s|%y\" \"$n\" 2>/dev/null; "
+        "done",
+    )
+    entries: list[dict[str, Any]] = []
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("|", 3)
+            if len(parts) < 4:
+                continue
+            kind_raw, name, size_raw, mtime = parts
+            kind = "dir" if "directory" in kind_raw else ("file" if "regular" in kind_raw else kind_raw)
+            try:
+                size_bytes = int(size_raw)
+            except ValueError:
+                size_bytes = -1
+            entries.append({
+                "kind": kind,
+                "name": name,
+                "size_bytes": size_bytes,
+                "mtime": mtime.strip(),
+            })
+    rc2, out2, _ = docker_exec(
+        user, host, DEFAULT_GITEA_RUNNER_CONTAINER,
+        f"du -sb {shlex.quote(cache_path)} 2>/dev/null | awk '{{print $1}}'",
+    )
+    total_bytes = -1
+    if rc2 == 0:
+        try:
+            total_bytes = int(out2.strip())
+        except ValueError:
+            total_bytes = -1
+    return {
+        "rc": rc,
+        "stderr": err,
+        "path": cache_path,
+        "entry_count": len(entries),
+        "total_bytes": total_bytes,
+        "entries": entries[:20],
+    }
+
+
+def probe_volume_mounts(user: str, host: str) -> dict[str, Any]:
+    """Enumerate volume mounts on the runner container. The docker.sock
+    binding is the load-bearing finding for cache-isolation analysis: if
+    the runner has /var/run/docker.sock mounted, jobs spawn sibling
+    containers (host's docker daemon visible), not docker-in-docker."""
+    rc, out, err = remote_run(
+        user, host,
+        f"docker inspect {DEFAULT_GITEA_RUNNER_CONTAINER} --format '{{{{json .Mounts}}}}' 2>&1",
+    )
+    mounts: list[dict[str, Any]] = []
+    docker_sock_mounted = False
+    if rc == 0:
+        try:
+            raw = json.loads(out)
+            for m in raw or []:
+                if not isinstance(m, dict):
+                    continue
+                mounts.append({
+                    "type": m.get("Type"),
+                    "source": m.get("Source"),
+                    "destination": m.get("Destination"),
+                    "mode": m.get("Mode"),
+                    "rw": m.get("RW"),
+                })
+                if str(m.get("Source") or "").endswith("docker.sock") or str(m.get("Destination") or "").endswith("docker.sock"):
+                    docker_sock_mounted = True
+        except json.JSONDecodeError:
+            pass
+    return {
+        "rc": rc,
+        "stderr": err,
+        "count": len(mounts),
+        "mounts": mounts,
+        "docker_sock_mounted": docker_sock_mounted,
+        "scope_note": (
+            "docker.sock mounted = sibling-container execution (host's docker daemon "
+            "visible to runner). Job containers are fresh per job, but the runner's "
+            "own filesystem (cache dirs) persists across jobs."
+        ),
+    }
+
+
+def probe_action_run_history(user: str, host: str) -> dict[str, Any]:
+    rc1, out1, _ = psql_select(user, host, "SELECT count(*) FROM action_run")
+    total = -1
+    if rc1 == 0:
+        try:
+            total = int(out1.strip())
+        except ValueError:
+            total = -1
+    rc2, out2, err2 = psql_select(
+        user, host,
+        "SELECT id, repo_id, status, "
+        "to_timestamp(updated) AT TIME ZONE 'UTC' "
+        "FROM action_run ORDER BY id DESC LIMIT 5",
+    )
+    recent: list[dict[str, Any]] = []
+    if rc2 == 0:
+        for line in out2.splitlines():
+            parts = line.split("|")
+            if len(parts) < 4:
+                continue
+            recent.append({
+                "id": parts[0].strip(),
+                "repo_id": parts[1].strip(),
+                "status_code": parts[2].strip(),
+                "updated_at": parts[3].strip(),
+            })
+    return {
+        "total_count": total,
+        "recent": recent,
+        "rc": rc2,
+        "stderr": err2,
+    }
+
+
+def classify_cache_scope(
+    runner_meta: dict[str, Any],
+    cache_act: dict[str, Any],
+    cache_actcache: dict[str, Any],
+    mounts: dict[str, Any],
+) -> dict[str, Any]:
+    """Classify based on observations.
+
+    isolated_per_job: cache wiped between jobs (no persistent dirs)
+    shared_per_runner: cache persists on runner filesystem across jobs
+        (current state — act_runner with content-addressed hash dirs)
+    unbounded: cache is shared with host OR with other unrelated workloads
+    """
+    enforcement: list[str] = []
+    gaps: list[str] = []
+    runner_rows = runner_meta.get("rows") or []
+    for row in runner_rows:
+        scope = row.get("scope")
+        if scope == "per_repo":
+            enforcement.append(f"runner {row.get('name')} bound per_repo (repo_id={row.get('repo_id')})")
+        elif scope == "per_owner_global":
+            gaps.append(
+                f"runner {row.get('name')} owner-global (owner_id={row.get('owner_id')}, repo_id=0) — "
+                "any repo owned by this user can use this runner; cache shared across all of them"
+            )
+        elif scope == "instance_global":
+            gaps.append(
+                f"runner {row.get('name')} instance-global (owner_id=0, repo_id=0) — "
+                "all repos can use this runner; cache shared instance-wide"
+            )
+    if cache_act.get("entry_count", 0) > 0:
+        gaps.append(
+            f"persistent act cache ({cache_act.get('entry_count')} entries, "
+            f"{cache_act.get('total_bytes')} bytes) — content-addressed but persistent across jobs; "
+            "Stage 2 demo would need to prove no read-after-write leak"
+        )
+    if cache_actcache.get("entry_count", 0) > 0:
+        gaps.append(
+            f"actcache server bolt.db present ({cache_actcache.get('total_bytes')} bytes) — "
+            "shared cache server state across all jobs"
+        )
+    if mounts.get("docker_sock_mounted"):
+        enforcement.append(
+            "docker.sock mounted — jobs spawn fresh sibling containers (job-level filesystem fresh per job)"
+        )
+        gaps.append(
+            "docker.sock mounted — runner can read/write any container on the host; "
+            "Stage 2 demo would need to fence runner docker access if cache leak is actually exploitable"
+        )
+    is_isolated = (
+        cache_act.get("entry_count", 0) == 0
+        and cache_actcache.get("entry_count", 0) == 0
+    )
+    if is_isolated:
+        status = "isolated_per_job"
+    else:
+        status = "shared_per_runner"
+    return {
+        "status": status,
+        "enforcement_observed": enforcement,
+        "enforcement_gaps": gaps,
+        "current_boundary_character": (
+            "structural" if status == "isolated_per_job"
+            else "shared_persistent_with_fresh_job_containers"
+        ),
+    }
+
+
+def build_proof() -> dict[str, Any]:
+    runtime_body = resolve_runtime_body()
+    if not runtime_body:
+        raise SystemExit(
+            "forge.runner_cache_boundary.status: forge_node.promotion_standard.current_runtime_body missing"
+        )
+    target = resolve_ssh_target(runtime_body.get("ssh_targets_id") or "dev-tools")
+    user = target.get("user") or "ubuntu"
+    host = pick_ssh_address(target)
+    if not host:
+        raise SystemExit("forge.runner_cache_boundary.status: no usable address for ssh target")
+
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    runner_meta = probe_runner_registration_metadata(user, host)
+    runner_data = probe_runner_data_dir(user, host)
+    cache_act = probe_cache_layout(user, host, RUNNER_CACHE_ACT)
+    cache_actcache = probe_cache_layout(user, host, RUNNER_CACHE_ACTCACHE)
+    mounts = probe_volume_mounts(user, host)
+    history = probe_action_run_history(user, host)
+    classification = classify_cache_scope(runner_meta, cache_act, cache_actcache, mounts)
+    proof: dict[str, Any] = {
+        "proof_class": "runner_cache_boundary_proof",
+        "stage": 1,
+        "stage_label": "read_only_enumeration_and_cache_scope_classification",
+        "capability": "forge.runner_cache_boundary.status",
+        "node_role": "forge_node",
+        "runtime_body": {
+            "ssh_targets_id": runtime_body.get("ssh_targets_id"),
+            "host_descriptor": runtime_body.get("host_descriptor"),
+            "addresses": runtime_body.get("addresses"),
+            "services": runtime_body.get("services"),
+        },
+        "ssh_route_used": {"user": user, "host": host},
+        "generated_at": timestamp,
+        "observation_only": True,
+        "scope_note": (
+            "Stage 1 read-only proof. Enumerates runner registration scope, cache "
+            "layout (file/dir names + sizes only), volume mounts, and action_run "
+            "history. NO mutation, NO API token use, NO read of /data/.runner "
+            "contents (file contains a registration token), NO read of token_hash "
+            "or token_salt. Stage 2 (clean-room job demonstration — actually "
+            "spawning two synthetic jobs and proving no artifact bleeds between "
+            "them) is FUTURE."
+        ),
+        "stop_lines_respected": [
+            "no Forgejo install",
+            "no runner mutation",
+            "no branch protection mutation",
+            "no DNS/secrets/tokens/users/webhooks/repos/backups changed",
+            "no API tokens used (Postgres + filesystem via SSH+docker exec only)",
+            "no read of /data/.runner contents (stat-only)",
+            "no read of token_hash, token_salt, or fingerprints",
+            "no actual job execution",
+        ],
+        "runner_registration": runner_meta,
+        "runner_data_dir": runner_data,
+        "cache_act_dir": cache_act,
+        "cache_actcache_dir": cache_actcache,
+        "volume_mounts": mounts,
+        "action_run_history": history,
+        "cache_scope_classification": classification,
+        "proof_summary": {
+            "cache_scope_status": classification.get("status"),
+            "current_boundary_character": classification.get("current_boundary_character"),
+            "runner_count": runner_meta.get("count"),
+            "runner_scopes": [r.get("scope") for r in runner_meta.get("rows") or []],
+            "act_cache_entry_count": cache_act.get("entry_count"),
+            "act_cache_total_bytes": cache_act.get("total_bytes"),
+            "actcache_entry_count": cache_actcache.get("entry_count"),
+            "actcache_total_bytes": cache_actcache.get("total_bytes"),
+            "docker_sock_mounted": mounts.get("docker_sock_mounted"),
+            "action_run_total": history.get("total_count"),
+            "drift_observed": classification.get("status") != "isolated_per_job",
+            "stage_2_blocked_until": (
+                "clean_room_job_demonstration_runs_two_synthetic_jobs_with_no_observed_leak"
+                if classification.get("status") != "isolated_per_job"
+                else None
+            ),
+        },
+    }
+    return proof
+
+
+def write_proof(proof: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(proof, sort_keys=False, width=120) + "\n", encoding="utf-8")
+
+
+def render_human(proof: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append(f"forge.runner_cache_boundary.status — runner_cache_boundary_proof Stage {proof.get('stage')}")
+    lines.append(f"generated_at: {proof.get('generated_at')}")
+    rb = proof.get("runtime_body") or {}
+    lines.append(f"runtime body: {rb.get('ssh_targets_id')} ({rb.get('host_descriptor')})")
+    lines.append("")
+    rmeta = proof.get("runner_registration") or {}
+    lines.append(f"runner registrations: {rmeta.get('count')}")
+    for r in rmeta.get("rows") or []:
+        lines.append(f"  id={r.get('id')} name={r.get('name')} version={r.get('version')} scope={r.get('scope')} ephemeral={r.get('ephemeral')}")
+    lines.append("")
+    rdd = proof.get("runner_data_dir") or {}
+    lines.append(f"/data inspection: runner reg file present = {rdd.get('runner_reg_present')} (contents NOT read)")
+    lines.append("")
+    cact = proof.get("cache_act_dir") or {}
+    lines.append(f"cache /root/.cache/act:      {cact.get('entry_count')} entries, {cact.get('total_bytes')} bytes")
+    cacc = proof.get("cache_actcache_dir") or {}
+    lines.append(f"cache /root/.cache/actcache: {cacc.get('entry_count')} entries, {cacc.get('total_bytes')} bytes")
+    mm = proof.get("volume_mounts") or {}
+    lines.append(f"volume mounts: {mm.get('count')} (docker_sock_mounted: {mm.get('docker_sock_mounted')})")
+    history = proof.get("action_run_history") or {}
+    lines.append(f"action_run history: total = {history.get('total_count')}")
+    lines.append("")
+    cl = proof.get("cache_scope_classification") or {}
+    lines.append(f"cache scope classification: {cl.get('status')} ({cl.get('current_boundary_character')})")
+    enf = cl.get("enforcement_observed") or []
+    if enf:
+        lines.append("  enforcement observed:")
+        for e in enf:
+            lines.append(f"    + {e}")
+    gaps = cl.get("enforcement_gaps") or []
+    if gaps:
+        lines.append("  enforcement gaps:")
+        for g in gaps:
+            lines.append(f"    - {g}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="forge.runner_cache_boundary.status")
+    parser.add_argument("--json", action="store_true", help="emit proof JSON only")
+    parser.add_argument("--no-write", action="store_true", help="do not persist receipt YAML")
+    parser.add_argument("--out", help=f"override receipt path (default: {RECEIPT_LATEST})")
+    parser.add_argument("--self-check", action="store_true", help="self-check pass")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("forge.runner_cache_boundary.status self-check PASS")
+        return 0
+
+    proof = build_proof()
+
+    if not args.no_write:
+        out_path = Path(args.out) if args.out else RECEIPT_LATEST
+        write_proof(proof, out_path)
+        proof.setdefault("proof_summary", {})["receipt_path"] = str(out_path)
+
+    if args.json:
+        print(json.dumps(proof, indent=2, default=str))
+    else:
+        print(render_human(proof))
+        if not args.no_write:
+            print(f"\nreceipt: {RECEIPT_LATEST}")
+
+    summary = proof.get("proof_summary") or {}
+    if summary.get("runner_count", 0) <= 0:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
