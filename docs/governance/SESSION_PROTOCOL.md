@@ -189,8 +189,13 @@ operator input (capture/readback/research notes) may still exist as intake,
 but it must not be treated as active work until attached or promoted into
 a bounded loop.
 
-- State (logical): `$SPINE_STATE/loop-scopes/LOOP-{NAME}-{DATE}.scope.md`
-- Authority: `ops/bindings/loop.closeout.contract.yaml`
+- Lifecycle authority: `shared_authority.db` (`loops` table) — canonical state for status, disposition, completion_level, and ownership. Routed reads/writes via cap dispatch.
+- Scope projection (logical): `$SPINE_STATE/loop-scopes/LOOP-{NAME}-{DATE}.scope.md` — operator-authored objective and acceptance; the file is the projection, the DB row is lifecycle truth.
+- Closeout contract: `ops/bindings/loop.closeout.contract.yaml`
+
+Both planes must agree at close time. Per `KERNEL_PRIMITIVE_CANON.md` §1, the
+work-request authority is "loop scope + SQLite loop row" jointly — the file
+without the row is not a loop, and the row without the file cannot close.
 
 ### Packet
 
@@ -245,11 +250,14 @@ stay on `main` and clean. All wave/feature work happens in managed worktrees.
 ## Execution Lifecycles
 
 No single autonomous execution handoff is taught as the default today.
-The truthful kernel progression is:
+The truthful kernel progression is the six-primitive coordination protocol
+declared in [`KERNEL_PRIMITIVE_CANON.md`](KERNEL_PRIMITIVE_CANON.md):
 
-`request -> claim -> execute -> outcome/receipt`
+`request -> claim -> heartbeat -> result | failure -> receipt`
 
-Current governed realizations split by transport mode.
+Each governed realization (interactive delegation, operational mailroom
+execution, durable transfer job) maps onto these primitives via the class
+mappings in the canon. Current governed realizations split by transport mode.
 
 Operator-facing defaults should describe outcome and operational state first.
 The lifecycle nouns below remain canonical control-plane truth, not the

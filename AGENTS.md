@@ -70,6 +70,7 @@ Legal work:
   engine-internal and less operator-public, including execute-path automation
 - doctrine/runtime reconciliation across `AGENTS.md`, `NORTH_STAR.md`,
   `docs/governance/SPINE.md`, `docs/governance/SESSION_PROTOCOL.md`,
+  `docs/governance/KERNEL_PRIMITIVE_CANON.md`,
   `docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`, and existing public
   help text
 - control-plane truth decisions and implementation, including node/control-plane
