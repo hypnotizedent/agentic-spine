@@ -1479,18 +1479,95 @@ def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False, golden_pa
         print("")
 
 
+CANONICAL_READBACK_HEADER = [
+    ("node.admission.status",   "canonical admission and current machine readback"),
+    ("node.recovery.status",    "recovery and control readback"),
+    ("appliance.health.status", "appliance and portable-media health"),
+]
+
+DEMOTED_EVIDENCE_HEADER = [
+    ("ops/bindings/ssh.targets.yaml",                "access evidence only; reachability is not admission"),
+    ("ops/bindings/operator.hardware.inventory.yaml","hardware and candidacy evidence only"),
+    ("ops/bindings/hardware.inventory.yaml",         "infra hardware evidence"),
+    ("ops/bindings/home.device.registry.yaml",       "compatibility and site evidence only"),
+    ("ops/bindings/shop.device.registry.yaml",       "L3 shop function evidence only"),
+    ("ops/bindings/home.hardware.inventory.yaml",    "demoted compatibility evidence"),
+    ("ops/bindings/internet.asset.registry.yaml",    "demoted compatibility evidence"),
+    ("ops/bindings/master.inventory.registry.yaml",  "registry-of-authorities; not physical-object truth"),
+    ("ops/bindings/fleet.admission.classification.yaml","admission classification evidence; composed by this readback"),
+]
+
+
+def emit_list_header() -> None:
+    print("# node.admission.status --list")
+    print("#")
+    print("# Canonical readbacks:")
+    for cap, role in CANONICAL_READBACK_HEADER:
+        print(f"#   {cap:<26} {role}")
+    print("#")
+    print("# Subordinate evidence (demoted; do not read as authority):")
+    for path, role in DEMOTED_EVIDENCE_HEADER:
+        print(f"#   {path:<48} {role}")
+    print("#")
+    print("# Per-row 'subtracts:' lines remain authoritative for each subject.")
+    print("# ----------------------------------------------------------------------")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Canonical node admission readback. Read-only; does not promote nodes."
+        description=(
+            "Canonical node admission readback. Composes governed identity, site, "
+            "candidacy, promotion, placement, access, recovery evidence, and machine "
+            "facts. Read-only; does not promote nodes, assign roles, or admit hardware. "
+            "Inventory and registry bindings are subordinate evidence; this readback is "
+            "the authority for current machine truth."
+        )
     )
-    parser.add_argument("--node", help="Limit readback to one governed subject")
-    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
-    parser.add_argument("--list", action="store_true", help="List governed subject IDs")
-    parser.add_argument("--machine-spec", action="store_true", help="Include machine facts from bootstrap claim and canonical inventories")
-    parser.add_argument("--golden-path", action="store_true", help="Include first-touch -> runtime proof path for Packet 534")
+    parser.add_argument(
+        "--node",
+        help=(
+            "Limit readback to one governed subject id (host, appliance, or media). "
+            "Use --list to enumerate valid ids."
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit machine-readable JSON including canonical_authority, "
+            "subtracted_peer_authority, vocabulary, and rows."
+        ),
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help=(
+            "List governed subject ids with a header naming the canonical readbacks "
+            "and the subordinate evidence bindings demoted by this surface."
+        ),
+    )
+    parser.add_argument(
+        "--machine-spec",
+        action="store_true",
+        help=(
+            "Include machine facts (CPU, RAM, disks, NICs) from bootstrap firstboot "
+            "claims and canonical inventory bindings; evidence only, not promotion."
+        ),
+    )
+    parser.add_argument(
+        "--golden-path",
+        action="store_true",
+        help=(
+            "Include the first-touch -> runtime proof path (PACKET-534): which "
+            "first-touch state admitted the subject and what proof advances it "
+            "through the promotion ladder."
+        ),
+    )
     args = parser.parse_args()
 
     if args.list:
+        if not args.json:
+            emit_list_header()
         for node_id in all_node_ids():
             print(node_id)
         return
@@ -1502,13 +1579,17 @@ def main() -> None:
         "mode": "golden_path" if args.golden_path else "machine_spec" if args.machine_spec else "admission",
         "canonical_authority": "node.admission.status",
         "recovery_evidence": "node.recovery.status",
+        "appliance_evidence": "appliance.health.status",
         "subtracted_peer_authority": [
+            "ops/bindings/ssh.targets.yaml",
+            "ops/bindings/operator.hardware.inventory.yaml",
+            "ops/bindings/hardware.inventory.yaml",
+            "ops/bindings/home.device.registry.yaml",
+            "ops/bindings/shop.device.registry.yaml",
             "ops/bindings/home.hardware.inventory.yaml",
             "ops/bindings/internet.asset.registry.yaml",
-            "ops/bindings/operator.hardware.inventory.yaml",
+            "ops/bindings/master.inventory.registry.yaml",
             "ops/bindings/fleet.admission.classification.yaml",
-            "ops/bindings/ssh.targets.yaml",
-            "ops/bindings/shop.device.registry.yaml",
         ],
         "vocabulary": READBACK_VOCABULARY,
         "rows": rows,
