@@ -786,6 +786,133 @@ def storage_evidence_candidate_set() -> set[str]:
     return candidates
 
 
+def forge_node_promotion_standard_for(node_id: str) -> dict[str, Any]:
+    """Compose forge_node promotion standard for a node id.
+
+    Mirrors storage_evidence_node_promotion_standard_for. Reads
+    node.role.contract.yaml#forge_node.promotion_standard. For each required
+    proof, checks if the proof_ref resolves to a YAML on disk under
+    $SPINE_STATE; emits status: present | missing | delivered_per_contract.
+
+    A proof is "delivered_per_contract" when the contract's proofs_present
+    declares it for this node but the receipt file is not visible from this
+    host (canonical receipts on storage_evidence_node may not be locally
+    projected on a consumer host post-D.3b v4).
+    """
+    node_role = load_yaml(NODE_ROLE_CONTRACT)
+    forge_node = ((node_role.get("node_types") or {}).get("forge_node") or {})
+    standard = forge_node.get("promotion_standard") or {}
+    required = standard.get("required_proofs") or {}
+    contract_proofs_for_node = (standard.get("proofs_present") or {}).get(node_id, [])
+
+    state_root = _resolve_spine_state()
+    proofs: dict[str, Any] = {}
+    for proof_name in (
+        "forge_status_proof",
+        "backup_restore_proof",
+        "agent_boundary_proof",
+        "runner_cache_boundary_proof",
+        "branch_protection_readback_proof",
+    ):
+        proof_def = required.get(proof_name) or {}
+        proof_ref_template = str(proof_def.get("proof_ref") or "").strip()
+        entry: dict[str, Any] = {
+            "status": "missing",
+            "source": proof_def.get("source"),
+            "proof_ref": proof_ref_template or None,
+        }
+        if proof_ref_template:
+            resolved = proof_ref_template.replace("$SPINE_STATE", str(state_root))
+            proof_path = Path(resolved)
+            if proof_path.exists():
+                entry["status"] = "present"
+                entry["receipt"] = str(proof_path)
+            else:
+                entry["note"] = "proof_ref declared but receipt not on this host (canonical may live on storage_evidence_node)"
+        if entry["status"] != "present" and proof_name in contract_proofs_for_node:
+            entry["status"] = "delivered_per_contract"
+            entry["note"] = "contract proofs_present declares delivered; receipt not visible from this host"
+        proofs[proof_name] = entry
+
+    on_disk_missing = [name for name, proof in proofs.items() if proof.get("status") == "missing"]
+    contract_complete = bool(contract_proofs_for_node) and all(p in contract_proofs_for_node for p in proofs.keys())
+    if not on_disk_missing:
+        state = "delivered"
+    elif contract_complete:
+        state = "delivered_per_contract"
+    else:
+        state = "incomplete"
+
+    return {
+        "role": "forge_node",
+        "state": state,
+        "standard_source": "ops/bindings/node.role.contract.yaml",
+        "proofs": proofs,
+        "missing_proofs": on_disk_missing,
+        "candidate_gaps": (standard.get("candidate_gaps") or {}).get(node_id, on_disk_missing),
+        "subtraction_note": "ssh.targets supplies access evidence only; delivered forge_node requires the five proof classes here",
+    }
+
+
+def forge_node_candidate_set() -> set[str]:
+    """Set of node_ids that are active forge_node candidates.
+
+    Includes nodes in candidate_gaps, proofs_present, AND the runtime body's
+    ssh_targets_id (the host actively serving the runtime body, even if proof
+    ladder is in-flight).
+    """
+    node_role = load_yaml(NODE_ROLE_CONTRACT)
+    standard = (((node_role.get("node_types") or {}).get("forge_node") or {}).get("promotion_standard") or {})
+    candidates: set[str] = set()
+    candidates.update((standard.get("candidate_gaps") or {}).keys())
+    candidates.update((standard.get("proofs_present") or {}).keys())
+    runtime_body = standard.get("current_runtime_body") or {}
+    ssh_id = str(runtime_body.get("ssh_targets_id") or "").strip()
+    if ssh_id:
+        candidates.add(ssh_id)
+    return candidates
+
+
+def operator_console_promotion_standard_for(node_id: str) -> dict[str, Any]:
+    """Compose operator_console promotion standard for a node id.
+
+    operator_console does not require a multi-proof receipt ladder like
+    storage/execution/forge node types — it is the active admitting client
+    surface. Delivery is declared via current_delivered_host plus
+    proofs_present[node_id] in the contract.
+    """
+    node_role = load_yaml(NODE_ROLE_CONTRACT)
+    operator_console = ((node_role.get("node_types") or {}).get("operator_console") or {})
+    standard = operator_console.get("promotion_standard") or {}
+    current_delivered = str(standard.get("current_delivered_host") or "").strip()
+    proofs_present_for_node = (standard.get("proofs_present") or {}).get(node_id, [])
+    if node_id == current_delivered or proofs_present_for_node:
+        state = "delivered"
+    else:
+        state = "incomplete"
+    return {
+        "role": "operator_console",
+        "state": state,
+        "standard_source": "ops/bindings/node.role.contract.yaml",
+        "current_delivered_host": current_delivered or None,
+        "proofs_present": proofs_present_for_node,
+        "subtraction_note": "operator_hardware kind identifies; delivered operator_console is named via current_delivered_host plus proofs_present",
+    }
+
+
+def operator_console_candidate_set() -> set[str]:
+    """Set of node_ids declared as operator_console candidates."""
+    node_role = load_yaml(NODE_ROLE_CONTRACT)
+    standard = (((node_role.get("node_types") or {}).get("operator_console") or {}).get("promotion_standard") or {})
+    candidates: set[str] = set()
+    candidates.update((standard.get("candidate_gaps") or {}).keys())
+    candidates.update((standard.get("proofs_present") or {}).keys())
+    current_delivered = str(standard.get("current_delivered_host") or "").strip()
+    if current_delivered:
+        candidates.add(current_delivered)
+    return candidates
+
+
 def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     sources = recovery.get("source_surfaces") or {}
     operator = sources.get("operator_hardware") or {}
@@ -800,6 +927,8 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     recovery["__runtime_role_truth"] = runtime_truth
     execution_host_standard = execution_host_promotion_standard_for(node_id_str, runtime_truth)
     storage_evidence_standard = storage_evidence_node_promotion_standard_for(node_id_str)
+    forge_node_standard = forge_node_promotion_standard_for(node_id_str)
+    operator_console_standard = operator_console_promotion_standard_for(node_id_str)
 
     validate_operator_role_candidacy(str(recovery.get("node_id") or "unknown"), operator)
     role_candidacy = as_list(operator.get("role_candidacy"))
@@ -817,6 +946,20 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
             role_candidacy.append("storage_evidence_node")
         if not role_candidacy:
             role_candidacy = ["storage_evidence_node"]
+    # Active forge_node candidacy (contract proofs_present + runtime body host).
+    if node_id_str in forge_node_candidate_set():
+        role_candidacy = [r for r in role_candidacy if r != "none"]
+        if "forge_node" not in role_candidacy:
+            role_candidacy.append("forge_node")
+        if not role_candidacy:
+            role_candidacy = ["forge_node"]
+    # Active operator_console candidacy (contract current_delivered_host).
+    if node_id_str in operator_console_candidate_set():
+        role_candidacy = [r for r in role_candidacy if r != "none"]
+        if "operator_console" not in role_candidacy:
+            role_candidacy.append("operator_console")
+        if not role_candidacy:
+            role_candidacy = ["operator_console"]
 
     promotion_stage = first_present(
         operator.get("promotion_stage"),
@@ -826,6 +969,29 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     )
     if runtime_truth.get("active"):
         promotion_stage = "delivered"
+    else:
+        # Contract-declared delivery: when the node appears in proofs_present
+        # for any first-class role and that role's standard reports delivered
+        # or delivered_per_contract, the contract has named this node as
+        # delivered for that role even if local receipt files aren't visible.
+        contract_delivered = False
+        if (
+            storage_evidence_standard.get("state") in ("delivered", "delivered_per_contract")
+            and node_id_str in storage_evidence_candidate_set()
+        ):
+            contract_delivered = True
+        if (
+            forge_node_standard.get("state") in ("delivered", "delivered_per_contract")
+            and node_id_str in forge_node_candidate_set()
+        ):
+            contract_delivered = True
+        if (
+            operator_console_standard.get("state") == "delivered"
+            and node_id_str in operator_console_candidate_set()
+        ):
+            contract_delivered = True
+        if contract_delivered:
+            promotion_stage = "delivered"
 
     placement_truth = dict(estate_truth)
     if runtime_truth.get("active"):
@@ -887,6 +1053,8 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         "role_delivery_proofs": {
             "execution_host": execution_host_standard,
             "storage_evidence_node": storage_evidence_standard,
+            "forge_node": forge_node_standard,
+            "operator_console": operator_console_standard,
         },
         "recovery_planes": recovery.get("recovery_planes") or {},
         "proof_channels": proof_channels,
