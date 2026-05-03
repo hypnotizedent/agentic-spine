@@ -117,6 +117,36 @@ Use `ops status --expert` when raw workflow-object counts, terminal telemetry,
 delegation state, wave state, or other control-plane internals are needed, and
 only when public status gives a reason for drilldown.
 
+### `$SPINE_STATE` Locality
+
+Every workflow object below uses `$SPINE_STATE/...` as its state path.
+`$SPINE_STATE` is a **logical** root, not a per-host literal. The
+authoritative resolution lives on the `storage_evidence_node` (pve,
+currently `/md1400/spine/state`). Consumer-host resolution (MacBook
+`~/code/.runtime/spine/state`, ai-cons `/home/ubuntu/code/.runtime/spine/state`,
+pve-r620 likewise) is **projection/cache**, not canonical authority.
+
+Writes that must be durable shared authority must run via `cap.sh`-routed
+cap execution (which lands the write on the authority host) or write
+through the canonical mount. A consumer host running a non-routed cap and
+writing under its local `$SPINE_STATE/...` produces a projection artifact
+that has no durable authority claim.
+
+Per-host materialization:
+
+| Host | `$SPINE_STATE` resolves to | Authority? |
+|---|---|---|
+| pve (`storage_evidence_node`) | `/md1400/spine/state` | canonical |
+| MacBook (`operator_console`) | `/Users/ronnyworks/code/.runtime/spine/state` | projection/cache |
+| ai-consolidation (`execution_host`) | `/home/ubuntu/code/.runtime/spine/state` | projection/cache |
+| pve-r620 (`watcher_node`) | none required (no spine code checkout) | n/a |
+
+(Authority: [`ops/bindings/root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical.file_plane_policy`](../../ops/bindings/root.authority.contract.yaml).)
+
+The state paths in the workflow objects below name **logical** state.
+Resolved authority for each path is on pve canonical; consumer-local copies
+are projection unless the cap that wrote them was routed.
+
 ### Loop
 
 A bounded problem slice with a named objective. Opens via `loops.create`
@@ -126,7 +156,7 @@ operator input (capture/readback/research notes) may still exist as intake,
 but it must not be treated as active work until attached or promoted into
 a bounded loop.
 
-- State: `$SPINE_STATE/loop-scopes/LOOP-{NAME}-{DATE}.scope.md`
+- State (logical): `$SPINE_STATE/loop-scopes/LOOP-{NAME}-{DATE}.scope.md`
 - Authority: `ops/bindings/loop.closeout.contract.yaml`
 
 ### Packet

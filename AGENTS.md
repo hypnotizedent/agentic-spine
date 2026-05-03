@@ -150,9 +150,18 @@ Do not treat archived or historical docs as first-read entry authority.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md), [`SPINE.md`](docs/governance/SPINE.md))
 
 Non-promoted work, synthesis artifacts, and parked material belong in
-`$SPINE_STATE/` (canonical: `~/code/.runtime/spine/state/`), not in the repo.
-New repo docs require deliberate promotion and human-steward co-sign.
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
+`$SPINE_STATE/`, not in the repo. `$SPINE_STATE` is a **logical** root.
+Canonical authority lives on the `storage_evidence_node` (pve, currently
+`/md1400/spine/state`); consumer-host resolution (MacBook
+`~/code/.runtime/spine/state`, ai-cons `/home/ubuntu/code/.runtime/spine/state`,
+pve-r620 likewise) is **projection/cache**, not durable shared state. Writes
+that must be durable shared authority must run via `cap.sh`-routed cap
+execution (which lands on the authority host) or write through the
+canonical mount. Local-direct writes on a consumer host produce projection
+artifacts only — not durable. New repo docs require deliberate promotion
+and human-steward co-sign.
+(Authority: [`root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical.file_plane_policy`](ops/bindings/root.authority.contract.yaml),
+[`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
 Operator input and human intent are the entry point; loops are bounded
 execution containers, not intake buckets. Operator input is unverified

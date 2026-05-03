@@ -44,7 +44,7 @@ When the drift gate fires (pve HEAD ≠ `origin/main` HEAD):
 
 ## What this policy does NOT cover
 
-- File-plane state plane (loop scopes / domain-state / mailroom file writes — three-host fragmentation): **separate operator-level architecture decision** (forensic-trace item 9). Not host code drift; it's state plane fragmentation.
+- File-plane state plane (loop scopes / domain-state / mailroom file writes — three-host fragmentation): **the policy is now declared** in `ops/bindings/root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical.file_plane_policy` (PACKET-590). pve is the canonical home; consumer-host `$SPINE_STATE/...` is projection/cache only. This file does not own the file-plane policy — it covers host **code** drift only. PACKET-600 propagated the policy teaching into AGENTS.md and SESSION_PROTOCOL.md so first-read docs match root authority.
 - Workbench role-aware verify (D153/D397): separate slice. Workbench is not pve's role.
 - Watcher transfer: paused per operator instruction.
 

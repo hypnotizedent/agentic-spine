@@ -35,8 +35,10 @@ fi
 # Check for repo-local .runtime directory
 if [[ -e "$ROOT/.runtime" ]]; then
   echo "D423 FAIL: repo-local .runtime directory exists at $ROOT/.runtime/" >&2
-  echo "  Runtime state must live under /Users/ronnyworks/code/.runtime/spine/" >&2
-  echo "  See: root.authority.contract.yaml" >&2
+  echo "  Runtime state must live outside the repo under \$SPINE_RUNTIME_ROOT (logical)." >&2
+  echo "  Canonical authority: pve /md1400/spine (storage_evidence_node)." >&2
+  echo "  Consumer-host resolution (e.g., MacBook ~/code/.runtime/spine) is projection/cache only." >&2
+  echo "  See: root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical.file_plane_policy" >&2
   FAILURES=$((FAILURES + 1))
 fi
 
@@ -51,7 +53,9 @@ fi
 # Check for domain-state files in wrong locations
 if find "$ROOT" -path "$ROOT/.git" -prune -o -type f -path "*/.runtime/spine/state/domain-state/*" -print 2>/dev/null | grep -q .; then
   echo "D423 FAIL: domain-state files found in repo-local .runtime/" >&2
-  echo "  Domain state must live in /Users/ronnyworks/code/.runtime/spine/state/" >&2
+  echo "  Domain state must live under \$SPINE_STATE/domain-state/ (logical), never inside the repo." >&2
+  echo "  Canonical authority: pve /md1400/spine/state/domain-state (storage_evidence_node)." >&2
+  echo "  Consumer-host \$SPINE_STATE/domain-state is projection/cache only." >&2
   find "$ROOT" -path "$ROOT/.git" -prune -o -type f -path "*/.runtime/spine/state/domain-state/*" -print 2>/dev/null | sed 's/^/    /' >&2
   FAILURES=$((FAILURES + 1))
 fi
