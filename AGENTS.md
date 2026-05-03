@@ -222,6 +222,14 @@ reason. Visible worker terminals are exceptional and must not substitute for
 lane telemetry.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
+Telemetry ownership is strict: loop scopes, packets, orchestration manifests,
+claims, heartbeats, receipts, handoffs, worktree leases, and managed worktrees
+created by another lane are protected evidence. Read and cite them; do not
+delete, rewrite, recreate, or "fix" them directly. Use the governed lifecycle
+capability for that artifact class, or file friction when the missing repair
+path is the bug.
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
+
 RAG retrieval is allowed as a discovery aid, not as authority. Use
 `rag.direct.retrieve` or `rag.direct.query` to find likely governed source refs,
 then read the cited packet, loop scope, contract, receipt, or capability

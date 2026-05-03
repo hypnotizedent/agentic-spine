@@ -125,6 +125,17 @@ the operator input being carried, attach it to an existing loop when
 the fit is clear, and create a loop only when there is a bounded objective
 with acceptance and close criteria.
 
+Workflow telemetry that another lane created is evidence, not scratch space.
+Loop scopes, controller-prompt packets, orchestration manifests, wave runtime
+state, claims, heartbeats, receipts, handoffs, worktree leases, and managed
+worktrees may be read and cited by other agents, but they must not be deleted,
+rewritten, recreated, or "fixed" directly unless the current lane owns them and
+uses the governed lifecycle capability for that artifact class. If telemetry is
+wrongly shaped, blocked, duplicate, stale, or non-promotable, file or attach
+friction and use an existing amend/promote/close/cleanup capability. If no such
+capability exists, the missing governed repair path is the work; raw filesystem
+surgery is not an acceptable substitute.
+
 Human intent is provenance and acceptance input, not standalone authority.
 Before mutation, resolve the owning canonical surface, confirm the request fits
 that surface, and treat examples or templates as illustrative unless the
