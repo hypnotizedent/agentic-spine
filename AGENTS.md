@@ -166,6 +166,21 @@ promotion and human-steward co-sign.
 (Authority: [`root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical.file_plane_policy`](ops/bindings/root.authority.contract.yaml),
 [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
+Tool-local agent-harness state — `~/.claude/{plans, projects/*/memory,
+todos, tasks, sessions, transcripts}` for Claude Code, and the equivalent
+per-machine homes from other harnesses — is **cache only**, not durable
+authority. Packet-shaped plans, durable behavioral rules, shared tasks,
+and proof of governed work must be promoted into the existing spine
+authority surface before being treated as durable truth. Promotion uses
+capabilities that already exist (`controller_prompt.create/amend/close`
+for packets, `loops.create` and the mailroom for shared work, AGENTS.md
+or contracts under `ops/bindings/` for durable behavioral rules,
+governed RCAP/EXEC_RECEIPT for proof). Do not invent a new home, new
+adapter, or new tool-specific subsystem to preserve cache content; the
+fix is promotion through existing caps, not a parallel governance shelf.
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md),
+[`root.authority.contract.yaml`](ops/bindings/root.authority.contract.yaml))
+
 Operator input and human intent are the entry point; loops are bounded
 execution containers, not intake buckets. Operator input is unverified
 outside thinking from the human steward (raw OI/HI drops); evidence is

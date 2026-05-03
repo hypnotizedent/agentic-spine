@@ -199,6 +199,35 @@ The state paths in the workflow objects below name **logical** state.
 Resolved authority for each path is on pve canonical; consumer-local copies
 are projection unless the cap that wrote them was routed.
 
+### Tool-local cache vs spine authority
+
+Agent-harness private homes — `~/.claude/{plans, projects/*/memory, todos,
+tasks, sessions, transcripts}` for Claude Code, and the equivalent
+per-machine homes from other harnesses — are **tool-local cache only**, not
+authority. They are fine as scratch and continuity for a single terminal on
+a single host. They become drift when they carry load-bearing work: packet
+bodies, durable behavioral rules, shared tasks, or governed receipts. That
+is the same disease class as a parallel local DB or a local rsync target —
+truth lives where the spine cannot read it.
+
+Promotion mappings (use the existing capability; do not invent a new home):
+
+| Class in tool-local cache | Spine authority surface | Promotion path |
+|---|---|---|
+| Packet-shaped plan (`/plan` output, brainstorm packet, draft slice body) | `$SPINE_STATE/controller-prompts/PACKET-{NAME}-{DATE}.md` | `controller_prompt.create` (birth), `controller_prompt.amend` (mid-packet checkpoint), `controller_prompt.close` (closeout receipt) |
+| Durable behavioral rule (rules future agents are expected to obey) | `AGENTS.md`, this file (`SESSION_PROTOCOL.md`), or the relevant contract under `ops/bindings/` | Edit committed governance directly. Auto-memory `feedback_*.md` files are local reinforcement only; they must point at committed governance, not be the governance. |
+| Shared task / multi-terminal work | Governed loop + `mailroom` request → claim → heartbeat → result/failure → receipt | `loops.create`, then submit work as a mailroom execution request bound to the loop. Tool-local TODO/task lists are session bookkeeping only; work invisible to `ops status` is ungoverned. |
+| Proof of governed work | `$SPINE_STATE/evidence/sessions/RCAP-*` and `$SPINE_STATE/domain-state/EXEC_RECEIPT-*.yaml` | Capability execution writes RCAP automatically. Closeout writes EXEC_RECEIPT via `controller_prompt.close` / `wave.finish` / `loop.closeout.finalize`. Tool transcripts and session logs are not receipts. |
+
+The canonical packet home is `$SPINE_STATE/controller-prompts`. Repo-tracked
+`docs/packets/` is for explicitly-promoted historical packets only — never
+the default. Naming `docs/packets/` as the default packet home creates a
+second wrong home next to tool-local cache.
+
+A packet body, behavioral rule, or shared task that lives only in tool-local
+cache is producing drift, not work. The fix is promotion through the
+existing caps, not a new adapter, folder, contract, or governance shelf.
+
 ### Loop
 
 A bounded problem slice with a named objective. Opens via `loops.create`
