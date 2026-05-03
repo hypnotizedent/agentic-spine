@@ -157,6 +157,40 @@ def fmval(key):
     mm = re.search(rf"^{re.escape(key)}:\s*(.+?)\s*$", fm, re.MULTILINE)
     return mm.group(1).strip().strip('"') if mm else ""
 
+def section_text(title):
+    mm = re.search(
+        rf"^## {re.escape(title)}\s*\n(.*?)(?=\n## |\Z)",
+        content,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not mm:
+        return ""
+    lines = []
+    for line in mm.group(1).strip().splitlines():
+        text = line.strip()
+        if text:
+            lines.append(text)
+    return " ".join(lines)
+
+def derive_scope(loop_id):
+    text = loop_id.upper()
+    if "DEPLOY" in text:
+        return "deploy"
+    if "LOOPS-AMEND" in text or "LOOP-LIFECYCLE" in text:
+        return "loops"
+    if "BACKUP" in text:
+        return "backup"
+    if "FORGE" in text or "GITEA" in text:
+        return "forge"
+    return "engine"
+
+def derive_created(loop_id):
+    mm = re.search(r"(\d{8})$", loop_id or "")
+    if not mm:
+        return ""
+    raw = mm.group(1)
+    return f"{raw[0:4]}-{raw[4:6]}-{raw[6:8]}"
+
 # Print the lifecycle deltas as shell-eval'd vars; print the full preserved
 # row as base64-encoded JSON so the merge stage gets the whole thing without
 # shell quoting hell.
@@ -164,9 +198,9 @@ import base64
 preserved = {
     "loop_id":             db_row.get("loop_id") or "",
     "owner":               db_row.get("owner") or fmval("owner") or "@ronny",
-    "created":             db_row.get("created") or fmval("created") or "",
-    "scope":               db_row.get("scope") or fmval("scope") or "",
-    "objective":           db_row.get("objective") or fmval("objective") or "",
+    "created":             db_row.get("created") or fmval("created") or derive_created(db_row.get("loop_id") or ""),
+    "scope":               db_row.get("scope") or fmval("scope") or derive_scope(db_row.get("loop_id") or ""),
+    "objective":           db_row.get("objective") or fmval("objective") or section_text("Objective"),
     "next_action":         db_row.get("next_action") or fmval("next_action") or "",
     "blocked_by":          db_row.get("blocked_by") or "",
     "linked_gaps":         db_row.get("linked_gaps") or "",
