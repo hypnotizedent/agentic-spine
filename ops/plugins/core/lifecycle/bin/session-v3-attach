@@ -820,14 +820,24 @@ if entry_compile_json:
     try:
         ec = json.loads(entry_compile_json)
         cs = ec.get("compilation_state", "")
-        # PACKET-640 (PACKET-635 follow-on): authority_unavailable added to
-        # the merge allowlist so authority-failure honesty propagates through
-        # --emit-assignment instead of silently flattening to the base
-        # entry.assignment.partial. clean_start and ambiguous remain outside
-        # the allowlist by current design (operator scope: PACKET-640 is
-        # narrowly authority_unavailable; broader allowlist propagation is a
-        # separate slice).
-        if cs in ("compiled", "partial", "loop_only", "packet_continuity", "packet_ambiguous", "authority_unavailable"):
+        # Merge allowlist for first-class entry-compile states. Each state
+        # entry-compile emits propagates here so --emit-assignment faithfully
+        # represents the canonical state machine instead of silently
+        # flattening unrecognized states into the base
+        # entry.assignment.partial shape.
+        #
+        # PACKET-640: added authority_unavailable + authority_error_class.
+        # PACKET-645: added clean_start + ambiguous + loop_candidates.
+        if cs in (
+            "compiled",
+            "partial",
+            "loop_only",
+            "packet_continuity",
+            "packet_ambiguous",
+            "authority_unavailable",
+            "clean_start",
+            "ambiguous",
+        ):
             assignment["type"] = "entry.assignment.compiled"
             if ec.get("packet_id"):
                 assignment["packet_id"] = ec["packet_id"]
@@ -860,6 +870,15 @@ if entry_compile_json:
             # allowlisted states; this guard preserves it cleanly when present.
             if ec.get("authority_error_class"):
                 assignment["authority_error_class"] = ec["authority_error_class"]
+            # PACKET-645: preserve loop_candidates for ambiguous (and any
+            # future state that emits it). entry-compile builds the list at
+            # line 443; the list contains {loop_id, objective} dicts.
+            if ec.get("loop_candidates"):
+                assignment["loop_candidates"] = ec["loop_candidates"]
+            # PACKET-645: preserve packet_candidates for packet_ambiguous
+            # similarly. entry-compile builds at line 477.
+            if ec.get("packet_candidates"):
+                assignment["packet_candidates"] = ec["packet_candidates"]
             assignment["compilation_state"] = cs
     except Exception:
         pass
