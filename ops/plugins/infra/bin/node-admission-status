@@ -22,6 +22,59 @@ APPLIANCE_IDENTITY_CONTRACT = ROOT / "ops/bindings/appliance.identity.contract.y
 RUNTIME_BOOTSTRAP_CONTRACT = ROOT / "ops/bindings/runtime.bootstrap.contract.yaml"
 
 
+# Vocabulary the readback uses. Surfaced in both the human header and the
+# JSON payload so a fresh agent can read this output without prior packet
+# lore. First-class node admission lives in node.role.contract.yaml; this
+# block teaches the terms the reader will encounter inline.
+READBACK_VOCABULARY = {
+    "candidacy": {
+        "first_class_node_roles": [
+            "operator_console",
+            "execution_host",
+            "storage_evidence_node",
+            "watcher_node",
+            "forge_node",
+            "translator_node",
+            "verification_node",
+        ],
+        "appliance_classes": [
+            "storage_appliance",
+            "portable_storage_appliance",
+            "portable_bootstrap_media_appliance",
+            "dns_appliance",
+        ],
+        "rule": (
+            "First-class node roles count toward node admission. Appliance "
+            "classes are L3 evidence — they may show promotion: delivered "
+            "or bootstrap-joined for appliance lifecycle but are not "
+            "first-class admitted nodes."
+        ),
+    },
+    "promotion": {
+        "delivered": "Contract proofs landed (proofs_present in node.role.contract or runtime_truth.active).",
+        "bootstrap-joined": "Appliance admitted via bootstrap; not runtime-activated.",
+        "taxonomy": "No first-class candidacy yet; subject is inventory/access evidence only.",
+    },
+    "lifecycle": {
+        "admitted_runtime_present": "Admitted and runtime is currently visible on the host.",
+        "admitted_not_activated": "Admitted but runtime is not yet active for the role.",
+        "candidate_or_access_evidence_only": "Access evidence (SSH/inventory) only; no node-role candidacy yet.",
+        "excluded": "Explicitly excluded from admission with reason.",
+    },
+    "proof_status": {
+        "present": "Receipt file exists at proof_ref on this host.",
+        "delivered_per_contract": (
+            "Contract proofs_present declares the proof delivered, but the receipt "
+            "file is not visible from this host. Canonical receipts live on the "
+            "storage_evidence_node (pve); consumer hosts may not see them locally "
+            "per root.authority.contract.yaml file_plane_policy. Contract claim "
+            "is the canonical truth; file-on-disk is verification."
+        ),
+        "missing": "No receipt and not declared in contract proofs_present.",
+    },
+}
+
+
 def fail(message: str, code: int = 1) -> None:
     print(f"FAIL: {message}", file=sys.stderr)
     raise SystemExit(code)
@@ -1296,6 +1349,25 @@ def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False, golden_pa
     print("Canonical node admission readback. Inventory identifies subjects;")
     print("admission/promotion proof decides node truth.")
     print("")
+    print("Vocabulary:")
+    print("  candidacy   First-class node roles {operator_console, execution_host,")
+    print("              storage_evidence_node, watcher_node, forge_node,")
+    print("              translator_node, verification_node} count toward node")
+    print("              admission. Appliance classes (storage/dns/portable")
+    print("              bootstrap) are L3 evidence — they may show promotion:")
+    print("              delivered or bootstrap-joined for appliance lifecycle,")
+    print("              not first-class node admission.")
+    print("  promotion   delivered = contract proofs landed (proofs_present or")
+    print("              runtime_truth.active); bootstrap-joined = appliance")
+    print("              admitted, not runtime-activated; taxonomy = no candidacy")
+    print("              yet (inventory/access evidence only).")
+    print("  lifecycle   admitted_runtime_present | admitted_not_activated |")
+    print("              candidate_or_access_evidence_only | excluded.")
+    print("  proof_state present = receipt file on this host; delivered_per_contract")
+    print("              = contract declares delivered but receipt canonical on")
+    print("              storage_evidence_node (pve), not visible from this host;")
+    print("              missing = no receipt and not in proofs_present.")
+    print("")
     for row in rows:
         print(f"- {row['node_id']}")
         print(f"  kind:       {row['object_kind']}")
@@ -1352,6 +1424,7 @@ def main() -> None:
             "ops/bindings/ssh.targets.yaml",
             "ops/bindings/shop.device.registry.yaml",
         ],
+        "vocabulary": READBACK_VOCABULARY,
         "rows": rows,
     }
 
