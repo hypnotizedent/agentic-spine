@@ -42,6 +42,8 @@ SPINE_STATE = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtim
 NODE_ROLE_CONTRACT = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
 VM_LIFECYCLE = REPO_ROOT / "ops/bindings/vm.lifecycle.yaml"
 SHOP_STORAGE_MAP = REPO_ROOT / "ops/bindings/shop.storage.map.yaml"
+BACKUP_INVENTORY = REPO_ROOT / "ops/bindings/domains/backup/backup.inventory.yaml"
+BACKUP_LOCALITY = REPO_ROOT / "ops/bindings/domains/backup/backup.locality.contract.yaml"
 RECEIPT_DIR = SPINE_STATE / "domain-state/forge-node"
 RECEIPT_LATEST = RECEIPT_DIR / "backup-restore-proof-latest.yaml"
 
@@ -96,6 +98,64 @@ def resolve_backup_lane(lane_id: str) -> dict[str, Any]:
                 if isinstance(lane, dict) and lane.get("lane_id") == lane_id:
                     return lane
     return {}
+
+
+def resolve_locality(target_name: str) -> dict[str, Any]:
+    """Look up the backup.locality.contract.yaml entry for the given backup
+    target name. Returns the dict block or empty when not declared."""
+    doc = load_yaml(BACKUP_LOCALITY)
+    for entry in doc.get("target_localities") or []:
+        if isinstance(entry, dict) and entry.get("target") == target_name:
+            return entry
+    return {}
+
+
+def resolve_runtime_unit_targets(hostname: str) -> list[str]:
+    """Pull inventory_targets from runtime_units in backup.inventory.yaml
+    for the given hostname. PACKET-612: surfaces the active recovery
+    promise for a VM whose recurring backup is policy-retired."""
+    doc = load_yaml(BACKUP_INVENTORY)
+    out: list[str] = []
+    for unit in doc.get("runtime_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        if str(unit.get("hostname") or "") != hostname:
+            continue
+        for member in unit.get("inventory_targets") or []:
+            member_str = str(member)
+            if member_str and member_str not in out:
+                out.append(member_str)
+    return out
+
+
+def derive_artifact_framing(target_name: str) -> dict[str, Any]:
+    """PACKET-612: classify whether the declared backup target carries
+    recurring freshness semantics or drill-evidence-only semantics.
+
+    When the locality contract marks the target as archive_only AND the
+    note says 'intentionally retired', the artifact (if any) is drill
+    evidence, not a recurring backup; the active recovery promise lives
+    on the runtime_unit's other inventory targets.
+    """
+    locality_entry = resolve_locality(target_name)
+    locality = str(locality_entry.get("locality") or "")
+    note = str(locality_entry.get("note") or "")
+    note_l = note.lower()
+    if locality == "archive_only" and "intentionally retired" in note_l:
+        return {
+            "artifact_framing": "drill_evidence_only",
+            "policy_source": "ops/bindings/domains/backup/backup.locality.contract.yaml",
+            "recurring_freshness_state": "not_applicable",
+            "locality": locality,
+            "locality_note": note or None,
+        }
+    return {
+        "artifact_framing": "recurring_freshness",
+        "policy_source": None,
+        "recurring_freshness_state": "applicable",
+        "locality": locality or None,
+        "locality_note": note or None,
+    }
 
 
 def resolve_restore_target(target_glob_match: str) -> dict[str, Any]:
@@ -288,8 +348,24 @@ def build_proof() -> dict[str, Any]:
             "ops/bindings/node.role.contract.yaml",
             "ops/bindings/vm.lifecycle.yaml",
             "ops/bindings/shop.storage.map.yaml",
+            "ops/bindings/domains/backup/backup.inventory.yaml",
+            "ops/bindings/domains/backup/backup.locality.contract.yaml",
         ],
     }
+    # PACKET-612: artifact framing (drill-evidence-only vs recurring freshness).
+    framing = derive_artifact_framing(declared_backup_target)
+    declared_posture["artifact_framing"] = framing.get("artifact_framing")
+    declared_posture["recurring_freshness_state"] = framing.get("recurring_freshness_state")
+    declared_posture["policy_source"] = framing.get("policy_source")
+    declared_posture["locality"] = framing.get("locality")
+    declared_posture["locality_note"] = framing.get("locality_note")
+    if framing.get("artifact_framing") == "drill_evidence_only":
+        # The active recovery promise lives on companion runtime_unit
+        # inventory_targets (e.g. app-gitea + app-gitea-export for VM 206).
+        host_for_runtime = str(vm_entry.get("hostname") or "")
+        companions = resolve_runtime_unit_targets(host_for_runtime)
+        active_promise = [m for m in companions if m != declared_backup_target]
+        declared_posture["active_recovery_promise"] = active_promise
     restore_target_block = resolve_restore_target(f"vzdump-qemu-{DEV_TOOLS_VMID}-")
     declared_posture["declared_restore_target"] = bool(restore_target_block)
     if restore_target_block:
@@ -437,6 +513,16 @@ def render_human(proof: dict[str, Any]) -> str:
     lines.append(f"  destination:     {declared.get('destination_host')}:{declared.get('destination_base_path') or '(missing)'}")
     lines.append(f"  artifact glob:   {declared.get('artifact_pattern')}")
     lines.append(f"  restore target declared: {declared.get('declared_restore_target')}")
+    framing_value = declared.get("artifact_framing") or "recurring_freshness"
+    lines.append(f"  artifact framing: {framing_value}")
+    if framing_value == "drill_evidence_only":
+        lines.append("    (drill evidence (not recurring backup) — recurring freshness is not applicable)")
+        promise = declared.get("active_recovery_promise") or []
+        if promise:
+            lines.append(f"    active recovery promise: {', '.join(promise)}")
+        policy_source = declared.get("policy_source")
+        if policy_source:
+            lines.append(f"    policy source: {policy_source}")
     lines.append("")
     lines.append("observed artifacts:")
     lines.append(f"  image count:     {observed.get('image_count')}")

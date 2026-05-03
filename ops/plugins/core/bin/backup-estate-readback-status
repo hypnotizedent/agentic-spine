@@ -10,6 +10,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
+: "${SPINE_STATE:=$HOME/code/.runtime/spine/state}"
+export SPINE_STATE
+
 JSON_MODE=0
 SHOW_DETAILS=0
 
@@ -82,8 +85,9 @@ backup_status_rc=$?
 set -e
 
 results_json="$tmpdir/results.json"
-python3 - "$ROOT" "$tmpdir" "$backup_status_out" "$backup_status_rc" > "$results_json" <<'PY'
+python3 - "$ROOT" "$tmpdir" "$backup_status_out" "$backup_status_rc" "${SPINE_STATE:-}" > "$results_json" <<'PY'
 import json
+import os
 import pathlib
 import re
 import sys
@@ -94,9 +98,11 @@ root = pathlib.Path(sys.argv[1])
 tmpdir = pathlib.Path(sys.argv[2])
 backup_status_path = pathlib.Path(sys.argv[3])
 backup_status_rc = int(sys.argv[4])
+spine_state = pathlib.Path(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else pathlib.Path(os.environ.get("SPINE_STATE", str(pathlib.Path.home() / "code/.runtime/spine/state")))
 
 lifecycle_path = root / "ops/bindings/vm.lifecycle.yaml"
 inventory_path = root / "ops/bindings/domains/backup/backup.inventory.yaml"
+locality_path = root / "ops/bindings/domains/backup/backup.locality.contract.yaml"
 
 
 def load_yaml(path):
@@ -107,6 +113,7 @@ def load_yaml(path):
 
 lifecycle = load_yaml(lifecycle_path)
 inventory = load_yaml(inventory_path)
+locality_doc = load_yaml(locality_path)
 
 vm_by_host_id = {}
 for row in lifecycle.get("vms", []) or []:
@@ -114,6 +121,11 @@ for row in lifecycle.get("vms", []) or []:
     vmid = str(row.get("id") or "")
     if vmid:
         vm_by_host_id[(host, vmid)] = row
+backup_target_to_lifecycle = {
+    str(row.get("backup_target") or ""): row
+    for row in lifecycle.get("vms", []) or []
+    if row.get("backup_target")
+}
 
 runtime_units = inventory.get("runtime_units", []) or []
 targets = inventory.get("targets", []) or []
@@ -123,6 +135,121 @@ for unit in runtime_units:
     mode = str(unit.get("unit_runtime_mode") or "")
     for target_name in unit.get("inventory_targets") or []:
         target_unit_mode[str(target_name)] = mode
+
+# Locality lookup for disabled-target classification (PACKET-612).
+locality_by_target = {}
+for entry in locality_doc.get("target_localities") or []:
+    if isinstance(entry, dict) and entry.get("target"):
+        locality_by_target[str(entry["target"])] = entry
+
+# Recovery-alternative lookup: for target X, find runtime_units whose
+# inventory_targets list contains X (companions become recovery promise);
+# fall back to runtime_units whose hostname matches the VM owner inferred
+# from the target name (e.g. vm-206-dev-tools-primary -> hostname dev-tools).
+def derive_recovery_alternative(target_name):
+    if not target_name:
+        return []
+    direct_companions = []
+    for unit in runtime_units:
+        members = [str(m) for m in unit.get("inventory_targets") or []]
+        if target_name in members:
+            direct_companions.extend(m for m in members if m != target_name)
+    if direct_companions:
+        # de-dupe preserving order
+        seen = set()
+        out = []
+        for m in direct_companions:
+            if m not in seen:
+                seen.add(m)
+                out.append(m)
+        return out
+    # Fallback: parse hostname from target name pattern.
+    # Patterns: vm-NNN-<hostname>-primary, home-vm-NNN-<hostname>-primary,
+    # lxc-NNN-<hostname>-primary, app-<hostname>-*, home-lxc-NNN-<hostname>-primary
+    inferred_hostname = None
+    parts = target_name.split("-")
+    if len(parts) >= 4 and parts[0] == "vm" and parts[1].isdigit():
+        # vm-NNN-<hostname...>-primary
+        inferred_hostname = "-".join(parts[2:-1]) if parts[-1] in {"primary", "offsite"} else "-".join(parts[2:])
+    elif len(parts) >= 5 and parts[0] == "home" and parts[1] == "vm" and parts[2].isdigit():
+        inferred_hostname = "-".join(parts[3:-1]) if parts[-1] == "primary" else "-".join(parts[3:])
+    elif len(parts) >= 4 and parts[0] == "lxc" and parts[1].isdigit():
+        inferred_hostname = "-".join(parts[2:-1]) if parts[-1] == "primary" else "-".join(parts[2:])
+    elif len(parts) >= 5 and parts[0] == "home" and parts[1] == "lxc" and parts[2].isdigit():
+        inferred_hostname = "-".join(parts[3:-1]) if parts[-1] == "primary" else "-".join(parts[3:])
+    if inferred_hostname:
+        for unit in runtime_units:
+            if str(unit.get("hostname") or "") == inferred_hostname:
+                members = [str(m) for m in unit.get("inventory_targets") or [] if str(m) != target_name]
+                if members:
+                    seen = set()
+                    out = []
+                    for m in members:
+                        if m not in seen:
+                            seen.add(m)
+                            out.append(m)
+                    return out
+    return []
+
+
+# Drill-evidence lookup: only forge_node currently has a drill receipt at
+# the canonical path. Parametric structure so other node-roles can plug in.
+DRILL_RECEIPT_PATHS = {
+    "forge_node": spine_state / "domain-state/forge-node/restore-drill-receipt-latest.yaml",
+}
+FORGE_TARGETS = {"vm-206-dev-tools-primary", "app-gitea", "app-gitea-export"}
+
+
+def derive_drill_evidence_present(target_name):
+    if target_name in FORGE_TARGETS:
+        path = DRILL_RECEIPT_PATHS.get("forge_node")
+        if path is not None:
+            return path.is_file()
+    return False
+
+
+def classify_disabled_target(target_name, target_def):
+    """Classify a disabled target per PACKET-612 rules.
+
+    Reads existing fields only:
+      - target_def.classification (critical|important|rebuildable|retired|decommissioned)
+      - target_def.retirement_reason
+      - locality_by_target[target_name].note
+    """
+    locality_entry = locality_by_target.get(target_name) or {}
+    note = str(locality_entry.get("note") or "")
+    inv_classification = str(target_def.get("classification") or "")
+    retirement_reason = str(target_def.get("retirement_reason") or "")
+
+    # rollback / appliance cutover -> appliance_cutover_rollback_only
+    note_l = note.lower()
+    if "rollback evidence" in note_l or "appliance cutover" in note_l:
+        return "appliance_cutover_rollback_only"
+    # app-local subtraction
+    if (
+        "not active readiness authority unless re-admitted" in note_l
+        or retirement_reason == "app_local_backup_subtraction_policy"
+    ):
+        return "app_local_subtraction"
+    # decommissioned residue (locality note says Decommissioned/Tombstoned, OR
+    # inventory classification == decommissioned, OR classification == retired
+    # without other markers — retired and decommissioned are aligned residue
+    # semantics per the locality contract restore_matrix).
+    if (
+        "decommissioned" in note_l
+        or "tombstoned" in note_l
+        or inv_classification == "decommissioned"
+    ):
+        return "decommissioned_residue"
+    # disabled by policy
+    if "intentionally retired" in note_l or "intentionally disabled" in note_l:
+        return "disabled_by_policy"
+    # classification: retired with no other clue -> bucket as decommissioned_residue
+    # (residue semantics; canonical recovery is on a different surface).
+    if inv_classification == "retired":
+        return "decommissioned_residue"
+    # No clear locality note + not retired/decommissioned -> needs operator decision.
+    return "needs_operator_decision"
 
 policy = (((inventory.get("model") or {}).get("vzdump_schedule_policy") or {}))
 derived = policy.get("derived_assignments") or {}
@@ -343,6 +470,18 @@ for host, doc in host_docs.items():
                 status = "partial"
                 reason = "fresh_target_but_no_live_proxmox_job_membership_seen"
 
+        # PACKET-612: per-row disabled-target classification (when applicable),
+        # recovery_alternative, drill_evidence_present.
+        disabled_classification = None
+        recovery_alternative = None
+        drill_evidence_present = False
+        backup_target_def = target_by_name.get(backup_target) if backup_target else None
+        if backup_target_def is not None and backup_target_def.get("enabled") is False:
+            disabled_classification = classify_disabled_target(backup_target, backup_target_def)
+            ra = derive_recovery_alternative(backup_target)
+            recovery_alternative = ra if ra else None
+            drill_evidence_present = derive_drill_evidence_present(backup_target)
+
         row = {
             "host": host,
             "kind": subject["kind"],
@@ -359,6 +498,9 @@ for host, doc in host_docs.items():
             "schedule_policy": policy_name or None,
             "unit_runtime_mode": unit_mode or None,
             "scheduled_jobs": scheduled_jobs,
+            "disabled_classification": disabled_classification,
+            "recovery_alternative": recovery_alternative,
+            "drill_evidence_present": drill_evidence_present,
         }
         subjects.append(row)
         if status in {"gap", "degraded", "partial"}:
@@ -368,6 +510,111 @@ for host, doc in host_docs.items():
                 "host": host,
                 "vmid": vmid,
                 "name": subject["name"],
+            })
+
+# PACKET-612: SECOND PASS — iterate ALL inventory targets (49) so disabled
+# targets that have no live Proxmox guest mapping (app-level lanes, retired
+# VM artifact targets, NAS legacy lanes) still surface as canonical estate
+# truth. Skip targets already covered by the live-guest pass (those rows
+# already carry the disabled_classification fields).
+covered_backup_targets = {
+    s.get("backup_target") for s in subjects if s.get("backup_target")
+}
+inventory_targets = []
+disabled_classification_counts = {
+    "disabled_by_policy": 0,
+    "decommissioned_residue": 0,
+    "app_local_subtraction": 0,
+    "appliance_cutover_rollback_only": 0,
+    "needs_operator_decision": 0,
+}
+# Count classifications already attributed to live-guest rows so the rollup
+# reflects the full estate, not just the inventory-only second pass.
+for s in subjects:
+    dc = s.get("disabled_classification")
+    if dc and dc in disabled_classification_counts:
+        disabled_classification_counts[dc] += 1
+for target_def in targets:
+    name = str(target_def.get("name") or "")
+    if not name:
+        continue
+    if name in covered_backup_targets:
+        continue
+    enabled = bool(target_def.get("enabled"))
+    inv_host = str(target_def.get("host") or "")
+    classification_value = str(target_def.get("classification") or "")
+    if enabled:
+        # Inventory-only enabled target — likely already covered by
+        # backup.status freshness; emit a row so the canonical estate
+        # truth includes it.
+        readback = target_status_for(name)
+        unit_mode = target_unit_mode.get(name, "")
+        if readback["status"] in {"stale", "missing", "error", "blocked"}:
+            row_status = "degraded"
+            row_reason = f"backup_target_{readback['status']}"
+        elif readback["status"] in {"not_reported", "missing_inventory"}:
+            row_status = "partial"
+            row_reason = f"backup_target_{readback['status']}"
+        else:
+            row_status = "ok"
+            row_reason = "covered_by_inventory_and_readback"
+        inventory_targets.append({
+            "scope": "inventory_only",
+            "host": inv_host or None,
+            "name": name,
+            "kind": str(target_def.get("kind") or ""),
+            "enabled": True,
+            "classification": classification_value or None,
+            "framing": "recurring_freshness_checked",
+            "status": row_status,
+            "reason": row_reason,
+            "backup_target": name,
+            "backup_target_status": readback.get("status"),
+            "backup_target_reason": readback.get("reason"),
+            "unit_runtime_mode": unit_mode or None,
+            "disabled_classification": None,
+            "recovery_alternative": None,
+            "drill_evidence_present": False,
+        })
+    else:
+        disabled_class = classify_disabled_target(name, target_def)
+        if disabled_class in disabled_classification_counts:
+            disabled_classification_counts[disabled_class] += 1
+        ra = derive_recovery_alternative(name)
+        recovery = ra if ra else None
+        drill_present = derive_drill_evidence_present(name)
+        unit_mode = target_unit_mode.get(name, "")
+        retirement_reason = str(target_def.get("retirement_reason") or "")
+        retired_at = str(target_def.get("retired_at") or "")
+        locality_entry = locality_by_target.get(name) or {}
+        inventory_targets.append({
+            "scope": "inventory_only",
+            "host": inv_host or None,
+            "name": name,
+            "kind": str(target_def.get("kind") or ""),
+            "enabled": False,
+            "classification": classification_value or None,
+            "framing": "disabled_target_classified",
+            "status": "disabled",
+            "reason": disabled_class,
+            "backup_target": name,
+            "backup_target_status": None,
+            "backup_target_reason": None,
+            "unit_runtime_mode": unit_mode or None,
+            "disabled_classification": disabled_class,
+            "recovery_alternative": recovery,
+            "drill_evidence_present": drill_present,
+            "locality": str(locality_entry.get("locality") or "") or None,
+            "locality_note": str(locality_entry.get("note") or "") or None,
+            "retirement_reason": retirement_reason or None,
+            "retired_at": retired_at or None,
+        })
+        if disabled_class == "needs_operator_decision":
+            gaps.append({
+                "severity": "medium",
+                "code": "disabled_target_needs_operator_decision",
+                "host": inv_host or None,
+                "target": name,
             })
 
 for unit in runtime_units:
@@ -413,6 +660,9 @@ counts = {
     "backup_status_degraded_unattached_total": backup_status_degraded_unattached_total,
     "gap_total": sum(1 for s in subjects if s["status"] == "gap"),
     "residue_total": sum(1 for s in subjects if s["status"] == "residue"),
+    "inventory_targets_total": len(inventory_targets),
+    "inventory_disabled_total": sum(1 for r in inventory_targets if r.get("enabled") is False),
+    "inventory_enabled_only_total": sum(1 for r in inventory_targets if r.get("enabled") is True),
 }
 
 print(json.dumps({
@@ -436,6 +686,8 @@ print(json.dumps({
     "backup_status_degraded_targets": backup_status_degraded_targets,
     "counts": counts,
     "subjects": subjects,
+    "inventory_targets": inventory_targets,
+    "disabled_classification_counts": disabled_classification_counts,
     "gaps": gaps,
 }, indent=2, sort_keys=True))
 PY
@@ -450,12 +702,50 @@ echo "status: $(jq -r '.status' "$results_json")"
 echo "control_node: $(jq -r '.control_node' "$results_json")"
 echo "subjects: $(jq -r '.counts.subjects_total' "$results_json") total, $(jq -r '.counts.running_total' "$results_json") running, $(jq -r '.counts.stopped_total' "$results_json") stopped"
 echo "coverage: $(jq -r '.counts.ok_total' "$results_json") ok, $(jq -r '.counts.partial_total' "$results_json") partial, $(jq -r '.counts.degraded_total' "$results_json") degraded, $(jq -r '.counts.gap_total' "$results_json") gaps, $(jq -r '.counts.residue_total' "$results_json") residue"
+echo "inventory: $(jq -r '.counts.inventory_targets_total' "$results_json") additional inventory targets ($(jq -r '.counts.inventory_disabled_total' "$results_json") disabled, $(jq -r '.counts.inventory_enabled_only_total' "$results_json") enabled-only)"
+disabled_counts="$(jq -r '.disabled_classification_counts | to_entries | map("\(.key)=\(.value)") | join(", ")' "$results_json")"
+if [[ -n "$disabled_counts" ]]; then
+  echo "disabled_classification: $disabled_counts"
+fi
 echo
-printf '%-14s %-5s %-24s %-10s %-10s %-34s %s\n' "HOST" "VMID" "NAME" "RUNTIME" "STATUS" "TARGET" "REASON"
-jq -r '.subjects[] | [.host, .vmid, .name, .runtime_status, .status, (.backup_target // "-"), .reason] | @tsv' "$results_json" \
-  | while IFS=$'\t' read -r host vmid name runtime status target reason; do
-      printf '%-14s %-5s %-24s %-10s %-10s %-34s %s\n' "$host" "$vmid" "$name" "$runtime" "$status" "$target" "$reason"
+printf '%-14s %-5s %-26s %-10s %-10s %-36s %s\n' "HOST" "VMID" "NAME" "RUNTIME" "STATUS" "TARGET" "REASON / DISABLED_CLASSIFICATION"
+jq -r '.subjects[] | [.host, .vmid, .name, .runtime_status, .status, (.backup_target // "-"), .reason, (.disabled_classification // "-"), (if (.recovery_alternative // []) == [] then "-" else (.recovery_alternative | join(",")) end), (.drill_evidence_present | tostring)] | @tsv' "$results_json" \
+  | while IFS=$'\t' read -r host vmid name runtime status target reason disabled_class recovery drill; do
+      base="$reason"
+      if [[ "$disabled_class" != "-" && -n "$disabled_class" ]]; then
+        base="$reason | disabled=$disabled_class"
+        if [[ "$recovery" != "-" && -n "$recovery" ]]; then
+          base="$base | recovery=$recovery"
+        fi
+        if [[ "$drill" == "true" ]]; then
+          base="$base | drill_evidence=true"
+        fi
+      fi
+      printf '%-14s %-5s %-26s %-10s %-10s %-36s %s\n' "$host" "$vmid" "$name" "$runtime" "$status" "$target" "$base"
     done
+
+inventory_count="$(jq -r '.counts.inventory_targets_total' "$results_json")"
+if [[ "$inventory_count" -gt 0 ]]; then
+  echo
+  echo "inventory targets (not represented by a live Proxmox guest):"
+  printf '%-22s %-36s %-10s %-32s %s\n' "HOST" "TARGET" "ENABLED" "DISABLED_CLASSIFICATION" "RECOVERY_ALTERNATIVE / DRILL"
+  jq -r '.inventory_targets[] | [(.host // "-"), .name, (.enabled | tostring), (.disabled_classification // "-"), (if (.recovery_alternative // []) == [] then "-" else (.recovery_alternative | join(",")) end), (.drill_evidence_present | tostring)] | @tsv' "$results_json" \
+    | while IFS=$'\t' read -r host name enabled disabled recovery drill; do
+        suffix=""
+        if [[ "$recovery" != "-" && -n "$recovery" ]]; then
+          suffix="recovery=$recovery"
+        fi
+        if [[ "$drill" == "true" ]]; then
+          if [[ -n "$suffix" ]]; then
+            suffix="$suffix | drill_evidence=true"
+          else
+            suffix="drill_evidence=true"
+          fi
+        fi
+        if [[ -z "$suffix" ]]; then suffix="-"; fi
+        printf '%-22s %-36s %-10s %-32s %s\n' "$host" "$name" "$enabled" "$disabled" "$suffix"
+      done
+fi
 
 if [[ "$SHOW_DETAILS" -eq 1 ]]; then
   echo

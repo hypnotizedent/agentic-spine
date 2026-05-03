@@ -1181,5 +1181,62 @@ if candidate.get("runtime_obligations", {}).get("active_runtime_labels"):
 if candidate.get("recovery_planes", {}).get("identity") != "ssh_identity_declared":
     fail("ssh target may only provide access/identity evidence for candidate subjects")
 
+# PACKET-612 (backup readback subtraction): backup.status is demoted from
+# primary estate truth; backup.estate.readback.status is canonical and must
+# classify disabled targets. forge.backup_restore.status reframes the
+# vm-206-dev-tools-primary artifact as drill_evidence_only. Extension of
+# D447 only — NO new D-gate.
+estate_readback_script = root / "ops/plugins/core/bin/backup-estate-readback-status"
+if not estate_readback_script.is_file():
+    fail("ops/plugins/core/bin/backup-estate-readback-status missing (PACKET-612 canonical estate readback)")
+estate_readback_text = estate_readback_script.read_text(encoding="utf-8")
+for required_term in (
+    "disabled_classification",
+    "recovery_alternative",
+    "drill_evidence_present",
+    "disabled_by_policy",
+    "decommissioned_residue",
+    "app_local_subtraction",
+    "appliance_cutover_rollback_only",
+    "needs_operator_decision",
+    "classify_disabled_target",
+    "derive_recovery_alternative",
+    "derive_drill_evidence_present",
+):
+    if required_term not in estate_readback_text:
+        fail(f"backup-estate-readback-status must implement {required_term} (PACKET-612 disabled-target classification)")
+
+forge_br_text_p612 = (root / "ops/plugins/infra/host/bin/forge-backup-restore-status").read_text(encoding="utf-8")
+for required_term in (
+    "artifact_framing",
+    "drill_evidence_only",
+    "active_recovery_promise",
+    "recurring_freshness_state",
+    "derive_artifact_framing",
+    "resolve_locality",
+    "resolve_runtime_unit_targets",
+):
+    if required_term not in forge_br_text_p612:
+        fail(f"forge-backup-restore-status must implement {required_term} (PACKET-612 artifact framing)")
+
+caps_doc_status = (caps_map.get("backup.status") or {})
+status_desc = str(caps_doc_status.get("description") or "")
+if "NOT primary estate truth" not in status_desc and "not primary estate truth" not in status_desc.lower():
+    fail("ops/capabilities.yaml backup.status description must demote it from primary estate truth (PACKET-612)")
+if "backup.estate.readback.status" not in status_desc:
+    fail("ops/capabilities.yaml backup.status description must redirect to backup.estate.readback.status (PACKET-612)")
+
+caps_doc_estate = (caps_map.get("backup.estate.readback.status") or {})
+estate_desc = str(caps_doc_estate.get("description") or "")
+if "Canonical backup estate readback" not in estate_desc:
+    fail("ops/capabilities.yaml backup.estate.readback.status description must declare 'Canonical backup estate readback' (PACKET-612)")
+if "PACKET-612" not in estate_desc:
+    fail("ops/capabilities.yaml backup.estate.readback.status description must reference PACKET-612 (canonical promotion provenance)")
+if "drill_evidence_present" not in estate_desc or "recovery_alternative" not in estate_desc:
+    fail("ops/capabilities.yaml backup.estate.readback.status description must name disabled-target enrichment fields (recovery_alternative, drill_evidence_present)")
+for required_phrase in ("disabled_by_policy", "decommissioned_residue", "app_local_subtraction", "appliance_cutover_rollback_only", "needs_operator_decision"):
+    if required_phrase not in status_desc:
+        fail(f"ops/capabilities.yaml backup.status description must name '{required_phrase}' classification (PACKET-612 — names live in backup.status description per redirect target)")
+
 print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, machine specs stay inside admission, active role runtime truth is composed, and candidate evidence cannot promote itself")
 PY
