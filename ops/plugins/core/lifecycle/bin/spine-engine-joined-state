@@ -275,12 +275,79 @@ def resolve_paths(root: Path) -> dict[str, Path]:
     }
 
 
+_CANONICAL_LOOP_COUNT_CACHE: int | None = None
+_CANONICAL_LOOP_COUNT_PROBED: bool = False
+
+
+def fetch_canonical_open_loop_count(repo_root: Path) -> int | None:
+    """Return canonical open loop count via routed `loops.status` cap.
+
+    PACKET-603: collapse-the-readers subtraction. Multiple surfaces previously
+    derived loop counts from a directly-opened local SQL authority
+    (status.sh, this script, and post_attach_router). On non-authority hosts
+    a stale/spurious local DB silently produced 0 while the routed canonical
+    on pve held the real count. The canonical entry-truth count lives behind
+    one cap: `loops.status` (already routed to pve via cap.sh per the
+    state_authority annotation). Consumers should override their
+    local-derived count with this canonical value when reachable.
+
+    Returns the canonical open count (int), or None when the routed cap
+    is unreachable / fails. Cached per process so multiple consumer call
+    sites in the same joined-state run amortize the SSH-routed dispatch
+    cost. Disable with SPINE_OPS_STATUS_CANONICAL_LOOPS_PROBE=disable.
+
+    Note: `loops.status` today returns count only, not full loop details.
+    Loop detail rows (objective, owner, next_action) remain local-derived
+    best-effort. When the count differs from what local SQL produced, the
+    canonical count wins for the summary; the detail rows are surfaced as
+    "may be stale local projection" via their `source` field.
+    """
+    global _CANONICAL_LOOP_COUNT_CACHE, _CANONICAL_LOOP_COUNT_PROBED
+    if _CANONICAL_LOOP_COUNT_PROBED:
+        return _CANONICAL_LOOP_COUNT_CACHE
+    _CANONICAL_LOOP_COUNT_PROBED = True
+    if (os.environ.get("SPINE_OPS_STATUS_CANONICAL_LOOPS_PROBE", "") or "").strip().lower() == "disable":
+        return None
+    ops_bin = repo_root / "bin" / "ops"
+    if not ops_bin.is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            [str(ops_bin), "cap", "run", "loops.status", "--", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=12,
+            cwd=str(repo_root),
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        text = proc.stdout
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end < start:
+            return None
+        try:
+            payload = json.loads(text[start : end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return None
+        count = payload.get("open_loops")
+        if isinstance(count, int) and count >= 0:
+            _CANONICAL_LOOP_COUNT_CACHE = count
+            return count
+        return None
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    except Exception:
+        return None
+
+
 def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
     rows_by_id: dict[str, dict[str, Any]] = {}
     status_index: dict[str, str] = {}
     scope_only_orphans: list[dict[str, Any]] = []
     projection_residue: list[dict[str, Any]] = []
     scopes_dir = paths["scopes_dir"]
+
     if loops_authority is not None:
         previous_spine_state = os.environ.get("SPINE_STATE")
         conn = None
@@ -310,6 +377,7 @@ def collect_loop_rows(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dic
                     "created_at_utc": "",
                     "updated_at_utc": "",
                     "path": "",
+                    "source": "local_db",
                 }
         except Exception:
             pass
@@ -1328,6 +1396,15 @@ def _gap_projection_match(gap_state: dict[str, Any]) -> bool | None:
 def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str, Any]:
     paths = resolve_paths(root)
     open_loops, loop_status_index, scope_only_orphans, projection_residue = collect_loop_rows(paths)
+
+    # PACKET-603: collapse-the-readers — canonical entry-truth count comes from
+    # the routed `loops.status` cap (which itself routes to pve via cap.sh).
+    # When that count is reachable AND differs from the local-derived count,
+    # canonical wins for the summary. Local-derived rows still surface for
+    # detail (objective, owner, etc.) but the headline count reflects pve
+    # canonical authority. This stops a stale/spurious local DB from
+    # silently presenting 0 while pve holds the real number.
+    canonical_open_loop_count = fetch_canonical_open_loop_count(paths["root"])
     gap_state = collect_gap_state(paths, loop_status_index)
     open_gaps = gap_state.get("open", []) if gap_state.get("status") == "ok" else []
     orphaned_gaps = gap_state.get("orphaned", []) if gap_state.get("status") == "ok" else []
@@ -1404,7 +1481,10 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "joined_state_path": str(paths["joined_state_path"]),
         },
         "summary": {
-            "open_loops": len(open_loops),
+            "open_loops": canonical_open_loop_count if canonical_open_loop_count is not None else len(open_loops),
+            "open_loops_local_count": len(open_loops),
+            "open_loops_canonical_count": canonical_open_loop_count,
+            "open_loops_source": "canonical_routed" if canonical_open_loop_count is not None else "local_db",
             "scope_only_orphans": len(scope_only_orphans),
             "projection_residue": len(projection_residue),
             "open_gaps": len(open_gaps) if gap_state.get("status") == "ok" else None,
