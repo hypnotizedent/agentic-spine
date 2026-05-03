@@ -112,7 +112,7 @@ def _check_packet_nn_uniqueness(
     supersedes_packet: str,
 ) -> None:
     """PACKET-685 (collision audit) fix #1: refuse creation when an existing
-    CONTROLLER-PACKET-{nn}-*.md file with a DIFFERENT slug exists, unless
+    controller-prompt packet with a DIFFERENT slug but same NN exists, unless
     --allow-sibling with explicit --sibling-justification (or
     --supersedes-packet) is supplied.
 
@@ -124,19 +124,19 @@ def _check_packet_nn_uniqueness(
     duplicates. This new guard catches the same-NN/different-slug class
     (e.g., PACKET-665-FORGE-AGENT-BOUNDARY-STAGE-2 vs
     PACKET-665-EMIT-ASSIGNMENT-SCOPE-FILE-FALLBACK-SUBTRACTION-F3).
+
+    PACKET-690 first-class closure: source the NN from each existing
+    packet's frontmatter `packet_id` field, NOT from a filename prefix.
+    Filename shape varies (canonical CONTROLLER-PACKET-* and legacy
+    MAILROOM-CONTROLLER-PACKET-*); the frontmatter packet_id is the
+    authoritative semantic identifier and survives any filename drift.
     """
     prompts_path = Path(controller_prompts_dir)
     if not prompts_path.is_dir():
         return  # no directory = no duplicates possible
 
-    nn_prefix = f"CONTROLLER-PACKET-{nn}-"
     existing_with_same_nn: list[Path] = []
     for path in _iter_packet_files(prompts_path):
-        name = path.name
-        if not name.startswith(nn_prefix):
-            continue
-        # Skip the file we are about to write to (same packet_id is caught
-        # by _check_packet_id_uniqueness with a clearer error).
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -154,6 +154,15 @@ def _check_packet_nn_uniqueness(
             continue
         existing_pid = str(fm.get("packet_id") or "").strip()
         if not existing_pid:
+            continue
+        # Extract NN from packet_id (PACKET-{NN}-{SLUG}). This sources NN
+        # from the authoritative semantic identifier, not the filename, so
+        # legacy MAILROOM-CONTROLLER-PACKET-{nn}-*.md files are correctly
+        # included in the same-NN scan.
+        pid_match = PACKET_ID_RE.match(existing_pid)
+        if not pid_match:
+            continue
+        if pid_match.group(1) != nn:
             continue
         if existing_pid == packet_id:
             continue  # exact match handled elsewhere
