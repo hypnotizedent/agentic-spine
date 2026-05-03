@@ -16,8 +16,8 @@ When you need to know **what is deployed** and **where it lives**:
 - Live stack directories are authored in `ops/bindings/probe.registry.yaml` and projected to `ops/bindings/docker.compose.targets.yaml`
 - SSH reachability/user/ports are declared in `ops/bindings/ssh.targets.yaml`
 - Health probes are authored in `ops/bindings/probe.registry.yaml` and projected to `ops/bindings/services.health.yaml`
-- Typed foundation compose SSOT (sanitized) lives under `agentic-foundation/ops/{infra,domains}/**`; archived transition material lives under `agentic-foundation/docs/archive/ops-staged/`
-- Workbench compose is supporting/reference only (never a runtime dependency). Query `~/code/workbench` directly when an external reference is required.
+- Typed compose SSOT (sanitized) lives under `workbench/ops/{infra,domains}/**` (PACKET-597: was `agentic-foundation/ops/...` — agentic-foundation was absorbed into workbench on 2026-04-09 per LOCAL_CONTROL_PLANE_CONTRACT.md:26); archived transition material lives at the historical `agentic-foundation/docs/archive/ops-staged/` artifacts retained as evidence
+- Workbench compose is now the canonical SSOT (PACKET-597 superseded the prior "supporting/reference only" framing). Query `~/code/workbench` directly when an external reference is required.
 
 ## Allowed Operations (Receipt-Producing)
 
