@@ -318,6 +318,11 @@ def durable_identifiers(recovery: dict[str, Any]) -> dict[str, Any]:
                 ssh.get("tailscale_ip"),
                 shop.get("tailscale_ip"),
             ),
+            "tailscale_name": first_present(
+                operator.get("tailscale_identity"),
+                (appliance.get("network_identities") or {}).get("tailscale_name"),
+                hardware.get("tailscale_identity"),
+            ),
             "mac": first_present(ssh.get("mac"), shop.get("mac")),
             "ssh_target_id": ssh.get("id"),
             "shop_device_id": shop.get("id"),
@@ -1326,6 +1331,229 @@ def machine_spec_row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+PROMOTION_LADDER = [
+    "taxonomy",
+    "contracted",
+    "workload-backed",
+    "candidate-backed",
+    "bootstrap-joined",
+    "materialized",
+    "delivered",
+]
+
+
+def journey_decision(row: dict[str, Any]) -> dict[str, Any]:
+    """Compute current_stop, candidate_evidence_only, and next_legal_action from row state.
+
+    Reads only fields already populated on the row by upstream builders; does not
+    re-source. The (lifecycle_state, promotion_stage, object_kind) tuple decides.
+    """
+    lifecycle = row.get("lifecycle_state") or "unknown"
+    admission_block = row.get("admission_identity") or {}
+    promotion = admission_block.get("promotion_stage") or "taxonomy"
+    kind = row.get("object_kind") or "unknown"
+
+    candidate_only = lifecycle == "candidate_or_access_evidence_only"
+
+    if lifecycle == "excluded":
+        action = "preserved or frozen; no advancement intended; remove only via exclusion-retirement closure"
+    elif candidate_only:
+        action = (
+            "remain candidate-evidence-only; reachability or specs alone do not admit. "
+            "Advance only by completing a governed first-touch (FT-BMC, FT-PXE, FT-MEDIA, or FT-SSH)."
+        )
+    elif lifecycle == "admitted_runtime_present" and promotion == "delivered":
+        action = "no action; node is delivered with active runtime. Watch recovery and verify drift."
+    elif promotion == "delivered":
+        action = "role delivered; verify recovery and runtime drift; no further promotion required."
+    elif promotion == "materialized":
+        action = "prove runtime activation and observability to advance to delivered."
+    elif promotion == "bootstrap-joined":
+        action = (
+            "advance through role-runtime promotion closure (role contract, "
+            "workload binding, runtime placement, observability) to materialize."
+        )
+    elif promotion == "candidate-backed":
+        action = "perform first-touch admission to advance to bootstrap-joined."
+    elif promotion in ("workload-backed", "contracted"):
+        action = "select a candidate host and complete bootstrap to advance."
+    elif promotion == "taxonomy" and lifecycle == "admitted_not_activated":
+        action = (
+            "first-touch admitted but no role bound; bind a node role + workload "
+            "to advance, or hold as admitted hardware with no promotion."
+        )
+    else:
+        action = "no advancement signal; review object_kind and lifecycle_state."
+
+    return {
+        "current_stop": promotion,
+        "lifecycle_state": lifecycle,
+        "object_kind": kind,
+        "ladder_terms": PROMOTION_LADDER,
+        "candidate_evidence_only": candidate_only,
+        "next_legal_action": action,
+        "promotion_authority": "node.admission.status (composes node.role.contract.yaml)",
+    }
+
+
+def identity_alignment(row: dict[str, Any]) -> dict[str, Any]:
+    """Surface identity planes side-by-side and flag aliases.
+
+    Aligned == all populated planes resolve to the same canonical id.
+    Aliases name planes whose value differs from the canonical id (e.g. tailscale_name).
+    """
+    durable = row.get("durable_identifiers") or {}
+    canonical = (
+        durable.get("device_id")
+        or durable.get("machine_id")
+        or durable.get("appliance_id")
+        or durable.get("hostname")
+    )
+    planes: dict[str, Any] = {}
+    aliases: list[dict[str, str]] = []
+
+    candidates = [
+        ("device_id", durable.get("device_id")),
+        ("machine_id", durable.get("machine_id")),
+        ("appliance_id", durable.get("appliance_id")),
+        ("hostname", durable.get("hostname")),
+        ("ssh_target_id", durable.get("ssh_target_id")),
+        ("tailscale_name", durable.get("tailscale_name")),
+        ("shop_device_id", durable.get("shop_device_id")),
+        ("lan_ip", durable.get("lan_ip")),
+        ("tailscale_ip", durable.get("tailscale_ip")),
+    ]
+    name_planes = {"device_id", "machine_id", "appliance_id", "hostname", "ssh_target_id", "tailscale_name", "shop_device_id"}
+    aligned = True
+    for plane, value in candidates:
+        if not value:
+            continue
+        planes[plane] = value
+        if plane in name_planes and canonical and value != canonical:
+            aliases.append({"plane": plane, "value": str(value), "canonical_id": str(canonical)})
+            aligned = False
+
+    return {
+        "canonical_id": canonical,
+        "planes": planes,
+        "aliases": aliases,
+        "aligned": aligned if planes else None,
+        "rule": "identity planes are deliberately distinct; aliases are evidence, not authority",
+    }
+
+
+def kind_separation(recovery: dict[str, Any], row: dict[str, Any]) -> dict[str, Any] | None:
+    """Make appliance/portable-media/host kind distinctions explicit on the row.
+
+    Carries the why-not-promote-this-as-a-node story per object kind.
+    """
+    sources = recovery.get("source_surfaces") or {}
+    appliance = sources.get("appliance_identity") or {}
+    operator = sources.get("operator_hardware") or {}
+    kind = row.get("object_kind")
+    appliance_class = str(appliance.get("class") or "").lower()
+    node_role_field = str(appliance.get("node_role") or "").lower()
+    media_type = (appliance.get("hardware_identity") or {}).get("media_type") or appliance.get("media_type")
+    backed_by = appliance.get("backed_by") or {}
+    backing_host = backed_by.get("host_machine") or backed_by.get("device_id") or backed_by.get("machine_id")
+
+    if kind == "appliance":
+        signal = " ".join((appliance_class, node_role_field, str(media_type or ""))).lower()
+        if any(k in signal for k in ("bootstrap_media", "bootstrap", "installer", "live")):
+            return {
+                "category": "portable_bootstrap_media_appliance",
+                "bootstrap_carrier_not_target": True,
+                "rule": (
+                    "media identity is the provisioning carrier; target machine "
+                    "identity is recorded by node admission of the receiving host, "
+                    "not this row. USB storage seen in any host's machine_facts is "
+                    "evidence, not host identity."
+                ),
+            }
+        if any(k in signal for k in ("portable_storage", "portable", "external_ssd", "external_storage", "removable")):
+            return {
+                "category": "portable_storage_appliance",
+                "portable_storage_not_node": True,
+                "rule": "reusable storage appliance; not promotable as a node",
+            }
+        if backing_host:
+            return {
+                "category": "service_appliance_backed_by_host",
+                "appliance_not_host_machine": True,
+                "host_machine": backing_host,
+                "rule": (
+                    "appliance role and physical host are separate admission rows; "
+                    "service is delivered through the appliance, host is admitted "
+                    "as operator_hardware separately."
+                ),
+            }
+        return {
+            "category": "appliance",
+            "rule": "appliance row; not a node candidate without role-runtime promotion closure",
+        }
+    if kind == "operator_hardware":
+        return {
+            "category": "operator_hardware",
+            "target_identity_planes_only": True,
+            "rule": (
+                "this row's identity planes describe the target machine. Any USB or "
+                "portable media observed in machine_facts is evidence of attached "
+                "hardware, not host identity. Portable bootstrap media has its own "
+                "appliance row."
+            ),
+        }
+    if kind == "ssh_target_only":
+        return {
+            "category": "ssh_target_only",
+            "rule": "reachability evidence only; not admitted, not promotable to a node",
+        }
+    if kind == "shop_physical_machine":
+        return {
+            "category": "shop_physical_machine",
+            "rule": "L3 shop function machine; shop.device.registry is evidence; admission resolves through this readback if a first-touch is completed",
+        }
+    return None
+
+
+def attachment_advisory(recovery: dict[str, Any], row: dict[str, Any]) -> dict[str, Any] | None:
+    """For portable media: relabel attachment_host_node_id when detached.
+
+    Prevents `host_node_id: pve` on a detached SanDisk from being read as
+    current attachment authority.
+    """
+    sources = recovery.get("source_surfaces") or {}
+    appliance = sources.get("appliance_identity") or {}
+    attachment = appliance.get("attachment") or {}
+    spec_known = ((row.get("machine_spec") or {}).get("known") or {})
+    state = (
+        attachment.get("mount_state")
+        or attachment.get("state")
+        or appliance.get("attachment_mount_state")
+        or spec_known.get("attachment_mount_state")
+        or ""
+    ).lower()
+    host = (
+        attachment.get("host_node_id")
+        or attachment.get("attachment_host_node_id")
+        or appliance.get("attachment_host_node_id")
+        or spec_known.get("attachment_host_node_id")
+    )
+    if not host:
+        return None
+    if state in ("detached", "ejected", "absent", "not_mounted", "unmounted", ""):
+        return {
+            "current_attachment_state": state or "unknown",
+            "host_node_id": host,
+            "host_node_id_meaning": "last_observed_host",
+            "rule": "host_node_id on detached or unknown-state media is observation history, not current attachment authority",
+        }
+    return {
+        "current_attachment_state": state,
+        "host_node_id": host,
+        "host_node_id_meaning": "current_attachment_host",
+    }
+
+
 def golden_path_row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     row = machine_spec_row_from_recovery(recovery)
     spec = row.get("machine_spec") or {}
@@ -1374,14 +1602,24 @@ def golden_path_row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         blockers.append("admission_not_complete")
     if (placement.get("placement_status") or "unknown") in {"", "unknown", "unassigned"}:
         blockers.append("placement_not_declared")
-    row["golden_path"] = {
-        "packet": "PACKET-534-NODE-PROVISIONING-RUNTIME-GOLDEN-PATH",
-        "definition": "first_touch -> machine_facts -> node_admission -> placement -> runtime -> receipts",
-        "stages": stages,
-        "state": "ready" if not blockers else "incomplete",
-        "blockers": blockers,
-        "stop_line": "read-only proof path; does not promote, place, or mutate the node",
-    }
+    journey = journey_decision(row)
+    alignment = identity_alignment(row)
+    separation = kind_separation(recovery, row)
+    advisory = attachment_advisory(recovery, row)
+    row["golden_path"] = compact_dict(
+        {
+            "packet": "PACKET-534-NODE-PROVISIONING-RUNTIME-GOLDEN-PATH",
+            "definition": "first_touch -> machine_facts -> node_admission -> placement -> runtime -> receipts",
+            "stages": stages,
+            "state": "ready" if not blockers else "incomplete",
+            "blockers": blockers,
+            "stop_line": "read-only proof path; does not promote, place, or mutate the node",
+            "journey": journey,
+            "identity_alignment": alignment,
+            "kind_separation": separation,
+            "attachment_advisory": advisory,
+        }
+    )
     return row
 
 
@@ -1475,6 +1713,26 @@ def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False, golden_pa
             print(f"  blockers:    {', '.join(path.get('blockers') or []) or 'none'}")
             for stage in path.get("stages") or []:
                 print(f"    - {stage.get('stage')}: {stage.get('state')}")
+            journey = path.get("journey") or {}
+            if journey:
+                print(f"  current_stop:        {journey.get('current_stop')}")
+                print(f"  candidate_evidence_only: {journey.get('candidate_evidence_only')}")
+                print(f"  next_legal_action:   {journey.get('next_legal_action')}")
+            alignment = path.get("identity_alignment") or {}
+            if alignment:
+                print(f"  identity_canonical:  {alignment.get('canonical_id')}")
+                print(f"  identity_aligned:    {alignment.get('aligned')}")
+                for alias in alignment.get("aliases") or []:
+                    print(f"    alias: {alias.get('plane')}={alias.get('value')} -> canonical {alias.get('canonical_id')}")
+            sep = path.get("kind_separation") or {}
+            if sep:
+                print(f"  kind_separation:     {sep.get('category')}")
+                print(f"    rule: {sep.get('rule')}")
+                if sep.get("host_machine"):
+                    print(f"    host_machine: {sep['host_machine']} (separate admission row)")
+            adv = path.get("attachment_advisory") or {}
+            if adv:
+                print(f"  attachment:          {adv.get('current_attachment_state')} (host_node_id={adv.get('host_node_id')}, meaning={adv.get('host_node_id_meaning')})")
         print(f"  subtracts:  {row['subtraction_caption']}")
         print("")
 

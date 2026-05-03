@@ -1265,6 +1265,100 @@ if stage_names != ["first_touch", "machine_facts", "node_admission", "placement"
 if "does not promote" not in golden.get("stop_line", ""):
     fail("golden-path readback must state non-mutating stop line")
 
+# --- Slice 2: operator-hardware journey, identity alignment, kind separation,
+# attachment advisory. These are not optional shape fields; the golden_path
+# block must teach a fresh operator what stop the subject is at, which identity
+# planes line up, why the row is/is not promotable, and whether portable-media
+# host_node_id is current attachment or last observed.
+
+def golden_path_for(subject_id):
+    p = subprocess.run(
+        [str(node_admission), "--node", subject_id, "--golden-path", "--json"],
+        text=True,
+        capture_output=True,
+    )
+    if p.returncode != 0:
+        fail(f"--golden-path sample failed for {subject_id}: {p.stderr.strip() or p.stdout.strip()}")
+    rs = (json.loads(p.stdout).get("rows") or [])
+    if len(rs) != 1:
+        fail(f"--golden-path --node {subject_id} must emit exactly one row")
+    return rs[0]
+
+# pve-r620 already loaded above as `golden`. Assert the new shape fields exist.
+journey = golden.get("journey") or {}
+for key in ("current_stop", "next_legal_action", "candidate_evidence_only", "ladder_terms", "promotion_authority"):
+    if key not in journey:
+        fail(f"golden_path.journey must include {key} (slice 2)")
+if journey.get("ladder_terms") != [
+    "taxonomy", "contracted", "workload-backed", "candidate-backed",
+    "bootstrap-joined", "materialized", "delivered",
+]:
+    fail("golden_path.journey.ladder_terms must enumerate the canonical 7-stage promotion ladder")
+
+alignment = golden.get("identity_alignment") or {}
+for key in ("canonical_id", "planes", "aliases", "aligned", "rule"):
+    if key not in alignment:
+        fail(f"golden_path.identity_alignment must include {key} (slice 2)")
+
+# Per-subject assertions covering each kind class and the named identity seams.
+# macbook-2016-pro: tailscale alias 2016macnode must surface in durable_identifiers
+# AND in identity_alignment.aliases. Without this the WAN-side identity is invisible
+# from the canonical readback.
+mac = golden_path_for("macbook-2016-pro")
+mac_durable = mac.get("durable_identifiers") or {}
+if mac_durable.get("tailscale_name") != "2016macnode":
+    fail("macbook-2016-pro durable_identifiers.tailscale_name must surface alias '2016macnode'")
+mac_aliases = (mac.get("golden_path") or {}).get("identity_alignment", {}).get("aliases") or []
+if not any(a.get("plane") == "tailscale_name" and a.get("value") == "2016macnode" for a in mac_aliases):
+    fail("macbook-2016-pro identity_alignment.aliases must include tailscale_name=2016macnode")
+mac_sep = (mac.get("golden_path") or {}).get("kind_separation") or {}
+if mac_sep.get("category") != "operator_hardware" or not mac_sep.get("target_identity_planes_only"):
+    fail("macbook-2016-pro kind_separation must classify as operator_hardware with target_identity_planes_only=True")
+
+# sandisk-cruzer: portable bootstrap media. Must be classified separately from
+# any host's identity. Detached host_node_id must read as last_observed_host.
+cruzer = golden_path_for("sandisk-cruzer-stage0-bootstrap-16gb-01")
+cruzer_sep = (cruzer.get("golden_path") or {}).get("kind_separation") or {}
+if cruzer_sep.get("category") != "portable_bootstrap_media_appliance":
+    fail("sandisk-cruzer kind_separation.category must be portable_bootstrap_media_appliance")
+if not cruzer_sep.get("bootstrap_carrier_not_target"):
+    fail("sandisk-cruzer kind_separation.bootstrap_carrier_not_target must be True")
+cruzer_adv = (cruzer.get("golden_path") or {}).get("attachment_advisory") or {}
+if cruzer_adv.get("host_node_id_meaning") != "last_observed_host":
+    fail("sandisk-cruzer attachment_advisory must label host_node_id as last_observed_host when not currently mounted")
+
+# sandisk-extreme: portable storage appliance, not a node.
+extreme = golden_path_for("sandisk-extreme-55ae-2tb-01")
+extreme_sep = (extreme.get("golden_path") or {}).get("kind_separation") or {}
+if extreme_sep.get("category") != "portable_storage_appliance":
+    fail("sandisk-extreme kind_separation.category must be portable_storage_appliance")
+if not extreme_sep.get("portable_storage_not_node"):
+    fail("sandisk-extreme kind_separation.portable_storage_not_node must be True")
+
+# pihole-home: service appliance backed by a separate physical host.
+# The appliance row must name raspberry-pi-home-1 as the host_machine and
+# must NOT collapse the appliance and its host into a single identity.
+pihole = golden_path_for("pihole-home")
+pihole_sep = (pihole.get("golden_path") or {}).get("kind_separation") or {}
+if pihole_sep.get("category") != "service_appliance_backed_by_host":
+    fail("pihole-home kind_separation.category must be service_appliance_backed_by_host")
+if pihole_sep.get("host_machine") != "raspberry-pi-home-1":
+    fail("pihole-home kind_separation.host_machine must name raspberry-pi-home-1")
+if not pihole_sep.get("appliance_not_host_machine"):
+    fail("pihole-home kind_separation.appliance_not_host_machine must be True")
+
+# udr-home: ssh_target_only. Reachability is not admission. The journey must
+# explicitly mark candidate_evidence_only=True so the 30-Dell-style harvest
+# stop is a visible legal stop, not silent admission.
+udr = golden_path_for("udr-home")
+udr_journey = (udr.get("golden_path") or {}).get("journey") or {}
+if udr_journey.get("candidate_evidence_only") is not True:
+    fail("udr-home journey.candidate_evidence_only must be True (ssh_target_only is candidate-evidence-only)")
+udr_sep = (udr.get("golden_path") or {}).get("kind_separation") or {}
+if udr_sep.get("category") != "ssh_target_only":
+    fail("udr-home kind_separation.category must be ssh_target_only")
+
+
 for subject in [
     "optiplex-9020-001",
     "optiplex-9020-002",
