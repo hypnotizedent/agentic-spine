@@ -189,8 +189,37 @@ ENTRY_COMPILE_STOP=""
 ENTRY_COMPILE_MUTATION=""
 ENTRY_COMPILE_HANDOFF=""
 
+extract_first_json_object() {
+    python3 -c '
+import json
+import sys
+
+text = sys.stdin.read()
+decoder = json.JSONDecoder()
+for idx, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        continue
+    print(json.dumps(obj))
+    raise SystemExit(0)
+raise SystemExit(1)
+'
+}
+
 if [[ -f "$ENTRY_COMPILE_BIN" ]]; then
-    ENTRY_COMPILE_JSON="$(python3 "$ENTRY_COMPILE_BIN" --state-root "${SPINE_STATE:-}" 2>/dev/null || true)"
+    # Prefer the governed capability so DB-backed entry truth routes to the
+    # storage_evidence_node. Direct local compile is a fallback only; otherwise
+    # consumer-local scope projections can resurrect stale loop truth.
+    if [[ "${SPINE_ENTRY_COMPILE_LOCAL_ONLY:-0}" != "1" ]]; then
+        ENTRY_COMPILE_CAP_OUT="$("$SPINE_ROOT/bin/ops" cap run entry.compile 2>/dev/null || true)"
+        ENTRY_COMPILE_JSON="$(extract_first_json_object <<< "$ENTRY_COMPILE_CAP_OUT" 2>/dev/null || true)"
+    fi
+    if [[ -z "$ENTRY_COMPILE_JSON" ]]; then
+        ENTRY_COMPILE_JSON="$(python3 "$ENTRY_COMPILE_BIN" --state-root "${SPINE_STATE:-}" 2>/dev/null || true)"
+    fi
     if [[ -n "$ENTRY_COMPILE_JSON" ]]; then
         eval "$(python3 -c "
 import json, sys, shlex
@@ -312,6 +341,7 @@ if [[ -f "$ROUTER_HELPER" ]]; then
     ROUTING_JSON=$(python3 "$ROUTER_HELPER" \
         --runtime-root "${SPINE_RUNTIME_ROOT}" \
         --state-root "${SPINE_STATE}" \
+        --entry-compile-json "${ENTRY_COMPILE_JSON:-}" \
         2>/dev/null) || true
 fi
 

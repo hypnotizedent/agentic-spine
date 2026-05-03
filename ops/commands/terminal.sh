@@ -194,11 +194,39 @@ fi
 #   - Zero active loops → keep empty (clean start)
 #   - Multiple active loops → keep empty (ambiguous, do not guess)
 #   - entry-compile failure → keep empty (degraded truth, no silent attach)
+extract_first_json_object() {
+    python3 -c '
+import json
+import sys
+
+text = sys.stdin.read()
+decoder = json.JSONDecoder()
+for idx, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        continue
+    print(json.dumps(obj))
+    raise SystemExit(0)
+raise SystemExit(1)
+'
+}
+
 if [[ -z "$LOOP_ID" && "$LAUNCH_MODE" != "solo" ]]; then
     ENTRY_COMPILE_BIN="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/entry-compile"
     _STATE_ROOT="$SPINE_STATE"
     if [[ -f "$ENTRY_COMPILE_BIN" && -d "$_STATE_ROOT/loop-scopes" ]]; then
-        AUTO_LOOP="$(python3 "$ENTRY_COMPILE_BIN" --state-root "$_STATE_ROOT" 2>/dev/null \
+        ENTRY_COMPILE_JSON=""
+        if [[ "${SPINE_ENTRY_COMPILE_LOCAL_ONLY:-0}" != "1" ]]; then
+            ENTRY_COMPILE_CAP_OUT="$("$SPINE_ROOT/bin/ops" cap run entry.compile 2>/dev/null || true)"
+            ENTRY_COMPILE_JSON="$(extract_first_json_object <<< "$ENTRY_COMPILE_CAP_OUT" 2>/dev/null || true)"
+        fi
+        if [[ -z "$ENTRY_COMPILE_JSON" ]]; then
+            ENTRY_COMPILE_JSON="$(python3 "$ENTRY_COMPILE_BIN" --state-root "$_STATE_ROOT" 2>/dev/null || true)"
+        fi
+        AUTO_LOOP="$(printf '%s\n' "$ENTRY_COMPILE_JSON" \
             | python3 -c "
 import json, sys
 try:

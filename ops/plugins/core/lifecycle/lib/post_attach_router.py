@@ -1,27 +1,28 @@
 """Deterministic post-attach routing helper.
 
-Called by session-v3-attach after posture resolution. Reads local truth
-(via control_loop_status + loop-scope files) and returns exactly one
-recommended next action. Never mutates state, never raises on missing
-data, never makes network calls.
+Called by session-v3-attach after posture resolution. Renders routing policy
+from compiled entry truth and returns exactly one recommended next action.
+Never mutates state, never raises on missing data, never makes network calls.
 
 Contract:
   - Pure stdlib. No subprocess. No network.
-  - Reuses collect_control_loop_status() for wave/loop counts.
-  - Reads SQLite authority for loop candidates (scope files are projection only).
+  - Reuses collect_control_loop_status() for current wave/session context.
+  - Reuses entry-compile for loop assignment/candidate truth.
+  - Does not open shared_authority.db directly.
   - Degrades gracefully to routing_state="ambiguous" when truth is
     unreliable, or "clean_start" when genuinely empty.
   - Target latency well under one second.
 
 Public API:
-    compute_routing(runtime_root, state_root, env=None) -> dict
+    compute_routing(runtime_root, state_root, env=None, entry_compile=None) -> dict
 """
 
 from __future__ import annotations
 
 import json
 import os
-import sqlite3
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
 from typing import Any
 
 from control_loop_status import collect_control_loop_status
@@ -91,8 +92,6 @@ WORK_INTAKE_POLICY = {
     ),
 }
 
-_OPEN_LOOP_STATUSES = frozenset({"open", "active", "draft"})
-
 _PRIORITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 _MAX_CANDIDATES = 3
@@ -119,15 +118,6 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
     return result
 
 
-def _collect_loop_candidates(state_root: str) -> tuple[list[dict[str, Any]], list[str]]:
-    """Scope-file candidate collection REMOVED — SQLite is sole loop authority.
-
-    Returns empty list. All candidate data now comes from
-    _read_live_loop_candidates() which reads SQLite directly.
-    """
-    return [], []
-
-
 def _sort_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         candidates,
@@ -138,72 +128,84 @@ def _sort_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
-def _resolve_loops_db_path(state_root: str, env: dict[str, Any]) -> str:
-    override = str(env.get("LOOPS_DB_PATH") or "").strip()
-    if override:
-        return os.path.expanduser(override)
-    return os.path.join(state_root, "shared_authority.db")
-
-
-def _read_live_loop_candidates(
-    state_root: str,
-    env: dict[str, Any],
-) -> tuple[list[dict[str, Any]] | None, list[str]]:
-    db_path = _resolve_loops_db_path(state_root, env)
-    if not db_path or not os.path.isfile(db_path):
-        return None, [f"loop authority missing: {db_path or 'unset'}"]
-
-    conn: sqlite3.Connection | None = None
+def _load_entry_compile_from_raw(raw: object) -> dict[str, Any] | None:
+    if isinstance(raw, dict):
+        return raw
+    text = str(raw or "").strip()
+    if not text:
+        return None
     try:
-        conn = sqlite3.connect(
-            f"file:{db_path}?mode=ro",
-            uri=True,
-            timeout=0.5,
-        )
-        conn.row_factory = sqlite3.Row
-        table_row = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='loops'"
-        ).fetchone()
-        if table_row is None:
-            return None, ["loop authority schema unavailable"]
-
-        placeholders = ",".join("?" for _ in _OPEN_LOOP_STATUSES)
-        rows = conn.execute(
-            f"SELECT loop_id, status, objective, priority, horizon "
-            f"FROM loops WHERE LOWER(status) IN ({placeholders}) "
-            "ORDER BY updated_at_utc DESC, loop_id DESC",
-            tuple(_OPEN_LOOP_STATUSES),
-        ).fetchall()
-    except (sqlite3.Error, OSError, ValueError) as exc:
-        return None, [f"loop authority read failed: {exc.__class__.__name__}"]
-    finally:
-        if conn is not None:
-            conn.close()
-
-    candidates: list[dict[str, Any]] = []
-    for row in rows:
-        loop_id = str(row["loop_id"] or "").strip()
-        if not loop_id:
-            continue
-        candidates.append({
-            "loop_id": loop_id,
-            "objective": str(row["objective"] or "").strip() or None,
-            "priority": str(row["priority"] or "").strip().lower() or None,
-            "horizon": str(row["horizon"] or "").strip() or None,
-        })
-    return _sort_candidates(candidates), []
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
-def _merge_live_candidates(
-    live_candidates: list[dict[str, Any]],
-    scope_candidates: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Merge is now a passthrough — scope candidates are always empty.
+def _compile_entry_assignment(state_root: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Load the existing entry-compile implementation and run it in-process."""
+    try:
+        helper = Path(__file__).resolve().parents[1] / "bin" / "entry-compile"
+        loader = SourceFileLoader("_spine_entry_compile_for_router", str(helper))
+        module = loader.load_module()
+        compiled = module.compile_assignment(state_root)
+    except Exception as exc:  # pragma: no cover - exercised by degraded installs
+        return None, f"entry compile unavailable: {exc.__class__.__name__}"
+    return compiled if isinstance(compiled, dict) else None, None
 
-    SQLite is the sole loop authority. Scope-file enrichment removed.
+
+def _candidate_from_compiled_loop(compiled: dict[str, Any]) -> dict[str, Any] | None:
+    loop_id = str(compiled.get("loop_id") or "").strip()
+    if not loop_id or loop_id.lower() in {"none", "<none>", "unknown"}:
+        return None
+    return {
+        "loop_id": loop_id,
+        "objective": compiled.get("loop_objective"),
+        "priority": str(compiled.get("loop_priority") or "").strip().lower() or None,
+        "horizon": compiled.get("loop_horizon"),
+    }
+
+
+def _entry_compile_candidates(
+    compiled: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], str, list[str]]:
+    """Return loop candidates from compiled entry truth.
+
+    post_attach_router is policy rendering. Loop authority belongs to
+    entry-compile. This helper intentionally consumes only fields emitted by
+    entry-compile and never opens shared_authority.db.
     """
-    return _sort_candidates(live_candidates), []
+    if not compiled:
+        return [], "unknown", ["entry compile produced no assignment"]
+
+    state = str(compiled.get("compilation_state") or "unknown").strip() or "unknown"
+    raw_candidates = compiled.get("loop_candidates")
+    candidates: list[dict[str, Any]] = []
+    if isinstance(raw_candidates, list):
+        for item in raw_candidates:
+            if not isinstance(item, dict):
+                continue
+            loop_id = str(item.get("loop_id") or "").strip()
+            if not loop_id:
+                continue
+            candidates.append({
+                "loop_id": loop_id,
+                "objective": item.get("objective"),
+                "priority": str(item.get("priority") or "").strip().lower() or None,
+                "horizon": item.get("horizon"),
+            })
+
+    if not candidates and state in {
+        "compiled",
+        "partial",
+        "loop_only",
+        "packet_continuity",
+        "packet_ambiguous",
+    }:
+        candidate = _candidate_from_compiled_loop(compiled)
+        if candidate:
+            candidates.append(candidate)
+
+    return _sort_candidates(candidates), state, []
 
 
 # ── Public API ───────────────────────────────────────────────────────
@@ -212,6 +214,7 @@ def compute_routing(
     runtime_root: str,
     state_root: str,
     env: dict | None = None,
+    entry_compile: dict[str, Any] | str | None = None,
 ) -> dict:
     """Compute the recommended post-attach routing action.
 
@@ -226,25 +229,22 @@ def compute_routing(
     runtime_root = os.path.normpath(runtime_root) if runtime_root else ""
     state_root = os.path.normpath(state_root) if state_root else ""
 
-    # Reuse sibling module for counts + current wave.
+    # Reuse sibling module for current wave/session context. Loop assignment
+    # truth comes from entry-compile below, not from this module.
     status = collect_control_loop_status(runtime_root, state_root, env)
-    summary = status.get("summary", {})
     current_wave = status.get("current_wave")
     warnings = list(status.get("warnings", []))
 
-    open_loops_count: int = summary.get("open_loops", 0)
+    compiled = _load_entry_compile_from_raw(entry_compile)
+    if compiled is None:
+        compiled = _load_entry_compile_from_raw(env.get("ENTRY_COMPILE_JSON"))
+    if compiled is None:
+        compiled, compile_warning = _compile_entry_assignment(state_root)
+        if compile_warning:
+            warnings.append(compile_warning)
 
-    # Gather candidate details from live authority first, then enrich from scope files.
-    scope_candidates, cand_warnings = _collect_loop_candidates(state_root)
-    live_candidates, live_warnings = _read_live_loop_candidates(state_root, env)
-    warnings.extend(cand_warnings)
-    warnings.extend(live_warnings)
-
-    stale_scope_ids: list[str] = []
-    if live_candidates is not None:
-        candidates, stale_scope_ids = _merge_live_candidates(live_candidates, scope_candidates)
-    else:
-        candidates = scope_candidates
+    candidates, compile_state, compile_warnings = _entry_compile_candidates(compiled)
+    warnings.extend(compile_warnings)
 
     # ── Routing decision ──
 
@@ -260,37 +260,28 @@ def compute_routing(
             open_loop_candidates=candidates,
         )
 
-    # Rule 2a: loop authority degraded — preserve ambiguity and surface
-    # scope-file candidates only as provisional read-side hints.
-    if live_candidates is None:
+    # Rule 2a: compiled entry truth unavailable — preserve ambiguity.
+    if compiled is None:
         warning_summary = "; ".join(sorted(set(warnings))) if warnings else "unknown"
-        first_id = candidates[0]["loop_id"] if candidates else ""
-        if candidates:
-            why = (
-                f"Live loop authority unavailable; scope projection shows "
-                f"{len(candidates)} possible loop(s)"
-            )
-        else:
-            why = "Live loop authority unavailable; no confirmed loop truth"
         return _result(
             routing_state="ambiguous",
             recommended_next_action=(
-                "Inspect provisional loop candidates carefully, or file friction "
+                "Re-run compiled entry readback, or file friction "
                 "if loop truth matters before acting"
             ),
-            recommended_command=f"./bin/ops loops show {first_id}" if first_id else None,
+            recommended_command="./bin/ops cap run entry.compile -- --json",
             recommended_container="friction",
-            why=f"{why}: {warning_summary}",
-            open_loop_candidates=candidates[:_MAX_CANDIDATES],
+            why=f"Compiled entry truth unavailable: {warning_summary}",
+            open_loop_candidates=[],
         )
 
     # Rule 4 check: ambiguous — warnings suggest degraded non-loop truth AND
-    # loop authority has no confirmed live loops to route against.
+    # compiled entry has no confirmed live loops to route against.
     degraded_waves = any(
         w in ("waves dir missing", "waves dir unreadable", "runtime_root not provided")
         for w in warnings
     )
-    if degraded_waves and open_loops_count == 0 and not candidates:
+    if degraded_waves and compile_state == "clean_start" and not candidates:
         warning_summary = "; ".join(sorted(set(warnings))) if warnings else "unknown"
         return _result(
             routing_state="ambiguous",
@@ -304,12 +295,9 @@ def compute_routing(
         )
 
     # Rule 2: confirmed live loops available
-    effective_count = max(open_loops_count, len(candidates))
-    if effective_count >= 1:
+    if candidates:
         first_id = candidates[0]["loop_id"] if candidates else "unknown"
-        why = f"{effective_count} live loop(s) available"
-        if stale_scope_ids:
-            why += f"; ignored {len(stale_scope_ids)} scope-only stale projection(s)"
+        why = f"{len(candidates)} loop candidate(s) from compiled entry ({compile_state})"
         return _result(
             routing_state="open_loop_available",
             recommended_next_action="Inspect and claim an open loop",
@@ -320,17 +308,19 @@ def compute_routing(
         )
 
     # Rule 3: clean start
-    why = "No live loops found in authority"
-    if stale_scope_ids:
-        why += f"; ignored {len(stale_scope_ids)} scope-only stale projection(s)"
+    if compile_state == "clean_start":
+        why = "Compiled entry found no active loop"
+    else:
+        why = f"Compiled entry state has no loop candidates ({compile_state})"
     return _result(
-        routing_state="clean_start",
+        routing_state="clean_start" if compile_state == "clean_start" else "ambiguous",
         recommended_next_action=(
-            "Create a new loop for a discrete objective, or file friction "
-            "if the work is unclear"
+            "Create a new loop for a discrete objective"
+            if compile_state == "clean_start"
+            else "Inspect compiled entry readback before selecting a loop"
         ),
-        recommended_command=None,
-        recommended_container="loop",
+        recommended_command=None if compile_state == "clean_start" else "./bin/ops cap run session.v3.attach -- --expert",
+        recommended_container="loop" if compile_state == "clean_start" else "friction",
         why=why,
         open_loop_candidates=[],
     )
@@ -370,7 +360,12 @@ if __name__ == "__main__":  # pragma: no cover
     )
     parser.add_argument("--runtime-root", required=True)
     parser.add_argument("--state-root", required=True)
+    parser.add_argument("--entry-compile-json", default="")
     ns = parser.parse_args()
 
-    result = compute_routing(ns.runtime_root, ns.state_root)
+    result = compute_routing(
+        ns.runtime_root,
+        ns.state_root,
+        entry_compile=ns.entry_compile_json,
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
