@@ -86,9 +86,101 @@ def _derive_packet_path(
     legacy MAILROOM- prefix is no longer produced; old files remain as
     historical compatibility and are still discovered via the dual-glob
     scan in _iter_packet_files().
+
+    PACKET-685 (collision audit) fix #2: if slug already ends in an
+    eight-digit YYYYMMDD suffix, skip the duplicate -{created_date}
+    append so we don't produce CONTROLLER-PACKET-NN-...-20260503-20260503.md
+    filenames. The double-date class was visible in PACKET-665 / 675 / 631 /
+    similar canonical filenames before this fix.
     """
-    filename = f"CONTROLLER-PACKET-{nn}-{slug}-{created_date}.md"
+    slug_normalized = slug
+    if re.fullmatch(r".*-\d{8}", slug):
+        # Slug already carries its own date suffix (operator pasted the full
+        # YYYYMMDD-form packet id, or a renamed slug already terminated in
+        # date). Strip it and let the canonical -{created_date} re-append once.
+        slug_normalized = slug[: -len("-YYYYMMDD")]
+    filename = f"CONTROLLER-PACKET-{nn}-{slug_normalized}-{created_date}.md"
     return os.path.join(controller_prompts_dir, filename)
+
+
+def _check_packet_nn_uniqueness(
+    nn: str,
+    packet_id: str,
+    controller_prompts_dir: str,
+    allow_sibling: bool,
+    sibling_justification: str,
+    supersedes_packet: str,
+) -> None:
+    """PACKET-685 (collision audit) fix #1: refuse creation when an existing
+    CONTROLLER-PACKET-{nn}-*.md file with a DIFFERENT slug exists, unless
+    --allow-sibling with explicit --sibling-justification (or
+    --supersedes-packet) is supplied.
+
+    Complementary to PACKET-675 (commit-msg boundary). PACKET-675 enforces
+    at the commit boundary; this guard enforces at the controller-prompt
+    birth boundary. Together they refuse same-NN reuse at both surfaces.
+
+    Existing _check_packet_id_uniqueness still covers exact-packet-id
+    duplicates. This new guard catches the same-NN/different-slug class
+    (e.g., PACKET-665-FORGE-AGENT-BOUNDARY-STAGE-2 vs
+    PACKET-665-EMIT-ASSIGNMENT-SCOPE-FILE-FALLBACK-SUBTRACTION-F3).
+    """
+    prompts_path = Path(controller_prompts_dir)
+    if not prompts_path.is_dir():
+        return  # no directory = no duplicates possible
+
+    nn_prefix = f"CONTROLLER-PACKET-{nn}-"
+    existing_with_same_nn: list[Path] = []
+    for path in _iter_packet_files(prompts_path):
+        name = path.name
+        if not name.startswith(nn_prefix):
+            continue
+        # Skip the file we are about to write to (same packet_id is caught
+        # by _check_packet_id_uniqueness with a clearer error).
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not text.startswith("---"):
+            continue
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            continue
+        try:
+            fm = yaml.safe_load(parts[1])
+        except yaml.YAMLError:
+            continue
+        if not isinstance(fm, dict):
+            continue
+        existing_pid = str(fm.get("packet_id") or "").strip()
+        if not existing_pid:
+            continue
+        if existing_pid == packet_id:
+            continue  # exact match handled elsewhere
+        existing_with_same_nn.append(path)
+
+    if not existing_with_same_nn:
+        return
+
+    if supersedes_packet:
+        # Operator declared this is a planned supersession. Allow.
+        return
+    if allow_sibling and sibling_justification.strip():
+        # Operator authorized sibling reuse with explicit justification. Allow.
+        return
+
+    paths_str = ", ".join(str(p.name) for p in existing_with_same_nn)
+    raise ControllerPromptCreateError(
+        f"PACKET-{nn} reuse refused: "
+        f"existing controller-prompt(s) with same PACKET-NN but different "
+        f"slug already on canonical: {paths_str}. "
+        f"To intentionally create a sibling, supply "
+        f"--allow-sibling AND --sibling-justification '<text>', "
+        f"OR --supersedes-packet PACKET-NN-PRIOR-SLUG. "
+        f"PACKET-685 (collision audit) enforces same-NN/different-slug "
+        f"refusal at the controller-prompt birth boundary; "
+        f"PACKET-675 enforces at the commit-message boundary."
+    )
 
 
 def _check_filesystem_uniqueness(packet_path: str) -> None:
@@ -418,6 +510,14 @@ def create_packet(
     # ── Uniqueness checks ─────────────────────────────────────────
     _check_filesystem_uniqueness(packet_path)
     _check_packet_id_uniqueness(packet_id, controller_prompts_dir)
+    _check_packet_nn_uniqueness(
+        nn=nn,
+        packet_id=packet_id,
+        controller_prompts_dir=controller_prompts_dir,
+        allow_sibling=allow_sibling,
+        sibling_justification=sibling_justification,
+        supersedes_packet=supersedes_packet,
+    )
 
     # ── Loop validation ───────────────────────────────────────────
     _validate_loop_scope(loop_id, state_root)
