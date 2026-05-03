@@ -704,6 +704,17 @@ for required_term in ("read_node_type_entry", "derive_contract_status", "contrac
     if required_term not in candidate_status_text:
         fail(f"node-role-candidate-status must implement {required_term} (PACKET-588 Phase 4 contracted-state surface)")
 
+# PACKET-609 Stage 2 readback teaching: node-role-candidate-status must
+# extract per-proof staged_delivery state and surface it in the readback
+# so the Stage 1 ladder + Stage 2 progress are not flattened into "5/5 +
+# delivered:false." Without this, terminals rereading the readback lose
+# the distinction between "Stage 1 inspection complete" and "Stage 2
+# enforcement still pending." Required functions + render markers are
+# locked here.
+for required_term in ("_extract_stage_2_state", "stage_2_state_by_proof", "stage_2_summary", "Stage 2 progress:"):
+    if required_term not in candidate_status_text:
+        fail(f"node-role-candidate-status must implement {required_term} (PACKET-609 Stage 2 readback teaching)")
+
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
 # structurally prevents drift like 'pve-730xd' (non-canonical machine identity)

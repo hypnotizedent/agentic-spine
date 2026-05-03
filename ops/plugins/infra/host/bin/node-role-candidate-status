@@ -209,6 +209,80 @@ def _check_proof_ref_freshness(required_proofs: dict[str, Any]) -> dict[str, dic
     return out
 
 
+def _extract_stage_2_state(required_proofs: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """For each required proof, extract Stage 2 state from its
+    staged_delivery block. PACKET-609: prevents the readback from
+    flattening Stage 1 + Stage 2 progress into "5/5 + delivered:false"
+    — operators need to see Stage 2 enforcement state per proof.
+
+    Returns (state_by_proof, summary).
+
+    state_by_proof shape:
+      {
+        proof_name: {
+          "declared": bool,
+          "stage_2_key": str | None  (e.g., "stage_2_drill", "stage_2_enforcement"),
+          "stage_2_status": str | None  (e.g., "delivered", "future"),
+          "stage_2_proof_ref": str | None,
+          "stage_2_packet": str | None,
+        }
+      }
+
+    summary: {declared, delivered, future, not_declared} counts.
+    """
+    state: dict[str, dict[str, Any]] = {}
+    summary = {"declared": 0, "delivered": 0, "future": 0, "not_declared": 0}
+    for name, body in (required_proofs or {}).items():
+        if not isinstance(body, dict):
+            continue
+        staged = body.get("staged_delivery")
+        if not isinstance(staged, dict):
+            state[name] = {
+                "declared": False,
+                "stage_2_key": None,
+                "stage_2_status": None,
+                "stage_2_proof_ref": None,
+                "stage_2_packet": None,
+            }
+            summary["not_declared"] += 1
+            continue
+        # Find the first key that starts with "stage_2_" and is not a
+        # metadata field like "stage_2_blocked_until" or "stage_2_*_proof_ref"
+        # or "stage_2_*_packet" or "stage_2_*_scope_note". The "primary"
+        # Stage 2 key is the one whose value names the state directly.
+        primary_key: str | None = None
+        primary_status: str | None = None
+        for key, value in staged.items():
+            if not key.startswith("stage_2_"):
+                continue
+            # Skip subordinate metadata fields
+            if key in {"stage_2_blocked_until"} or key.endswith("_proof_ref") or key.endswith("_packet") or key.endswith("_scope_note"):
+                continue
+            primary_key = key
+            primary_status = str(value) if value is not None else None
+            break
+        # Locate the matching proof_ref/packet (e.g., stage_2_drill →
+        # stage_2_drill_proof_ref + stage_2_drill_packet)
+        ref_field = f"{primary_key}_proof_ref" if primary_key else None
+        packet_field = f"{primary_key}_packet" if primary_key else None
+        state[name] = {
+            "declared": primary_key is not None,
+            "stage_2_key": primary_key,
+            "stage_2_status": primary_status,
+            "stage_2_proof_ref": staged.get(ref_field) if ref_field else None,
+            "stage_2_packet": staged.get(packet_field) if packet_field else None,
+        }
+        if primary_key is None:
+            summary["not_declared"] += 1
+        else:
+            summary["declared"] += 1
+            if primary_status == "delivered":
+                summary["delivered"] += 1
+            elif primary_status == "future":
+                summary["future"] += 1
+    return state, summary
+
+
 def derive_contract_status(node_type_block: dict[str, Any] | None) -> dict[str, Any]:
     """Compute the contracted/delivered status from the node_type block.
 
@@ -232,6 +306,8 @@ def derive_contract_status(node_type_block: dict[str, Any] | None) -> dict[str, 
             "proofs_present": [],
             "proofs_pending": [],
             "proof_ref_freshness": {},
+            "stage_2_state_by_proof": {},
+            "stage_2_summary": {"declared": 0, "delivered": 0, "future": 0, "not_declared": 0},
             "status_label": "candidate_only",
         }
     promotion = node_type_block.get("promotion_standard") or {}
@@ -268,6 +344,7 @@ def derive_contract_status(node_type_block: dict[str, Any] | None) -> dict[str, 
         status_label = "delivered"
     else:
         status_label = "contracted_not_delivered"
+    stage_2_state, stage_2_summary = _extract_stage_2_state(required_block)
     return {
         "declared": True,
         "delivered": delivered,
@@ -275,6 +352,8 @@ def derive_contract_status(node_type_block: dict[str, Any] | None) -> dict[str, 
         "proofs_present": proofs_present,
         "proofs_pending": pending,
         "proof_ref_freshness": _check_proof_ref_freshness(required_block),
+        "stage_2_state_by_proof": stage_2_state,
+        "stage_2_summary": stage_2_summary,
         "status_label": status_label,
     }
 
@@ -492,19 +571,39 @@ def main() -> int:
         cs = payload.get('contract_status') or {}
         status_label = cs.get('status_label', 'candidate_only')
         freshness = cs.get('proof_ref_freshness') or {}
+        stage_2_state = cs.get('stage_2_state_by_proof') or {}
+        stage_2_summary = cs.get('stage_2_summary') or {}
         if status_label == "candidate_only":
             print(f"\ncontract status: candidate-only (not declared in node.role.contract.yaml)")
         elif status_label == "contracted_not_delivered":
             present_n = len(cs.get('proofs_present') or [])
             required_n = len(cs.get('required_proofs') or [])
-            print(f"\ncontract status: contracted, not delivered ({present_n}/{required_n} proofs met)")
+            print(f"\ncontract status: contracted, not delivered ({present_n}/{required_n} Stage 1 proofs met)")
+            # PACKET-609: Stage 2 progress header — teaches that Stage 1
+            # ladder closure ≠ role delivered.
+            s2_decl = stage_2_summary.get("declared", 0)
+            s2_done = stage_2_summary.get("delivered", 0)
+            s2_future = stage_2_summary.get("future", 0)
+            s2_undecl = stage_2_summary.get("not_declared", 0)
+            if s2_decl or s2_undecl:
+                undeclared_note = f" ({s2_undecl} proof(s) without Stage 2 declaration)" if s2_undecl else ""
+                print(f"Stage 2 progress: {s2_done}/{s2_decl} declared delivered, {s2_future} future{undeclared_note}")
             for proof in cs.get('required_proofs') or []:
                 marker = "✓" if proof in (cs.get('proofs_present') or []) else "·"
                 fresh = freshness.get(proof)
                 ref_note = ""
                 if fresh:
                     ref_note = " [proof_ref present]" if fresh.get('present') else " [proof_ref MISSING]"
-                print(f"  {marker} {proof}{ref_note}")
+                # PACKET-609: per-proof Stage 2 trailer
+                s2 = stage_2_state.get(proof) or {}
+                if s2.get("declared"):
+                    key = (s2.get("stage_2_key") or "stage_2").replace("stage_2_", "")
+                    status = (s2.get("stage_2_status") or "").upper()
+                    pkt_suffix = f" → {s2.get('stage_2_packet')}" if s2.get("stage_2_packet") else ""
+                    s2_trailer = f"  · Stage 2 ({key}): {status}{pkt_suffix}"
+                else:
+                    s2_trailer = "  · Stage 2: not declared"
+                print(f"  {marker} {proof}{ref_note}{s2_trailer}")
         elif status_label == "delivered":
             print(f"\ncontract status: delivered ({len(cs.get('proofs_present') or [])}/{len(cs.get('required_proofs') or [])} proofs met)")
         if payload['missing']:
