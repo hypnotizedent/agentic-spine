@@ -96,7 +96,7 @@ if "enabled" not in db_authority:
     fail("runtime.bootstrap.contract.yaml#db_authority.enabled must be explicitly declared (true|false)")
 if not isinstance(db_authority.get("enabled"), bool):
     fail("runtime.bootstrap.contract.yaml#db_authority.enabled must be a boolean")
-for required_field in ("host", "user", "host_addr_lan", "host_addr_tailscale", "code_path", "authority_hostnames", "per_host_ssh_key", "routing_safety_classes"):
+for required_field in ("host", "user", "host_addr_lan", "host_addr_tailscale", "preferred_route", "code_path", "authority_hostnames", "per_host_ssh_key", "routing_safety_classes"):
     if required_field not in db_authority:
         fail(f"runtime.bootstrap.contract.yaml#db_authority.{required_field} missing")
 if not isinstance(db_authority.get("authority_hostnames"), list) or not db_authority.get("authority_hostnames"):

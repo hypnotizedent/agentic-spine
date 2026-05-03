@@ -1253,10 +1253,15 @@ _route_to_db_authority_if_needed() {
         route_labels+=("tailscale")
     fi
 
-    if [[ "${SPINE_DB_AUTHORITY_ROUTE:-auto}" == "tailscale" && "${#route_addrs[@]}" -gt 1 ]]; then
+    local preferred_route
+    preferred_route="${SPINE_DB_AUTHORITY_ROUTE:-$(yq e '.db_authority.preferred_route // "auto"' "$contract" 2>/dev/null)}"
+
+    if [[ "$preferred_route" == "tailscale" && "${#route_addrs[@]}" -gt 1 ]]; then
         route_addrs=("$host_addr_tailscale" "$host_addr")
         route_labels=("tailscale" "lan")
-    elif [[ "${SPINE_DB_AUTHORITY_ROUTE:-auto}" == "auto" && "${#route_addrs[@]}" -gt 1 ]]; then
+    elif [[ "$preferred_route" == "lan" ]]; then
+        : # contract default order already tries LAN first
+    elif [[ "$preferred_route" == "auto" && "${#route_addrs[@]}" -gt 1 ]]; then
         # If the LAN address would route through a tunnel interface, the client
         # is off-LAN. Try Tailscale first so normal routed caps do not sit on a
         # LAN connect timeout before doing the only reachable thing.

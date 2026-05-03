@@ -19,8 +19,8 @@ Always exit 0; consumers parse status from payload.
 
 Hosts probed (v1 hardcoded; future: read from contract):
 - macbook-2016-pro: operator_console (local)
-- ai-consolidation: execution_host (ssh ubuntu@192.168.1.8)
-- pve: storage_evidence_node (ssh root@192.168.1.184 via spine_machine_ed25519)
+- ai-consolidation: execution_host (ssh ubuntu@LAN or Tailscale)
+- pve: storage_evidence_node (ssh root@LAN or Tailscale via spine_machine_ed25519)
 
 Note: pve-r620 is the watcher_node. It does not host an agentic-spine checkout
 (observes via NFS read-only mount + heartbeat per node.role.contract). It is
@@ -49,7 +49,7 @@ HOSTS = [
         "name": "ai-consolidation",
         "role": "execution_host",
         "reach": "ssh",
-        "ssh_target": "ubuntu@192.168.1.8",
+        "ssh_targets": ["ubuntu@100.71.17.29", "ubuntu@192.168.1.8"],
         "ssh_key": None,
         "checkout": "/home/ubuntu/code/agentic-spine",
     },
@@ -57,14 +57,14 @@ HOSTS = [
         "name": "pve",
         "role": "storage_evidence_node",
         "reach": "ssh",
-        "ssh_target": "root@192.168.1.184",
+        "ssh_targets": ["root@100.96.211.33", "root@192.168.1.184"],
         "ssh_key": str(Path.home() / ".ssh" / "spine_machine_ed25519"),
         "checkout": "/opt/agentic-spine",
         "sync_mechanism": "rsync from MacBook (no gitea SSH from pve today; per HOST_DRIFT_POLICY.md)",
     },
 ]
 
-CONNECT_TIMEOUT_SECONDS = 10
+CONNECT_TIMEOUT_SECONDS = 3
 
 
 def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
@@ -83,7 +83,7 @@ def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
         return 127, "", str(exc)
 
 
-def _ssh_cmd(host: dict[str, Any]) -> list[str]:
+def _ssh_cmd(host: dict[str, Any], target: str) -> list[str]:
     cmd = [
         "ssh",
         "-o", "BatchMode=yes",
@@ -91,7 +91,7 @@ def _ssh_cmd(host: dict[str, Any]) -> list[str]:
     ]
     if host.get("ssh_key"):
         cmd.extend(["-i", host["ssh_key"]])
-    cmd.append(host["ssh_target"])
+    cmd.append(target)
     return cmd
 
 
@@ -117,9 +117,18 @@ def probe_host(host: dict[str, Any], origin_head: str) -> dict[str, Any]:
         rc_h, out_h, err_h = _run(["git", "-C", host["checkout"], "rev-parse", "HEAD"])
         rc_d, out_d, err_d = _run(["git", "-C", host["checkout"], "status", "--porcelain"])
     else:
-        ssh_base = _ssh_cmd(host)
-        rc_h, out_h, err_h = _run(ssh_base + [head_cmd_remote])
-        rc_d, out_d, err_d = _run(ssh_base + [dirty_cmd_remote])
+        rc_h, out_h, err_h = 1, "", "no ssh targets declared"
+        rc_d, out_d, err_d = 1, "", "no ssh targets declared"
+        for target in host.get("ssh_targets") or [host.get("ssh_target")]:
+            if not target:
+                continue
+            ssh_base = _ssh_cmd(host, target)
+            rc_h, out_h, err_h = _run(ssh_base + [head_cmd_remote], timeout=CONNECT_TIMEOUT_SECONDS + 5)
+            if rc_h != 0:
+                continue
+            rc_d, out_d, err_d = _run(ssh_base + [dirty_cmd_remote], timeout=CONNECT_TIMEOUT_SECONDS + 5)
+            result["reach_target"] = target
+            break
 
     if rc_h != 0:
         result["status"] = "unreachable"
