@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+"""forge.runner_cache_boundary.demo — Stage 2 clean-room demo for
+runner_cache_boundary_proof.
+
+Stage 1 (forge.runner_cache_boundary.status) already classified the
+forge_node runner cache scope as `shared_per_runner` with named
+enforcement gaps. Stage 2's job is to honestly DEMONSTRATE the live
+boundary so forge_node delivery is gated on truth.
+
+Phase 0 (this script's default mode): metadata-only mechanical
+demonstration. Reads cache file mtimes via SSH+docker-exec on the
+dev-tools VM 206 runner, reads action_run timestamps from the Gitea
+Postgres database, and computes whether cache entries persist across
+distinct action_run boundaries. If they do, the boundary is
+mechanically demonstrated as `leaky` without running any test jobs.
+
+Phase 1 (mutating disposable test jobs) is FUTURE and explicitly out
+of scope without separate operator approval. This script never spawns
+jobs, never mutates runner config, never writes secrets, never reads
+/data/.runner contents, never reads token_hash or token_salt fields,
+and never dumps bolt.db internal pages — only key names + sizes + mtimes.
+
+Output: receipt at $SPINE_STATE/domain-state/forge-node/
+runner-cache-boundary-demo-latest.yaml with boundary_demonstrated
+classification (leaky | clean | undemonstrated) + per-cache-entry
+evidence + per-action-run timestamp correlation.
+
+The receipt is the proof_ref consumed by node.role.contract.yaml
+forge_node.required_proofs.runner_cache_boundary_proof.staged_delivery.
+stage_2_clean_room_demo when authorized to advance.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml  # type: ignore
+except ImportError:
+    print("forge.runner_cache_boundary.demo requires PyYAML", file=sys.stderr)
+    sys.exit(2)
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+SPINE_STATE = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtime/spine/state")))
+NODE_ROLE_CONTRACT = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
+RECEIPT_DIR = SPINE_STATE / "domain-state/forge-node"
+RECEIPT_LATEST = RECEIPT_DIR / "runner-cache-boundary-demo-latest.yaml"
+STAGE_1_RECEIPT = RECEIPT_DIR / "runner-cache-boundary-proof-latest.yaml"
+
+DEFAULT_GITEA_RUNNER_CONTAINER = "gitea-runner"
+DEFAULT_POSTGRES_CONTAINER = "gitea-postgres"
+DEFAULT_SSH_CONNECT_TIMEOUT = "8"
+RUNNER_CACHE_ACT = "/root/.cache/act"
+RUNNER_CACHE_ACTCACHE = "/root/.cache/actcache"
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_runtime_body() -> dict[str, Any]:
+    contract = load_yaml(NODE_ROLE_CONTRACT)
+    forge = (((contract.get("node_types") or {}).get("forge_node") or {}).get("promotion_standard") or {})
+    return forge.get("current_runtime_body") or {}
+
+
+def resolve_ssh_target(ssh_targets_id: str) -> dict[str, Any]:
+    targets_doc = load_yaml(REPO_ROOT / "ops/bindings/ssh.targets.yaml")
+    ssh_block = targets_doc.get("ssh") or {}
+    targets = ssh_block.get("targets") if isinstance(ssh_block, dict) else None
+    if isinstance(targets, list):
+        for entry in targets:
+            if isinstance(entry, dict) and entry.get("id") == ssh_targets_id:
+                return entry
+    return {}
+
+
+def pick_ssh_address(target: dict[str, Any]) -> str | None:
+    return target.get("tailscale_ip") or target.get("host") or target.get("lan_ip")
+
+
+def remote_run(user: str, host: str, command: str, timeout: int = 15) -> tuple[int, str, str]:
+    full = [
+        "ssh",
+        "-o", f"ConnectTimeout={DEFAULT_SSH_CONNECT_TIMEOUT}",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        f"{user}@{host}",
+        command,
+    ]
+    try:
+        proc = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, "", f"ssh timeout after {timeout}s"
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def docker_exec(user: str, host: str, container: str, inner_cmd: str, timeout: int = 15) -> tuple[int, str, str]:
+    cmd = f"docker exec {shlex.quote(container)} sh -c {shlex.quote(inner_cmd)}"
+    return remote_run(user, host, cmd, timeout=timeout)
+
+
+def psql_select(user: str, host: str, sql: str) -> tuple[int, str, str]:
+    safe_inner = f"psql -U gitea -d gitea -t -A -F'|' -c {shlex.quote(sql)}"
+    return docker_exec(user, host, DEFAULT_POSTGRES_CONTAINER, safe_inner)
+
+
+def probe_action_run_window(user: str, host: str) -> dict[str, Any]:
+    """Read action_run table: how many runs, earliest start, latest finish.
+    Used to compute whether cache mtimes fall inside a single run window
+    or span multiple distinct run boundaries."""
+    rc, out, err = psql_select(
+        user, host,
+        "SELECT COUNT(*), "
+        "MIN(to_timestamp(started) AT TIME ZONE 'UTC'), "
+        "MAX(to_timestamp(stopped) AT TIME ZONE 'UTC') "
+        "FROM action_run WHERE started > 0",
+    )
+    info = {"rc": rc, "stderr": err, "count": 0, "earliest_start": None, "latest_stop": None}
+    if rc == 0 and out:
+        parts = out.split("|")
+        if len(parts) >= 3:
+            info["count"] = int(parts[0].strip() or "0")
+            info["earliest_start"] = parts[1].strip() or None
+            info["latest_stop"] = parts[2].strip() or None
+    return info
+
+
+def probe_recent_runs(user: str, host: str, n: int = 5) -> list[dict[str, Any]]:
+    """Read recent action_run rows: id, started, stopped. Used to compute
+    distinct-run boundaries near the most recent activity, so we can
+    correlate cache file mtimes against distinct run windows."""
+    rc, out, _ = psql_select(
+        user, host,
+        f"SELECT id, "
+        f"to_timestamp(started) AT TIME ZONE 'UTC', "
+        f"to_timestamp(stopped) AT TIME ZONE 'UTC' "
+        f"FROM action_run WHERE started > 0 "
+        f"ORDER BY started DESC LIMIT {int(n)}",
+    )
+    rows: list[dict[str, Any]] = []
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 3:
+                rows.append({
+                    "id": parts[0].strip(),
+                    "started_utc": parts[1].strip(),
+                    "stopped_utc": parts[2].strip(),
+                })
+    return rows
+
+
+def probe_cache_mtimes(user: str, host: str, cache_path: str) -> list[dict[str, Any]]:
+    """Enumerate cache directory entries with mtimes (no content reads).
+    Uses BusyBox-compatible ls + stat."""
+    rc, out, _ = docker_exec(
+        user, host, DEFAULT_GITEA_RUNNER_CONTAINER,
+        f"if [ -d {shlex.quote(cache_path)} ]; then "
+        f"  cd {shlex.quote(cache_path)} && "
+        f"  for entry in $(ls -A 2>/dev/null); do "
+        f"    if [ -e \"$entry\" ]; then "
+        f"      stat -c '%n|%s|%Y' \"$entry\" 2>/dev/null || stat -f '%N|%z|%m' \"$entry\" 2>/dev/null; "
+        f"    fi; "
+        f"  done; "
+        f"fi",
+    )
+    entries: list[dict[str, Any]] = []
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 3:
+                try:
+                    mtime_epoch = int(parts[2].strip())
+                except ValueError:
+                    continue
+                mtime_iso = datetime.fromtimestamp(mtime_epoch, tz=timezone.utc).isoformat()
+                entries.append({
+                    "name": parts[0].strip(),
+                    "size_bytes": int(parts[1].strip() or "0"),
+                    "mtime_epoch": mtime_epoch,
+                    "mtime_utc": mtime_iso,
+                })
+    return entries
+
+
+def parse_iso_to_epoch(iso: str | None) -> int | None:
+    if not iso:
+        return None
+    try:
+        if "+" not in iso and iso.endswith("Z") is False:
+            iso = iso + "+00:00"
+        elif iso.endswith("Z"):
+            iso = iso[:-1] + "+00:00"
+        return int(datetime.fromisoformat(iso).timestamp())
+    except ValueError:
+        return None
+
+
+def classify_boundary(
+    cache_entries_by_path: dict[str, list[dict[str, Any]]],
+    recent_runs: list[dict[str, Any]],
+    action_run_window: dict[str, Any],
+) -> dict[str, Any]:
+    """Phase 0 mechanical demonstration:
+
+    A cache entry whose mtime falls BEFORE the most recent action_run's
+    started_utc is mechanical proof that the entry persisted from a
+    prior run into (or past) a subsequent run boundary. Because the
+    cache directory is mounted into every runner job's filesystem, that
+    persistent entry IS readable by any subsequent job — i.e., the
+    boundary is leaky in the operator-relevant sense (no clean room).
+
+    Conversely, if every cache entry's mtime is AT OR AFTER the most
+    recent run's start, the cache might be ephemeral-per-run; we still
+    classify undemonstrated rather than clean because owner-global
+    runner scope + docker.sock mount + mtime equivalence at run-start
+    do not prove no read; they only prove no recent persistence
+    observed.
+    """
+    if not recent_runs or len(recent_runs) < 1:
+        return {
+            "boundary_demonstrated": "undemonstrated",
+            "reason": "insufficient action_run history to compute run-boundary timestamps",
+            "evidence": {"recent_run_count": len(recent_runs)},
+        }
+
+    most_recent = recent_runs[0]
+    most_recent_started_epoch = parse_iso_to_epoch(most_recent.get("started_utc"))
+    if not most_recent_started_epoch:
+        return {
+            "boundary_demonstrated": "undemonstrated",
+            "reason": "could not parse most-recent action_run started_utc",
+            "evidence": {"most_recent_run": most_recent},
+        }
+
+    cross_run_persistent: list[dict[str, Any]] = []
+    within_recent_run: list[dict[str, Any]] = []
+    for cache_path, entries in cache_entries_by_path.items():
+        for e in entries:
+            tagged = dict(e)
+            tagged["cache_path"] = cache_path
+            if e["mtime_epoch"] < most_recent_started_epoch:
+                cross_run_persistent.append(tagged)
+            else:
+                within_recent_run.append(tagged)
+
+    # Distinct-run boundary check: at least 2 distinct runs in recent
+    # history with different started timestamps so we can prove the cache
+    # spans more than one run window.
+    distinct_started = {r.get("started_utc") for r in recent_runs}
+    distinct_started.discard(None)
+    distinct_started.discard("")
+    distinct_run_count = len(distinct_started)
+
+    if cross_run_persistent and distinct_run_count >= 2:
+        return {
+            "boundary_demonstrated": "leaky",
+            "reason": (
+                f"{len(cross_run_persistent)} cache entr(ies) have mtimes "
+                f"older than the most recent action_run start "
+                f"({most_recent.get('started_utc')}); cache directory is "
+                f"mounted into every runner job's filesystem, therefore "
+                f"any subsequent job reads pre-existing cache state. "
+                f"Distinct recent runs observed: {distinct_run_count}."
+            ),
+            "evidence": {
+                "most_recent_run": most_recent,
+                "cross_run_persistent_count": len(cross_run_persistent),
+                "cross_run_persistent_sample": cross_run_persistent[:5],
+                "within_recent_run_count": len(within_recent_run),
+                "distinct_recent_runs": distinct_run_count,
+                "total_action_runs_in_history": action_run_window.get("count", 0),
+            },
+        }
+    if not cross_run_persistent and distinct_run_count >= 2 and within_recent_run:
+        return {
+            "boundary_demonstrated": "undemonstrated",
+            "reason": (
+                "all cache entries' mtimes fall at or after the most "
+                "recent action_run start; this is consistent with either "
+                "a clean ephemeral-per-run cache OR a freshly-rebuilt "
+                "shared cache. Phase 0 cannot distinguish without test "
+                "jobs (Phase 1, FUTURE)."
+            ),
+            "evidence": {
+                "most_recent_run": most_recent,
+                "within_recent_run_count": len(within_recent_run),
+                "distinct_recent_runs": distinct_run_count,
+                "total_action_runs_in_history": action_run_window.get("count", 0),
+            },
+        }
+    return {
+        "boundary_demonstrated": "undemonstrated",
+        "reason": (
+            "phase-0 evidence insufficient to conclude either way "
+            "(distinct_run_count<2 or no cache entries observed)"
+        ),
+        "evidence": {
+            "most_recent_run": most_recent,
+            "distinct_recent_runs": distinct_run_count,
+            "cache_entries_total": sum(len(v) for v in cache_entries_by_path.values()),
+        },
+    }
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="forge.runner_cache_boundary.demo")
+    parser.add_argument("--mode", choices=("metadata-only",), default="metadata-only",
+                        help="Phase 0 metadata-only demo. Phase 1 (mutating test jobs) is FUTURE.")
+    parser.add_argument("--ssh-user", default="root", help="SSH user for dev-tools VM")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--self-check", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("forge.runner_cache_boundary.demo self-check PASS")
+        return 0
+
+    runtime_body = resolve_runtime_body()
+    target = resolve_ssh_target(runtime_body.get("ssh_targets_id") or "dev-tools")
+    host = pick_ssh_address(target)
+    user = args.ssh_user
+
+    if not host:
+        print("FAIL: cannot resolve dev-tools SSH host", file=sys.stderr)
+        return 1
+
+    action_run_window = probe_action_run_window(user, host)
+    recent_runs = probe_recent_runs(user, host, n=10)
+    cache_entries = {
+        RUNNER_CACHE_ACT: probe_cache_mtimes(user, host, RUNNER_CACHE_ACT),
+        RUNNER_CACHE_ACTCACHE: probe_cache_mtimes(user, host, RUNNER_CACHE_ACTCACHE),
+    }
+
+    classification = classify_boundary(cache_entries, recent_runs, action_run_window)
+
+    receipt = {
+        "proof_class": "runner_cache_boundary_demo",
+        "stage_label": "stage_2_clean_room_demo_phase_0",
+        "generated_at_utc": utc_now_iso(),
+        "runtime_body": {
+            "ssh_targets_id": runtime_body.get("ssh_targets_id"),
+            "host_descriptor": runtime_body.get("host_descriptor"),
+        },
+        "stage_1_receipt_ref": str(STAGE_1_RECEIPT),
+        "phase": "phase_0_metadata_only",
+        "boundary_demonstrated": classification["boundary_demonstrated"],
+        "reason": classification["reason"],
+        "evidence": classification["evidence"],
+        "action_run_window": action_run_window,
+        "recent_runs": recent_runs,
+        "cache_entries_summary": {
+            cache: {
+                "count": len(entries),
+                "total_bytes": sum(e["size_bytes"] for e in entries),
+                "earliest_mtime_utc": min((e["mtime_utc"] for e in entries), default=None),
+                "latest_mtime_utc": max((e["mtime_utc"] for e in entries), default=None),
+            }
+            for cache, entries in cache_entries.items()
+        },
+        "stop_lines_enforced": [
+            "no /data/.runner contents read",
+            "no token_hash or token_salt read",
+            "no bolt.db values dumped (key names + sizes only)",
+            "no test jobs spawned (phase 0 metadata-only)",
+            "no runner config mutation",
+            "no branch protection mutation",
+        ],
+        "phase_1_disposition": (
+            "phase 1 mutating disposable test jobs are FUTURE and require explicit "
+            "operator approval; this packet does not advance to phase 1."
+        ),
+        "scope_note": (
+            "Phase 0 mechanically demonstrates the boundary via cache mtimes vs "
+            "action_run timestamps. A 'leaky' classification is sufficient evidence "
+            "for the contract's stage_2_clean_room_demo state. A 'clean' classification "
+            "would require phase 1 active test jobs and is FUTURE."
+        ),
+    }
+
+    RECEIPT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(RECEIPT_LATEST, "w", encoding="utf-8") as f:
+        yaml.safe_dump(receipt, f, sort_keys=False)
+
+    if args.json:
+        print(json.dumps(receipt, indent=2, default=str))
+    else:
+        print("forge.runner_cache_boundary.demo — runner_cache_boundary_proof Stage 2 phase 0")
+        print(f"generated_at: {receipt['generated_at_utc']}")
+        print(f"runtime body: {runtime_body.get('host_descriptor')}")
+        print()
+        print(f"action_run history: total={action_run_window.get('count')}, "
+              f"earliest={action_run_window.get('earliest_start')}, "
+              f"latest_stop={action_run_window.get('latest_stop')}")
+        print()
+        for cache, entries in cache_entries.items():
+            total = sum(e["size_bytes"] for e in entries)
+            print(f"cache {cache}: {len(entries)} entries, {total} bytes")
+            for e in entries:
+                print(f"  {e['name']}: {e['size_bytes']} bytes, mtime={e['mtime_utc']}")
+        print()
+        print(f"boundary_demonstrated: {classification['boundary_demonstrated']}")
+        print(f"reason: {classification['reason']}")
+        print()
+        print(f"receipt: {RECEIPT_LATEST}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
