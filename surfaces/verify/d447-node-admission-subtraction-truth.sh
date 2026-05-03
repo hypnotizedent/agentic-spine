@@ -635,6 +635,25 @@ appliance_classes = {
     for row in appliance_identity.get("appliances") or []
     if isinstance(row, dict) and row.get("class")
 }
+portable_media_vocab = (((appliance_identity.get("field_vocabulary") or {}).get("portable_media_type_values")) or {})
+if not portable_media_vocab:
+    fail("appliance.identity.contract.yaml must declare portable_media_type_values")
+portable_media_values = set(portable_media_vocab.keys())
+portable_rows = [
+    row for row in appliance_identity.get("appliances") or []
+    if isinstance(row, dict) and row.get("class") in {"portable_storage_appliance", "portable_bootstrap_media_appliance"}
+]
+if not portable_rows:
+    fail("appliance.identity.contract.yaml must keep portable appliance rows in the canonical appliance contract")
+for appliance in portable_rows:
+    appliance_id = appliance.get("appliance_id") or "<unknown>"
+    hardware = appliance.get("hardware_identity") or {}
+    media_type = hardware.get("media_type")
+    if media_type not in portable_media_values:
+        fail(f"{appliance_id}: hardware_identity.media_type must use portable_media_type_values")
+    for required_field in (appliance_identity.get("field_vocabulary") or {}).get("portable_hardware_identity_required_fields") or []:
+        if hardware.get(required_field) in (None, "", [], {}):
+            fail(f"{appliance_id}: hardware_identity missing required portable field {required_field}")
 for machine in operator_inventory.get("machines") or []:
     if not isinstance(machine, dict):
         continue
@@ -652,6 +671,8 @@ for required_snippet in [
     "appliance_class_values",
     "validate_operator_role_candidacy",
     "operator role_candidacy contains appliance class name",
+    "appliance_identity_storage_facts",
+    "hardware_identity.media_type",
 ]:
     if required_snippet not in node_admission_text:
         fail(f"node.admission.status must enforce role_candidacy vocabulary in the canonical reader: missing {required_snippet}")
@@ -812,6 +833,33 @@ if spec_row.get("role_suitability", {}).get("assignment_made") is not False:
 setup = spec_row.get("setup_correctness") or {}
 if "activation_statement" not in setup:
     fail("machine-spec readback must state it is evidence only, not activation")
+
+for appliance_id, expected_media_type, expected_rotational in [
+    ("wd-elements-5tb-01", "hdd", True),
+    ("sandisk-extreme-55ae-2tb-01", "ssd", False),
+    ("sandisk-cruzer-stage0-bootstrap-16gb-01", "usb_flash", False),
+]:
+    proc = subprocess.run(
+        [str(node_admission), "--node", appliance_id, "--machine-spec", "--json"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        fail(f"portable appliance machine-spec failed for {appliance_id}: {proc.stderr.strip() or proc.stdout.strip()}")
+    payload = json.loads(proc.stdout)
+    rows = payload.get("rows") or []
+    if len(rows) != 1:
+        fail(f"portable appliance machine-spec for {appliance_id} must emit exactly one row")
+    known = ((rows[0].get("machine_spec") or {}).get("known") or {})
+    if known.get("media_type") != expected_media_type:
+        fail(f"{appliance_id} machine_spec.known.media_type must be {expected_media_type}")
+    if known.get("storage_rotational") is not expected_rotational:
+        fail(f"{appliance_id} machine_spec.known.storage_rotational mismatch")
+    for required_field in ["storage_capacity_bytes", "storage_interface", "storage_summary"]:
+        if known.get(required_field) in (None, "", [], {}):
+            fail(f"{appliance_id} machine_spec.known missing storage field: {required_field}")
+    if (rows[0].get("physical_identity") or {}).get("source_surface") != "ops/bindings/appliance.identity.contract.yaml":
+        fail(f"{appliance_id} physical identity must resolve through appliance identity evidence")
 
 proc = subprocess.run(
     [str(node_admission), "--node", "ai-consolidation", "--json"],

@@ -123,6 +123,72 @@ def compact_dict(data: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if value not in (None, "", [], {})}
 
 
+def as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def media_type_rotational(media_type: Any) -> bool | None:
+    text = str(media_type or "").strip()
+    if text == "hdd":
+        return True
+    if text in {"ssd", "usb_flash"}:
+        return False
+    return None
+
+
+def portable_appliance_classes() -> set[str]:
+    return {"portable_storage_appliance", "portable_bootstrap_media_appliance"}
+
+
+def appliance_identity_storage_facts(appliance: dict[str, Any]) -> dict[str, Any]:
+    """Project structured appliance storage identity into node admission facts.
+
+    Appliance identity remains the canonical evidence surface; this readback only
+    exposes its hardware facts so routing agents do not parse model strings.
+    """
+    if not appliance:
+        return {}
+
+    hardware = as_dict(appliance.get("hardware_identity"))
+    filesystem = as_dict(appliance.get("current_filesystem"))
+    attachment = as_dict(appliance.get("current_attachment"))
+    media_type = hardware.get("media_type")
+    capacity_bytes = hardware.get("capacity_bytes")
+    interface = hardware.get("interface")
+    model = first_present(hardware.get("model"), appliance.get("model"))
+    summary_bits = [
+        str(capacity_bytes) if capacity_bytes not in (None, "") else "",
+        str(media_type or ""),
+        str(model or ""),
+        f"via {interface}" if interface else "",
+    ]
+    storage_summary = " ".join(bit for bit in summary_bits if bit).strip()
+
+    return compact_dict(
+        {
+            "media_type": media_type,
+            "storage_rotational": media_type_rotational(media_type),
+            "storage_capacity_bytes": capacity_bytes,
+            "storage_interface": interface,
+            "storage_model": model,
+            "storage_manufacturer": hardware.get("manufacturer"),
+            "storage_product_family": hardware.get("product_family"),
+            "storage_serial_short": hardware.get("serial_short"),
+            "storage_serial": hardware.get("serial"),
+            "storage_wwn": hardware.get("wwn"),
+            "storage_summary": storage_summary,
+            "filesystem_type": filesystem.get("type"),
+            "filesystem_label": filesystem.get("label"),
+            "filesystem_uuid": filesystem.get("uuid"),
+            "filesystem_state": filesystem.get("state"),
+            "attachment_host_node_id": attachment.get("host_node_id"),
+            "attachment_by_id_path": attachment.get("by_id_path"),
+            "attachment_mount_state": attachment.get("mount_state"),
+            "attachment_last_observed_at_utc": attachment.get("last_observed_at_utc"),
+        }
+    )
+
+
 def load_json_file(path: str | None) -> dict[str, Any]:
     if not path:
         return {}
@@ -847,7 +913,8 @@ def machine_facts_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     claim_facts = claim.get("machine_facts") if isinstance(claim.get("machine_facts"), dict) else {}
     operator_facts = operator.get("machine_facts") if isinstance(operator.get("machine_facts"), dict) else {}
     hardware_facts = hardware.get("machine_facts") if isinstance(hardware.get("machine_facts"), dict) else {}
-    appliance_facts = appliance.get("machine_facts") if isinstance(appliance.get("machine_facts"), dict) else {}
+    appliance_declared_facts = appliance.get("machine_facts") if isinstance(appliance.get("machine_facts"), dict) else {}
+    appliance_facts = {**appliance_identity_storage_facts(appliance), **appliance_declared_facts}
     shop_facts = {
         "product_name": first_present(shop.get("model"), shop.get("name")),
         "sys_vendor": shop.get("vendor"),
@@ -876,7 +943,25 @@ def machine_facts_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
             "cpu_model": first_present(claim_facts.get("cpu_model"), inventory_facts.get("cpu_model")),
             "cpu_threads": first_present(claim_facts.get("cpu_threads"), inventory_facts.get("cpu_threads")),
             "memory_bytes": first_present(claim_facts.get("memory_bytes"), inventory_facts.get("memory_bytes")),
+            "media_type": first_present(claim_facts.get("media_type"), inventory_facts.get("media_type")),
+            "storage_rotational": first_present(claim_facts.get("storage_rotational"), inventory_facts.get("storage_rotational")),
+            "storage_capacity_bytes": first_present(claim_facts.get("storage_capacity_bytes"), inventory_facts.get("storage_capacity_bytes")),
+            "storage_interface": first_present(claim_facts.get("storage_interface"), inventory_facts.get("storage_interface")),
+            "storage_model": first_present(claim_facts.get("storage_model"), inventory_facts.get("storage_model")),
+            "storage_manufacturer": first_present(claim_facts.get("storage_manufacturer"), inventory_facts.get("storage_manufacturer")),
+            "storage_product_family": first_present(claim_facts.get("storage_product_family"), inventory_facts.get("storage_product_family")),
+            "storage_serial_short": first_present(claim_facts.get("storage_serial_short"), inventory_facts.get("storage_serial_short")),
+            "storage_serial": first_present(claim_facts.get("storage_serial"), inventory_facts.get("storage_serial")),
+            "storage_wwn": first_present(claim_facts.get("storage_wwn"), inventory_facts.get("storage_wwn")),
             "storage_summary": first_present(claim_facts.get("storage_summary"), inventory_facts.get("storage_summary")),
+            "filesystem_type": first_present(claim_facts.get("filesystem_type"), inventory_facts.get("filesystem_type")),
+            "filesystem_label": first_present(claim_facts.get("filesystem_label"), inventory_facts.get("filesystem_label")),
+            "filesystem_uuid": first_present(claim_facts.get("filesystem_uuid"), inventory_facts.get("filesystem_uuid")),
+            "filesystem_state": first_present(claim_facts.get("filesystem_state"), inventory_facts.get("filesystem_state")),
+            "attachment_host_node_id": first_present(claim_facts.get("attachment_host_node_id"), inventory_facts.get("attachment_host_node_id")),
+            "attachment_by_id_path": first_present(claim_facts.get("attachment_by_id_path"), inventory_facts.get("attachment_by_id_path")),
+            "attachment_mount_state": first_present(claim_facts.get("attachment_mount_state"), inventory_facts.get("attachment_mount_state")),
+            "attachment_last_observed_at_utc": first_present(claim_facts.get("attachment_last_observed_at_utc"), inventory_facts.get("attachment_last_observed_at_utc")),
             "nic_summary": first_present(claim_facts.get("nic_summary"), inventory_facts.get("nic_summary")),
             "bios_version": first_present(claim_facts.get("bios_version"), inventory_facts.get("bios_version")),
             "lan_ip": declared_lan_ip(hardware, ssh, shop, appliance),
@@ -886,13 +971,22 @@ def machine_facts_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
             "bootstrap_claim": claim_path,
         }
     )
-    required_fact_fields = [
-        "cpu_model",
-        "cpu_threads",
-        "memory_bytes",
-        "storage_summary",
-        "nic_summary",
-    ]
+    if str(appliance.get("class") or "") in portable_appliance_classes():
+        required_fact_fields = [
+            "model",
+            "media_type",
+            "storage_capacity_bytes",
+            "storage_interface",
+            "storage_summary",
+        ]
+    else:
+        required_fact_fields = [
+            "cpu_model",
+            "cpu_threads",
+            "memory_bytes",
+            "storage_summary",
+            "nic_summary",
+        ]
     missing_fields = [field for field in required_fact_fields if known.get(field) in (None, "", [], {})]
     source_ownership = {
         "machine_facts": "firstboot claim machine_facts when present; otherwise canonical inventory fact fields",
@@ -900,6 +994,7 @@ def machine_facts_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         "operator_inventory": "ops/bindings/operator.hardware.inventory.yaml",
         "hardware_inventory": "ops/bindings/hardware.inventory.yaml",
         "appliance_identity": "ops/bindings/appliance.identity.contract.yaml",
+        "appliance_media_type": "ops/bindings/appliance.identity.contract.yaml#appliances[].hardware_identity.media_type",
         "access_path": "ops/bindings/ssh.targets.yaml",
         "shop_function_projection": "ops/bindings/shop.device.registry.yaml",
     }
