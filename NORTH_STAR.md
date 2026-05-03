@@ -1,5 +1,5 @@
 ---
-status: draft
+status: authoritative
 audience: agents
 scope: platform-identity
 ---
