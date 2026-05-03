@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """entry-compile — Compile current assignment from existing runtime truth.
 
-Reads three source surfaces:
-  1. Loop scope file ($SPINE_STATE/loop-scopes/*.scope.md)
+Reads canonical authority for active loop, then enriches with execution
+tracker and packet artifacts:
+  1. Active loop: SQLite shared_authority.db via loops_sql_authority
+     (no scope-file fallback — scope files are projections of SQLite,
+     not independent policy)
   2. Execution tracker ($SPINE_STATE/controller-prompts/_intake-artifacts/*PACKET-EXECUTION*.md)
   3. Active packet prompt ($SPINE_STATE/controller-prompts/MAILROOM-CONTROLLER-PACKET-<NN>-*.md)
 
 Emits a JSON compiled assignment object to stdout containing:
   loop_id, packet_id, context_sources, active_artifacts,
   stop_condition, mutation_ground, handoff_target
+
+If canonical DB cannot answer (missing/corrupt/unreachable), returns
+compilation_state: clean_start. Does NOT silently substitute scope-file
+projection as authority.
 
 Read-only. Never mutates state.
 """
@@ -88,11 +95,21 @@ def _normalize_string_list(value: object) -> list[str]:
     return result
 
 
-# Authority: SQLite (scope-file fallback)
+# Authority: SQLite via loops_sql_authority. Scope files are projections,
+# not independent policy (see loops_sql_authority library docstring).
+# When canonical DB cannot answer, downstream consumers gracefully
+# degrade (compile_assignment returns compilation_state: "clean_start"
+# on None). Scope-file projection MUST NOT be substituted as authority
+# (PACKET-630 / F2 canonical fix from engine packet/loop/wave forensic;
+# same disease class as PACKET-625 Slice 4, one layer deeper in the
+# entry-truth chain).
 def _find_active_loop(state_root: str) -> dict | None:
-    """Find the active loop from SQLite authority. Falls back to scope files."""
+    """Find the active loop from SQLite authority.
 
-    # ── Primary path: SQLite via loops_sql_authority ──────────────────────
+    Returns the active loop, an ambiguous marker, or None.
+    Does NOT fall back to scope-file projection. If canonical DB cannot
+    answer, returns None and lets downstream gracefully degrade.
+    """
     db_path = os.path.join(state_root, "shared_authority.db")
     try:
         from pathlib import Path
@@ -120,39 +137,9 @@ def _find_active_loop(state_root: str) -> dict | None:
         return None
 
     except Exception:
-        pass  # Fall through to scope-file fallback
-
-    # ── Fallback: scope-file frontmatter parsing ─────────────────────────
-    scopes_dir = os.path.join(state_root, "loop-scopes")
-    if not os.path.isdir(scopes_dir):
+        # Canonical DB unavailable. Do NOT substitute scope-file projection
+        # as authority. Return None; downstream produces clean_start.
         return None
-
-    candidates = []
-    try:
-        entries = sorted(os.listdir(scopes_dir))
-    except OSError:
-        return None
-
-    for name in entries:
-        if not name.endswith(".scope.md"):
-            continue
-        path = os.path.join(scopes_dir, name)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                text = f.read(16384)
-        except OSError:
-            continue
-        fm = _parse_frontmatter(text)
-        status = fm.get("status", "").lower()
-        if status in _OPEN_STATUSES:
-            fm["_path"] = path
-            candidates.append(fm)
-
-    if len(candidates) == 1:
-        return candidates[0]
-    if len(candidates) > 1:
-        return {"_ambiguous": True, "_candidates": candidates}
-    return None
 
 
 def _find_execution_tracker(state_root: str, loop_id: str | None = None) -> dict | None:
