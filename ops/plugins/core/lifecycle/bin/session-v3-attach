@@ -672,9 +672,13 @@ if routing_json_raw:
     except Exception:
         pass
 
-# Authority: SQLite (scope-file fallback)
-# Enrich loop metadata from SQLite, falling back to scope-file parsing
-_sql_resolved = False
+# Authority: SQLite via loops_sql_authority. No scope-file fallback —
+# scope files are projections of SQLite, not independent policy
+# (loops_sql_authority library docstring). When canonical SQLite cannot
+# answer (DB missing/corrupt/unreachable OR loop not in DB), loop fields
+# stay at their initial defaults rather than reading projection files.
+# Same disease-line fix as F1 (PACKET-625), F2 (PACKET-630),
+# F4 (PACKET-650). PACKET-665 closes F3.
 if loop_id and state_root:
     db_path = os.path.join(state_root, "shared_authority.db")
     if os.path.isfile(db_path):
@@ -696,56 +700,8 @@ if loop_id and state_root:
                 excl = loop_data.get("exclusions")
                 if isinstance(excl, list) and excl:
                     loop_exclusions = excl
-                _sql_resolved = True
         except Exception:
             pass
-
-    # Scope-file fallback when SQLite unavailable or missing loop
-    if not _sql_resolved:
-        scope_dir = os.path.join(state_root, "loop-scopes")
-        for name in sorted(os.listdir(scope_dir)) if os.path.isdir(scope_dir) else []:
-            if not name.endswith(".scope.md"):
-                continue
-            path = os.path.join(scope_dir, name)
-            try:
-                with open(path, "r") as f:
-                    text = f.read(16384)
-            except OSError:
-                continue
-            if loop_id not in text:
-                continue
-            # Parse frontmatter
-            lines = text.split("\n")
-            if not lines or lines[0].strip() != "---":
-                continue
-            current_list_key = None
-            for line in lines[1:]:
-                stripped = line.strip()
-                if stripped == "---":
-                    break
-                if stripped.startswith("- ") and current_list_key:
-                    val = stripped[2:].strip().strip('"').strip("'")
-                    if current_list_key == "evidence_refs":
-                        loop_evidence_refs.append(val)
-                    elif current_list_key == "exclusions":
-                        loop_exclusions.append(val)
-                    continue
-                colon = stripped.find(":")
-                if colon < 1:
-                    current_list_key = None
-                    continue
-                key = stripped[:colon].strip()
-                val = stripped[colon+1:].strip().strip('"').strip("'")
-                current_list_key = None
-                if key == "objective" and val:
-                    loop_objective = val
-                elif key == "priority" and val:
-                    loop_priority = val
-                elif key == "evidence_refs":
-                    current_list_key = "evidence_refs"
-                elif key == "exclusions":
-                    current_list_key = "exclusions"
-            break
 
 # Compose the assignment object
 assignment = {
