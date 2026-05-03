@@ -210,15 +210,18 @@ raise SystemExit(1)
 }
 
 if [[ -f "$ENTRY_COMPILE_BIN" ]]; then
-    # Prefer the governed capability so DB-backed entry truth routes to the
-    # storage_evidence_node. Direct local compile is a fallback only; otherwise
-    # consumer-local scope projections can resurrect stale loop truth.
-    if [[ "${SPINE_ENTRY_COMPILE_LOCAL_ONLY:-0}" != "1" ]]; then
+    # Entry truth is canonical (cap.sh-routed entry.compile, DB-backed on the
+    # storage_evidence_node) OR explicit-opt-in local
+    # (SPINE_ENTRY_COMPILE_LOCAL_ONLY=1). There is no silent fallback from
+    # canonical-empty to local — that path resurrected stale loop truth from
+    # consumer-local scope projections (PACKET-625 / Slice 4 of engine
+    # semantics campaign). If the canonical reader returns empty, downstream
+    # banner sections degrade gracefully (compiled-entry block omitted).
+    if [[ "${SPINE_ENTRY_COMPILE_LOCAL_ONLY:-0}" == "1" ]]; then
+        ENTRY_COMPILE_JSON="$(python3 "$ENTRY_COMPILE_BIN" --state-root "${SPINE_STATE:-}" 2>/dev/null || true)"
+    else
         ENTRY_COMPILE_CAP_OUT="$("$SPINE_ROOT/bin/ops" cap run entry.compile 2>/dev/null || true)"
         ENTRY_COMPILE_JSON="$(extract_first_json_object <<< "$ENTRY_COMPILE_CAP_OUT" 2>/dev/null || true)"
-    fi
-    if [[ -z "$ENTRY_COMPILE_JSON" ]]; then
-        ENTRY_COMPILE_JSON="$(python3 "$ENTRY_COMPILE_BIN" --state-root "${SPINE_STATE:-}" 2>/dev/null || true)"
     fi
     if [[ -n "$ENTRY_COMPILE_JSON" ]]; then
         eval "$(python3 -c "
