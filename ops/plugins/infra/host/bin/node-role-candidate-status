@@ -451,16 +451,62 @@ def compute_next_action(
             "Boring first proof; no runtime mutation."
         )
     # All required proofs present but contract still says delivered: false.
-    # This is the "Stage 1 ladder closed" state — Stage 2 enforcement work
-    # is the natural next move.
+    # PACKET-619 vocabulary alignment: read Stage 2 state already populated
+    # by _extract_stage_2_state and produce a current next_action that names
+    # delivered Stage 2 items (with packet refs) and remaining future work.
+    # Shared vocabulary with node.admission.status: "nameplate declared,
+    # not final-delivered" is the human prose for the contracted_not_delivered
+    # machine code.
     if required and len(present) >= len(required):
-        return (
-            f"{candidate_name} Stage 1 ladder closed ({len(present)}/{len(required)} read-only proofs "
-            f"present) but contract keeps `delivered: false`. Next slice: pick a Stage 2 enforcement "
-            "step from the staged_delivery blocks (e.g., real backup/restore drill, structural agent-"
-            "boundary enforcement, branch-protection tightening, runner clean-room demonstration). "
-            "Stage 2 is mutating — operator decides which Stage 2 to run first."
-        )
+        s2_state = contract_status.get("stage_2_state_by_proof") or {}
+        s2_summary = contract_status.get("stage_2_summary") or {}
+        delivered_items = [
+            (name, state.get("stage_2_packet"))
+            for name, state in s2_state.items()
+            if state.get("stage_2_status") == "delivered"
+        ]
+        future_items = [
+            name for name, state in s2_state.items() if state.get("stage_2_status") == "future"
+        ]
+        not_declared = [
+            name for name, state in s2_state.items() if not state.get("declared")
+        ]
+        parts = [
+            f"{candidate_name}: nameplate declared, not final-delivered.",
+            f"Substrate Stage 1 complete ({len(present)}/{len(required)} read-only proofs present).",
+        ]
+        if s2_summary.get("declared"):
+            line = (
+                f"Stage 2 partial: {s2_summary.get('delivered', 0)}/"
+                f"{s2_summary.get('declared', 0)} declared delivered"
+            )
+            if delivered_items:
+                shown = ", ".join(
+                    f"{name} ({pkt})" if pkt else name for name, pkt in delivered_items
+                )
+                line += f" — delivered: {shown}"
+            if future_items:
+                line += f". Future Stage 2 work: {', '.join(future_items)}"
+            if not_declared:
+                line += f". Stage 2 not declared for: {', '.join(not_declared)}"
+            parts.append(line + ".")
+        if future_items:
+            parts.append(
+                "Next slice: pick one remaining future Stage 2 step "
+                f"({', '.join(future_items)}); Stage 2 is mutating — operator decides."
+            )
+        elif not_declared:
+            parts.append(
+                "Next slice: declare Stage 2 staged_delivery for proofs without it "
+                f"({', '.join(not_declared)}), or run the next mutating enforcement step. "
+                "Operator decides."
+            )
+        else:
+            parts.append(
+                "All declared Stage 2 work delivered; next slice is contract delivered:true "
+                "or operator-named final-delivery sequence."
+            )
+        return " ".join(parts)
     found_packets = [ip for ip in intent_packets if ip.get("found")]
     if not found_packets:
         return f"Author the first intent packet for {candidate_name} per the operator-approved scope."

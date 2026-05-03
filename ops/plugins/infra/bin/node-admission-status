@@ -840,6 +840,55 @@ def storage_evidence_candidate_set() -> set[str]:
     return candidates
 
 
+def _forge_node_stage_2_summary() -> dict[str, Any]:
+    """Extract Stage 2 partial-progress summary for forge_node from the
+    contract's required_proofs.staged_delivery blocks. Mirrors the
+    _extract_stage_2_state helper in node.role.candidate.status so both
+    readbacks teach the same Stage 2 vocabulary. PACKET-619 vocabulary
+    alignment: admission per-host line surfaces Stage 2 partial progress
+    when forge_node candidacy is contracted_not_delivered.
+    """
+    node_role = load_yaml(NODE_ROLE_CONTRACT)
+    forge_node = ((node_role.get("node_types") or {}).get("forge_node") or {})
+    required = (forge_node.get("promotion_standard") or {}).get("required_proofs") or {}
+    declared = delivered = future = not_declared = 0
+    delivered_items: list[str] = []
+    future_items: list[str] = []
+    for name, body in required.items():
+        if not isinstance(body, dict):
+            continue
+        staged = body.get("staged_delivery")
+        if not isinstance(staged, dict):
+            not_declared += 1
+            continue
+        primary_status = None
+        for key, value in staged.items():
+            if not key.startswith("stage_2_"):
+                continue
+            if key in {"stage_2_blocked_until"} or key.endswith("_proof_ref") or key.endswith("_packet") or key.endswith("_scope_note"):
+                continue
+            primary_status = str(value) if value is not None else None
+            break
+        if primary_status is None:
+            not_declared += 1
+            continue
+        declared += 1
+        if primary_status == "delivered":
+            delivered += 1
+            delivered_items.append(name)
+        elif primary_status == "future":
+            future += 1
+            future_items.append(name)
+    return {
+        "declared": declared,
+        "delivered": delivered,
+        "future": future,
+        "not_declared": not_declared,
+        "delivered_items": delivered_items,
+        "future_items": future_items,
+    }
+
+
 def forge_node_promotion_standard_for(node_id: str) -> dict[str, Any]:
     """Compose forge_node promotion standard for a node id.
 
@@ -914,6 +963,7 @@ def forge_node_promotion_standard_for(node_id: str) -> dict[str, Any]:
         "proofs": proofs,
         "missing_proofs": on_disk_missing,
         "candidate_gaps": (standard.get("candidate_gaps") or {}).get(node_id, on_disk_missing),
+        "stage_2_summary": _forge_node_stage_2_summary(),
         "subtraction_note": "ssh.targets supplies access evidence only; Stage 1 proof coverage is not delivered forge_node while promotion_standard.delivered is false",
     }
 
@@ -1394,7 +1444,24 @@ def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False, golden_pa
         print(f"  lifecycle:  {row['lifecycle_state']}")
         print(f"  admission:  {row['admission_state']} / {row['first_touch_state']}")
         print(f"  candidacy:  {', '.join(str(v) for v in row['role_candidacy'])}")
-        print(f"  promotion:  {row['promotion_stage']}")
+        # PACKET-619 vocabulary alignment: when forge_node candidate is
+        # contracted_not_delivered, surface Stage 2 partial progress here so
+        # admission and node.role.candidate.status teach the same state.
+        promotion_line = row['promotion_stage']
+        if (
+            row['promotion_stage'] == 'contracted_not_delivered'
+            and 'forge_node' in (row.get('role_candidacy') or [])
+        ):
+            forge_std = (row.get('role_delivery_proofs') or {}).get('forge_node') or {}
+            s2 = forge_std.get('stage_2_summary') or {}
+            if s2.get('declared') or s2.get('not_declared'):
+                bits = [f"Stage 2 partial: {s2.get('delivered',0)}/{s2.get('declared',0)} delivered"]
+                if s2.get('future'):
+                    bits.append(f"{s2['future']} future")
+                if s2.get('not_declared'):
+                    bits.append(f"{s2['not_declared']} not declared")
+                promotion_line += f" ({', '.join(bits)})"
+        print(f"  promotion:  {promotion_line}")
         print(f"  access:     {(row.get('access_path') or {}).get('host', 'none')}")
         print(f"  recovery:   {json.dumps(row.get('recovery_planes') or {}, sort_keys=True)}")
         if machine_spec:
