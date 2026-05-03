@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""node.role.candidate.status — three-plane candidate readback.
+
+PACKET-591 implementation under PACKET-588 phased order Phase 3. Reconciles
+runtime truth, intent/planning truth, and repo/contract truth for a named
+architecture candidate (e.g., forge_node) so Ronny or a future agent can
+ask one canonical thing and get a complete, current picture instead of
+relying on memory or scattered evidence.
+
+Estate-truth reconciliation rule (from AGENTS.md / SESSION_PROTOCOL.md
+landed in commit 98282bef): "Estate truth must not split into three
+disconnected planes. When planning or changing L1/L2 estate shape,
+reconcile runtime truth, intent/planning truth, and repo/contract truth
+before choosing the next slice."
+
+For each candidate, output:
+- aliases: declared synonyms (so a query for any alias surfaces the canonical)
+- runtime body: declared runtime substrate (host, addresses, services)
+- intent packets: numbered packet IDs + paths + status
+- contract status: bindings that already declare or reference the candidate
+- domain-state artifacts: existing spec / evidence / candidate YAMLs
+- missing: gaps between desired and observed
+- next first-class action: name the next packet/slice to advance
+
+NO mutation. NO host modification. NO new authority surfaces.
+This is a read-only reconciliation surface.
+
+v1 scope: forge_node populated. Future candidates (safe_node, runner_node,
+control_node, archive_node, etc.) extend the CANDIDATES table.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+SPINE_STATE = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtime/spine/state")))
+
+
+# Candidate registry — declarative source of truth for what this surface knows about.
+# Adding a new candidate means adding an entry here, not building a parallel surface.
+CANDIDATES: dict[str, dict[str, Any]] = {
+    "forge_node": {
+        "purpose": "Source-of-code-truth and CI execution surface (Gitea + Forgejo runner / GitOps pattern)",
+        "aliases": [
+            "courthouse",        # operator's canonical L2 framing
+            "source_node",       # node-role naming convention
+            "Gitea",             # current implementation
+            "Forgejo",           # potential future swap
+            "dev-tools",         # ssh.targets id
+            "git runner",        # CI surface
+            "GitOps",            # operating model
+        ],
+        "runtime_body": {
+            "ssh_targets_id": "dev-tools",
+            "host_descriptor": "Dev tools VM 206 (Gitea + PostgreSQL + Gitea Actions runner)",
+            "expected_addresses": {
+                "lan": "192.168.1.206",
+                "tailscale": "100.90.167.39",
+            },
+            "services": ["gitea", "gitea-postgresql", "gitea-actions-runner"],
+            "code_truth_role": "origin/main of agentic-spine + workbench + projects",
+        },
+        "intent_packet_ids": [514, 515, 516, 556, 591],
+        "domain_state_artifact_globs": [
+            "domain-state/spine/FORGE-COURTHOUSE-NODE-*.{md,yaml}",
+            "domain-state/spine/L2-COURTHOUSE-SAFE-*.{md,yaml}",
+            "domain-state/spine/GITEA-SECRETS-*.{md,yaml}",
+            "domain-state/spine/L2-FIRST-CLASS-FOUNDATION-*.md",
+        ],
+        "contract_grep_terms": [
+            "forge_node", "forge-node", "courthouse", "source_node", "dev-tools", "gitea",
+        ],
+        "expected_contract_homes": [
+            "ops/bindings/node.role.contract.yaml",
+            "ops/bindings/ssh.targets.yaml",
+            "ops/bindings/hardware.inventory.yaml",
+            "ops/bindings/fleet.admission.classification.yaml",
+        ],
+    },
+    # Future candidates: safe_node, runner_node, control_node, archive_node
+    # Add their entries here when the operator approves their first slice.
+}
+
+
+def list_intent_packets(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolve numbered intent packets to their actual filesystem paths + status."""
+    out: list[dict[str, Any]] = []
+    prompts_dir = SPINE_STATE / "controller-prompts"
+    bodies_dir = SPINE_STATE / "packet-bodies"
+    for pid in candidate.get("intent_packet_ids", []):
+        entry: dict[str, Any] = {"packet_id": pid, "found": False, "paths": []}
+        for d in (prompts_dir, bodies_dir):
+            if not d.is_dir():
+                continue
+            for path in d.glob(f"*PACKET-{pid}-*.md"):
+                entry["found"] = True
+                entry["paths"].append(str(path))
+        out.append(entry)
+    return out
+
+
+def list_domain_state_artifacts(candidate: dict[str, Any]) -> list[str]:
+    """Glob for existing domain-state artifacts named for this candidate."""
+    out: list[str] = []
+    for pattern in candidate.get("domain_state_artifact_globs", []):
+        # Manually expand {md,yaml} alternation since pathlib glob doesn't.
+        if "{md,yaml}" in pattern:
+            for ext in ("md", "yaml"):
+                expanded = pattern.replace("{md,yaml}", ext)
+                out.extend(str(p) for p in SPINE_STATE.glob(expanded))
+        else:
+            out.extend(str(p) for p in SPINE_STATE.glob(pattern))
+    return sorted(set(out))
+
+
+def grep_contracts(candidate: dict[str, Any]) -> dict[str, list[str]]:
+    """Grep ops/bindings for each contract grep term; return terms→files."""
+    bindings_dir = REPO_ROOT / "ops" / "bindings"
+    out: dict[str, list[str]] = {}
+    if not bindings_dir.is_dir():
+        return out
+    files = list(bindings_dir.rglob("*.yaml")) + list(bindings_dir.rglob("*.yml"))
+    for term in candidate.get("contract_grep_terms", []):
+        hits: list[str] = []
+        for f in files:
+            try:
+                if term in f.read_text(encoding="utf-8"):
+                    hits.append(str(f.relative_to(REPO_ROOT)))
+            except (OSError, UnicodeDecodeError):
+                continue
+        if hits:
+            out[term] = sorted(set(hits))
+    return out
+
+
+def check_expected_contract_homes(candidate: dict[str, Any]) -> dict[str, bool]:
+    """Confirm each expected contract home exists; doesn't validate content."""
+    out: dict[str, bool] = {}
+    for rel in candidate.get("expected_contract_homes", []):
+        out[rel] = (REPO_ROOT / rel).is_file()
+    return out
+
+
+def list_handoffs(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Find handoff files mentioning the candidate's aliases."""
+    out: list[dict[str, Any]] = []
+    handoffs_dir = SPINE_STATE / "handoffs"
+    if not handoffs_dir.is_dir():
+        return out
+    aliases_lower = [a.lower() for a in candidate.get("aliases", [])]
+    aliases_lower.extend([candidate.get("runtime_body", {}).get("ssh_targets_id", "").lower()])
+    for path in sorted(handoffs_dir.glob("HO-*.md")):
+        try:
+            text = path.read_text(encoding="utf-8").lower()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if any(a and a in text for a in aliases_lower):
+            out.append({"path": str(path), "id": path.stem})
+    return out
+
+
+def compute_missing(
+    candidate_name: str,
+    candidate: dict[str, Any],
+    intent_packets: list[dict[str, Any]],
+    contract_hits: dict[str, list[str]],
+    expected_homes: dict[str, bool],
+) -> list[str]:
+    missing: list[str] = []
+    # 1. Intent packets that the table claims exist but don't
+    for ip in intent_packets:
+        if not ip.get("found"):
+            missing.append(f"declared intent PACKET-{ip['packet_id']} not found at expected paths")
+    # 2. node.role.contract.yaml mention of candidate role name
+    nrc_text = ""
+    nrc_path = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
+    if nrc_path.is_file():
+        try:
+            nrc_text = nrc_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    if candidate_name not in nrc_text:
+        missing.append(f"node.role.contract.yaml does not declare '{candidate_name}' as a node_type or candidate (current state: candidate-only on this readback surface)")
+    # 3. expected_contract_homes that don't exist
+    for home, exists in expected_homes.items():
+        if not exists:
+            missing.append(f"expected contract home missing: {home}")
+    # 4. fleet.admission has the runtime ssh_targets_id?
+    fleet_path = REPO_ROOT / "ops/bindings/fleet.admission.classification.yaml"
+    runtime_id = (candidate.get("runtime_body") or {}).get("ssh_targets_id")
+    if runtime_id and fleet_path.is_file():
+        try:
+            if runtime_id not in fleet_path.read_text(encoding="utf-8"):
+                missing.append(f"fleet.admission.classification.yaml does not list runtime body '{runtime_id}'")
+        except OSError:
+            pass
+    return missing
+
+
+def compute_next_action(
+    candidate_name: str,
+    candidate: dict[str, Any],
+    missing: list[str],
+    intent_packets: list[dict[str, Any]],
+) -> str:
+    """Heuristic: name the next first-class slice to advance the candidate."""
+    if any("node.role.contract.yaml does not declare" in m for m in missing):
+        return (
+            f"Add '{candidate_name}' as a declared node_type or candidate in "
+            f"ops/bindings/node.role.contract.yaml with required_proofs sketch "
+            "(no implementation, just the contract slot). Boring first move; no "
+            "runtime change, no installs, no DNS/secrets/branch protection."
+        )
+    found_packets = [ip for ip in intent_packets if ip.get("found")]
+    if not found_packets:
+        return f"Author the first intent packet for {candidate_name} per the operator-approved scope."
+    return (
+        f"All declared intent packets present; node_type declared. "
+        f"Next slice: pick one packet from the intent list and execute its scope, "
+        "or close one of the open handoffs against this candidate."
+    )
+
+
+def status_for_candidate(candidate_name: str) -> dict[str, Any]:
+    candidate = CANDIDATES[candidate_name]
+    intent_packets = list_intent_packets(candidate)
+    contract_hits = grep_contracts(candidate)
+    expected_homes = check_expected_contract_homes(candidate)
+    domain_artifacts = list_domain_state_artifacts(candidate)
+    handoffs = list_handoffs(candidate)
+    missing = compute_missing(candidate_name, candidate, intent_packets, contract_hits, expected_homes)
+    next_action = compute_next_action(candidate_name, candidate, missing, intent_packets)
+
+    return {
+        "capability": "node.role.candidate.status",
+        "candidate": candidate_name,
+        "purpose": candidate.get("purpose", ""),
+        "aliases": candidate.get("aliases", []),
+        "runtime_body": candidate.get("runtime_body", {}),
+        "intent_packets": intent_packets,
+        "domain_state_artifacts": domain_artifacts,
+        "handoffs": handoffs,
+        "contract_hits": contract_hits,
+        "expected_contract_homes": expected_homes,
+        "missing": missing,
+        "next_action": next_action,
+        "scope_note": "PACKET-591 read-only candidate readback. Reconciles runtime / intent / contract truth without mutation.",
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="node.role.candidate.status")
+    parser.add_argument("--candidate", help="candidate name (e.g., forge_node). If omitted, lists all known candidates.")
+    parser.add_argument("--json", action="store_true", help="emit JSON only")
+    parser.add_argument("--self-check", action="store_true", help="self-check pass")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("node.role.candidate.status self-check PASS")
+        return 0
+
+    if not args.candidate:
+        # List known candidates
+        out = {
+            "capability": "node.role.candidate.status",
+            "known_candidates": sorted(CANDIDATES.keys()),
+            "note": "Pass --candidate <name> for a full reconciliation readback.",
+        }
+        if args.json:
+            print(json.dumps(out, indent=2))
+        else:
+            print("known candidates:")
+            for c in sorted(CANDIDATES.keys()):
+                print(f"  {c} — {CANDIDATES[c].get('purpose', '')}")
+            print("\nUsage: node.role.candidate.status --candidate <name>")
+        return 0
+
+    if args.candidate not in CANDIDATES:
+        print(f"unknown candidate: {args.candidate}", file=sys.stderr)
+        print(f"known: {', '.join(sorted(CANDIDATES.keys()))}", file=sys.stderr)
+        return 2
+
+    payload = status_for_candidate(args.candidate)
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"node.role.candidate.status — {payload['candidate']}")
+        print(f"purpose: {payload['purpose']}")
+        print(f"aliases: {', '.join(payload['aliases'])}")
+        rb = payload['runtime_body']
+        print(f"runtime body:")
+        print(f"  ssh_targets_id: {rb.get('ssh_targets_id', '?')}")
+        print(f"  host:           {rb.get('host_descriptor', '?')}")
+        addrs = rb.get('expected_addresses', {})
+        if addrs:
+            print(f"  addresses:      lan={addrs.get('lan', '?')}  tailscale={addrs.get('tailscale', '?')}")
+        services = rb.get('services', [])
+        if services:
+            print(f"  services:       {', '.join(services)}")
+        print(f"intent packets ({len([ip for ip in payload['intent_packets'] if ip['found']])}/{len(payload['intent_packets'])} found):")
+        for ip in payload['intent_packets']:
+            marker = "✓" if ip['found'] else "✗"
+            print(f"  {marker} PACKET-{ip['packet_id']}")
+        if payload['domain_state_artifacts']:
+            print(f"domain-state artifacts ({len(payload['domain_state_artifacts'])}):")
+            for a in payload['domain_state_artifacts'][:6]:
+                print(f"  {Path(a).name}")
+            if len(payload['domain_state_artifacts']) > 6:
+                print(f"  ... +{len(payload['domain_state_artifacts']) - 6} more")
+        if payload['handoffs']:
+            print(f"handoffs ({len(payload['handoffs'])}):")
+            for h in payload['handoffs'][:5]:
+                print(f"  {h['id']}")
+        if payload['contract_hits']:
+            total_files = len({f for files in payload['contract_hits'].values() for f in files})
+            print(f"contract hits: {total_files} binding file(s) reference {len(payload['contract_hits'])} alias term(s)")
+        if payload['missing']:
+            print(f"\nmissing ({len(payload['missing'])}):")
+            for m in payload['missing']:
+                print(f"  - {m}")
+        else:
+            print(f"\nno missing pieces detected")
+        print(f"\nnext action:\n  {payload['next_action']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

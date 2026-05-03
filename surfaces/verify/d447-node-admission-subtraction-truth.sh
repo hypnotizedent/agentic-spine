@@ -398,6 +398,29 @@ if "CLERK_SKIP_BRIEF_READ" not in clerk_text:
 if "SPINE_ROLE_POLICY_OVERRIDE_REF" not in cap_sh_text or "override_prefix" not in cap_sh_text:
     fail("ops/commands/cap.sh must forward SPINE_ROLE_POLICY_OVERRIDE_* env vars across SSH dispatch (PACKET-592 Phase 2)")
 
+# PACKET-591 (Phase 3 of PACKET-588 phased order): three-plane candidate
+# readback. Reconciles runtime / intent / contract truth for a named
+# architecture candidate so one canonical query answers the operator's
+# acceptance bar (aliases, runtime body, intent packets, contract status,
+# missing pieces, next first-class action). Read-only — no mutation, no
+# new authority surfaces. No new D-gate (extends D447 per add-one-retire-one).
+candidate_status_script = root / "ops/plugins/infra/host/bin/node-role-candidate-status"
+if not candidate_status_script.is_file():
+    fail("ops/plugins/infra/host/bin/node-role-candidate-status missing (PACKET-591 three-plane candidate readback)")
+if not os.access(str(candidate_status_script), os.X_OK):
+    fail("node-role-candidate-status must be executable")
+candidate_status_text = candidate_status_script.read_text(encoding="utf-8")
+if "node.role.candidate.status" not in candidate_status_text:
+    fail("node-role-candidate-status must self-identify as node.role.candidate.status capability")
+for required_term in ("forge_node", "intent_packet_ids", "expected_contract_homes", "compute_missing", "compute_next_action"):
+    if required_term not in candidate_status_text:
+        fail(f"node-role-candidate-status must define {required_term} (PACKET-591 three-plane reconciliation surface)")
+caps_doc_candidate = (caps_map.get("node.role.candidate.status") or {})
+if caps_doc_candidate.get("safety") != "read-only":
+    fail("node.role.candidate.status must be safety: read-only (PACKET-591 stop lines: NO mutation, NO host modification)")
+if caps_doc_candidate.get("script_path") != "./ops/plugins/infra/host/bin/node-role-candidate-status":
+    fail("node.role.candidate.status script_path must point at ops/plugins/infra/host/bin/node-role-candidate-status")
+
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
 # structurally prevents drift like 'pve-730xd' (non-canonical machine identity)
