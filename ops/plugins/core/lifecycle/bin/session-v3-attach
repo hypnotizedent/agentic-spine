@@ -820,7 +820,14 @@ if entry_compile_json:
     try:
         ec = json.loads(entry_compile_json)
         cs = ec.get("compilation_state", "")
-        if cs in ("compiled", "partial", "loop_only", "packet_continuity", "packet_ambiguous"):
+        # PACKET-640 (PACKET-635 follow-on): authority_unavailable added to
+        # the merge allowlist so authority-failure honesty propagates through
+        # --emit-assignment instead of silently flattening to the base
+        # entry.assignment.partial. clean_start and ambiguous remain outside
+        # the allowlist by current design (operator scope: PACKET-640 is
+        # narrowly authority_unavailable; broader allowlist propagation is a
+        # separate slice).
+        if cs in ("compiled", "partial", "loop_only", "packet_continuity", "packet_ambiguous", "authority_unavailable"):
             assignment["type"] = "entry.assignment.compiled"
             if ec.get("packet_id"):
                 assignment["packet_id"] = ec["packet_id"]
@@ -848,6 +855,11 @@ if entry_compile_json:
                 assignment["active_delegations"] = ec["active_delegations"]
             if ec.get("stale_delegations") is not None:
                 assignment["stale_delegations"] = ec["stale_delegations"]
+            # PACKET-640: preserve sanitized error class for authority_unavailable.
+            # Field is omitted from entry-compile output for the other
+            # allowlisted states; this guard preserves it cleanly when present.
+            if ec.get("authority_error_class"):
+                assignment["authority_error_class"] = ec["authority_error_class"]
             assignment["compilation_state"] = cs
     except Exception:
         pass
