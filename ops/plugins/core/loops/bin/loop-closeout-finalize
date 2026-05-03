@@ -9,9 +9,16 @@ LOOPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/loops-authority-bridge"
 
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
+source "$ROOT/ops/lib/git-lock.sh"
 
 SCOPES_DIR="$SPINE_STATE/loop-scopes"
 SCOPES_ARCHIVE_DIR="$SPINE_STATE/archive/closed-loop-scopes"
+
+# Acquire loops mutation lock; mirror loops-create:149 and loops-amend:102.
+# Closes mutate the same DB row + scope projection that amend/create touch;
+# without this lock, amend/close races are possible.
+acquire_git_lock loops || exit 1
+trap 'release_git_lock loops 2>/dev/null || true' EXIT
 
 usage() {
   cat <<'USAGE'
@@ -202,8 +209,21 @@ os.replace(staged, source)
 PY
 
 if [[ -z "$RECEIPT_PATH" ]]; then
-  RECEIPT_DIR="$(yq e -r '.closeout_receipts.directory // ""' "$CONTRACT" 2>/dev/null)"
-  [[ -n "$RECEIPT_DIR" && "$RECEIPT_DIR" != "null" ]] || RECEIPT_DIR="$HOME/code/.evidence/spine/loop-closeouts"
+  # Canonical resolution: prefer SPINE_LOOP_CLOSEOUTS_ROOT (exported by
+  # spine_runtime_resolve_paths) which resolves to /md1400/spine/evidence/
+  # loop-closeouts on pve canonical and ~/code/.evidence/spine/loop-closeouts
+  # on consumer hosts. Contract value is consulted only as a fallback and
+  # has $SPINE_* tokens expanded so the literal Darwin path can never leak.
+  RECEIPT_DIR="${SPINE_LOOP_CLOSEOUTS_ROOT:-}"
+  if [[ -z "$RECEIPT_DIR" ]]; then
+    RECEIPT_DIR="$(yq e -r '.closeout_receipts.directory // ""' "$CONTRACT" 2>/dev/null)"
+    RECEIPT_DIR="${RECEIPT_DIR/\$SPINE_LOOP_CLOSEOUTS_ROOT/$SPINE_LOOP_CLOSEOUTS_ROOT}"
+    RECEIPT_DIR="${RECEIPT_DIR/\$SPINE_EVIDENCE_ROOT/$SPINE_EVIDENCE_ROOT}"
+  fi
+  if [[ -z "$RECEIPT_DIR" || "$RECEIPT_DIR" == "null" ]]; then
+    echo "FAIL: cannot resolve closeout receipt directory; set SPINE_LOOP_CLOSEOUTS_ROOT or run via cap.sh routing" >&2
+    exit 1
+  fi
   RECEIPT_PATH="$RECEIPT_DIR/${LOOP_ID}.closeout.md"
 elif [[ "$RECEIPT_PATH" != /* ]]; then
   RECEIPT_PATH="$ROOT/$RECEIPT_PATH"

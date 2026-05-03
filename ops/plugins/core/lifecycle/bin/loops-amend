@@ -24,7 +24,7 @@ set -euo pipefail
 #   - missing --reason
 #   - missing --loop-id
 #   - unknown loop_id (DB row absent or scope file absent)
-#   - no-op call (no lifecycle field actually changes)
+#   - no-op call (no lifecycle field actually changes — exits 2, not 0)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$ROOT/ops/lib/spine-paths.sh"
@@ -265,8 +265,11 @@ declare -a CHANGES=()
 [[ "$db_exec_mode" != "$RESOLVED_EXEC_MODE" ]] && CHANGES+=("execution_mode: $db_exec_mode -> $RESOLVED_EXEC_MODE")
 
 if (( ${#CHANGES[@]} == 0 )); then
-  echo "NOOP: no lifecycle field changed for $LOOP_ID; refusing to write a no-op receipt" >&2
-  exit 0
+  # Exit 2 (not 0) for no-op so cap-level outcome reads "skipped/no mutation"
+  # rather than successful mutation. The capability RCAP still exists because
+  # cap.sh ran the script, but no DB row or scope file was changed.
+  echo "SKIPPED: no lifecycle field changed for $LOOP_ID; no mutation occurred (cap RCAP exists because cap execution ran, but no DB or scope file change)" >&2
+  exit 2
 fi
 
 if (( DRY_RUN )); then
