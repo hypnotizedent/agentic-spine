@@ -29,10 +29,67 @@ from control_loop_status import collect_control_loop_status
 # ── Constants ────────────────────────────────────────────────────────
 
 CONTAINER_RULES_SUMMARY = (
-    "default=loop | plan=known multi-loop sequence | "
-    "friction=when unclear | wave=inside loop only | "
-    "gap=defect report, not a work container"
+    "direct=read-only report or direct tiny patch | "
+    "engine=non-trivial/cross-surface/runtime/authority/host/long-running | "
+    "approval=destructive/secrets/production/authority promotion | "
+    "default container=loop | wave=inside loop only | "
+    "friction=when unclear | gap=defect report"
 )
+
+WORK_INTAKE_POLICY = {
+    "version": "1.0",
+    "classes": [
+        {
+            "class": "read_only_report",
+            "engine_required": False,
+            "packet_required": False,
+            "rule": "observe, inspect, explain, or recommend only; no mutation",
+        },
+        {
+            "class": "direct_tiny_patch",
+            "engine_required": False,
+            "packet_required": False,
+            "rule": (
+                "one bounded local change with no runtime, authority, host, "
+                "storage, backup, watcher, control-plane, architectural, "
+                "cross-surface, long-running, or continuity-bearing impact"
+            ),
+        },
+        {
+            "class": "engine_lane_required",
+            "engine_required": True,
+            "packet_required": "when_mutating_or_executing",
+            "rule": (
+                "non-trivial, multi-file, cross-surface, architectural, "
+                "estate-shape, runtime/authority/host-affecting, long-running, "
+                "ambiguous, or continuity-bearing work"
+            ),
+        },
+        {
+            "class": "human_approval_required",
+            "engine_required": True,
+            "packet_required": True,
+            "rule": (
+                "destructive actions, secret exposure, production host mutation, "
+                "authority promotion/retirement, or unclear canonical owner"
+            ),
+        },
+    ],
+    "packet_required_for": [
+        "runtime",
+        "authority",
+        "host",
+        "storage",
+        "backup",
+        "watcher",
+        "control_plane",
+    ],
+    "direct_mode_requires_reason": True,
+    "visible_worker_window_policy": (
+        "visible worker terminals are exceptional operator-interaction surfaces; "
+        "engine lanes should prefer headless/background workers with telemetry"
+    ),
+}
 
 _OPEN_LOOP_STATUSES = frozenset({"open", "active", "draft"})
 
@@ -296,6 +353,7 @@ def _result(
         "why": why,
         "open_loop_candidates": open_loop_candidates,
         "container_rules_summary": CONTAINER_RULES_SUMMARY,
+        "work_intake_policy": WORK_INTAKE_POLICY,
     }
 
 

@@ -35,7 +35,40 @@ Agent entry is simple:
    entry/aperture/control-plane rule that caused the failure. Keep it in the
    existing authoritative home.
 
-4. Run:
+4. Classify the task before mutation. This is the work-intake router policy,
+   not a new workflow object:
+
+   - `read-only report`: inspect, explain, or recommend only. Use direct
+     readback and cite the governed source you read.
+   - `direct tiny patch`: one bounded local change with no runtime, authority,
+     host, storage, backup, watcher, control-plane, architectural,
+     cross-surface, long-running, or continuity-bearing impact. Repo mutation
+     still happens in a managed worktree. The agent must say why direct mode is
+     sufficient before or with the mutation readback.
+   - `engine lane required`: non-trivial, multi-file, cross-surface,
+     architectural, estate-shape, runtime/authority/host-affecting,
+     long-running, ambiguous, or continuity-bearing work. Open or attach the
+     governed loop, scope execution with a packet when work will mutate state,
+     use the lane/worktree custody path, and leave receipt/readback.
+   - `human approval required`: destructive actions, secret exposure,
+     production host mutation, authority promotion/retirement, or no clear
+     canonical owner.
+
+   Runtime, authority, host, storage, backup, watcher, and control-plane work
+   require a packet before mutation. If an agent skips the engine for anything
+   beyond read-only report or direct tiny patch, that is a policy violation for
+   the clerk to file, not an operator reminder burden.
+
+   Visible iTerm worker windows are an operator-interaction surface, not proof
+   of governed lane custody. Engine lanes should prefer headless/background
+   workers with status/telemetry readback. A visible worker terminal is
+   exceptional and needs a concrete operator-interaction reason.
+
+   `AGENTS.md`, `session.v3.attach`, terminal launch, and the clerk only point
+   to, read back, enforce, or file symptoms for this policy. They do not create
+   a second agent-entry authority.
+
+5. Run:
 
 ```bash
 cd ~/code/agentic-spine
@@ -44,7 +77,7 @@ cd ~/code/agentic-spine
 ./bin/ops cap run spine.verify
 ```
 
-5. Work through `./bin/ops cap run <capability> -- ...`
+6. Work through `./bin/ops cap run <capability> -- ...`
 
 ## Retrieval Assistance
 

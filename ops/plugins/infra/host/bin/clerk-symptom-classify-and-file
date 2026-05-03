@@ -49,13 +49,14 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 
 CONNECT_TIMEOUT = 8
 SUBPROCESS_TIMEOUT = 30
+ENTRY_POLICY_FRESH_WINDOW_MINUTES = 120
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 
@@ -117,6 +118,167 @@ def read_engine_smoke_status(brief: dict[str, str]) -> str:
 
 def read_spine_verify_status(brief: dict[str, str]) -> str:
     return brief.get("Spine", "unknown")
+
+
+def _resolve_state_root() -> Path:
+    configured = os.environ.get("SPINE_STATE", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / "code" / ".runtime" / "spine" / "state"
+
+
+def _parse_simple_yaml(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return data
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        data[key.strip()] = value.strip().strip('"').strip("'")
+    return data
+
+
+def _parse_utc(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _is_fresh_heartbeat(record: dict[str, str], now: datetime) -> bool:
+    expires_at = _parse_utc(record.get("expires_at", ""))
+    if expires_at is not None:
+        return expires_at > now
+    heartbeat_at = _parse_utc(record.get("heartbeat_at", "") or record.get("last_heartbeat_utc", ""))
+    if heartbeat_at is None:
+        return False
+    return now - heartbeat_at <= timedelta(minutes=ENTRY_POLICY_FRESH_WINDOW_MINUTES)
+
+
+def read_entry_policy_signals() -> dict[str, Any]:
+    """Read local signals that indicate agent-entry policy bypass risk.
+
+    This is intentionally diagnostic only. The clerk does not decide the task
+    class; it files potential bypass symptoms when existing telemetry shows
+    work happening outside loop/packet/lane readback.
+    """
+    state_root = _resolve_state_root()
+    now = datetime.now(timezone.utc)
+    signals: dict[str, Any] = {
+        "state_root": str(state_root),
+        "fresh_unbound_root_terminals": [],
+        "visible_worker_without_lane": [],
+        "recent_commits_without_work_ref": [],
+    }
+
+    heartbeat_dirs = [
+        state_root / "terminal-heartbeats",
+        state_root / "terminals",
+    ]
+    for directory in heartbeat_dirs:
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*")):
+            if not path.is_file():
+                continue
+            record = _parse_simple_yaml(path)
+            if not record or not _is_fresh_heartbeat(record, now):
+                continue
+            terminal_id = record.get("terminal_id", path.stem)
+            role = record.get("role", "")
+            loop_id = record.get("loop_id", "")
+            branch = record.get("branch", "")
+            lane_type = record.get("lane_type", "")
+            checkout_root = record.get("checkout_root", "")
+            is_unbound = (
+                not loop_id
+                or terminal_id.startswith("adhoc-")
+                or terminal_id.startswith("attach-unset-")
+            )
+            is_root_main = lane_type == "root_main_integration" or (
+                branch == "main" and checkout_root == str(REPO_ROOT)
+            )
+            if is_unbound and is_root_main:
+                signals["fresh_unbound_root_terminals"].append({
+                    "terminal_id": terminal_id,
+                    "role": role or "unknown",
+                    "branch": branch or "unknown",
+                    "lane_type": lane_type or "unknown",
+                    "heartbeat_path": str(path),
+                })
+
+            role_text = str(role or "").lower()
+            terminal_text = str(terminal_id or "").lower()
+            is_worker = "worker" in role_text or "worker" in terminal_text
+            has_lane_telemetry = bool(loop_id or record.get("wave_id") or record.get("active_wave_id"))
+            if is_worker and not has_lane_telemetry:
+                signals["visible_worker_without_lane"].append({
+                    "terminal_id": terminal_id,
+                    "role": role or "unknown",
+                    "heartbeat_path": str(path),
+                })
+
+    rc, out, _err = _run([
+        "git",
+        "-C",
+        str(REPO_ROOT),
+        "log",
+        "--since=24 hours ago",
+        "--max-count=20",
+        "--format=%H%x1f%s",
+    ])
+    work_ref_re = re.compile(r"\b(PACKET-[0-9]+|LOOP-[A-Z0-9._-]+|WAVE-[A-Z0-9._-]+|EXEC_RECEIPT)\b")
+    if rc == 0:
+        for line in out.splitlines():
+            if "\x1f" not in line:
+                continue
+            sha, subject = line.split("\x1f", 1)
+            if work_ref_re.search(subject):
+                continue
+            frc, fout, _ferr = _run([
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "show",
+                "--name-only",
+                "--format=",
+                sha,
+            ])
+            if frc != 0:
+                continue
+            files = [f.strip() for f in fout.splitlines() if f.strip()]
+            top_levels = {f.split("/", 1)[0] for f in files}
+            policy_paths = [
+                f for f in files
+                if f == "AGENTS.md"
+                or f.startswith("docs/governance/")
+                or f.startswith("ops/bindings/")
+                or f.startswith("ops/commands/")
+                or f.startswith("ops/plugins/core/")
+            ]
+            if len(top_levels) <= 1 and len(files) <= 1 and not policy_paths:
+                continue
+            signals["recent_commits_without_work_ref"].append({
+                "sha": sha[:12],
+                "subject": subject,
+                "changed_files": len(files),
+                "top_levels": sorted(top_levels),
+                "policy_paths": policy_paths[:8],
+            })
+
+    return signals
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,6 +446,79 @@ def classify_brief_failures(brief: dict[str, str]) -> list[dict[str, Any]]:
     return out
 
 
+def classify_entry_policy(signals: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+
+    for item in signals.get("fresh_unbound_root_terminals", []):
+        terminal_id = item.get("terminal_id", "unknown")
+        out.append({
+            "dedupe_key": f"agent_entry_policy:unbound_root_terminal:{terminal_id}",
+            "classification": "agent_entry_policy",
+            "capability": "session.v3.attach",
+            "expected": (
+                "non-trivial mutation enters through governed loop/packet/lane "
+                "(canonical home: AGENTS.md + docs/governance/SESSION_PROTOCOL.md work-intake router policy)"
+            ),
+            "actual": (
+                f"fresh unbound root-main terminal {terminal_id}; role={item.get('role')}; "
+                f"lane_type={item.get('lane_type')} [autonomy: read_only_diagnosis_auto] "
+                "[next: if this terminal is doing more than read-only report or direct tiny patch, "
+                "attach/open governed work before mutation]"
+            ),
+            "severity": "medium",
+            "owner": "operator_console",
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": "attach/open governed work for any non-trivial mutation; otherwise record direct-mode reason",
+        })
+
+    for item in signals.get("visible_worker_without_lane", []):
+        terminal_id = item.get("terminal_id", "unknown")
+        out.append({
+            "dedupe_key": f"agent_entry_policy:visible_worker_without_lane:{terminal_id}",
+            "classification": "agent_entry_policy",
+            "capability": "ops.terminal.launch",
+            "expected": (
+                "visible worker terminals are exceptional and carry lane telemetry "
+                "(canonical home: docs/governance/SESSION_PROTOCOL.md work-intake router policy)"
+            ),
+            "actual": (
+                f"fresh worker-shaped terminal {terminal_id} has no loop/wave telemetry "
+                "[autonomy: read_only_diagnosis_auto] "
+                "[next: prefer headless/background engine lane, or relaunch with an operator-interaction reason]"
+            ),
+            "severity": "medium",
+            "owner": "operator_console",
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": "move worker execution behind lane telemetry or justify visible operator-interaction terminal",
+        })
+
+    for item in signals.get("recent_commits_without_work_ref", []):
+        sha = item.get("sha", "unknown")
+        policy_paths = item.get("policy_paths") or []
+        severity = "high" if policy_paths else "medium"
+        out.append({
+            "dedupe_key": f"agent_entry_policy:commit_without_work_ref:{sha}",
+            "classification": "agent_entry_policy",
+            "capability": "git.commit",
+            "expected": (
+                "cross-surface or policy-runtime commits carry packet/loop/wave provenance "
+                "(canonical home: SESSION_PROTOCOL work-intake router)"
+            ),
+            "actual": (
+                f"recent commit {sha} lacks PACKET/LOOP/WAVE/EXEC_RECEIPT marker; "
+                f"subject={item.get('subject')!r}; changed_files={item.get('changed_files')} "
+                f"[autonomy: read_only_diagnosis_auto] "
+                "[next: inspect whether this was read-only/direct-tiny work or an engine-lane bypass]"
+            ),
+            "severity": severity,
+            "owner": "engine_authority",
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": "inspect commit provenance and file/attach governed work if it bypassed required engine lane",
+        })
+
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Filing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -378,11 +613,13 @@ def main() -> int:
         brief = read_brief()
         drift = read_drift()
         reach = read_reachability()
+    entry_policy_signals = read_entry_policy_signals()
 
     classified: list[dict[str, Any]] = []
     classified.extend(classify_authority_reachability(reach))
     classified.extend(classify_code_drift(drift))
     classified.extend(classify_brief_failures(brief))
+    classified.extend(classify_entry_policy(entry_policy_signals))
 
     filings: list[dict[str, Any]] = []
     if args.file:
@@ -398,6 +635,11 @@ def main() -> int:
             "brief_fields": list(brief.keys()),
             "drift_overall": drift.get("overall_status"),
             "reach_overall": reach.get("overall_status"),
+            "entry_policy": {
+                "fresh_unbound_root_terminals": len(entry_policy_signals.get("fresh_unbound_root_terminals", [])),
+                "visible_worker_without_lane": len(entry_policy_signals.get("visible_worker_without_lane", [])),
+                "recent_commits_without_work_ref": len(entry_policy_signals.get("recent_commits_without_work_ref", [])),
+            },
         },
         "classified_count": len(classified),
         "classified": classified,

@@ -42,6 +42,9 @@ Usage:
 
 Options:
   --role <solo|control|lane-worker>  Launch mode (solo disables implicit loop attach)
+  --visible-worker-window-reason <text>
+                         Required for --role lane-worker; visible workers are
+                         exceptional operator-interaction surfaces, not default lanes
   --tool <tool>         Tool to run (claude|codex|opencode|verify)
   --terminal <name>     Terminal character name (sets SPINE_TERMINAL_ID)
   --loop <loop_id>      Explicitly attach a loop (otherwise one live loop auto-attaches)
@@ -79,6 +82,7 @@ TERMINAL_NAME=""
 LOOP_ID=""
 SESSION_POSTURE=""
 LAUNCH_MODE=""
+VISIBLE_WORKER_WINDOW_REASON=""
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -88,6 +92,7 @@ while [[ $# -gt 0 ]]; do
         --loop) LOOP_ID="${2:-}"; shift 2 ;;
         --session-posture) SESSION_POSTURE="${2:-}"; shift 2 ;;
         --role) LAUNCH_MODE="${2:-}"; shift 2 ;;
+        --visible-worker-window-reason) VISIBLE_WORKER_WINDOW_REASON="${2:-}"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --) shift; break ;;
         *) shift ;;  # Accept and ignore unknown flags for forward compat
@@ -110,6 +115,14 @@ resolve_launch_mode() {
 }
 
 LAUNCH_MODE="$(resolve_launch_mode "$LAUNCH_MODE")"
+
+VISIBLE_WORKER_WINDOW_POLICY=""
+if [[ "$LAUNCH_MODE" == "lane-worker" && -z "$VISIBLE_WORKER_WINDOW_REASON" && "${SPINE_ALLOW_VISIBLE_WORKER_WINDOW:-0}" != "1" ]]; then
+    VISIBLE_WORKER_WINDOW_POLICY="visible lane-worker terminals require --visible-worker-window-reason; use governed headless/background lanes when operator interaction is not needed"
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        fail "$VISIBLE_WORKER_WINDOW_POLICY"
+    fi
+fi
 
 # ── Resolve execution class from contract ─────────────────────────────────
 # Reads terminal.role.contract.yaml to map terminal name → type → execution class.
@@ -417,6 +430,10 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "# Terminal: ${TERMINAL_NAME:-ad-hoc}"
     echo "# Execution class: $RUNTIME_ROLE"
     echo "# Launch mode: $LAUNCH_MODE"
+    echo "# Work intake: direct only for read-only reports or direct tiny patches"
+    echo "# Engine lane: required for non-trivial/cross-surface/runtime/authority/host/long-running work"
+    [[ -z "$VISIBLE_WORKER_WINDOW_POLICY" ]] || echo "# Worker window policy: $VISIBLE_WORKER_WINDOW_POLICY"
+    [[ -z "$VISIBLE_WORKER_WINDOW_REASON" ]] || echo "# Visible worker reason: $VISIBLE_WORKER_WINDOW_REASON"
     echo "# Node type: ${__SP_NODE_TYPE:-unknown}"
     echo "# Session posture: ${__SP_POSTURE:-unknown} (source: ${__SP_SOURCE:-unknown})"
     [[ -z "$LOOP_ID" ]] || echo "# Loop: $LOOP_ID"

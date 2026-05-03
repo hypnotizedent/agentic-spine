@@ -214,6 +214,13 @@ reason for drilldown.
 Orientation (read-only, not admission): `./bin/ops cap run session.v3.attach`
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
+Agent entry mode is governed by the work-intake router policy in
+`SESSION_PROTOCOL.md`. Serious work defaults to engine lane; direct terminal
+work is limited to read-only reports and direct tiny patches with an explicit
+reason. Visible worker terminals are exceptional and must not substitute for
+lane telemetry.
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
+
 RAG retrieval is allowed as a discovery aid, not as authority. Use
 `rag.direct.retrieve` or `rag.direct.query` to find likely governed source refs,
 then read the cited packet, loop scope, contract, receipt, or capability
