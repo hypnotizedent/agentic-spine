@@ -379,6 +379,25 @@ if caps_doc_clerk.get("safety") != "read-only":
 if caps_doc_clerk.get("script_path") != "./ops/plugins/infra/host/bin/clerk-symptom-classify-and-file":
     fail("clerk.symptom.classify.and.file script_path must point at ops/plugins/infra/host/bin/clerk-symptom-classify-and-file")
 
+# PACKET-592 Phase 2: brief integrates clerk rollup; clerk honors cached
+# brief data + drift/reach payloads via env vars to avoid recursion and
+# SSH re-probe (off-LAN brief would otherwise exceed cadence budget).
+if "infra/host/bin/clerk-symptom-classify-and-file" not in status_sh_text:
+    fail("ops/commands/status.sh brief output must integrate clerk-symptom-classify-and-file (PACKET-592 Phase 2 Clerk rollup)")
+if "Clerk:" not in status_sh_text:
+    fail("ops/commands/status.sh must emit 'Clerk:' field in --brief output (PACKET-592 Phase 2)")
+if "CLERK_SKIP_BRIEF_READ" not in status_sh_text:
+    fail("ops/commands/status.sh must set CLERK_SKIP_BRIEF_READ when invoking the clerk (avoid recursion)")
+if "CLERK_DRIFT_JSON" not in status_sh_text or "CLERK_REACH_JSON" not in status_sh_text:
+    fail("ops/commands/status.sh must pass CLERK_DRIFT_JSON + CLERK_REACH_JSON to clerk (avoid SSH re-probe)")
+if "CLERK_SKIP_BRIEF_READ" not in clerk_text:
+    fail("clerk must honor CLERK_SKIP_BRIEF_READ env var to break brief→clerk→brief recursion")
+# PACKET-592 Phase 2: cap.sh forwards SPINE_ROLE_POLICY_OVERRIDE_* across SSH
+# so cross-host clerk filing works from operator console without direct
+# pve invocation.
+if "SPINE_ROLE_POLICY_OVERRIDE_REF" not in cap_sh_text or "override_prefix" not in cap_sh_text:
+    fail("ops/commands/cap.sh must forward SPINE_ROLE_POLICY_OVERRIDE_* env vars across SSH dispatch (PACKET-592 Phase 2)")
+
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
 # structurally prevents drift like 'pve-730xd' (non-canonical machine identity)

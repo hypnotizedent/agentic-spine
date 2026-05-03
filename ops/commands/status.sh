@@ -2103,6 +2103,53 @@ if mode == "--brief":
                     parts.append(f"Authority: degraded ({', '.join(_degraded_summary)})")
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
             parts.append("Authority: unknown")
+    # PACKET-592 Phase 2: clerk rollup. Read clerk's classification of the
+    # current symptoms and compress to a single actionable line:
+    #   Clerk: ok                       (no symptoms classified)
+    #   Clerk: filed (N, 0 need operator)   (all classified, none need action)
+    #   Clerk: action (M of N need operator) (operator should look)
+    # The clerk's own dry-run runs in CLERK_SKIP_BRIEF_READ mode to avoid
+    # recursing into ops status --brief. Drift + reachability classification
+    # is still produced; brief-derived symptoms (Spine/Secondary/Coherence)
+    # are surfaced inline by status.sh fields above.
+    _clerk_bin = spine / "ops/plugins/infra/host/bin/clerk-symptom-classify-and-file"
+    if _clerk_bin.is_file() and os.access(str(_clerk_bin), os.X_OK):
+        try:
+            _clerk_env = os.environ.copy()
+            _clerk_env["CLERK_SKIP_BRIEF_READ"] = "1"
+            # Pass brief-derived symptoms forward so clerk can classify
+            # Spine/Secondary/Coherence/Engine without recursing into ops status.
+            _clerk_env["CLERK_BRIEF_SPINE"] = _spine_vs or ""
+            _clerk_env["CLERK_BRIEF_SECONDARY"] = _secondary_vs or ""
+            _clerk_env["CLERK_BRIEF_COHERENCE"] = "attention" if joined_state_summary.get("coherence_attention") else "ok"
+            _clerk_env["CLERK_BRIEF_ENGINE"] = _engine_vs or ""
+            # Pass already-collected drift + reach payloads to avoid SSH re-probe
+            # (each probe is ~5s; 6 probes would push brief past the 30s timeout).
+            try:
+                _clerk_env["CLERK_DRIFT_JSON"] = json.dumps(_drift_payload) if "_drift_payload" in dir() and _drift_payload else ""
+            except Exception:
+                _clerk_env["CLERK_DRIFT_JSON"] = ""
+            try:
+                _clerk_env["CLERK_REACH_JSON"] = json.dumps(_reach_payload) if "_reach_payload" in dir() and _reach_payload else ""
+            except Exception:
+                _clerk_env["CLERK_REACH_JSON"] = ""
+            _clerk_proc = subprocess.run(
+                [str(_clerk_bin), "--json"],
+                capture_output=True, text=True, timeout=20, env=_clerk_env,
+            )
+            if _clerk_proc.returncode == 0 and _clerk_proc.stdout.strip():
+                _clerk_payload = json.loads(_clerk_proc.stdout)
+                _classified = _clerk_payload.get("classified", []) or []
+                _need_op = sum(1 for r in _classified if r.get("autonomy") == "stop_and_ask")
+                _total = len(_classified)
+                if _total == 0:
+                    parts.append("Clerk: ok")
+                elif _need_op == 0:
+                    parts.append(f"Clerk: filed ({_total} classified, 0 need operator)")
+                else:
+                    parts.append(f"Clerk: action ({_need_op} of {_total} need operator)")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+            parts.append("Clerk: unknown")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)

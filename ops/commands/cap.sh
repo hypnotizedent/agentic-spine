@@ -1242,8 +1242,23 @@ _route_to_db_authority_if_needed() {
     for arg in "${cap_args[@]}"; do
         quoted_args+=" $(printf %q "$arg")"
     done
+
+    # PACKET-592 Phase 2: forward SPINE_ROLE_POLICY_OVERRIDE_* env vars across
+    # the SSH dispatch so admission overrides set by the caller (e.g., the
+    # PACKET-592 clerk filing friction records) reach the routed cap on the
+    # authority host. Without this, mutating routed caps fail with admission
+    # gate refused even when the caller had a governed override locally.
+    # Only the named override env vars are forwarded — no wildcard env leak.
+    local override_prefix=""
+    if [[ -n "${SPINE_ROLE_POLICY_OVERRIDE_REF:-}" ]]; then
+        override_prefix+="export SPINE_ROLE_POLICY_OVERRIDE_REF=$(printf %q "$SPINE_ROLE_POLICY_OVERRIDE_REF") && "
+    fi
+    if [[ -n "${SPINE_ROLE_POLICY_OVERRIDE_REASON:-}" ]]; then
+        override_prefix+="export SPINE_ROLE_POLICY_OVERRIDE_REASON=$(printf %q "$SPINE_ROLE_POLICY_OVERRIDE_REASON") && "
+    fi
+
     local remote_cmd
-    remote_cmd="cd $(printf %q "$code_path") && ./bin/ops cap run $(printf %q "$cap_name")${quoted_args}"
+    remote_cmd="cd $(printf %q "$code_path") && ${override_prefix}./bin/ops cap run $(printf %q "$cap_name")${quoted_args}"
 
     local routed_rc=0 route_addr route_label attempted_routes=()
     local route_addrs=("$host_addr")

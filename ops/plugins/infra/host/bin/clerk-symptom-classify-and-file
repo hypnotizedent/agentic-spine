@@ -347,9 +347,37 @@ def main() -> int:
         print("clerk.symptom.classify.and.file self-check PASS")
         return 0
 
-    brief = read_brief()
-    drift = read_drift()
-    reach = read_reachability()
+    # PACKET-592 Phase 2: when status.sh --brief invokes the clerk for its
+    # rollup line, brief can pass brief-derived symptoms AND already-collected
+    # drift/reach payloads via env vars so the clerk classifies without
+    # re-running ops status --brief or re-probing SSH (which would be ~30s).
+    # CLERK_SKIP_BRIEF_READ enables the env-pass mode.
+    skip_brief = bool(os.environ.get("CLERK_SKIP_BRIEF_READ"))
+    if skip_brief:
+        brief = {}
+        for key, env_name in (
+            ("Spine", "CLERK_BRIEF_SPINE"),
+            ("Secondary", "CLERK_BRIEF_SECONDARY"),
+            ("Coherence", "CLERK_BRIEF_COHERENCE"),
+            ("Engine", "CLERK_BRIEF_ENGINE"),
+        ):
+            val = os.environ.get(env_name, "").strip()
+            if val:
+                brief[key] = val
+        _drift_json = os.environ.get("CLERK_DRIFT_JSON", "").strip()
+        try:
+            drift = json.loads(_drift_json) if _drift_json else read_drift()
+        except json.JSONDecodeError:
+            drift = read_drift()
+        _reach_json = os.environ.get("CLERK_REACH_JSON", "").strip()
+        try:
+            reach = json.loads(_reach_json) if _reach_json else read_reachability()
+        except json.JSONDecodeError:
+            reach = read_reachability()
+    else:
+        brief = read_brief()
+        drift = read_drift()
+        reach = read_reachability()
 
     classified: list[dict[str, Any]] = []
     classified.extend(classify_authority_reachability(reach))
