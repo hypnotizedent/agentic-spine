@@ -495,6 +495,43 @@ gaps_for_devtools = (forge_candidate_gaps.get("dev-tools") or [])
 if "forge_status_proof" in gaps_for_devtools:
     fail("forge_status_proof must be removed from candidate_gaps.dev-tools when present in proofs_present (no double-listing)")
 
+# PACKET-588 Phase 6 (branch_protection_readback_proof): the second proof on
+# the forge_node ladder. Materialized by the forge.branch_protection.status
+# cap which probes dev-tools via SSH+docker-exec read-only using Postgres
+# SELECTs and filesystem listings only — NO API tokens by design (proof scope
+# discipline). Locks: cap script exists + executable + self-identifies; cap
+# is registered safety: read-only; branch_protection_readback_proof has a
+# proof_ref pointing at the receipt path; the proof is listed in
+# proofs_present.dev-tools and removed from candidate_gaps. Subtraction in
+# same change: branch_protection_readback_proof retired from
+# candidate_gaps -> proofs_present. Extension of D447 only — NO new D-gate.
+forge_bp_script = root / "ops/plugins/infra/host/bin/forge-branch-protection-status"
+if not forge_bp_script.is_file():
+    fail("ops/plugins/infra/host/bin/forge-branch-protection-status missing (PACKET-588 Phase 6 branch_protection_readback_proof)")
+if not os.access(str(forge_bp_script), os.X_OK):
+    fail("forge-branch-protection-status must be executable")
+forge_bp_text = forge_bp_script.read_text(encoding="utf-8")
+if "forge.branch_protection.status" not in forge_bp_text or "branch_protection_readback_proof" not in forge_bp_text:
+    fail("forge-branch-protection-status must self-identify as forge.branch_protection.status capability and emit branch_protection_readback_proof receipts")
+for required_term in ("probe_branch_list", "probe_protected_branch_schema", "probe_protected_branches", "probe_acl_surface_counts"):
+    if required_term not in forge_bp_text:
+        fail(f"forge-branch-protection-status must implement {required_term} (operator-approved 2026-05-02 read-only probe set)")
+caps_doc_forge_bp = (caps_map.get("forge.branch_protection.status") or {})
+if caps_doc_forge_bp.get("safety") != "read-only":
+    fail("forge.branch_protection.status must be safety: read-only (PACKET-588 Phase 6 — branch protection probe must not mutate forge state)")
+if caps_doc_forge_bp.get("script_path") != "./ops/plugins/infra/host/bin/forge-branch-protection-status":
+    fail("forge.branch_protection.status script_path must point at ops/plugins/infra/host/bin/forge-branch-protection-status")
+forge_bp_required = (forge_required_proofs.get("branch_protection_readback_proof") or {})
+if not forge_bp_required.get("proof_ref"):
+    fail("forge_node.required_proofs.branch_protection_readback_proof must declare proof_ref (PACKET-588 Phase 6 receipt pointer)")
+expected_bp_ref = "$SPINE_STATE/domain-state/forge-node/branch-protection-readback-proof-latest.yaml"
+if forge_bp_required.get("proof_ref") != expected_bp_ref:
+    fail(f"branch_protection_readback_proof.proof_ref must equal {expected_bp_ref}")
+if "branch_protection_readback_proof" not in present_for_devtools:
+    fail("forge_node.promotion_standard.proofs_present.dev-tools must list branch_protection_readback_proof (PACKET-588 Phase 6 — proof ladder progression)")
+if "branch_protection_readback_proof" in gaps_for_devtools:
+    fail("branch_protection_readback_proof must be removed from candidate_gaps.dev-tools when present in proofs_present (no double-listing)")
+
 # node-role-candidate-status must derive contract status from node.role.contract.yaml
 # so the readback flips from candidate-only to contracted/not-delivered when
 # the nameplate lands. This is the load-bearing piece that makes Phase 4

@@ -1,0 +1,553 @@
+#!/usr/bin/env python3
+"""forge.branch_protection.status — read-only branch_protection_readback_proof.
+
+Materializes the second proof on the forge_node ladder (PACKET-588 Phase 6 /
+proof 2 of 5 under the Phase 4 nameplate). Probes the runtime body declared in
+node.role.contract.yaml as forge_node.promotion_standard.current_runtime_body
+(the dev-tools VM running Gitea + Postgres + Actions runner) via SSH +
+docker exec, with Postgres SELECTs and filesystem listings only — NO API
+tokens are minted or used by this proof, by design, to keep scope tight and
+authority surfaces minimal.
+
+The cap captures, for the primary repo (ronny/agentic-spine):
+  - Branch surface (filesystem `git for-each-ref` like forge.status, but
+    treated here as the repo enumerated against protection rules).
+  - The protected_branch table schema (column names) so the proof is robust
+    to schema variation between Gitea releases.
+  - Per-protected-branch row values for the columns that exist (names + values
+    only — no value-mutation suggestions).
+  - ACL surface counts: org_user / team / "user" / repository tables (read-
+    only COUNT(*)).
+
+Read-only observation only. NO Forgejo install. NO runner changes. NO
+branch protection mutation. NO DNS/secrets/tokens/users/webhooks/repos.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml  # type: ignore
+except ImportError:
+    print(
+        "forge.branch_protection.status requires PyYAML "
+        "(apt install python3-yaml or pip install pyyaml)",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+SPINE_STATE = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtime/spine/state")))
+NODE_ROLE_CONTRACT = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
+SSH_TARGETS = REPO_ROOT / "ops/bindings/ssh.targets.yaml"
+RECEIPT_DIR = SPINE_STATE / "domain-state/forge-node"
+RECEIPT_LATEST = RECEIPT_DIR / "branch-protection-readback-proof-latest.yaml"
+
+PRIMARY_REPO = "agentic-spine"
+PRIMARY_REPO_OWNER = "ronny"
+DEFAULT_SSH_CONNECT_TIMEOUT = "8"
+DEFAULT_GITEA_CONTAINER = "gitea"
+DEFAULT_POSTGRES_CONTAINER = "gitea-postgres"
+GITEA_DATA_REPOS_DIR = "/data/git/repositories"
+PSQL_USER = "gitea"
+PSQL_DB = "gitea"
+
+# Columns we want to surface if present in the live schema. The cap intersects
+# this against the schema readback so we only SELECT columns that exist —
+# upstream Gitea adds/removes columns across versions, and we don't want this
+# proof to hard-fail on schema drift.
+DESIRED_PROTECTION_COLUMNS = [
+    "branch_name",
+    "can_push",
+    "enable_whitelist",
+    "whitelist_user_i_ds",
+    "whitelist_team_i_ds",
+    "enable_merge_whitelist",
+    "merge_whitelist_user_i_ds",
+    "merge_whitelist_team_i_ds",
+    "can_force_push",
+    "enable_force_push_allowlist",
+    "enable_status_check",
+    "status_check_contexts",
+    "enable_approvals_whitelist",
+    "required_approvals",
+    "block_on_rejected_reviews",
+    "block_on_official_review_requests",
+    "block_on_outdated_branch",
+    "dismiss_stale_approvals",
+    "ignore_stale_approvals",
+    "require_signed_commits",
+    "protected_file_patterns",
+    "unprotected_file_patterns",
+    "block_admin_merge_override",
+]
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_runtime_body() -> dict[str, Any]:
+    contract = load_yaml(NODE_ROLE_CONTRACT)
+    forge = (((contract.get("node_types") or {}).get("forge_node") or {}).get("promotion_standard") or {})
+    return forge.get("current_runtime_body") or {}
+
+
+def resolve_ssh_target(ssh_targets_id: str) -> dict[str, Any]:
+    targets_doc = load_yaml(SSH_TARGETS)
+    ssh_block = targets_doc.get("ssh") or {}
+    targets = ssh_block.get("targets") if isinstance(ssh_block, dict) else None
+    if isinstance(targets, list):
+        for entry in targets:
+            if isinstance(entry, dict) and entry.get("id") == ssh_targets_id:
+                return entry
+    # Fallback: scan all list-shaped values for an entry with the id
+    for value in targets_doc.values():
+        if isinstance(value, list):
+            for entry in value:
+                if isinstance(entry, dict) and entry.get("id") == ssh_targets_id:
+                    return entry
+        elif isinstance(value, dict):
+            for inner in value.values():
+                if isinstance(inner, list):
+                    for entry in inner:
+                        if isinstance(entry, dict) and entry.get("id") == ssh_targets_id:
+                            return entry
+    return {}
+
+
+def pick_ssh_address(target: dict[str, Any]) -> str | None:
+    """Prefer Tailscale (off-LAN safe) then LAN. The operator may run this from
+    off-shop; the Tailscale route is the safer default."""
+    return target.get("tailscale_ip") or target.get("host") or target.get("lan_ip")
+
+
+def remote_run(user: str, host: str, command: str, timeout: int = 12) -> tuple[int, str, str]:
+    full = [
+        "ssh",
+        "-o", f"ConnectTimeout={DEFAULT_SSH_CONNECT_TIMEOUT}",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        f"{user}@{host}",
+        command,
+    ]
+    try:
+        proc = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, "", f"ssh timeout after {timeout}s"
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def docker_exec(user: str, host: str, container: str, inner_cmd: str, timeout: int = 15) -> tuple[int, str, str]:
+    cmd = f"docker exec {shlex.quote(container)} sh -c {shlex.quote(inner_cmd)}"
+    return remote_run(user, host, cmd, timeout=timeout)
+
+
+def psql_query(user: str, host: str, sql: str, timeout: int = 15) -> tuple[int, str, str]:
+    """Run a Postgres SELECT inside the gitea-postgres container.
+
+    Uses -t (tuples-only) and -A (unaligned) for stable parse, with a
+    TAB field separator. Returns (rc, stdout, stderr)."""
+    inner = (
+        f"psql -U {shlex.quote(PSQL_USER)} -d {shlex.quote(PSQL_DB)} "
+        f"-At -F$'\t' -c {shlex.quote(sql)}"
+    )
+    return docker_exec(user, host, DEFAULT_POSTGRES_CONTAINER, inner, timeout=timeout)
+
+
+def probe_branch_list(user: str, host: str) -> dict[str, Any]:
+    """List branches in the primary repo via filesystem `git for-each-ref`.
+
+    Mirrors the read pattern in forge-status (lines 205-221) so this proof's
+    repo-scoping evidence matches what forge_status_proof saw.
+    """
+    repo_path = f"{GITEA_DATA_REPOS_DIR}/{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}.git"
+    rc, out, err = docker_exec(
+        user, host, DEFAULT_GITEA_CONTAINER,
+        f"git --git-dir={shlex.quote(repo_path)} for-each-ref --format='%(refname:short)' refs/heads/",
+    )
+    branches: list[str] = []
+    if rc == 0:
+        branches = [line.strip() for line in out.splitlines() if line.strip()]
+    return {
+        "rc": rc,
+        "stderr": err,
+        "repo": f"{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}",
+        "count": len(branches),
+        "names": branches[:50],
+    }
+
+
+def probe_protected_branch_schema(user: str, host: str) -> dict[str, Any]:
+    """Read the protected_branch column list from information_schema so the
+    cap is robust to Gitea schema variation."""
+    sql = (
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name='protected_branch' ORDER BY ordinal_position"
+    )
+    rc, out, err = psql_query(user, host, sql)
+    columns: list[str] = []
+    if rc == 0:
+        columns = [line.strip() for line in out.splitlines() if line.strip()]
+    return {
+        "rc": rc,
+        "stderr": err,
+        "columns": columns,
+        "observed": bool(columns),
+    }
+
+
+def _parse_psql_value(raw: str, column: str) -> Any:
+    if raw == "":
+        return None
+    if raw in ("t", "f"):
+        return raw == "t"
+    # Best-effort numeric parse for *_unix and bigint columns
+    if raw.lstrip("-").isdigit():
+        try:
+            return int(raw)
+        except ValueError:
+            return raw
+    return raw
+
+
+def probe_protected_branches(user: str, host: str, schema_columns: list[str]) -> dict[str, Any]:
+    """Resolve the primary repo's repo_id, then SELECT the intersection of
+    DESIRED_PROTECTION_COLUMNS with the live schema. Returns one rule entry
+    per row, with the columns and values captured names-only — no
+    value-mutation suggestions surface from this proof."""
+    # Resolve the repo_id by owner_name + name.
+    sql_rid = (
+        f"SELECT id FROM repository WHERE name="
+        f"'{PRIMARY_REPO}' AND owner_name='{PRIMARY_REPO_OWNER}'"
+    )
+    rc_rid, out_rid, err_rid = psql_query(user, host, sql_rid)
+    if rc_rid != 0 or not out_rid.strip():
+        return {
+            "rc": rc_rid,
+            "stderr": err_rid or "primary repo id lookup returned no rows",
+            "repo": f"{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}",
+            "repo_id": None,
+            "columns_used": [],
+            "rules": [],
+        }
+    repo_id = out_rid.strip().splitlines()[0].strip()
+    columns_used = [c for c in DESIRED_PROTECTION_COLUMNS if c in schema_columns]
+    if not columns_used:
+        return {
+            "rc": 0,
+            "stderr": "schema readback returned zero matching columns from DESIRED_PROTECTION_COLUMNS",
+            "repo": f"{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}",
+            "repo_id": repo_id,
+            "columns_used": [],
+            "rules": [],
+        }
+    select_clause = ", ".join(columns_used)
+    sql_rules = (
+        f"SELECT {select_clause} FROM protected_branch WHERE repo_id={repo_id} "
+        f"ORDER BY branch_name"
+    )
+    rc, out, err = psql_query(user, host, sql_rules)
+    rules: list[dict[str, Any]] = []
+    if rc == 0:
+        for line in out.splitlines():
+            if not line:
+                continue
+            fields = line.split("\t")
+            row: dict[str, Any] = {}
+            for col_idx, col_name in enumerate(columns_used):
+                raw = fields[col_idx] if col_idx < len(fields) else ""
+                row[col_name] = _parse_psql_value(raw, col_name)
+            rules.append({
+                "repo": f"{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}",
+                "branch": row.get("branch_name"),
+                "rules": row,
+            })
+    return {
+        "rc": rc,
+        "stderr": err,
+        "repo": f"{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}",
+        "repo_id": repo_id,
+        "columns_used": columns_used,
+        "rules": rules,
+        "observed": rc == 0,
+    }
+
+
+def _table_exists(present: dict[str, bool], table: str) -> bool:
+    return bool(present.get(table))
+
+
+def probe_acl_surface_counts(user: str, host: str) -> dict[str, Any]:
+    """Count rows in org_user / team / "user" / repository — schema-probe first
+    so the proof tolerates a stripped Gitea where some tables are absent."""
+    presence_sql = (
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='public' AND table_name IN "
+        "('org_user','team','user','repository')"
+    )
+    rc_p, out_p, err_p = psql_query(user, host, presence_sql)
+    present = {t: False for t in ("org_user", "team", "user", "repository")}
+    if rc_p == 0:
+        for line in out_p.splitlines():
+            name = line.strip()
+            if name in present:
+                present[name] = True
+    counts: dict[str, int | None] = {
+        "org_count": None,
+        "team_count": None,
+        "user_count": None,
+        "repo_count": None,
+    }
+    errs: list[str] = []
+    if _table_exists(present, "org_user"):
+        rc, out, err = psql_query(user, host, "SELECT count(*) FROM org_user")
+        if rc == 0 and out.strip():
+            try:
+                counts["org_count"] = int(out.strip().splitlines()[0])
+            except ValueError:
+                errs.append(f"org_user count parse: {out!r}")
+        else:
+            errs.append(f"org_user count rc={rc} err={err}")
+    if _table_exists(present, "team"):
+        rc, out, err = psql_query(user, host, "SELECT count(*) FROM team")
+        if rc == 0 and out.strip():
+            try:
+                counts["team_count"] = int(out.strip().splitlines()[0])
+            except ValueError:
+                errs.append(f"team count parse: {out!r}")
+        else:
+            errs.append(f"team count rc={rc} err={err}")
+    if _table_exists(present, "user"):
+        # double-quote because user is reserved
+        rc, out, err = psql_query(user, host, 'SELECT count(*) FROM "user"')
+        if rc == 0 and out.strip():
+            try:
+                counts["user_count"] = int(out.strip().splitlines()[0])
+            except ValueError:
+                errs.append(f"user count parse: {out!r}")
+        else:
+            errs.append(f"user count rc={rc} err={err}")
+    if _table_exists(present, "repository"):
+        rc, out, err = psql_query(user, host, "SELECT count(*) FROM repository")
+        if rc == 0 and out.strip():
+            try:
+                counts["repo_count"] = int(out.strip().splitlines()[0])
+            except ValueError:
+                errs.append(f"repository count parse: {out!r}")
+        else:
+            errs.append(f"repository count rc={rc} err={err}")
+    counts["tables_present"] = present
+    counts["errors"] = errs
+    counts["observed"] = all(
+        counts[k] is not None
+        for k in ("org_count", "team_count", "user_count", "repo_count")
+    )
+    return counts
+
+
+def build_proof(runtime_body: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    user = target.get("user") or "ubuntu"
+    host = pick_ssh_address(target)
+    if not host:
+        raise SystemExit(
+            f"forge.branch_protection.status: no usable address for ssh target id={target.get('id')!r}"
+        )
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    branches = probe_branch_list(user, host)
+    schema = probe_protected_branch_schema(user, host)
+    rules = probe_protected_branches(user, host, schema.get("columns") or [])
+    acl = probe_acl_surface_counts(user, host)
+    proof: dict[str, Any] = {
+        "proof_class": "branch_protection_readback_proof",
+        "capability": "forge.branch_protection.status",
+        "node_role": "forge_node",
+        "runtime_body": {
+            "ssh_targets_id": runtime_body.get("ssh_targets_id"),
+            "host_descriptor": runtime_body.get("host_descriptor"),
+            "addresses": runtime_body.get("addresses"),
+            "services": runtime_body.get("services"),
+        },
+        "ssh_route_used": {
+            "user": user,
+            "host": host,
+            "address_class": "tailscale" if host == target.get("tailscale_ip") else "lan",
+        },
+        "generated_at": timestamp,
+        "observation_only": True,
+        "scope_note": (
+            "Read-only branch + protection + ACL surface enumeration. "
+            "Postgres + filesystem only — no API tokens used."
+        ),
+        "stop_lines_respected": [
+            "no Forgejo install",
+            "no branch protection mutation",
+            "no runner changes",
+            "no DNS/secrets/tokens/users/webhooks/repos mutated",
+        ],
+        "primary_repo": f"{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}",
+        "branches": {
+            "count": branches.get("count", 0),
+            "names": branches.get("names", []),
+        },
+        "protected_branch_schema": schema.get("columns") or [],
+        "protected_branches": rules.get("rules") or [],
+        "acl_surface": {
+            "org_count": acl.get("org_count"),
+            "team_count": acl.get("team_count"),
+            "user_count": acl.get("user_count"),
+            "repo_count": acl.get("repo_count"),
+        },
+        "proof_summary": {
+            "branches_enumerated": bool(branches.get("count", 0) > 0),
+            "protection_rules_observed": len(rules.get("rules") or []),
+            "schema_observed": bool(schema.get("observed")),
+            "acl_observed": bool(acl.get("observed")),
+        },
+        "_diagnostics": {
+            "branches": {"rc": branches.get("rc"), "stderr": branches.get("stderr")},
+            "schema": {"rc": schema.get("rc"), "stderr": schema.get("stderr")},
+            "rules": {
+                "rc": rules.get("rc"),
+                "stderr": rules.get("stderr"),
+                "columns_used": rules.get("columns_used"),
+                "repo_id": rules.get("repo_id"),
+            },
+            "acl": {
+                "tables_present": acl.get("tables_present"),
+                "errors": acl.get("errors"),
+            },
+        },
+    }
+    return proof
+
+
+def write_proof(proof: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(proof, sort_keys=False, width=120) + "\n", encoding="utf-8")
+
+
+def render_human(proof: dict[str, Any]) -> str:
+    s = proof.get("proof_summary") or {}
+    lines: list[str] = []
+    lines.append("forge.branch_protection.status — branch_protection_readback_proof")
+    lines.append(f"generated_at: {proof.get('generated_at')}")
+    rb = proof.get("runtime_body") or {}
+    lines.append(f"runtime body: {rb.get('ssh_targets_id')} ({rb.get('host_descriptor')})")
+    sr = proof.get("ssh_route_used") or {}
+    lines.append(f"probed via:   {sr.get('user')}@{sr.get('host')} ({sr.get('address_class')})")
+    lines.append("")
+    lines.append(f"primary repo: {proof.get('primary_repo')}")
+    branches = proof.get("branches") or {}
+    lines.append(f"  branches enumerated: {branches.get('count')}")
+    if branches.get("names"):
+        lines.append(f"  branches: {', '.join(branches.get('names') or [])}")
+    lines.append("")
+    schema_cols = proof.get("protected_branch_schema") or []
+    lines.append(f"protected_branch schema columns: {len(schema_cols)}")
+    if schema_cols:
+        head = ", ".join(schema_cols[:8])
+        more = f" ... (+{len(schema_cols) - 8} more)" if len(schema_cols) > 8 else ""
+        lines.append(f"  {head}{more}")
+    lines.append("")
+    rules = proof.get("protected_branches") or []
+    lines.append(f"protection rules observed: {len(rules)}")
+    for r in rules:
+        rule_columns = r.get("rules") or {}
+        signed = rule_columns.get("require_signed_commits")
+        approvals = rule_columns.get("required_approvals")
+        status = rule_columns.get("enable_status_check")
+        whitelist = rule_columns.get("enable_whitelist")
+        lines.append(
+            f"  {r.get('repo')}@{r.get('branch')}: "
+            f"signed_commits={signed} required_approvals={approvals} "
+            f"status_check={status} push_whitelist={whitelist}"
+        )
+    lines.append("")
+    acl = proof.get("acl_surface") or {}
+    lines.append("acl surface counts:")
+    lines.append(f"  org_count:  {acl.get('org_count')}")
+    lines.append(f"  team_count: {acl.get('team_count')}")
+    lines.append(f"  user_count: {acl.get('user_count')}")
+    lines.append(f"  repo_count: {acl.get('repo_count')}")
+    lines.append("")
+    lines.append(
+        f"summary: branches_enumerated={s.get('branches_enumerated')} "
+        f"protection_rules_observed={s.get('protection_rules_observed')} "
+        f"schema_observed={s.get('schema_observed')} "
+        f"acl_observed={s.get('acl_observed')}"
+    )
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="forge.branch_protection.status")
+    parser.add_argument("--json", action="store_true", help="emit proof JSON only")
+    parser.add_argument("--no-write", action="store_true", help="do not persist receipt YAML (probe-only)")
+    parser.add_argument("--out", help=f"override receipt path (default: {RECEIPT_LATEST})")
+    parser.add_argument("--self-check", action="store_true", help="self-check pass")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("forge.branch_protection.status self-check PASS")
+        return 0
+
+    runtime_body = resolve_runtime_body()
+    if not runtime_body:
+        print(
+            "forge.branch_protection.status: forge_node.promotion_standard.current_runtime_body "
+            "missing in node.role.contract.yaml",
+            file=sys.stderr,
+        )
+        return 2
+    ssh_id = runtime_body.get("ssh_targets_id")
+    if not ssh_id:
+        print(
+            "forge.branch_protection.status: runtime body must declare ssh_targets_id",
+            file=sys.stderr,
+        )
+        return 2
+    target = resolve_ssh_target(ssh_id)
+    if not target:
+        print(
+            f"forge.branch_protection.status: ssh target {ssh_id!r} not found in ssh.targets.yaml",
+            file=sys.stderr,
+        )
+        return 2
+
+    proof = build_proof(runtime_body, target)
+
+    if not args.no_write:
+        out_path = Path(args.out) if args.out else RECEIPT_LATEST
+        write_proof(proof, out_path)
+        proof.setdefault("proof_summary", {})["receipt_path"] = str(out_path)
+
+    if args.json:
+        print(json.dumps(proof, indent=2, default=str))
+    else:
+        print(render_human(proof))
+        if not args.no_write:
+            print(f"\nreceipt: {RECEIPT_LATEST}")
+
+    summary = proof.get("proof_summary") or {}
+    if not (summary.get("branches_enumerated") and summary.get("schema_observed")):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
