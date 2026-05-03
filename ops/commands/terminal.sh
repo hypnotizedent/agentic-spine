@@ -237,11 +237,18 @@ if [[ -z "$LOOP_ID" && "$LAUNCH_MODE" != "solo" ]]; then
         fi
         AUTO_LOOP="$(printf '%s\n' "$ENTRY_COMPILE_JSON" \
             | python3 -c "
+# Loop-bearing canonical states (entry-compile populates loop_id).
+# packet_continuity / packet_ambiguous added (PACKET-655) so the public
+# front door consumes the full canonical state machine. terminal.sh
+# binds the LOOP only — packet choice (when ambiguous) is resolved
+# downstream via session.v3.attach --expert. clean_start, ambiguous,
+# and authority_unavailable have loop_id=None and are excluded both
+# by the allowlist (defense in depth) and by the lid check below.
 import json, sys
 try:
     d = json.loads(sys.stdin.read())
     cs = d.get('compilation_state', '')
-    if cs in ('compiled', 'partial', 'loop_only'):
+    if cs in ('compiled', 'partial', 'loop_only', 'packet_continuity', 'packet_ambiguous'):
         lid = d.get('loop_id')
         if lid and lid != 'None':
             print(lid)
