@@ -37,8 +37,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+try:
+    import yaml  # type: ignore
+except ImportError:
+    yaml = None  # type: ignore
+
 REPO_ROOT = Path(__file__).resolve().parents[5]
 SPINE_STATE = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtime/spine/state")))
+NODE_ROLE_CONTRACT = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
 
 
 # Candidate registry — declarative source of truth for what this surface knows about.
@@ -146,6 +152,87 @@ def check_expected_contract_homes(candidate: dict[str, Any]) -> dict[str, bool]:
     return out
 
 
+def read_node_type_entry(candidate_name: str) -> dict[str, Any] | None:
+    """Read the candidate's node_type block from node.role.contract.yaml.
+
+    Returns the parsed block (with promotion_standard and required_proofs)
+    when the candidate is declared as a node_type, or None when only the
+    candidate-readback surface knows about it. The presence of a block here
+    is what flips the readback from candidate-only to contracted.
+    """
+    if yaml is None or not NODE_ROLE_CONTRACT.is_file():
+        return None
+    try:
+        contract = yaml.safe_load(NODE_ROLE_CONTRACT.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(contract, dict):
+        return None
+    node_types = contract.get("node_types") or {}
+    block = node_types.get(candidate_name)
+    if isinstance(block, dict):
+        return block
+    return None
+
+
+def derive_contract_status(node_type_block: dict[str, Any] | None) -> dict[str, Any]:
+    """Compute the contracted/delivered status from the node_type block.
+
+    Returns a dict with:
+      - declared: bool — node_type entry exists
+      - delivered: bool — promotion_standard.delivered is true OR
+        proofs_present has the host listed
+      - required_proofs: list[str] — names of required proofs (empty when
+        no promotion_standard)
+      - proofs_present: list[str] — proofs already met for the candidate's
+        runtime body
+      - proofs_pending: list[str] — proofs still required
+      - status_label: one of candidate_only | contracted_not_delivered |
+        delivered (the human-readable summary)
+    """
+    if not node_type_block:
+        return {
+            "declared": False,
+            "delivered": False,
+            "required_proofs": [],
+            "proofs_present": [],
+            "proofs_pending": [],
+            "status_label": "candidate_only",
+        }
+    promotion = node_type_block.get("promotion_standard") or {}
+    required = list((promotion.get("required_proofs") or {}).keys())
+    explicit_delivered = promotion.get("delivered")
+    runtime_body = promotion.get("current_runtime_body") or {}
+    candidate_host = runtime_body.get("ssh_targets_id")
+    proofs_present_block = promotion.get("proofs_present") or {}
+    proofs_present = []
+    if isinstance(proofs_present_block, dict) and candidate_host:
+        proofs_present = list(proofs_present_block.get(candidate_host) or [])
+    candidate_gaps = promotion.get("candidate_gaps") or {}
+    pending: list[str] = []
+    if isinstance(candidate_gaps, dict) and candidate_host:
+        pending = list(candidate_gaps.get(candidate_host) or [])
+    if not pending and required:
+        pending = [p for p in required if p not in proofs_present]
+    delivered = bool(explicit_delivered) or (
+        bool(required) and not pending and len(proofs_present) >= len(required)
+    )
+    if delivered:
+        status_label = "delivered"
+    elif explicit_delivered is False or pending:
+        status_label = "contracted_not_delivered"
+    else:
+        status_label = "contracted_not_delivered"
+    return {
+        "declared": True,
+        "delivered": delivered,
+        "required_proofs": required,
+        "proofs_present": proofs_present,
+        "proofs_pending": pending,
+        "status_label": status_label,
+    }
+
+
 def list_handoffs(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     """Find handoff files mentioning the candidate's aliases."""
     out: list[dict[str, Any]] = []
@@ -170,22 +257,18 @@ def compute_missing(
     intent_packets: list[dict[str, Any]],
     contract_hits: dict[str, list[str]],
     expected_homes: dict[str, bool],
+    contract_status: dict[str, Any],
 ) -> list[str]:
     missing: list[str] = []
     # 1. Intent packets that the table claims exist but don't
     for ip in intent_packets:
         if not ip.get("found"):
             missing.append(f"declared intent PACKET-{ip['packet_id']} not found at expected paths")
-    # 2. node.role.contract.yaml mention of candidate role name
-    nrc_text = ""
-    nrc_path = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
-    if nrc_path.is_file():
-        try:
-            nrc_text = nrc_path.read_text(encoding="utf-8")
-        except OSError:
-            pass
-    if candidate_name not in nrc_text:
-        missing.append(f"node.role.contract.yaml does not declare '{candidate_name}' as a node_type or candidate (current state: candidate-only on this readback surface)")
+    # 2. node.role.contract.yaml declaration as a node_type. The candidate
+    # is "candidate-only" until this entry exists; once it exists it moves
+    # to "contracted/not-delivered" and the proof ladder takes over.
+    if not contract_status.get("declared"):
+        missing.append(f"node.role.contract.yaml does not declare '{candidate_name}' as a node_type (current state: candidate-only on this readback surface)")
     # 3. expected_contract_homes that don't exist
     for home, exists in expected_homes.items():
         if not exists:
@@ -199,6 +282,11 @@ def compute_missing(
                 missing.append(f"fleet.admission.classification.yaml does not list runtime body '{runtime_id}'")
         except OSError:
             pass
+    # 5. Once declared, surface unmet proofs as missing pieces. This makes
+    # the proof ladder load-bearing: each missing proof is a separately
+    # nameable next-slice candidate.
+    for proof in contract_status.get("proofs_pending", []):
+        missing.append(f"required proof not yet materialized: {proof}")
     return missing
 
 
@@ -207,20 +295,39 @@ def compute_next_action(
     candidate: dict[str, Any],
     missing: list[str],
     intent_packets: list[dict[str, Any]],
+    contract_status: dict[str, Any],
 ) -> str:
     """Heuristic: name the next first-class slice to advance the candidate."""
-    if any("node.role.contract.yaml does not declare" in m for m in missing):
+    if not contract_status.get("declared"):
         return (
             f"Add '{candidate_name}' as a declared node_type or candidate in "
             f"ops/bindings/node.role.contract.yaml with required_proofs sketch "
             "(no implementation, just the contract slot). Boring first move; no "
             "runtime change, no installs, no DNS/secrets/branch protection."
         )
+    if contract_status.get("delivered"):
+        return (
+            f"All required proofs present for {candidate_name}. The role is "
+            "delivered; subsequent work is normal-mode operation, not promotion."
+        )
+    pending = contract_status.get("proofs_pending") or []
+    if pending:
+        # Pick the read-only proof first (status / readback) before
+        # mutating proofs (restore drill, agent boundary). Heuristic: any
+        # *_status_proof or *_readback_proof first; else first in list.
+        readonly_first = [p for p in pending if "status_proof" in p or "readback_proof" in p]
+        first = (readonly_first or pending)[0]
+        return (
+            f"{candidate_name} is contracted, not delivered. Proof ladder: "
+            f"{len(contract_status.get('proofs_present') or [])}/{len(contract_status.get('required_proofs') or [])} met. "
+            f"Next slice: materialize '{first}' as a read-only governed cap with a fresh receipt. "
+            "Boring first proof; no runtime mutation."
+        )
     found_packets = [ip for ip in intent_packets if ip.get("found")]
     if not found_packets:
         return f"Author the first intent packet for {candidate_name} per the operator-approved scope."
     return (
-        f"All declared intent packets present; node_type declared. "
+        f"{candidate_name} declared; all intent packets present; no required proofs declared. "
         f"Next slice: pick one packet from the intent list and execute its scope, "
         "or close one of the open handoffs against this candidate."
     )
@@ -233,8 +340,10 @@ def status_for_candidate(candidate_name: str) -> dict[str, Any]:
     expected_homes = check_expected_contract_homes(candidate)
     domain_artifacts = list_domain_state_artifacts(candidate)
     handoffs = list_handoffs(candidate)
-    missing = compute_missing(candidate_name, candidate, intent_packets, contract_hits, expected_homes)
-    next_action = compute_next_action(candidate_name, candidate, missing, intent_packets)
+    node_type_block = read_node_type_entry(candidate_name)
+    contract_status = derive_contract_status(node_type_block)
+    missing = compute_missing(candidate_name, candidate, intent_packets, contract_hits, expected_homes, contract_status)
+    next_action = compute_next_action(candidate_name, candidate, missing, intent_packets, contract_status)
 
     return {
         "capability": "node.role.candidate.status",
@@ -247,9 +356,10 @@ def status_for_candidate(candidate_name: str) -> dict[str, Any]:
         "handoffs": handoffs,
         "contract_hits": contract_hits,
         "expected_contract_homes": expected_homes,
+        "contract_status": contract_status,
         "missing": missing,
         "next_action": next_action,
-        "scope_note": "PACKET-591 read-only candidate readback. Reconciles runtime / intent / contract truth without mutation.",
+        "scope_note": "PACKET-591 + PACKET-588 Phase 4 readback. Reconciles runtime / intent / contract truth and surfaces contracted/delivered state without mutation.",
     }
 
 
@@ -320,6 +430,19 @@ def main() -> int:
         if payload['contract_hits']:
             total_files = len({f for files in payload['contract_hits'].values() for f in files})
             print(f"contract hits: {total_files} binding file(s) reference {len(payload['contract_hits'])} alias term(s)")
+        cs = payload.get('contract_status') or {}
+        status_label = cs.get('status_label', 'candidate_only')
+        if status_label == "candidate_only":
+            print(f"\ncontract status: candidate-only (not declared in node.role.contract.yaml)")
+        elif status_label == "contracted_not_delivered":
+            present_n = len(cs.get('proofs_present') or [])
+            required_n = len(cs.get('required_proofs') or [])
+            print(f"\ncontract status: contracted, not delivered ({present_n}/{required_n} proofs met)")
+            for proof in cs.get('required_proofs') or []:
+                marker = "✓" if proof in (cs.get('proofs_present') or []) else "·"
+                print(f"  {marker} {proof}")
+        elif status_label == "delivered":
+            print(f"\ncontract status: delivered ({len(cs.get('proofs_present') or [])}/{len(cs.get('required_proofs') or [])} proofs met)")
         if payload['missing']:
             print(f"\nmissing ({len(payload['missing'])}):")
             for m in payload['missing']:

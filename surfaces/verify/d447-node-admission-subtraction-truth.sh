@@ -421,6 +421,50 @@ if caps_doc_candidate.get("safety") != "read-only":
 if caps_doc_candidate.get("script_path") != "./ops/plugins/infra/host/bin/node-role-candidate-status":
     fail("node.role.candidate.status script_path must point at ops/plugins/infra/host/bin/node-role-candidate-status")
 
+# PACKET-588 Phase 4 (forge_node nameplate): forge_node must exist as a
+# declared node_type with promotion_standard.required_proofs covering the
+# five-proof ladder approved by operator on 2026-05-02. delivered must be
+# false (nameplate-only — no runtime mutation in Phase 4). The candidate
+# host (dev-tools) must appear in candidate_gaps so the proof ladder is
+# pending and load-bearing. Adding the forge_node entry is the
+# subtraction in this same change: it retires the "node.role.contract.yaml
+# does not declare forge_node" missing-piece reported by node.role.candidate.status.
+forge_node_block = (node_role_contract.get("node_types") or {}).get("forge_node") or {}
+if not forge_node_block:
+    fail("node.role.contract.yaml node_types must declare forge_node (PACKET-588 Phase 4 nameplate)")
+forge_promotion = forge_node_block.get("promotion_standard") or {}
+if not forge_promotion:
+    fail("forge_node must declare promotion_standard with required_proofs (PACKET-588 Phase 4)")
+if forge_promotion.get("delivered") is not False:
+    fail("forge_node.promotion_standard.delivered must be false (PACKET-588 Phase 4 is contract-only — no runtime mutation, no Forgejo install)")
+forge_required_proofs = forge_promotion.get("required_proofs") or {}
+for required_proof in (
+    "forge_status_proof",
+    "backup_restore_proof",
+    "agent_boundary_proof",
+    "runner_cache_boundary_proof",
+    "branch_protection_readback_proof",
+):
+    if required_proof not in forge_required_proofs:
+        fail(f"forge_node.required_proofs must include {required_proof} (operator-approved 2026-05-02)")
+forge_runtime_body = forge_promotion.get("current_runtime_body") or {}
+if forge_runtime_body.get("ssh_targets_id") != "dev-tools":
+    fail("forge_node.current_runtime_body.ssh_targets_id must be 'dev-tools' (the canonical access-path-evidence id)")
+forge_authority = (node_role_contract.get("authority_matrix") or {}).get("forge_node") or {}
+if not forge_authority:
+    fail("authority_matrix must declare forge_node (peer to other node_types — declares what the role can/cannot do)")
+forge_state_access = (node_role_contract.get("state_access_model") or {}).get("forge_node") or {}
+if not forge_state_access:
+    fail("state_access_model must declare forge_node (peer to other node_types)")
+
+# node-role-candidate-status must derive contract status from node.role.contract.yaml
+# so the readback flips from candidate-only to contracted/not-delivered when
+# the nameplate lands. This is the load-bearing piece that makes Phase 4
+# observable through one canonical surface.
+for required_term in ("read_node_type_entry", "derive_contract_status", "contract_status", "contracted_not_delivered"):
+    if required_term not in candidate_status_text:
+        fail(f"node-role-candidate-status must implement {required_term} (PACKET-588 Phase 4 contracted-state surface)")
+
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
 # structurally prevents drift like 'pve-730xd' (non-canonical machine identity)
