@@ -2,59 +2,101 @@
 
 > Status: authoritative
 > Owner: @ronny
-> Last verified: 2026-05-02
-> Surface: governance — defines how host-local code/state checkouts stay aligned with `origin/main` truth
+> Last verified: 2026-05-03
+> Surface: governance — defines how host-local code checkouts stay aligned with `origin/main` truth
 
 ## Purpose
 
-Spine governance is a single canonical source: `origin/main` of `agentic-spine`. Every host that runs spine code (operator console, execution host, watcher, storage_evidence_node) holds a local checkout of that repo. Drift between any host's local checkout and `origin/main` is silent corruption — code can run against stale contracts, verify gates can pass against demoted truth, and routed dispatches can land on stale targets.
+Spine governance has one code source of truth: `origin/main` of
+`agentic-spine` on the forge. Every host that runs spine code must execute the
+same committed contracts and capabilities. Drift between a runtime checkout and
+`origin/main` is silent corruption: caps run stale code, verify readback teaches
+old truth, and closeout rituals turn into manual sync ceremonies.
 
-This policy declares the canonical host drift surfaces, names the drift gate that catches divergence, and defines resolution paths.
+PACKET-616 makes runtime checkout deployment first-class. The canonical
+placement contract is:
 
-## Canonical host drift surfaces
+`ops/bindings/runtime.checkout.placement.yaml`
 
-| Host | Role | Code path | Sync mechanism | Drift gate |
+The canonical readback is:
+
+`./bin/ops cap run infra.host.code.drift.status`
+
+The canonical update path is:
+
+`./bin/ops cap run infra.host.code.deploy.update`
+
+## The Single Rule
+
+**Every managed runtime checkout HEAD must equal `origin/main` HEAD before
+operators trust that host's spine readback.**
+
+`runtime.checkout.placement.yaml` declares which hosts are managed, where their
+checkouts live, and which hosts are intentionally unmanaged. The drift cap reads
+that contract. The deploy cap reads the same contract and updates only managed
+checkouts.
+
+## Canonical Runtime Checkout Placement
+
+| Host | Role | Code path | Canonical update mode | Drift gate |
 |---|---|---|---|---|
-| MacBook | operator_console | `/Users/ronnyworks/code/agentic-spine` | `git pull origin main --ff-only` (operator-driven) | git tracks divergence directly |
-| ai-consolidation | execution_host | `/home/ubuntu/code/agentic-spine` | `git pull origin main --ff-only` (run after ops on MacBook push) | git tracks divergence directly |
-| pve | storage_evidence_node (delivered) | `/opt/agentic-spine` | rsync from MacBook primary checkout (no gitea SSH from pve today) | **D447 extension (PACKET-586)** — verifies pve checkout HEAD matches `origin/main` HEAD |
-| pve-r620 | watcher_node | (no spine code checkout — observes only via NFS read-only mount + heartbeat) | n/a | n/a |
+| MacBook | operator_console | `/Users/ronnyworks/code/agentic-spine` | `infra.host.code.deploy.update` local `git pull --ff-only` | `infra.host.code.drift.status` |
+| ai-consolidation | execution_host | `/home/ubuntu/code/agentic-spine` | `infra.host.code.deploy.update` over SSH, `git pull --ff-only` | `infra.host.code.drift.status` |
+| pve | storage_evidence_node | `/opt/agentic-spine` | `infra.host.code.deploy.update` over SSH, `git pull --ff-only` using pve's read-only forge deploy key | `infra.host.code.drift.status` |
+| pve-r620 | watcher_node | no checkout | unmanaged witness surface | n/a |
 
-## The single rule
+The table is explanatory. The machine-readable authority is
+`ops/bindings/runtime.checkout.placement.yaml`.
 
-**Every host's spine checkout HEAD must equal `origin/main` HEAD before consumers can trust authority readback.**
+## Subtracted Operator Grammar
 
-For git-tracked hosts (MacBook, ai-consolidation), `git pull origin main --ff-only` enforces this naturally; CI / operator workflow catches divergence on next pull. The drift surface is bounded.
+These are no longer the normal deployment path:
 
-For pve, the rsync-from-MacBook pattern was a substrate workaround during D.3b cutover (PACKET-581) — pve does not currently have gitea SSH access. The drift gate at D447 catches divergence at verify time. If pve drifts, spine.verify on pve fails before any cap dispatches against stale code.
+- operator-typed `ssh ... git pull`
+- per-host manual checkout sync after every commit
+- MacBook-to-pve rsync as normal deployment
 
-## Resolution paths
+They remain legal only as expert emergency/bootstrap drilldown when the governed
+deploy cap cannot run and the incident is recorded. Normal closeout should be one
+cap call, followed by drift readback.
 
-When the drift gate fires (pve HEAD ≠ `origin/main` HEAD):
+## Governed Update Behavior
 
-1. **Routine drift after operator push**: re-rsync from MacBook primary checkout:
-   ```bash
-   rsync -av --exclude=node_modules --exclude=.runtime --exclude=.evidence \
-     -e "ssh -i ~/.ssh/spine_machine_ed25519" \
-     /Users/ronnyworks/code/agentic-spine/ \
-     root@192.168.1.184:/opt/agentic-spine/
-   ssh -i ~/.ssh/spine_machine_ed25519 root@192.168.1.184 'chown -R root:root /opt/agentic-spine'
-   ```
-2. **Substrate gap** (gitea SSH not available from pve): out-of-scope for this policy — separate slice would set up pve→gitea SSH so `git pull` works directly. Until then, rsync is the authoritative sync mechanism.
+`infra.host.code.deploy.update`:
 
-## What this policy does NOT cover
+- reads `ops/bindings/runtime.checkout.placement.yaml`
+- refuses dirty checkouts
+- refuses non-fast-forward/diverged checkouts
+- skips unmanaged witness surfaces
+- performs `git fetch origin main` and `git pull --ff-only origin main`
+- writes before/after HEAD receipts under
+  `$SPINE_STATE/domain-state/host-code-deploy/`
 
-- File-plane state plane (loop scopes / domain-state / mailroom file writes — three-host fragmentation): **the policy is now declared** in `ops/bindings/root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical.file_plane_policy` (PACKET-590). pve is the canonical home; consumer-host `$SPINE_STATE/...` is projection/cache only. This file does not own the file-plane policy — it covers host **code** drift only. PACKET-600 propagated the policy teaching into AGENTS.md and SESSION_PROTOCOL.md so first-read docs match root authority.
-- Workbench role-aware verify (D153/D397): separate slice. Workbench is not pve's role.
-- Watcher transfer: paused per operator instruction.
+The deploy cap declares `routing.db_authority: skip` because it does not mutate
+the shared authority DB. Its target is external runtime checkouts.
 
-## Related contracts and gates
+## What This Policy Does Not Cover
 
-- `ops/bindings/runtime.bootstrap.contract.yaml#db_authority.code_path` — declares `/opt/agentic-spine` as the routed-cap dispatch target on pve
-- `ops/bindings/root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical` — declares pve canonical roots (PACKET-585)
-- `surfaces/verify/d447-node-admission-subtraction-truth.sh` — D447 gate; PACKET-586 extends with the pve checkout drift check
-- Receipts: PACKET-581 (path resolution), PACKET-584 (recovery drill), PACKET-585 (root authority truth-up)
+- File-plane state (`$SPINE_STATE`, loop scopes, domain-state, mailroom writes):
+  owned by root authority and storage_evidence_node file-plane policy.
+- Workbench role-aware verify: workbench is not pve's role.
+- Watcher transfer: paused by operator instruction; pve-r620 stays a witness
+  surface with no spine checkout.
+- Product/domain deploys: this policy only updates the `agentic-spine` runtime
+  checkout on hosts that run spine code.
+
+## Related Contracts and Gates
+
+- `ops/bindings/runtime.checkout.placement.yaml` — canonical runtime checkout placement
+- `ops/bindings/runtime.bootstrap.contract.yaml#db_authority.code_path` — pve routed-cap checkout path
+- `ops/bindings/root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical` — pve canonical roots
+- `surfaces/verify/d447-node-admission-subtraction-truth.sh` — static lock that the placement/readback/deploy surfaces exist
+- `infra.host.code.drift.status` — read-only drift readback
+- `infra.host.code.deploy.update` — governed runtime checkout update
 
 ## History
 
-- 2026-05-02: Created. Closes the dangling `/ctx` skill reference. Pairs with PACKET-586 drift gate extension.
+- 2026-05-02: Created to stop hidden pve checkout drift after D.3b migration.
+- 2026-05-03: PACKET-616 subtracted rsync as canonical sync after pve received a
+  read-only forge deploy key. Runtime checkout deployment is now a governed cap
+  over a placement contract.

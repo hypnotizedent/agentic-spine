@@ -274,29 +274,35 @@ for cap_name in sorted(D3C_DB_BACKED_CAPS):
 if unannotated:
     fail("D.3c missing state_authority: shared_authority_db on " + ", ".join(unannotated))
 
-# PACKET-586: pve as delivered storage_evidence_node holds the canonical
-# /opt/agentic-spine code checkout that routed caps execute against. pve
-# does not currently have gitea SSH; the sync mechanism is rsync from the
-# operator console (per docs/governance/HOST_DRIFT_POLICY.md). This drift
-# gate verifies pve checkout HEAD matches origin/main HEAD locally —
-# if the operator console is out-of-sync with origin/main, the gate fails
-# closed before pushing fresh divergence to pve.
-#
-# This is a static check against the committed state, not a live SSH probe.
-# It catches the most common drift class: operator pushes to origin/main
-# but forgets to re-rsync to pve, leaving pve running stale code.
-#
-# A live ssh-probe variant (verify pve actually has the same HEAD) belongs
-# in a future ops cap that runs from the consumer where the operator can
-# trigger it; D447 stays static-honest.
+# PACKET-616: runtime checkout deployment is a first-class deploy artery.
+# Host placement lives in ops/bindings/runtime.checkout.placement.yaml, drift
+# readback consumes that contract, and infra.host.code.deploy.update is the
+# governed update cap. The old MacBook-to-pve rsync path is emergency/bootstrap
+# drilldown only, not canonical operator grammar.
 host_drift_policy = root / "docs/governance/HOST_DRIFT_POLICY.md"
 if not host_drift_policy.is_file():
     fail("docs/governance/HOST_DRIFT_POLICY.md missing (PACKET-586 declared this as the canonical host-drift governance surface; /ctx skill references it)")
 drift_policy_text = host_drift_policy.read_text(encoding="utf-8")
 if "/opt/agentic-spine" not in drift_policy_text:
     fail("HOST_DRIFT_POLICY.md must name /opt/agentic-spine as pve's drift surface")
-if "rsync" not in drift_policy_text.lower():
-    fail("HOST_DRIFT_POLICY.md must document the rsync sync mechanism for pve (gitea SSH not yet available from pve)")
+if "infra.host.code.deploy.update" not in drift_policy_text:
+    fail("HOST_DRIFT_POLICY.md must name infra.host.code.deploy.update as the canonical runtime checkout update path")
+if "emergency/bootstrap drilldown" not in drift_policy_text:
+    fail("HOST_DRIFT_POLICY.md must demote manual rsync/git sync to emergency/bootstrap drilldown only")
+
+placement_contract = root / "ops/bindings/runtime.checkout.placement.yaml"
+if not placement_contract.is_file():
+    fail("ops/bindings/runtime.checkout.placement.yaml missing (PACKET-616 canonical runtime checkout placement)")
+placement_text = placement_contract.read_text(encoding="utf-8")
+for token in [
+    "canonical_update_capability: infra.host.code.deploy.update",
+    "canonical_drift_readback_capability: infra.host.code.drift.status",
+    "macbook_to_pve_rsync_as_normal_sync",
+    "watcher_node_witness_independence_no_checkout",
+    "git_pull_ff_only",
+]:
+    if token not in placement_text:
+        fail(f"runtime.checkout.placement.yaml missing required PACKET-616 token: {token}")
 
 # PACKET-589 (under PACKET-588): the live drift readback capability must exist
 # and be wired into capabilities.yaml. The cap is read-only and probes each
@@ -311,8 +317,11 @@ if not os.access(str(drift_cap_script), os.X_OK):
 drift_cap_text = drift_cap_script.read_text(encoding="utf-8")
 if "infra.host.code.drift.status" not in drift_cap_text:
     fail("host-code-drift-status script must self-identify as infra.host.code.drift.status capability")
-if "macbook-2016-pro" not in drift_cap_text or "ai-consolidation" not in drift_cap_text or '"pve"' not in drift_cap_text:
-    fail("host-code-drift-status must probe all three hosts (macbook-2016-pro, ai-consolidation, pve)")
+if "runtime.checkout.placement.yaml" not in drift_cap_text:
+    fail("host-code-drift-status must read runtime.checkout.placement.yaml instead of carrying a parallel HOSTS table")
+for token in ["dirty_blocked", "behind_fixable", "unmanaged_checkout", "infra.host.code.deploy.update"]:
+    if token not in drift_cap_text:
+        fail(f"host-code-drift-status missing PACKET-616 classification token: {token}")
 # PACKET-588 Phase 1 stop lines (no automatic pull, no rsync, no host mutation)
 # are enforced at the cap-safety annotation layer (must be safety: read-only)
 # and through code review — substring checks on the script body would false-fire
@@ -322,6 +331,22 @@ if caps_doc_drift.get("safety") != "read-only":
     fail("infra.host.code.drift.status must be safety: read-only in capabilities.yaml")
 if caps_doc_drift.get("script_path") != "./ops/plugins/infra/host/bin/host-code-drift-status":
     fail("infra.host.code.drift.status script_path must point at ops/plugins/infra/host/bin/host-code-drift-status")
+deploy_cap_script = root / "ops/plugins/infra/host/bin/host-code-deploy-update"
+if not deploy_cap_script.is_file():
+    fail("ops/plugins/infra/host/bin/host-code-deploy-update missing (PACKET-616 governed deploy artery)")
+if not os.access(str(deploy_cap_script), os.X_OK):
+    fail("host-code-deploy-update must be executable")
+deploy_cap_text = deploy_cap_script.read_text(encoding="utf-8")
+for token in ["infra.host.code.deploy.update", "runtime.checkout.placement.yaml", "dirty_blocked", "ahead_or_diverged_blocked", "git pull --ff-only origin main"]:
+    if token not in deploy_cap_text:
+        fail(f"host-code-deploy-update missing PACKET-616 token: {token}")
+caps_doc_deploy = (caps_map.get("infra.host.code.deploy.update") or {})
+if caps_doc_deploy.get("safety") != "mutating":
+    fail("infra.host.code.deploy.update must be safety: mutating in capabilities.yaml")
+if ((caps_doc_deploy.get("routing") or {}).get("db_authority")) != "skip":
+    fail("infra.host.code.deploy.update must declare routing.db_authority: skip because it mutates external runtime checkouts, not shared_authority.db")
+if caps_doc_deploy.get("script_path") != "./ops/plugins/infra/host/bin/host-code-deploy-update":
+    fail("infra.host.code.deploy.update script_path must point at ops/plugins/infra/host/bin/host-code-deploy-update")
 status_sh_text = (root / "ops/commands/status.sh").read_text(encoding="utf-8")
 if "infra/host/bin/host-code-drift-status" not in status_sh_text:
     fail("ops/commands/status.sh brief output must integrate host-code-drift-status (PACKET-589 ops status --brief deliverable)")

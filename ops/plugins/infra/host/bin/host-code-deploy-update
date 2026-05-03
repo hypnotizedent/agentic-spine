@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""infra.host.code.deploy.update — governed runtime checkout deploy artery.
+
+Updates managed agentic-spine runtime checkouts to origin/main using the
+machine-readable runtime checkout placement contract. Refuses dirty or
+non-fast-forward checkouts. Writes before/after receipts.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml
+except ImportError as exc:  # pragma: no cover - verifier hosts have PyYAML.
+    print(f"PyYAML required: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+
+CONNECT_TIMEOUT_SECONDS = 5
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def placement_path() -> Path:
+    return repo_root() / "ops" / "bindings" / "runtime.checkout.placement.yaml"
+
+
+def load_placement() -> dict[str, Any]:
+    with placement_path().open("r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def state_root() -> Path:
+    env = os.environ.get("SPINE_STATE")
+    if env:
+        return Path(env)
+    root = repo_root()
+    for candidate in [root, *root.parents]:
+        if candidate.name == "spine" and candidate.parent.name == ".runtime":
+            return candidate / "state"
+    return root.parent / ".runtime" / "spine" / "state"
+
+
+def receipt_dir() -> Path:
+    return state_root() / "domain-state" / "host-code-deploy"
+
+
+def now_utc() -> str:
+    return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def run(cmd: list[str], timeout: int = 60) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"command timed out after {timeout}s"
+
+
+def ssh_base(checkout: dict[str, Any], target: str) -> list[str]:
+    cmd = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={CONNECT_TIMEOUT_SECONDS}",
+    ]
+    key = checkout.get("ssh_key")
+    if key:
+        cmd.extend(["-i", os.path.expanduser(str(key))])
+    cmd.append(target)
+    return cmd
+
+
+def remote_script(path: str, action: str) -> str:
+    q_path = shlex.quote(path)
+    if action == "inspect":
+        return (
+            f"cd {q_path} && "
+            "printf 'head=%s\\n' \"$(git rev-parse HEAD)\" && "
+            "printf 'origin=%s\\n' \"$(git rev-parse origin/main 2>/dev/null || true)\" && "
+            "printf 'dirty=%s\\n' \"$(git status --porcelain | wc -l | tr -d ' ')\""
+        )
+    if action == "fetch":
+        return f"cd {q_path} && git fetch origin main"
+    if action == "ff_check":
+        return f"cd {q_path} && git merge-base --is-ancestor HEAD origin/main"
+    if action == "pull":
+        return f"cd {q_path} && git pull --ff-only origin main"
+    raise ValueError(action)
+
+
+def run_on_checkout(checkout: dict[str, Any], action: str, timeout: int = 60) -> tuple[int, str, str, str | None]:
+    path = str(checkout["path"])
+    script = remote_script(path, action)
+    if checkout.get("reach") == "local":
+        return (*run(["bash", "-lc", script], timeout=timeout), None)
+
+    last_rc, last_out, last_err = 1, "", "no ssh target succeeded"
+    for target in checkout.get("ssh_targets") or []:
+        rc, out, err = run(ssh_base(checkout, target) + [script], timeout=timeout + CONNECT_TIMEOUT_SECONDS)
+        if rc == 0:
+            return rc, out, err, target
+        last_rc, last_out, last_err = rc, out, err
+    return last_rc, last_out, last_err, None
+
+
+def parse_inspect(out: str) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for line in out.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            data[key.strip()] = value.strip()
+    data["dirty_count"] = int(data.get("dirty") or 0)
+    return data
+
+
+def select_checkouts(placement: dict[str, Any], target: str) -> list[dict[str, Any]]:
+    checkouts = placement.get("checkouts") or []
+    if target == "all":
+        return checkouts
+    selected = [c for c in checkouts if c.get("host_id") == target]
+    if not selected:
+        raise SystemExit(f"unknown target: {target}")
+    return selected
+
+
+def update_checkout(checkout: dict[str, Any], dry_run: bool) -> dict[str, Any]:
+    host_id = checkout.get("host_id")
+    record: dict[str, Any] = {
+        "host_id": host_id,
+        "role": checkout.get("role"),
+        "path": checkout.get("path"),
+        "managed": bool(checkout.get("managed")),
+        "reach": checkout.get("reach"),
+        "update_mode": checkout.get("update_mode"),
+        "started_at": now_utc(),
+        "dry_run": dry_run,
+        "status": "unknown",
+        "pre_head": None,
+        "post_head": None,
+        "origin_main_head": None,
+        "reach_target": None,
+        "actions": [],
+    }
+
+    if not checkout.get("managed"):
+        record["status"] = "unmanaged_checkout"
+        record["note"] = checkout.get("exclusion_reason") or "checkout unmanaged by placement contract"
+        record["finished_at"] = now_utc()
+        return record
+
+    rc, out, err, target = run_on_checkout(checkout, "inspect")
+    record["reach_target"] = target
+    if rc != 0:
+        record["status"] = "unreachable"
+        record["error"] = (err or out).strip()[:500]
+        record["finished_at"] = now_utc()
+        return record
+
+    pre = parse_inspect(out)
+    record["pre_head"] = pre.get("head")
+    record["origin_main_head"] = pre.get("origin")
+    record["dirty_count"] = pre.get("dirty_count")
+    if pre["dirty_count"] > 0:
+        record["status"] = "dirty_blocked"
+        record["note"] = "refused to update dirty checkout"
+        record["finished_at"] = now_utc()
+        return record
+
+    if dry_run:
+        record["status"] = "dry_run"
+        record["finished_at"] = now_utc()
+        return record
+
+    rc_f, out_f, err_f, target_f = run_on_checkout(checkout, "fetch", timeout=120)
+    record["actions"].append({"action": "git fetch origin main", "rc": rc_f})
+    if target_f:
+        record["reach_target"] = target_f
+    if rc_f != 0:
+        record["status"] = "fetch_failed"
+        record["error"] = (err_f or out_f).strip()[:500]
+        record["finished_at"] = now_utc()
+        return record
+
+    rc2, out2, err2, target2 = run_on_checkout(checkout, "inspect")
+    if target2:
+        record["reach_target"] = target2
+    if rc2 != 0:
+        record["status"] = "post_fetch_inspect_failed"
+        record["error"] = (err2 or out2).strip()[:500]
+        record["finished_at"] = now_utc()
+        return record
+    post_fetch = parse_inspect(out2)
+    record["origin_main_head"] = post_fetch.get("origin")
+    if post_fetch.get("head") == post_fetch.get("origin"):
+        record["status"] = "ok"
+        record["post_head"] = post_fetch.get("head")
+        record["finished_at"] = now_utc()
+        return record
+
+    rc_ff, out_ff, err_ff, target_ff = run_on_checkout(checkout, "ff_check")
+    record["actions"].append({"action": "git merge-base --is-ancestor HEAD origin/main", "rc": rc_ff})
+    if target_ff:
+        record["reach_target"] = target_ff
+    if rc_ff != 0:
+        record["status"] = "ahead_or_diverged_blocked"
+        record["error"] = (err_ff or out_ff).strip()[:500]
+        record["finished_at"] = now_utc()
+        return record
+
+    rc_p, out_p, err_p, target_p = run_on_checkout(checkout, "pull", timeout=180)
+    record["actions"].append({"action": "git pull --ff-only origin main", "rc": rc_p})
+    if target_p:
+        record["reach_target"] = target_p
+    if rc_p != 0:
+        record["status"] = "pull_failed"
+        record["error"] = (err_p or out_p).strip()[:500]
+        record["finished_at"] = now_utc()
+        return record
+
+    rc3, out3, err3, target3 = run_on_checkout(checkout, "inspect")
+    if target3:
+        record["reach_target"] = target3
+    if rc3 != 0:
+        record["status"] = "post_pull_inspect_failed"
+        record["error"] = (err3 or out3).strip()[:500]
+    else:
+        post = parse_inspect(out3)
+        record["post_head"] = post.get("head")
+        record["origin_main_head"] = post.get("origin")
+        record["status"] = "updated" if record["post_head"] != record["pre_head"] else "ok"
+    record["finished_at"] = now_utc()
+    return record
+
+
+def write_receipt(payload: dict[str, Any]) -> Path:
+    root = receipt_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    latest = root / "runtime-checkout-deploy-latest.yaml"
+    stamped = root / f"runtime-checkout-deploy-{stamp}.yaml"
+    text = yaml.safe_dump(payload, sort_keys=False)
+    latest.write_text(text, encoding="utf-8")
+    stamped.write_text(text, encoding="utf-8")
+    return latest
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="infra.host.code.deploy.update")
+    parser.add_argument("--target", default="all", help="host_id to update, or all")
+    parser.add_argument("--dry-run", action="store_true", help="inspect only; do not fetch or pull")
+    parser.add_argument("--json", action="store_true", help="emit JSON")
+    parser.add_argument("--self-check", action="store_true", help="verify contract exists and exit")
+    args = parser.parse_args()
+
+    placement = load_placement()
+    if args.self_check:
+        if placement.get("policy", {}).get("canonical_update_capability") != "infra.host.code.deploy.update":
+            print("runtime.checkout.placement.yaml missing canonical_update_capability", file=sys.stderr)
+            return 1
+        print("infra.host.code.deploy.update self-check PASS")
+        return 0
+
+    records = [update_checkout(c, args.dry_run) for c in select_checkouts(placement, args.target)]
+    blocking = {
+        "dirty_blocked",
+        "ahead_or_diverged_blocked",
+        "unreachable",
+        "fetch_failed",
+        "pull_failed",
+        "post_fetch_inspect_failed",
+        "post_pull_inspect_failed",
+    }
+    overall = "attention" if any(r["status"] in blocking for r in records) else "ok"
+    payload = {
+        "capability": "infra.host.code.deploy.update",
+        "generated_at": now_utc(),
+        "placement_contract": "ops/bindings/runtime.checkout.placement.yaml",
+        "target": args.target,
+        "dry_run": args.dry_run,
+        "overall_status": overall,
+        "records": records,
+    }
+    receipt = write_receipt(payload)
+    payload["receipt"] = str(receipt)
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("infra.host.code.deploy.update")
+        print(f"overall: {overall}")
+        print(f"receipt: {receipt}")
+        for record in records:
+            before = (record.get("pre_head") or "-")[:8]
+            after = (record.get("post_head") or record.get("pre_head") or "-")[:8]
+            print(f"  {record['host_id']:<22} {record['status']:<28} {before} -> {after}")
+    return 1 if overall == "attention" else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

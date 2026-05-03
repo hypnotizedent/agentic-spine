@@ -1420,7 +1420,7 @@ capabilities:
     plane: fabric
     layer: L2_shared_infrastructure
   infra.host.code.drift.status:
-    description: Read-only host code drift readback (PACKET-589 under PACKET-588). Reports per-host checkout HEAD vs origin/main HEAD, dirty worktree state, reachability. NO mutation, NO automatic pull, NO rsync. Probes MacBook (operator_console, local), ai-consolidation (execution_host, ssh), pve (storage_evidence_node, ssh). pve-r620 watcher excluded (no checkout). Use --json for machine-readable output.
+    description: Read-only host code drift readback. Reads ops/bindings/runtime.checkout.placement.yaml as the canonical placement contract and reports per-host checkout HEAD vs origin/main HEAD, dirty worktree state, reachability, and deploy-update next action. NO mutation, NO automatic pull, NO rsync. Use infra.host.code.deploy.update as the governed update path.
     tags:
       - infra
       - drift
@@ -1434,6 +1434,28 @@ capabilities:
     lifecycle: ready
     outputs:
       - stdout
+    domain: infra
+    plane: fabric
+    layer: L2_shared_infrastructure
+  infra.host.code.deploy.update:
+    description: Governed runtime checkout deploy artery (PACKET-616). Reads ops/bindings/runtime.checkout.placement.yaml, updates managed agentic-spine runtime checkouts to origin/main with git fetch + git pull --ff-only, refuses dirty or non-fast-forward checkouts, skips unmanaged watcher surfaces, and writes before/after HEAD receipts. Subtracts operator-typed ssh/git-pull/rsync as normal deployment grammar; manual sync remains emergency drilldown only.
+    tags:
+      - infra
+      - deployment-hygiene
+      - runtime-checkout
+      - subtraction
+    command: ./ops/plugins/infra/host/bin/host-code-deploy-update
+    script_path: ./ops/plugins/infra/host/bin/host-code-deploy-update
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: argparse
+    lifecycle: ready
+    routing:
+      db_authority: skip
+    outputs:
+      - stdout
+      - $SPINE_STATE/domain-state/host-code-deploy/runtime-checkout-deploy-latest.yaml
     domain: infra
     plane: fabric
     layer: L2_shared_infrastructure

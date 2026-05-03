@@ -1,0 +1,69 @@
+status: authoritative
+owner: "@ronny"
+scope: runtime-checkout-placement
+last_verified: "2026-05-03"
+
+version: 1
+canonical_source_authority:
+  role: forge_node
+  remote_name: origin
+  branch: main
+  repository: ronny/agentic-spine
+  remote_url: ssh://git@100.90.167.39:2222/ronny/agentic-spine.git
+
+policy:
+  canonical_update_capability: infra.host.code.deploy.update
+  canonical_drift_readback_capability: infra.host.code.drift.status
+  dirty_checkout_policy: refuse_dirty
+  divergent_checkout_policy: refuse_non_fast_forward
+  manual_sync_status: emergency_drilldown_only
+  manual_sync_subtracted:
+    - operator_typed_git_pull_per_host
+    - operator_typed_ssh_git_pull
+    - macbook_to_pve_rsync_as_normal_sync
+  receipt_root: $SPINE_STATE/domain-state/host-code-deploy
+
+checkouts:
+  - host_id: macbook-2016-pro
+    role: operator_console
+    managed: true
+    reach: local
+    path: /Users/ronnyworks/code/agentic-spine
+    update_mode: git_pull_ff_only
+    drift_gate: git_head_equals_origin_main
+
+  - host_id: ai-consolidation
+    role: execution_host
+    managed: true
+    reach: ssh
+    ssh_targets:
+      - ubuntu@100.71.17.29
+      - ubuntu@192.168.1.8
+    path: /home/ubuntu/code/agentic-spine
+    update_mode: git_pull_ff_only
+    drift_gate: git_head_equals_origin_main
+
+  - host_id: pve
+    role: storage_evidence_node
+    managed: true
+    reach: ssh
+    ssh_targets:
+      - root@100.96.211.33
+      - root@192.168.1.184
+    ssh_key: ~/.ssh/spine_machine_ed25519
+    path: /opt/agentic-spine
+    update_mode: git_pull_ff_only
+    drift_gate: git_head_equals_origin_main
+    note: >
+      PACKET-625 admitted pve's read-only deploy key to forge, so pve now
+      pulls origin/main directly. The older MacBook-to-pve rsync path is
+      emergency/bootstrap drilldown only, not normal runtime deployment.
+
+  - host_id: pve-r620
+    role: watcher_node
+    managed: false
+    reach: none
+    path: null
+    update_mode: none
+    drift_gate: none
+    exclusion_reason: watcher_node_witness_independence_no_checkout
