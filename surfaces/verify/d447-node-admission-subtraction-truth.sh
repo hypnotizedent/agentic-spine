@@ -457,6 +457,44 @@ forge_state_access = (node_role_contract.get("state_access_model") or {}).get("f
 if not forge_state_access:
     fail("state_access_model must declare forge_node (peer to other node_types)")
 
+# PACKET-588 Phase 5 (forge_status_proof): the first proof on the forge_node
+# ladder. Materialized by the forge.status cap which probes dev-tools via
+# SSH+docker-exec read-only. Locks: cap script exists + executable + self-
+# identifies; cap is registered safety: read-only; forge_status_proof has
+# a proof_ref pointing at the receipt path; the proof is listed in
+# proofs_present.dev-tools and removed from candidate_gaps. Subtraction in
+# same change: forge_status_proof retired from candidate_gaps -> proofs_present.
+forge_status_script = root / "ops/plugins/infra/host/bin/forge-status"
+if not forge_status_script.is_file():
+    fail("ops/plugins/infra/host/bin/forge-status missing (PACKET-588 Phase 5 forge_status_proof)")
+if not os.access(str(forge_status_script), os.X_OK):
+    fail("forge-status must be executable")
+forge_status_text = forge_status_script.read_text(encoding="utf-8")
+if "forge.status" not in forge_status_text or "forge_status_proof" not in forge_status_text:
+    fail("forge-status must self-identify as forge.status capability and emit forge_status_proof receipts")
+for required_term in ("probe_service_status", "probe_gitea_version", "probe_runner_version", "probe_repo_inventory", "probe_primary_main_head"):
+    if required_term not in forge_status_text:
+        fail(f"forge-status must implement {required_term} (operator-approved 2026-05-02 read-only probe set)")
+caps_doc_forge = (caps_map.get("forge.status") or {})
+if caps_doc_forge.get("safety") != "read-only":
+    fail("forge.status must be safety: read-only (PACKET-588 Phase 5 — forge probe must not mutate forge state)")
+if caps_doc_forge.get("script_path") != "./ops/plugins/infra/host/bin/forge-status":
+    fail("forge.status script_path must point at ops/plugins/infra/host/bin/forge-status")
+forge_status_required = (forge_required_proofs.get("forge_status_proof") or {})
+if not forge_status_required.get("proof_ref"):
+    fail("forge_node.required_proofs.forge_status_proof must declare proof_ref (PACKET-588 Phase 5 receipt pointer)")
+expected_ref = "$SPINE_STATE/domain-state/forge-node/forge-status-proof-latest.yaml"
+if forge_status_required.get("proof_ref") != expected_ref:
+    fail(f"forge_status_proof.proof_ref must equal {expected_ref}")
+proofs_present = forge_promotion.get("proofs_present") or {}
+present_for_devtools = (proofs_present.get("dev-tools") or [])
+if "forge_status_proof" not in present_for_devtools:
+    fail("forge_node.promotion_standard.proofs_present.dev-tools must list forge_status_proof (PACKET-588 Phase 5 — proof ladder progression)")
+forge_candidate_gaps = forge_promotion.get("candidate_gaps") or {}
+gaps_for_devtools = (forge_candidate_gaps.get("dev-tools") or [])
+if "forge_status_proof" in gaps_for_devtools:
+    fail("forge_status_proof must be removed from candidate_gaps.dev-tools when present in proofs_present (no double-listing)")
+
 # node-role-candidate-status must derive contract status from node.role.contract.yaml
 # so the readback flips from candidate-only to contracted/not-delivered when
 # the nameplate lands. This is the load-bearing piece that makes Phase 4

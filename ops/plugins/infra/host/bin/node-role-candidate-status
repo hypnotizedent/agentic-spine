@@ -175,6 +175,40 @@ def read_node_type_entry(candidate_name: str) -> dict[str, Any] | None:
     return None
 
 
+def _resolve_proof_ref(raw: str) -> Path:
+    """Expand $SPINE_STATE in a proof_ref into the host's actual path.
+
+    Falls back to the SPINE_STATE module constant when the env var is
+    unset (so the readback resolves consistently from any session,
+    including non-cap-shell invocations)."""
+    if "$SPINE_STATE" in raw and not os.environ.get("SPINE_STATE"):
+        raw = raw.replace("$SPINE_STATE", str(SPINE_STATE))
+    return Path(os.path.expandvars(raw))
+
+
+def _check_proof_ref_freshness(required_proofs: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """For each proof that declares a proof_ref, check whether the artifact
+    is present on disk. Returns name -> {proof_ref, expanded, present}.
+
+    Freshness here means "artifact exists at the declared host-relative
+    path" — content-level validation belongs in proof-specific gates.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for name, body in (required_proofs or {}).items():
+        if not isinstance(body, dict):
+            continue
+        ref = body.get("proof_ref")
+        if not ref:
+            continue
+        expanded = _resolve_proof_ref(str(ref))
+        out[name] = {
+            "proof_ref": str(ref),
+            "expanded": str(expanded),
+            "present": expanded.is_file(),
+        }
+    return out
+
+
 def derive_contract_status(node_type_block: dict[str, Any] | None) -> dict[str, Any]:
     """Compute the contracted/delivered status from the node_type block.
 
@@ -197,10 +231,12 @@ def derive_contract_status(node_type_block: dict[str, Any] | None) -> dict[str, 
             "required_proofs": [],
             "proofs_present": [],
             "proofs_pending": [],
+            "proof_ref_freshness": {},
             "status_label": "candidate_only",
         }
     promotion = node_type_block.get("promotion_standard") or {}
-    required = list((promotion.get("required_proofs") or {}).keys())
+    required_block = promotion.get("required_proofs") or {}
+    required = list(required_block.keys())
     explicit_delivered = promotion.get("delivered")
     runtime_body = promotion.get("current_runtime_body") or {}
     candidate_host = runtime_body.get("ssh_targets_id")
@@ -229,6 +265,7 @@ def derive_contract_status(node_type_block: dict[str, Any] | None) -> dict[str, 
         "required_proofs": required,
         "proofs_present": proofs_present,
         "proofs_pending": pending,
+        "proof_ref_freshness": _check_proof_ref_freshness(required_block),
         "status_label": status_label,
     }
 
@@ -432,6 +469,7 @@ def main() -> int:
             print(f"contract hits: {total_files} binding file(s) reference {len(payload['contract_hits'])} alias term(s)")
         cs = payload.get('contract_status') or {}
         status_label = cs.get('status_label', 'candidate_only')
+        freshness = cs.get('proof_ref_freshness') or {}
         if status_label == "candidate_only":
             print(f"\ncontract status: candidate-only (not declared in node.role.contract.yaml)")
         elif status_label == "contracted_not_delivered":
@@ -440,7 +478,11 @@ def main() -> int:
             print(f"\ncontract status: contracted, not delivered ({present_n}/{required_n} proofs met)")
             for proof in cs.get('required_proofs') or []:
                 marker = "✓" if proof in (cs.get('proofs_present') or []) else "·"
-                print(f"  {marker} {proof}")
+                fresh = freshness.get(proof)
+                ref_note = ""
+                if fresh:
+                    ref_note = " [proof_ref present]" if fresh.get('present') else " [proof_ref MISSING]"
+                print(f"  {marker} {proof}{ref_note}")
         elif status_label == "delivered":
             print(f"\ncontract status: delivered ({len(cs.get('proofs_present') or [])}/{len(cs.get('required_proofs') or [])} proofs met)")
         if payload['missing']:

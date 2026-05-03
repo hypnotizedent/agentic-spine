@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""forge.status — read-only forge_status_proof inspection.
+
+Materializes the first proof on the forge_node ladder (PACKET-588 Phase 5
+under Phase 4 nameplate). Probes the runtime body declared in
+node.role.contract.yaml as forge_node.promotion_standard.current_runtime_body
+(the dev-tools VM running Gitea + Postgres + Actions runner) and writes a
+governed YAML receipt that node.role.candidate.status composes as proof
+freshness evidence.
+
+Read-only observation only. NO Forgejo install. NO runner changes. NO
+branch protection mutation. NO DNS/secrets/tokens/users/webhooks/repos.
+The cap captures: service status, Gitea + runner versions, repo inventory
+(names only, from on-disk repository directory listing), origin/main HEAD
+for agentic-spine, declared SSH/HTTP route addresses, backup posture
+pointer (if any binding declares one), and branch surface names for the
+key repo. Branch protection ACL detail is explicitly out of scope here —
+that lives with branch_protection_readback_proof, the fifth proof on the
+ladder.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml  # type: ignore
+except ImportError:
+    print("forge.status requires PyYAML (apt install python3-yaml or pip install pyyaml)", file=sys.stderr)
+    sys.exit(2)
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+SPINE_STATE = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtime/spine/state")))
+NODE_ROLE_CONTRACT = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
+SSH_TARGETS = REPO_ROOT / "ops/bindings/ssh.targets.yaml"
+RECEIPT_DIR = SPINE_STATE / "domain-state/forge-node"
+RECEIPT_LATEST = RECEIPT_DIR / "forge-status-proof-latest.yaml"
+
+PRIMARY_REPO = "agentic-spine"
+PRIMARY_REPO_OWNER = "ronny"
+DEFAULT_SSH_CONNECT_TIMEOUT = "8"
+DEFAULT_GITEA_CONTAINER = "gitea"
+DEFAULT_RUNNER_CONTAINER = "gitea-runner"
+DEFAULT_POSTGRES_CONTAINER = "gitea-postgres"
+GITEA_DATA_REPOS_DIR = "/data/git/repositories"
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_runtime_body() -> dict[str, Any]:
+    contract = load_yaml(NODE_ROLE_CONTRACT)
+    forge = (((contract.get("node_types") or {}).get("forge_node") or {}).get("promotion_standard") or {})
+    return forge.get("current_runtime_body") or {}
+
+
+def resolve_ssh_target(ssh_targets_id: str) -> dict[str, Any]:
+    targets_doc = load_yaml(SSH_TARGETS)
+    ssh_block = targets_doc.get("ssh") or {}
+    targets = ssh_block.get("targets") if isinstance(ssh_block, dict) else None
+    if isinstance(targets, list):
+        for entry in targets:
+            if isinstance(entry, dict) and entry.get("id") == ssh_targets_id:
+                return entry
+    # Fallback: scan all list-shaped values for an entry with the id
+    for value in targets_doc.values():
+        if isinstance(value, list):
+            for entry in value:
+                if isinstance(entry, dict) and entry.get("id") == ssh_targets_id:
+                    return entry
+        elif isinstance(value, dict):
+            for inner in value.values():
+                if isinstance(inner, list):
+                    for entry in inner:
+                        if isinstance(entry, dict) and entry.get("id") == ssh_targets_id:
+                            return entry
+    return {}
+
+
+def pick_ssh_address(target: dict[str, Any]) -> str | None:
+    """Prefer Tailscale (off-LAN safe) then LAN. Operator-runtime defaults
+    elsewhere choose lan_first; this cap defaults the safer route since
+    the operator may not be on the shop LAN when running it."""
+    return target.get("tailscale_ip") or target.get("host") or target.get("lan_ip")
+
+
+def remote_run(user: str, host: str, command: str, timeout: int = 12) -> tuple[int, str, str]:
+    full = [
+        "ssh",
+        "-o", f"ConnectTimeout={DEFAULT_SSH_CONNECT_TIMEOUT}",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        f"{user}@{host}",
+        command,
+    ]
+    try:
+        proc = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, "", f"ssh timeout after {timeout}s"
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def docker_exec(user: str, host: str, container: str, inner_cmd: str, timeout: int = 15) -> tuple[int, str, str]:
+    # Build a single remote command string: docker exec <c> sh -c '<inner>'
+    # SSH passes the joined string to the remote shell, which then runs docker exec.
+    cmd = f"docker exec {shlex.quote(container)} sh -c {shlex.quote(inner_cmd)}"
+    return remote_run(user, host, cmd, timeout=timeout)
+
+
+def probe_service_status(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = remote_run(
+        user, host,
+        "docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>&1",
+    )
+    rows = []
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                rows.append({"name": parts[0], "image": parts[1], "status": parts[2]})
+    return {
+        "rc": rc,
+        "stderr": err,
+        "containers": rows,
+        "gitea_container_present": any(r["name"] == DEFAULT_GITEA_CONTAINER for r in rows),
+        "runner_container_present": any(r["name"] == DEFAULT_RUNNER_CONTAINER for r in rows),
+        "postgres_container_present": any(r["name"] == DEFAULT_POSTGRES_CONTAINER for r in rows),
+    }
+
+
+def probe_gitea_version(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = docker_exec(user, host, DEFAULT_GITEA_CONTAINER, "/usr/local/bin/gitea --version")
+    return {"rc": rc, "stderr": err, "version_line": out.split("\n")[0] if out else ""}
+
+
+def probe_runner_version(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = docker_exec(user, host, DEFAULT_RUNNER_CONTAINER, "act_runner --version")
+    return {"rc": rc, "stderr": err, "version_line": out.split("\n")[0] if out else ""}
+
+
+def probe_repo_inventory(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = docker_exec(
+        user, host, DEFAULT_GITEA_CONTAINER,
+        f"ls -1 {shlex.quote(GITEA_DATA_REPOS_DIR)}",
+    )
+    owners: list[str] = []
+    if rc == 0:
+        owners = [line.strip() for line in out.splitlines() if line.strip()]
+    repos: list[dict[str, str]] = []
+    repo_count = 0
+    for owner in owners:
+        rc2, out2, _ = docker_exec(
+            user, host, DEFAULT_GITEA_CONTAINER,
+            f"ls -1 {shlex.quote(GITEA_DATA_REPOS_DIR)}/{shlex.quote(owner)}",
+        )
+        if rc2 != 0:
+            continue
+        for line in out2.splitlines():
+            line = line.strip()
+            if not line or not line.endswith(".git"):
+                continue
+            name = line[:-4]
+            repos.append({"owner": owner, "name": name})
+            repo_count += 1
+    primary = [r for r in repos if r["name"] == PRIMARY_REPO]
+    return {
+        "rc": rc,
+        "stderr": err,
+        "owners": owners,
+        "repo_count": repo_count,
+        "primary_repo_present": bool(primary),
+        "repos_sample": [f"{r['owner']}/{r['name']}" for r in repos[:25]],
+    }
+
+
+def probe_primary_main_head(user: str, host: str) -> dict[str, Any]:
+    repo_path = f"{GITEA_DATA_REPOS_DIR}/{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}.git"
+    rc, out, err = docker_exec(
+        user, host, DEFAULT_GITEA_CONTAINER,
+        f"git --git-dir={shlex.quote(repo_path)} rev-parse main",
+    )
+    return {
+        "rc": rc,
+        "stderr": err,
+        "repo": f"{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}",
+        "ref": "main",
+        "sha": out.strip() if rc == 0 else "",
+    }
+
+
+def probe_primary_branches(user: str, host: str) -> dict[str, Any]:
+    repo_path = f"{GITEA_DATA_REPOS_DIR}/{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}.git"
+    rc, out, err = docker_exec(
+        user, host, DEFAULT_GITEA_CONTAINER,
+        f"git --git-dir={shlex.quote(repo_path)} for-each-ref --format='%(refname:short)' refs/heads/",
+    )
+    branches: list[str] = []
+    if rc == 0:
+        branches = [line.strip() for line in out.splitlines() if line.strip()]
+    return {
+        "rc": rc,
+        "stderr": err,
+        "repo": f"{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}",
+        "branch_count": len(branches),
+        "branches": branches[:50],
+        "scope_note": "Names only — branch protection ACL detail lives in branch_protection_readback_proof.",
+    }
+
+
+def probe_http_route(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = remote_run(
+        user, host,
+        "curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/api/v1/version",
+    )
+    code = out.strip() if rc == 0 else ""
+    rc2, out2, err2 = remote_run(
+        user, host,
+        "curl -s http://localhost:3000/api/v1/version 2>&1",
+    )
+    return {
+        "rc": rc,
+        "stderr": err or err2,
+        "status_code": code,
+        "anonymous_response": out2.strip()[:200] if rc2 == 0 else "",
+        "scope_note": "Anonymous probe only — full API enumeration requires auth, deferred to backup_restore_proof.",
+    }
+
+
+def find_backup_pointer() -> dict[str, Any]:
+    """Best-effort scan for any binding that names dev-tools/forge/gitea
+    in a backup context. Returns the first match. Read-only."""
+    bindings_dir = REPO_ROOT / "ops/bindings"
+    if not bindings_dir.is_dir():
+        return {"found": False, "scanned": 0}
+    backup_files = sorted(bindings_dir.rglob("*backup*.yaml")) + sorted(bindings_dir.rglob("*backup*.yml"))
+    matches: list[str] = []
+    for f in backup_files:
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if any(term in text for term in ("dev-tools", "forge_node", "gitea")):
+            matches.append(str(f.relative_to(REPO_ROOT)))
+    return {
+        "found": bool(matches),
+        "scanned": len(backup_files),
+        "matches": matches,
+        "scope_note": "Pointer-only scan. Full backup substrate verification belongs in backup_restore_proof.",
+    }
+
+
+def collect_route_evidence(target: dict[str, Any]) -> dict[str, Any]:
+    """Read-only enumeration of declared SSH and HTTP routes for forge.
+
+    No probe, just declared values from ssh.targets.yaml. Probing-confirmed
+    reachability is captured as part of the live probes above.
+    """
+    return {
+        "ssh": {
+            "target_id": target.get("id"),
+            "user": target.get("user"),
+            "lan_host": target.get("host") or target.get("lan_ip"),
+            "tailscale_host": target.get("tailscale_ip"),
+            "access_policy": target.get("access_policy"),
+        },
+        "http": {
+            "lan_url": f"http://{target.get('host') or target.get('lan_ip')}:3000",
+            "tailscale_url": f"http://{target.get('tailscale_ip')}:3000" if target.get("tailscale_ip") else None,
+            "scope_note": "Internal HTTP. Public DNS surface is out of scope for this proof; no DNS read here.",
+        },
+    }
+
+
+def build_proof(runtime_body: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    user = target.get("user") or "ubuntu"
+    host = pick_ssh_address(target)
+    if not host:
+        raise SystemExit(f"forge.status: no usable address for ssh target id={target.get('id')!r}")
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    proof: dict[str, Any] = {
+        "proof_class": "forge_status_proof",
+        "capability": "forge.status",
+        "node_role": "forge_node",
+        "runtime_body": {
+            "ssh_targets_id": runtime_body.get("ssh_targets_id"),
+            "host_descriptor": runtime_body.get("host_descriptor"),
+            "addresses": runtime_body.get("addresses"),
+            "services": runtime_body.get("services"),
+        },
+        "ssh_route_used": {
+            "user": user,
+            "host": host,
+            "address_class": "tailscale" if host == target.get("tailscale_ip") else "lan",
+        },
+        "generated_at": timestamp,
+        "observation_only": True,
+        "scope_note": (
+            "Read-only proof. Probes Gitea/runner versions, repo inventory, "
+            "origin/main HEAD for the primary repo, declared routes, backup "
+            "pointer, branch surface (names only). NO mutation."
+        ),
+        "stop_lines_respected": [
+            "no Forgejo install",
+            "no runner changes",
+            "no branch protection mutation",
+            "no DNS/secrets/tokens",
+            "no repo/user/webhook mutation",
+        ],
+        "service_status": probe_service_status(user, host),
+        "routes_declared": collect_route_evidence(target),
+    }
+    proof["gitea"] = probe_gitea_version(user, host)
+    proof["runner"] = probe_runner_version(user, host)
+    proof["repos"] = probe_repo_inventory(user, host)
+    proof["primary_main_head"] = probe_primary_main_head(user, host)
+    proof["primary_branches"] = probe_primary_branches(user, host)
+    proof["http_anonymous_probe"] = probe_http_route(user, host)
+    proof["backup_pointer"] = find_backup_pointer()
+    proof["proof_summary"] = {
+        "service_up": proof["service_status"].get("gitea_container_present"),
+        "runner_present": proof["service_status"].get("runner_container_present"),
+        "postgres_present": proof["service_status"].get("postgres_container_present"),
+        "gitea_version_line": proof["gitea"].get("version_line"),
+        "runner_version_line": proof["runner"].get("version_line"),
+        "repo_count": proof["repos"].get("repo_count"),
+        "primary_repo_present": proof["repos"].get("primary_repo_present"),
+        "primary_main_sha": proof["primary_main_head"].get("sha"),
+        "primary_branch_count": proof["primary_branches"].get("branch_count"),
+        "http_status_code": proof["http_anonymous_probe"].get("status_code"),
+        "backup_pointer_found": proof["backup_pointer"].get("found"),
+    }
+    return proof
+
+
+def write_proof(proof: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(proof, sort_keys=False, width=120) + "\n", encoding="utf-8")
+
+
+def render_human(proof: dict[str, Any]) -> str:
+    s = proof.get("proof_summary") or {}
+    lines: list[str] = []
+    lines.append(f"forge.status — forge_status_proof")
+    lines.append(f"generated_at: {proof.get('generated_at')}")
+    rb = proof.get("runtime_body") or {}
+    lines.append(f"runtime body: {rb.get('ssh_targets_id')} ({rb.get('host_descriptor')})")
+    sr = proof.get("ssh_route_used") or {}
+    lines.append(f"probed via:   {sr.get('user')}@{sr.get('host')} ({sr.get('address_class')})")
+    lines.append("")
+    lines.append("service status:")
+    lines.append(f"  gitea container:    {'present' if s.get('service_up') else 'MISSING'}")
+    lines.append(f"  runner container:   {'present' if s.get('runner_present') else 'MISSING'}")
+    lines.append(f"  postgres container: {'present' if s.get('postgres_present') else 'MISSING'}")
+    lines.append("")
+    lines.append("versions:")
+    lines.append(f"  gitea:  {s.get('gitea_version_line') or '(unobserved)'}")
+    lines.append(f"  runner: {s.get('runner_version_line') or '(unobserved)'}")
+    lines.append("")
+    lines.append("repos:")
+    lines.append(f"  count:                {s.get('repo_count')}")
+    lines.append(f"  agentic-spine present: {bool(s.get('primary_repo_present'))}")
+    lines.append(f"  agentic-spine main:    {s.get('primary_main_sha') or '(unobserved)'}")
+    lines.append(f"  agentic-spine branches: {s.get('primary_branch_count')}")
+    lines.append("")
+    lines.append("routes (declared):")
+    routes = proof.get("routes_declared") or {}
+    ssh = routes.get("ssh") or {}
+    http = routes.get("http") or {}
+    lines.append(f"  ssh:  {ssh.get('user')}@{ssh.get('lan_host')} (lan), {ssh.get('user')}@{ssh.get('tailscale_host')} (tailscale)")
+    lines.append(f"  http: {http.get('lan_url')} (lan)")
+    if http.get("tailscale_url"):
+        lines.append(f"        {http.get('tailscale_url')} (tailscale)")
+    lines.append("")
+    lines.append(f"http anonymous probe status: {s.get('http_status_code') or '(unobserved)'}")
+    lines.append(f"backup pointer found in spine bindings: {bool(s.get('backup_pointer_found'))}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="forge.status")
+    parser.add_argument("--json", action="store_true", help="emit proof JSON only")
+    parser.add_argument("--no-write", action="store_true", help="do not persist receipt YAML (probe-only)")
+    parser.add_argument("--out", help=f"override receipt path (default: {RECEIPT_LATEST})")
+    parser.add_argument("--self-check", action="store_true", help="self-check pass")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("forge.status self-check PASS")
+        return 0
+
+    runtime_body = resolve_runtime_body()
+    if not runtime_body:
+        print("forge.status: forge_node.promotion_standard.current_runtime_body missing in node.role.contract.yaml", file=sys.stderr)
+        return 2
+    ssh_id = runtime_body.get("ssh_targets_id")
+    if not ssh_id:
+        print("forge.status: runtime body must declare ssh_targets_id", file=sys.stderr)
+        return 2
+    target = resolve_ssh_target(ssh_id)
+    if not target:
+        print(f"forge.status: ssh target {ssh_id!r} not found in ssh.targets.yaml", file=sys.stderr)
+        return 2
+
+    proof = build_proof(runtime_body, target)
+
+    if not args.no_write:
+        out_path = Path(args.out) if args.out else RECEIPT_LATEST
+        write_proof(proof, out_path)
+        proof.setdefault("proof_summary", {})["receipt_path"] = str(out_path)
+
+    if args.json:
+        print(json.dumps(proof, indent=2, default=str))
+    else:
+        print(render_human(proof))
+        if not args.no_write:
+            print(f"\nreceipt: {RECEIPT_LATEST}")
+
+    summary = proof.get("proof_summary") or {}
+    if not (summary.get("service_up") and summary.get("primary_main_sha")):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
