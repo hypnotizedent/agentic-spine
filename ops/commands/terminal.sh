@@ -218,13 +218,22 @@ if [[ -z "$LOOP_ID" && "$LAUNCH_MODE" != "solo" ]]; then
     ENTRY_COMPILE_BIN="$SPINE_ROOT/ops/plugins/core/lifecycle/bin/entry-compile"
     _STATE_ROOT="$SPINE_STATE"
     if [[ -f "$ENTRY_COMPILE_BIN" && -d "$_STATE_ROOT/loop-scopes" ]]; then
+        # Entry truth is canonical (cap.sh-routed entry.compile, DB-backed
+        # on storage_evidence_node) OR explicit-opt-in local
+        # (SPINE_ENTRY_COMPILE_LOCAL_ONLY=1). No silent fallback when
+        # canonical returns empty — that path resurrected stale loop truth
+        # from consumer-local projection on the public front-door terminal
+        # birth (PACKET-650 / F4 from engine packet/loop/wave forensic;
+        # same disease class as PACKET-625 F1 in session-v3-attach).
+        # If canonical returns empty, AUTO_LOOP stays empty and terminal
+        # launch proceeds without auto-attaching a loop — operator can
+        # supply --loop explicitly or accept ambiguous-mode admission.
         ENTRY_COMPILE_JSON=""
-        if [[ "${SPINE_ENTRY_COMPILE_LOCAL_ONLY:-0}" != "1" ]]; then
+        if [[ "${SPINE_ENTRY_COMPILE_LOCAL_ONLY:-0}" == "1" ]]; then
+            ENTRY_COMPILE_JSON="$(python3 "$ENTRY_COMPILE_BIN" --state-root "$_STATE_ROOT" 2>/dev/null || true)"
+        else
             ENTRY_COMPILE_CAP_OUT="$("$SPINE_ROOT/bin/ops" cap run entry.compile 2>/dev/null || true)"
             ENTRY_COMPILE_JSON="$(extract_first_json_object <<< "$ENTRY_COMPILE_CAP_OUT" 2>/dev/null || true)"
-        fi
-        if [[ -z "$ENTRY_COMPILE_JSON" ]]; then
-            ENTRY_COMPILE_JSON="$(python3 "$ENTRY_COMPILE_BIN" --state-root "$_STATE_ROOT" 2>/dev/null || true)"
         fi
         AUTO_LOOP="$(printf '%s\n' "$ENTRY_COMPILE_JSON" \
             | python3 -c "
