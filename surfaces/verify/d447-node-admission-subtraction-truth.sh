@@ -1254,7 +1254,8 @@ payload = json.loads(proc.stdout)
 rows = payload.get("rows") or []
 if len(rows) != 1:
     fail("node.admission.status --golden-path sample must emit exactly one row")
-golden = rows[0].get("golden_path") or {}
+golden_row = rows[0]
+golden = golden_row.get("golden_path") or {}
 if golden.get("definition") != "first_touch -> machine_facts -> node_admission -> placement -> runtime -> receipts":
     fail("golden-path definition must preserve first-touch to receipts ladder")
 if golden.get("state") != "ready":
@@ -1271,6 +1272,17 @@ if "does not promote" not in golden.get("stop_line", ""):
 # planes line up, why the row is/is not promotable, and whether portable-media
 # host_node_id is current attachment or last observed.
 
+def assert_current_stop_matches_row(subject_id, sample_row):
+    sample_golden = sample_row.get("golden_path") or {}
+    sample_journey = sample_golden.get("journey") or {}
+    if sample_journey.get("current_stop") != sample_row.get("promotion_stage"):
+        fail(
+            f"{subject_id} golden_path.journey.current_stop must match canonical "
+            f"row promotion_stage: got {sample_journey.get('current_stop')!r}, "
+            f"expected {sample_row.get('promotion_stage')!r}"
+        )
+
+
 def golden_path_for(subject_id):
     p = subprocess.run(
         [str(node_admission), "--node", subject_id, "--golden-path", "--json"],
@@ -1282,9 +1294,12 @@ def golden_path_for(subject_id):
     rs = (json.loads(p.stdout).get("rows") or [])
     if len(rs) != 1:
         fail(f"--golden-path --node {subject_id} must emit exactly one row")
-    return rs[0]
+    sample_row = rs[0]
+    assert_current_stop_matches_row(subject_id, sample_row)
+    return sample_row
 
-# pve-r620 already loaded above as `golden`. Assert the new shape fields exist.
+# pve-r620 already loaded above as `golden_row`. Assert the new shape fields exist.
+assert_current_stop_matches_row("pve-r620", golden_row)
 journey = golden.get("journey") or {}
 for key in ("current_stop", "next_legal_action", "candidate_evidence_only", "ladder_terms", "promotion_authority"):
     if key not in journey:
