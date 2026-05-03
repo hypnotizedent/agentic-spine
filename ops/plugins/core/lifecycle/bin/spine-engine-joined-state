@@ -717,8 +717,9 @@ def _parse_verify_text(text: str) -> dict[str, Any]:
     return result
 
 
-def parse_verify_output(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8", errors="replace").strip()
+def parse_verify_output_text(text: str) -> dict[str, Any]:
+    """Parse verify-run output (JSON or plain text). Used for both local-file and SSH-fetched text."""
+    text = (text or "").strip()
     try:
         payload = json.loads(text)
     except (json.JSONDecodeError, ValueError):
@@ -748,6 +749,305 @@ def parse_verify_output(path: Path) -> dict[str, Any]:
         "blocking_fail_ids": blocking,
         "warning_ids": warning_ids,
     }
+
+
+def parse_verify_output(path: Path) -> dict[str, Any]:
+    return parse_verify_output_text(path.read_text(encoding="utf-8", errors="replace"))
+
+
+# ── PACKET-594: pve canonical receipt sourcing ────────────────────────────────
+# After D.3b v4 cutover and cap.sh routing, verify receipts written by routed caps
+# land at /md1400/spine/evidence/sessions/ on pve. MacBook-local
+# $SPINE_RECEIPTS holds only pre-cutover receipts and any locally-executed cap
+# receipts. Status readers must consider BOTH sources to surface live truth, with
+# pve canonical winning on recency. Per root.authority.contract.yaml#
+# storage_evidence_node_canonical.file_plane_policy: pve is canonical, consumer-
+# local is projection. SSH probe is best-effort with short timeouts and fails
+# quietly (falls back to local-only).
+PVE_CANONICAL_SESSIONS_DIR = "/md1400/spine/evidence/sessions"
+PVE_CANONICAL_TAILSCALE_ADDR = "100.96.211.33"
+PVE_CANONICAL_LAN_ADDR = "192.168.1.184"
+VERIFY_FRESHNESS_MINUTES_DEFAULT = 360  # 6 hours
+PVE_PROBE_DISABLED = (os.environ.get("SPINE_OPS_STATUS_PVE_PROBE", "").strip().lower() == "disable")
+
+
+def _verify_freshness_minutes() -> int:
+    raw = os.environ.get("SPINE_OPS_STATUS_VERIFY_FRESHNESS_MINUTES", "").strip()
+    if not raw:
+        return VERIFY_FRESHNESS_MINUTES_DEFAULT
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return VERIFY_FRESHNESS_MINUTES_DEFAULT
+
+
+_PVE_VERIFY_SNAPSHOT_CACHE: dict[str, dict[str, str]] | None = None
+
+
+def _pve_canonical_verify_snapshot() -> dict[str, dict[str, str]]:
+    """One-shot SSH snapshot of pve canonical verify receipts.
+
+    Returns {pattern: {"name": <latest_dir_name>, "output": <output.txt content>}}.
+    Empty mapping on failure or when probing is disabled. Cached per process.
+    """
+    global _PVE_VERIFY_SNAPSHOT_CACHE
+    if _PVE_VERIFY_SNAPSHOT_CACHE is not None:
+        return _PVE_VERIFY_SNAPSHOT_CACHE
+    if PVE_PROBE_DISABLED:
+        _PVE_VERIFY_SNAPSHOT_CACHE = {}
+        return _PVE_VERIFY_SNAPSHOT_CACHE
+    patterns = (
+        "__verify.engine.run__",
+        "__spine.verify__",
+        "__verify.infra.run__",
+        "__verify.run__",
+        "__verify.fast__",
+    )
+    pattern_args = " ".join(f"'{p}'" for p in patterns)
+    # Single SSH script: for each pattern, find latest dir name, cat output.txt + receipt.exec.json.
+    # exec.json carries the canonical capability status ("done"/"failed"/...) which is the
+    # authoritative fallback when output.txt parsing produces "unknown" for engine-smoke /
+    # all-PASS verify outputs that lack a wrapper line.
+    cmd = (
+        f"DIR={PVE_CANONICAL_SESSIONS_DIR}; "
+        f"for p in {pattern_args}; do "
+        f"  latest=$(ls $DIR 2>/dev/null | grep -- \"$p\" | sort -r | head -1); "
+        f"  if [ -n \"$latest\" ]; then "
+        f"    echo \"PATTERN=$p NAME=$latest\"; "
+        f"    echo '---OUTPUT_BEGIN---'; "
+        f"    cat $DIR/$latest/output.txt 2>/dev/null; "
+        f"    echo '---OUTPUT_END---'; "
+        f"    echo '---EXEC_BEGIN---'; "
+        f"    cat $DIR/$latest/receipt.exec.json 2>/dev/null; "
+        f"    echo '---EXEC_END---'; "
+        f"  else "
+        f"    echo \"PATTERN=$p NAME=\"; "
+        f"  fi; "
+        f"done"
+    )
+    timeout = 5
+    for addr in (PVE_CANONICAL_TAILSCALE_ADDR, PVE_CANONICAL_LAN_ADDR):
+        try:
+            proc = subprocess.run(
+                [
+                    "ssh", "-o", "BatchMode=yes",
+                    "-o", f"ConnectTimeout={timeout}",
+                    f"root@{addr}", cmd,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout * 2 + 6,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                _PVE_VERIFY_SNAPSHOT_CACHE = _parse_pve_verify_snapshot(proc.stdout)
+                return _PVE_VERIFY_SNAPSHOT_CACHE
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            continue
+        except Exception:
+            continue
+    _PVE_VERIFY_SNAPSHOT_CACHE = {}
+    return _PVE_VERIFY_SNAPSHOT_CACHE
+
+
+def _parse_pve_verify_snapshot(raw: str) -> dict[str, dict[str, str]]:
+    """Parse the multi-pattern SSH snapshot block."""
+    result: dict[str, dict[str, str]] = {}
+    current_pattern = ""
+    current_name = ""
+    output_lines: list[str] = []
+    exec_lines: list[str] = []
+    section: str = ""  # "" | "output" | "exec"
+
+    def _flush() -> None:
+        if current_pattern:
+            result[current_pattern] = {
+                "name": current_name,
+                "output": "\n".join(output_lines).rstrip(),
+                "exec_json": "\n".join(exec_lines).rstrip(),
+            }
+
+    for line in raw.splitlines():
+        if line.startswith("PATTERN="):
+            _flush()
+            head = line[len("PATTERN="):]
+            if " NAME=" in head:
+                current_pattern, current_name = head.split(" NAME=", 1)
+            else:
+                current_pattern, current_name = head, ""
+            output_lines = []
+            exec_lines = []
+            section = ""
+        elif line == "---OUTPUT_BEGIN---":
+            section = "output"
+        elif line == "---OUTPUT_END---":
+            section = ""
+        elif line == "---EXEC_BEGIN---":
+            section = "exec"
+        elif line == "---EXEC_END---":
+            section = ""
+        elif section == "output":
+            output_lines.append(line)
+        elif section == "exec":
+            exec_lines.append(line)
+    _flush()
+    return result
+
+
+def _receipt_name_utc_timestamp(name: str) -> "dt.datetime | None":
+    """Parse RCAP-YYYYMMDD-HHMMSS_... → UTC datetime; None on parse failure."""
+    m = re.match(r"^RCAP-(\d{8})-(\d{6})__", name or "")
+    if not m:
+        return None
+    try:
+        return dt.datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        return None
+
+
+def _collect_canonical_latest_verify(
+    paths: dict[str, Path],
+    pattern: str,
+    scope: str,
+    freshness_minutes: int | None = None,
+) -> dict[str, Any]:
+    """Collect the most recent verify receipt across local + pve canonical.
+
+    Honors root.authority.contract.yaml#file_plane_policy: pve canonical is
+    authority. Falls back to local-only when pve is unreachable. If the newest
+    receipt across both sources is older than the freshness window, status is
+    reported as "stale" (with stale_status preserving the parsed status); when
+    no receipt exists at all, status is "unknown". This prevents stale failed
+    receipts from being surfaced as current truth.
+    """
+    if freshness_minutes is None:
+        freshness_minutes = _verify_freshness_minutes()
+
+    local_root = paths["receipts_root"]
+    local_dirs: list[Path] = []
+    if local_root.exists():
+        local_dirs = sorted(
+            (p for p in local_root.glob(f"RCAP-*{pattern}*") if p.is_dir()),
+            key=lambda p: p.name, reverse=True,
+        )[:10]
+
+    snapshot = _pve_canonical_verify_snapshot()
+    remote_entry = snapshot.get(pattern, {})
+    remote_name = remote_entry.get("name", "").strip()
+    remote_output = remote_entry.get("output", "")
+    remote_exec_json = remote_entry.get("exec_json", "")
+
+    candidates: list[tuple[str, str]] = [(p.name, "local") for p in local_dirs]
+    if remote_name:
+        candidates.append((remote_name, "remote"))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    if not candidates:
+        result = _empty_verify_result()
+        result.update({"scope": scope, "freshness": "unknown", "stale_status": "", "source": ""})
+        return result
+
+    winner_name, winner_source = candidates[0]
+    winner_ts = _receipt_name_utc_timestamp(winner_name)
+    if winner_ts is not None:
+        age_seconds = (dt.datetime.now(dt.timezone.utc) - winner_ts).total_seconds()
+        age_minutes = int(age_seconds / 60) if age_seconds >= 0 else None
+    else:
+        age_minutes = None
+    is_fresh = age_minutes is not None and age_minutes <= freshness_minutes
+
+    output_text = ""
+    output_path_str = ""
+    receipt_path_str = ""
+    exec_payload: dict[str, Any] = {}
+    if winner_source == "local":
+        winner_path = next((p for p in local_dirs if p.name == winner_name), None)
+        if winner_path is not None:
+            output_path = winner_path / "output.txt"
+            receipt_path = winner_path / "receipt.md"
+            exec_path = winner_path / "receipt.exec.json"
+            if output_path.exists():
+                try:
+                    output_text = output_path.read_text(encoding="utf-8", errors="replace")
+                    output_path_str = str(output_path)
+                    receipt_path_str = str(receipt_path)
+                except Exception:
+                    output_text = ""
+            if exec_path.exists():
+                try:
+                    exec_payload = json.loads(exec_path.read_text(encoding="utf-8", errors="replace")) or {}
+                except Exception:
+                    exec_payload = {}
+    else:  # remote
+        output_text = remote_output
+        output_path_str = f"{PVE_CANONICAL_SESSIONS_DIR}/{winner_name}/output.txt"
+        receipt_path_str = f"{PVE_CANONICAL_SESSIONS_DIR}/{winner_name}/receipt.md"
+        if remote_exec_json:
+            try:
+                exec_payload = json.loads(remote_exec_json) or {}
+            except Exception:
+                exec_payload = {}
+
+    summary = parse_verify_output_text(output_text) if output_text else {
+        "status": "unknown",
+        "scope": "",
+        "wrapper_total": 0,
+        "wrapper_pass": 0,
+        "wrapper_fail": 0,
+        "wrapper_warn": 0,
+        "blocking_fail_ids": [],
+        "warning_ids": [],
+    }
+    parsed_status = str(summary.get("status") or "unknown").strip().lower()
+    # Same fallback as _build_verify_result: when output parse yields "unknown",
+    # consult receipt.exec.json's canonical capability status. "done" → pass,
+    # "failed"/"fail"/"error" → failed.
+    if parsed_status == "unknown" and isinstance(exec_payload, dict):
+        exec_status = str(exec_payload.get("status") or "").strip().lower()
+        if exec_status in VERIFY_PASS_STATUSES:
+            parsed_status = "pass"
+        elif exec_status in {"failed", "fail", "error"}:
+            parsed_status = "failed"
+
+    base: dict[str, Any] = {
+        "scope": scope,
+        "generated_at_utc": render_dt(winner_ts) if winner_ts else "",
+        "receipt_path": receipt_path_str,
+        "output_path": output_path_str,
+        "run_key": "",
+        "wrapper_total": summary.get("wrapper_total", 0),
+        "wrapper_pass": summary.get("wrapper_pass", 0),
+        "wrapper_fail": summary.get("wrapper_fail", 0),
+        "wrapper_warn": summary.get("wrapper_warn", 0),
+        "blocking_fail_ids": summary.get("blocking_fail_ids", []),
+        "warning_ids": summary.get("warning_ids", []),
+        "source": winner_source,
+        "age_minutes": age_minutes,
+        "freshness_minutes_window": freshness_minutes,
+    }
+
+    if not output_text:
+        # Receipt directory present but output unreadable — treat as unknown unless fresh-aware staleness hint
+        base.update({
+            "status": "stale" if winner_ts and not is_fresh else "unknown",
+            "stale_status": parsed_status,
+            "freshness": "stale" if winner_ts and not is_fresh else "unknown",
+        })
+        return base
+
+    if not is_fresh:
+        base.update({
+            "status": "stale",
+            "stale_status": parsed_status,
+            "freshness": "stale",
+        })
+        return base
+
+    base.update({
+        "status": parsed_status,
+        "stale_status": "",
+        "freshness": "fresh",
+    })
+    return base
 
 
 VERIFY_RECEIPT_PATTERNS = ("__spine.verify__", "__verify.run__", "__verify.infra.run__", "__verify.fast__")
@@ -815,36 +1115,52 @@ def _empty_verify_result() -> dict[str, Any]:
 
 
 def collect_latest_front_door_verify(paths: dict[str, Path]) -> dict[str, Any]:
-    """Collect the most recent front-door verify receipt.
+    """Collect the most recent front-door verify receipt across local + pve canonical.
 
     Prefers spine-scoped receipts (the front-door authority surface), then
     infra-scoped receipts, and falls back to fast-scoped receipts for backward
-    compatibility.
+    compatibility. Per scope preference, accepts a fresh receipt; if none is
+    fresh in any scope, returns the highest-priority scope's stale-or-unknown
+    result so the secondary readback honestly reports stale rather than masking
+    a stale failed receipt as current truth.
     """
+    scope_to_pattern = {
+        "spine": SPINE_VERIFY_RECEIPT_PATTERN,
+        "infra": "__verify.infra.run__",
+        "fast": "__verify.fast__",
+    }
+    fresh_results: list[dict[str, Any]] = []
+    fallback: dict[str, Any] | None = None
     for target_scope in FRONT_DOOR_VERIFY_SCOPES:
-        for receipt_dir in _verify_receipt_dirs(paths):
-            output_path = receipt_dir / "output.txt"
-            if not output_path.exists():
-                continue
-            try:
-                summary = parse_verify_output(output_path)
-            except Exception:
-                continue
-            scope = summary.get("scope") or ""
-            if not scope and "__spine.verify__" in receipt_dir.name:
-                scope = "spine"
-            if not scope and "__verify.infra.run__" in receipt_dir.name:
-                scope = "infra"
-            if not scope and "__verify.fast__" in receipt_dir.name:
-                scope = "fast"
-            if scope != target_scope:
-                continue
-            return _build_verify_result(receipt_dir, summary, scope)
-    return _empty_verify_result()
+        pattern = scope_to_pattern.get(target_scope)
+        if not pattern:
+            continue
+        result = _collect_canonical_latest_verify(paths, pattern, target_scope)
+        if result.get("freshness") == "fresh":
+            fresh_results.append(result)
+            break  # Highest-priority fresh wins
+        if fallback is None:
+            fallback = result
+    if fresh_results:
+        return fresh_results[0]
+    return fallback if fallback is not None else _empty_verify_result()
 
 
-# Backward-compatible alias
+# Backward-compatible alias for the front-door headline reader.
 collect_latest_fast_verify = collect_latest_front_door_verify
+
+
+def collect_latest_secondary_verify(paths: dict[str, Path]) -> dict[str, Any]:
+    """Collect the most recent verify.infra.run receipt (estate/workload health).
+
+    Per docs/governance/SPINE.md, verify.infra.run is the canonical secondary
+    verify surface (estate/workload health), distinct from spine.verify
+    (spine/object truth). The brief's `Secondary:` field reflects this reader
+    specifically. When no fresh verify.infra.run receipt exists, status is
+    "stale" or "unknown" rather than masking a stale failed receipt as
+    current secondary truth.
+    """
+    return _collect_canonical_latest_verify(paths, "__verify.infra.run__", "infra")
 
 
 ENGINE_VERIFY_RECEIPT_PATTERN = "__verify.engine.run__"
@@ -852,47 +1168,13 @@ SPINE_VERIFY_RECEIPT_PATTERN = "__spine.verify__"
 
 
 def collect_latest_engine_verify(paths: dict[str, Path]) -> dict[str, Any]:
-    """Collect the most recent verify.engine.run receipt."""
-    root = paths["receipts_root"]
-    if not root.exists():
-        return _empty_verify_result()
-    candidates = sorted(
-        (p for p in root.glob(f"RCAP-*{ENGINE_VERIFY_RECEIPT_PATTERN}*") if p.is_dir()),
-        key=lambda p: p.stat().st_mtime, reverse=True,
-    )
-    for receipt_dir in candidates[:10]:
-        output_path = receipt_dir / "output.txt"
-        if not output_path.exists():
-            continue
-        try:
-            summary = parse_verify_output(output_path)
-        except Exception:
-            continue
-        scope = "engine"
-        return _build_verify_result(receipt_dir, summary, scope)
-    return _empty_verify_result()
+    """Collect the most recent verify.engine.run receipt across local + pve canonical."""
+    return _collect_canonical_latest_verify(paths, ENGINE_VERIFY_RECEIPT_PATTERN, "engine")
 
 
 def collect_latest_spine_verify(paths: dict[str, Path]) -> dict[str, Any]:
-    """Collect the most recent spine.verify receipt."""
-    root = paths["receipts_root"]
-    if not root.exists():
-        return _empty_verify_result()
-    candidates = sorted(
-        (p for p in root.glob(f"RCAP-*{SPINE_VERIFY_RECEIPT_PATTERN}*") if p.is_dir()),
-        key=lambda p: p.stat().st_mtime, reverse=True,
-    )
-    for receipt_dir in candidates[:10]:
-        output_path = receipt_dir / "output.txt"
-        if not output_path.exists():
-            continue
-        try:
-            summary = parse_verify_output(output_path)
-        except Exception:
-            continue
-        scope = "spine"
-        return _build_verify_result(receipt_dir, summary, scope)
-    return _empty_verify_result()
+    """Collect the most recent spine.verify receipt across local + pve canonical."""
+    return _collect_canonical_latest_verify(paths, SPINE_VERIFY_RECEIPT_PATTERN, "spine")
 
 
 def build_engine_coherence_summary(
@@ -1044,6 +1326,7 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             orphaned_waves.append(orphan)
     main_override_signals = collect_main_override_signals(paths)
     latest_fast_verify = collect_latest_fast_verify(paths)
+    latest_secondary_verify = collect_latest_secondary_verify(paths)
     latest_engine_verify = collect_latest_engine_verify(paths)
     latest_spine_verify = collect_latest_spine_verify(paths)
     verify_temporal = {}
@@ -1113,7 +1396,9 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
             "recent_main_overrides": len(main_override_signals),
             "engine_verify_status": latest_engine_verify.get("status", "unknown"),
             "spine_verify_status": latest_spine_verify.get("status", "unknown"),
-            "secondary_verify_status": latest_fast_verify.get("status", "unknown"),
+            "secondary_verify_status": latest_secondary_verify.get("status", "unknown"),
+            "secondary_verify_freshness": latest_secondary_verify.get("freshness", "unknown"),
+            "secondary_verify_stale_status": latest_secondary_verify.get("stale_status", ""),
             "latest_verify_status": latest_fast_verify.get("status", "unknown"),
             "latest_verify_scope": latest_fast_verify.get("scope", ""),
             "latest_fast_verify_status": latest_fast_verify.get("status", "unknown"),
@@ -1155,7 +1440,8 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
         "verify": {
             "engine": latest_engine_verify,
             "spine": latest_spine_verify,
-            "secondary": latest_fast_verify,
+            "secondary": latest_secondary_verify,
+            "front_door": latest_fast_verify,
             "latest_fast": latest_fast_verify,
         },
         "temporal_truth": {"verify": verify_temporal},
