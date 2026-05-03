@@ -421,6 +421,15 @@ acting on it. The governed classes (capability, wave-close, controller-prompt,
 loop closeout) are authoritative. Narrative receipts are **compatibility
 residue** — session memory only, not canonical evidence.
 
+On consumer hosts post-D.3b v4 cutover (2026-05-02T21:43Z), narrative receipts
+written by direct local file IO under `$SPINE_STATE/domain-state/` are
+projection/cache per `root.authority.contract.yaml`
+`storage_evidence_node_canonical.file_plane_policy`. There is no governed
+writer today for non-authoritative durable research or derived-conclusion
+notes that future agents on other hosts can reliably find; the seam is named,
+not yet filled. Until a governed writer exists, such notes remain
+session-local — do not infer durability from the file existing on disk.
+
 ### Receipt Outcome Semantics
 
 Every governed receipt expresses an **outcome**: `success`, `failure`, or

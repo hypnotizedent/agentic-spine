@@ -149,9 +149,17 @@ session_posture_resolve() {
 
 # ── Recovery posture resolution ──────────────────────────────────────
 # Detects operator_site from local network interfaces and derives
-# recovery_posture + safe_to_mutate. Called after session_posture_resolve.
-# Sets: __SP_OPERATOR_SITE, __SP_RECOVERY_POSTURE, __SP_SAFE_TO_MUTATE,
+# recovery_posture + recovery_ready. Called after session_posture_resolve.
+# Sets: __SP_OPERATOR_SITE, __SP_RECOVERY_POSTURE, __SP_RECOVERY_READY,
 #        __SP_SITE_DETECTION_BASIS
+#
+# RECOVERY_READY (formerly SAFE_TO_MUTATE, renamed 2026-05-03):
+# Pure recovery-readiness telemetry — signals whether the execution host's
+# canonical state is reachable from this terminal so a mutation could be
+# rolled back. NOT a mutation permission gate. Mutation enforcement lives in
+# role.runtime.control.contract.yaml (bound terminal identity +
+# mutating_capability_allowlist_by_role). This variable has no downstream
+# enforcement consumer; it is informational telemetry only.
 #
 # Site CIDRs from topology.sites.yaml:
 #   shop: 192.168.1.0/24
@@ -202,20 +210,20 @@ session_recovery_posture_resolve() {
         *)      __SP_RECOVERY_POSTURE="unknown" ;;
     esac
 
-    # safe_to_mutate derivation
+    # recovery_ready derivation (telemetry only — see banner above; not a mutation gate)
     local execution_host_state_status=""
     execution_host_state_status="$(__sp_probe_execution_host_state)"
     case "$execution_host_state_status" in
         ready)
-            __SP_SAFE_TO_MUTATE="true"
+            __SP_RECOVERY_READY="true"
             __SP_SITE_DETECTION_BASIS="${__SP_SITE_DETECTION_BASIS}+execution_host_state:ready"
             ;;
         *)
             case "$__SP_RECOVERY_POSTURE" in
-                full)    __SP_SAFE_TO_MUTATE="true" ;;
-                partial) __SP_SAFE_TO_MUTATE="site_local_only" ;;
-                remote)  __SP_SAFE_TO_MUTATE="tailscale_reachable_only" ;;
-                *)       __SP_SAFE_TO_MUTATE="false" ;;
+                full)    __SP_RECOVERY_READY="true" ;;
+                partial) __SP_RECOVERY_READY="site_local_only" ;;
+                remote)  __SP_RECOVERY_READY="tailscale_reachable_only" ;;
+                *)       __SP_RECOVERY_READY="false" ;;
             esac
             if [ -n "$execution_host_state_status" ]; then
                 __SP_SITE_DETECTION_BASIS="${__SP_SITE_DETECTION_BASIS}+execution_host_state:${execution_host_state_status}"
@@ -323,7 +331,7 @@ session_posture_emit_env() {
 
     printf 'export SPINE_OPERATOR_SITE=%q\n' "${__SP_OPERATOR_SITE:-unknown}"
     printf 'export SPINE_RECOVERY_POSTURE=%q\n' "${__SP_RECOVERY_POSTURE:-unknown}"
-    printf 'export SPINE_SAFE_TO_MUTATE=%q\n' "${__SP_SAFE_TO_MUTATE:-false}"
+    printf 'export SPINE_RECOVERY_READY=%q\n' "${__SP_RECOVERY_READY:-false}"
     printf 'export SPINE_SITE_DETECTION_BASIS=%q\n' "${__SP_SITE_DETECTION_BASIS:-unavailable}"
 
     printf 'export SPINE_DEFAULT_VERIFY_CMD=%q\n' "./bin/ops cap run verify.engine.run && ./bin/ops cap run spine.verify"

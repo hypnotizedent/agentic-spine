@@ -158,8 +158,10 @@ pve-r620 likewise) is **projection/cache**, not durable shared state. Writes
 that must be durable shared authority must run via `cap.sh`-routed cap
 execution (which lands on the authority host) or write through the
 canonical mount. Local-direct writes on a consumer host produce projection
-artifacts only — not durable. New repo docs require deliberate promotion
-and human-steward co-sign.
+artifacts only — not durable. There is no governed writer today for
+non-authoritative durable research or derived-conclusion notes; until one
+exists, such notes are session-local only. New repo docs require deliberate
+promotion and human-steward co-sign.
 (Authority: [`root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical.file_plane_policy`](ops/bindings/root.authority.contract.yaml),
 [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
@@ -226,3 +228,20 @@ Verify hierarchy for all agent sessions:
   estate/workload health — they are scoped secondary surfaces, not peers
 - estate/workload verify surfaces must not be treated as spine closeout truth or
   as packet/loop/governance blockers unless a contract explicitly says so
+
+Live verify exit codes govern, not the cached `ops status` projection — re-run
+`verify.engine.run` and `spine.verify` directly before treating any failure as
+a blocker, since the "spine verify" line in `ops status` is a projection that
+may lag the live truth. A FAIL D-gate blocks bounded mutation only when its
+scope predicate overlaps the surface being modified; per-host scope skips such
+as `D153` and `D397` already establish the per-gate scope-predicate pattern. A
+bound `worker`-class terminal may proceed in a managed worktree on an
+orthogonal red with an explicit risk note. The real mutation gate is bound
+terminal identity (`SPINE_TERMINAL_ID` set by `ops terminal launch`) plus the
+capability role allowlist in `role.runtime.control.contract.yaml`
+(`runtime_roles.mutating_roles` and `mutating_capability_allowlist_by_role`),
+not posture telemetry such as `SPINE_RECOVERY_READY` (formerly
+`SPINE_SAFE_TO_MUTATE`, renamed for honesty — it signals execution-host
+recovery readiness, not mutation permission, and has no enforcement consumer).
+(Authority: [`role.runtime.control.contract.yaml`](ops/bindings/role.runtime.control.contract.yaml),
+[`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
