@@ -1203,7 +1203,10 @@ _route_to_db_authority_if_needed() {
         "$SPINE_CODE/ops/capabilities.yaml" 2>/dev/null)"
 
     # Routing decision (D.3c read-path extension):
-    # - mutating/destructive: always route (writes need authority)
+    # - mutating/destructive: always route (writes need authority), UNLESS the
+    #   cap declares routing.db_authority: skip — used by mutating caps that
+    #   target an external system (e.g., gitea API) and do not touch
+    #   shared_authority.db. Default for mutating remains route-to-authority.
     # - read-only/read-only-with-cache: route only if cap.state_authority == "shared_authority_db"
     # - other: stay local
     # Caps without state_authority declared default to local for read-only — but
@@ -1211,6 +1214,12 @@ _route_to_db_authority_if_needed() {
     # lib-level db_authority_guard and fail closed at sqlite open time, so the
     # disease cannot land silently. D447 verify enforces the annotation.
     if [[ "$cap_safety" == "mutating" || "$cap_safety" == "destructive" ]]; then
+        local cap_db_routing
+        cap_db_routing="$(yq e ".capabilities.\"${cap_name}\".routing.db_authority // \"\"" \
+            "$SPINE_CODE/ops/capabilities.yaml" 2>/dev/null)"
+        if [[ "$cap_db_routing" == "skip" ]]; then
+            return 126
+        fi
         : # route (fall through to SSH dispatch below)
     elif [[ "$cap_safety" == "read-only" || "$cap_safety" == "read-only-with-cache" ]]; then
         local cap_state_authority

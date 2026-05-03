@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# gitea-deploy-key-ensure - Idempotent admission of a READ-ONLY SSH deploy
+# key to a Gitea repository.
+#
+# This is the only governed Gitea API mutation cap admitted by
+# platform.control.surfaces.yaml gitea.control.governed_api_caps. It is
+# narrow by design: GET-then-POST-if-absent, read_only:true is hardcoded,
+# and the cap refuses to act if a same-titled key already exists with
+# write access. It does not delete keys, list keys for other purposes,
+# or admit any other class of Gitea mutation.
+#
+# Authority: ops/bindings/platform.control.surfaces.yaml — gitea.control
+#            governed_api_caps lists this cap as the narrow exception.
+# Token: GITEA_API_TOKEN via ops/plugins/providers/bin/infisical-agent.sh
+# API:   POST /api/v1/repos/{owner}/{repo}/keys with read_only:true
+#
+# Usage:
+#   gitea-deploy-key-ensure --repo <owner>/<name> --title <title> --key-file <path>
+#   gitea-deploy-key-ensure --repo <owner>/<name> --title <title> --key '<ssh-key-line>'
+#   gitea-deploy-key-ensure --repo <owner>/<name> --title <title> --key-from-host <ssh-host>:<path>
+#
+# Exit codes:
+#   0   key admitted (created) or already-present (idempotent no-op)
+#   1   API error
+#   2   bad usage / missing dependency
+#   3   refuses to act (existing key with same title is write-enabled)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+
+# shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/platform-control-surface.sh
+source "$SPINE_ROOT/ops/lib/platform-control-surface.sh"
+
+stop(){ echo "STOP ($1): $2" >&2; exit "$1"; }
+
+command -v curl >/dev/null 2>&1 || stop 2 "missing dependency: curl"
+command -v python3 >/dev/null 2>&1 || stop 2 "missing dependency: python3"
+command -v ssh >/dev/null 2>&1 || stop 2 "missing dependency: ssh"
+
+REPO=""
+TITLE=""
+KEY_LINE=""
+KEY_FILE=""
+KEY_FROM_HOST=""
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) REPO="$2"; shift 2 ;;
+    --title) TITLE="$2"; shift 2 ;;
+    --key) KEY_LINE="$2"; shift 2 ;;
+    --key-file) KEY_FILE="$2"; shift 2 ;;
+    --key-from-host) KEY_FROM_HOST="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help)
+      sed -n '2,32p' "$0"
+      exit 0
+      ;;
+    *) stop 2 "unknown arg: $1" ;;
+  esac
+done
+
+[[ -n "$REPO" ]] || stop 2 "--repo <owner>/<name> required"
+[[ -n "$TITLE" ]] || stop 2 "--title <title> required"
+[[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || stop 2 "--repo must be <owner>/<name>"
+
+# Resolve key content
+KEY_CONTENT=""
+if [[ -n "$KEY_LINE" ]]; then
+  KEY_CONTENT="$KEY_LINE"
+elif [[ -n "$KEY_FILE" ]]; then
+  [[ -r "$KEY_FILE" ]] || stop 2 "key-file not readable: $KEY_FILE"
+  KEY_CONTENT="$(cat "$KEY_FILE")"
+elif [[ -n "$KEY_FROM_HOST" ]]; then
+  remote_host="${KEY_FROM_HOST%%:*}"
+  remote_path="${KEY_FROM_HOST#*:}"
+  [[ -n "$remote_host" && -n "$remote_path" && "$remote_host" != "$KEY_FROM_HOST" ]] || stop 2 "--key-from-host must be host:/path"
+  KEY_CONTENT="$(ssh "$remote_host" "cat $remote_path" 2>/dev/null)" || stop 2 "ssh $remote_host cat $remote_path failed"
+else
+  stop 2 "one of --key, --key-file, --key-from-host required"
+fi
+
+# Trim whitespace and validate basic shape
+KEY_CONTENT="$(echo "$KEY_CONTENT" | head -1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+[[ -n "$KEY_CONTENT" ]] || stop 2 "resolved key is empty"
+[[ "$KEY_CONTENT" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)\  ]] \
+  || stop 2 "key does not look like an OpenSSH public key line"
+
+# Resolve gitea endpoint (prefer resolved internal URL, fall back to admin)
+resolved="$(control_surface_backend_resolved_url gitea 2 2>/dev/null || true)"
+GITEA_URL="$(awk '{print $1}' <<<"$resolved")"
+[[ -n "$GITEA_URL" ]] || GITEA_URL="$(control_surface_backend_url gitea)"
+GITEA_HOST="${GITEA_URL#*://}"
+
+# Resolve API token
+INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
+[[ -x "$INFISICAL_AGENT" ]] || stop 2 "infisical-agent.sh not executable at $INFISICAL_AGENT"
+GITEA_TOKEN="$("$INFISICAL_AGENT" get infrastructure prod GITEA_API_TOKEN 2>/dev/null || true)"
+[[ -n "$GITEA_TOKEN" ]] || stop 1 "GITEA_API_TOKEN not resolvable from Infisical (path=/spine/vm-infra/gitea)"
+
+AUTH="Authorization: token ${GITEA_TOKEN}"
+CONNECT_TIMEOUT=5
+MAX_TIME=15
+KEYS_PATH="/api/v1/repos/${REPO}/keys"
+
+# Helpers
+api_get_status_body() {
+  local path="$1"
+  curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+    -o /tmp/gitea-deploy-key-ensure.body.$$ \
+    -w "%{http_code}" \
+    -H "$AUTH" "${GITEA_URL}${path}"
+}
+
+api_post_status_body() {
+  local path="$1"
+  local body="$2"
+  curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+    -o /tmp/gitea-deploy-key-ensure.body.$$ \
+    -w "%{http_code}" \
+    -X POST \
+    -H "$AUTH" \
+    -H "Content-Type: application/json" \
+    --data "$body" \
+    "${GITEA_URL}${path}"
+}
+
+cleanup() {
+  rm -f /tmp/gitea-deploy-key-ensure.body.$$ 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Compare keys by their ssh-keygen fingerprint (algorithm + key body) so a
+# key with a different comment is recognized as the same.
+key_body_only() {
+  echo "$1" | awk '{print $1" "$2}'
+}
+
+CANDIDATE_BODY="$(key_body_only "$KEY_CONTENT")"
+
+echo "gitea.deploy_key.ensure"
+echo "repo: $REPO"
+echo "title: $TITLE"
+echo "endpoint: ${GITEA_URL}${KEYS_PATH}"
+echo "dry_run: $DRY_RUN"
+echo
+
+# 1. GET existing keys
+get_status="$(api_get_status_body "$KEYS_PATH")"
+get_body="$(cat /tmp/gitea-deploy-key-ensure.body.$$ 2>/dev/null || echo '[]')"
+
+if [[ "$get_status" == "404" ]]; then
+  stop 1 "repo not found: $REPO (HTTP 404)"
+fi
+if [[ "$get_status" != "200" ]]; then
+  echo "$get_body" >&2
+  stop 1 "GET ${KEYS_PATH} returned HTTP $get_status (expected 200)"
+fi
+
+# Find a matching deploy key by title OR by key body (algo+body, ignoring comment)
+# Pass the GET body as a positional arg to avoid heredoc/herestring stdin conflict.
+match_json="$(python3 -c '
+import json, sys
+data = sys.argv[1]
+candidate_body = sys.argv[2].strip()
+candidate_title = sys.argv[3].strip()
+try:
+    keys = json.loads(data)
+except Exception as e:
+    print(json.dumps({"error": f"parse: {e}"}))
+    sys.exit(0)
+for k in keys:
+    body = " ".join(k.get("key", "").split()[:2])
+    if body == candidate_body or k.get("title", "") == candidate_title:
+        print(json.dumps({
+            "match": True,
+            "id": k.get("id"),
+            "title": k.get("title"),
+            "read_only": k.get("read_only"),
+            "body_match": body == candidate_body,
+            "title_match": k.get("title", "") == candidate_title,
+        }))
+        sys.exit(0)
+print(json.dumps({"match": False}))
+' "$get_body" "$CANDIDATE_BODY" "$TITLE")"
+
+match_present="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('match', False))" "$match_json")"
+
+if [[ "$match_present" == "True" ]]; then
+  match_read_only="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('read_only', None))" "$match_json")"
+  match_id="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('id', ''))" "$match_json")"
+  match_title="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('title', ''))" "$match_json")"
+  body_match="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('body_match', False))" "$match_json")"
+
+  if [[ "$match_read_only" == "True" ]]; then
+    echo "outcome: present"
+    echo "key_id: $match_id"
+    echo "title_on_gitea: $match_title"
+    echo "read_only: True"
+    echo "body_match: $body_match"
+    echo "no mutation needed (idempotent no-op)"
+    exit 0
+  else
+    echo "outcome: refused" >&2
+    echo "key_id: $match_id" >&2
+    echo "title_on_gitea: $match_title" >&2
+    echo "read_only: $match_read_only" >&2
+    echo "this cap will not admit or modify a write-enabled key under the deploy-key admission contract." >&2
+    echo "remove the existing write-enabled key via browser admin and re-run, or pick a different title." >&2
+    exit 3
+  fi
+fi
+
+# 2. Not present — POST with read_only:true (hardcoded)
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "outcome: would_create"
+  echo "title: $TITLE"
+  echo "read_only: true"
+  echo "(dry run; no API write)"
+  exit 0
+fi
+
+post_body="$(python3 -c '
+import json, sys
+title = sys.argv[1]
+key = sys.argv[2]
+print(json.dumps({"title": title, "key": key, "read_only": True}))
+' "$TITLE" "$KEY_CONTENT")"
+
+post_status="$(api_post_status_body "$KEYS_PATH" "$post_body")"
+post_resp_body="$(cat /tmp/gitea-deploy-key-ensure.body.$$ 2>/dev/null || echo '{}')"
+
+if [[ "$post_status" == "201" ]]; then
+  new_id="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('id', ''))" "$post_resp_body")"
+  new_ro="$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('read_only', None))" "$post_resp_body")"
+  echo "outcome: created"
+  echo "key_id: $new_id"
+  echo "read_only: $new_ro"
+  if [[ "$new_ro" != "True" ]]; then
+    echo "WARNING: gitea returned read_only=$new_ro despite POST read_only:true" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ "$post_status" == "422" ]]; then
+  echo "outcome: rejected_by_gitea" >&2
+  echo "$post_resp_body" >&2
+  echo "POST ${KEYS_PATH} returned 422 (likely duplicate key already present under different title or invalid key shape)" >&2
+  stop 1 "gitea rejected the deploy key admission"
+fi
+
+echo "$post_resp_body" >&2
+stop 1 "POST ${KEYS_PATH} returned HTTP $post_status (expected 201)"
