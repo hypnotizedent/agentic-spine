@@ -39,6 +39,13 @@ compat_exceptions = {
     "ops/plugins/infra/host/bin/host-operator-hardware-bootstrap-shelf-publish",
     "surfaces/verify/d19-backup-drift.sh",
     "surfaces/verify/d398-repo-local-evidence-write-target-lock.sh",
+    # root.authority.contract.yaml is the canonical declaration of where
+    # receipts live; its narrative naturally references "receipts/" inside
+    # /md1400/spine/receipts and Darwin install-default paths. The grep is
+    # over-broad for this file. PACKET-585 added the storage_evidence_node
+    # canonical text on line 24 ("state/evidence/mailroom/receipts/archive
+    # roots") which is descriptive authority, not a write-target violation.
+    "ops/bindings/root.authority.contract.yaml",
 }
 allowed_contexts = (
     "docs/receipts/",
