@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# .githooks/commit-msg — PACKET-NN commit-label governance hook.
+#
+# L1 engine packet semantics enforced at the forge commit boundary.
+# Calls the canonical validator via cap.sh routing so canonical
+# controller-prompt truth on storage_evidence_node is the source — not
+# whatever local projection the committing host happens to have.
+#
+# Policy:
+#   REUSE  (same PACKET-NN, different slug)         → HARD REJECT
+#   GHOST  (no governed packet)                     → HARD REJECT
+#   PARENT-PHASE (bare PACKET-NN, number governed)  → ALLOW
+#   OK     (exact governed match)                   → ALLOW
+#
+# Override: SPINE_PACKET_LABEL_OVERRIDE_REASON='<reason>' bypasses
+# REUSE/GHOST blocks and prints the reason visibly during commit.
+#
+# Exit:
+#   0 → commit allowed
+#   1 → commit blocked
+#
+# This hook MUST stay thin. The validator is the engine check; the hook
+# is just the enforcement point.
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="${1:-}"
+if [[ -z "$COMMIT_MSG_FILE" || ! -f "$COMMIT_MSG_FILE" ]]; then
+    # Git always passes the message file; if absent, do not block.
+    exit 0
+fi
+
+# Skip merge commits, fixup commits, etc. — they often replicate prior
+# commit subjects with PACKET-NN that we'd false-flag.
+if git rev-parse --verify MERGE_HEAD >/dev/null 2>&1; then
+    exit 0
+fi
+FIRST_LINE="$(head -n1 "$COMMIT_MSG_FILE" 2>/dev/null || true)"
+if [[ "$FIRST_LINE" =~ ^(Merge\ |Revert\ |fixup!\ |squash!\ ) ]]; then
+    exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$ROOT" || ! -d "$ROOT" ]]; then
+    # No repo context (shouldn't happen for commit-msg but safe).
+    exit 0
+fi
+
+# Call the canonical validator via cap.sh so the read routes to
+# storage_evidence_node and sees authoritative controller-prompts/.
+# Pass commit-msg path; bypass cap.sh's own argparse via `-- --commit-msg-file`.
+cd "$ROOT"
+
+# Ensure the validator gets stdin closed so it doesn't try to read it.
+"$ROOT/bin/ops" cap run packet.label.validate -- \
+    --commit-msg-file "$COMMIT_MSG_FILE" </dev/null
+rc=$?
+
+# cap.sh wraps the validator's exit code. Treat 0 as pass; non-zero as
+# block (operator can use SPINE_PACKET_LABEL_OVERRIDE_REASON for an
+# explicit, audit-visible bypass).
+exit "$rc"

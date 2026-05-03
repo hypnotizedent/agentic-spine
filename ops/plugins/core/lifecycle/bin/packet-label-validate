@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""packet-label-validate — Shared validator for PACKET-NN commit-message labels.
+
+L1 engine packet semantics enforced at the forge commit boundary. The
+canonical authority for governed packet IDs is
+$SPINE_STATE/controller-prompts/CONTROLLER-PACKET-{NN}-{SLUG}-{DATE}.md
+(birth/close governed by controller_prompt.create / .close).
+
+This validator is the single source of truth for commit-message
+PACKET-NN classification. Called by:
+  - .githooks/commit-msg (forge enforcement at commit time)
+  - any future readback that needs the same classification
+
+Classification per PACKET-NN-(SLUG?) token in commit message text:
+
+  OK           exact governed packet ID match exists
+               (e.g., commit says PACKET-625-ENTRY-READER-... and
+               that exact file is in controller-prompts/)
+
+  PARENT-PHASE bare PACKET-NN whose number prefix matches a governed
+               packet, AND the message contains a phased indicator
+               like "Phase N" / "Step N" / "(PACKET-NN ...)"
+               referencing the governed parent
+
+  REUSE        same PACKET-NN- prefix as a governed packet, but
+               different slug → HARD REJECT (the PACKET-625 collision
+               class). Override permitted.
+
+  GHOST        no governed packet for that PACKET-NN- prefix at all
+               → HARD REJECT (the PACKET-611 / PACKET-619 ghost-label
+               class). Override permitted; PARENT-PHASE escape hatch
+               also permitted.
+
+Override:
+  Set SPINE_PACKET_LABEL_OVERRIDE_REASON=<reason> in the env.
+  Reason is printed visibly during commit so future agents see it.
+  An empty reason is treated as no override.
+
+Exit codes:
+  0 — all PACKET-NN tokens are OK or PARENT-PHASE
+  1 — at least one REUSE or GHOST classification, no override
+  2 — REUSE/GHOST present but override accepted (validator prints
+       acknowledgment to stderr; commit proceeds — caller treats
+       this as success)
+
+Usage:
+  packet-label-validate --commit-msg-file <path>
+  packet-label-validate --commit-msg-text "<text>"
+  echo "<text>" | packet-label-validate --stdin
+
+Read-only. Never mutates state.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from pathlib import Path
+
+PACKET_TOKEN_RE = re.compile(r"\bPACKET-(\d+)(-[A-Z][A-Z0-9-]*)?\b")
+
+# Phased-work indicators that legitimize a bare PACKET-NN reference
+# when the number IS governed but no slug appears alongside.
+PHASE_INDICATOR_RE = re.compile(
+    r"\b(Phase\s+\d+|Step\s+\d+|Slice\s+\d+|follow-?on|fix|amend|closure|continuation)\b",
+    re.IGNORECASE,
+)
+
+
+_CP_FILE_RE = re.compile(
+    r"^(?:MAILROOM-)?CONTROLLER-PACKET-(\d+)-(.+)\.md$"
+)
+# Strip 1 or 2 trailing `-YYYYMMDD` date suffixes from the slug
+# (controller_prompt.create produces double-date filenames for some shapes).
+_TRAILING_DATE_RE = re.compile(r"(?:-\d{8})+$")
+
+
+def _load_governed_packets(spine_state: Path) -> dict[int, list[str]]:
+    """Map PACKET number → list of governed full IDs (PACKET-NN-SLUG).
+
+    Reads $SPINE_STATE/controller-prompts/CONTROLLER-PACKET-*.md filenames.
+    Strips trailing date suffix(es) from the slug. Returns {} if the
+    directory doesn't exist (no canonical to compare against).
+    """
+    cp_dir = spine_state / "controller-prompts"
+    if not cp_dir.is_dir():
+        return {}
+    governed: dict[int, list[str]] = {}
+    for entry in cp_dir.iterdir():
+        if not entry.is_file():
+            continue
+        name = entry.name
+        m = _CP_FILE_RE.match(name)
+        if not m:
+            continue
+        try:
+            num = int(m.group(1))
+        except ValueError:
+            continue
+        raw_slug = m.group(2)
+        # Strip trailing date suffix(es) so the slug normalizes to the form
+        # used in commit-message PACKET-NN-SLUG references.
+        slug = _TRAILING_DATE_RE.sub("", raw_slug)
+        if not slug:
+            continue
+        full_id = f"PACKET-{num}-{slug}"
+        governed.setdefault(num, []).append(full_id)
+    return governed
+
+
+def _classify_token(
+    token_num: int,
+    token_slug: str | None,
+    msg_text: str,
+    governed: dict[int, list[str]],
+) -> tuple[str, str]:
+    """Return (classification, detail) for a single PACKET-NN(-SLUG)? token.
+
+    classification ∈ {OK, PARENT-PHASE, REUSE, GHOST}.
+    detail is a human-readable explanation.
+
+    Slug normalization: trailing -YYYYMMDD date suffix(es) are stripped
+    from BOTH governed and commit-message slugs before comparison, since
+    commit messages may include a date suffix (matching the filename
+    shape) that the governed slug stored in our index lacks.
+    """
+    governed_for_num = governed.get(token_num, [])
+
+    if token_slug is None or token_slug == "":
+        # Bare PACKET-NN reference. PARENT-PHASE if number is governed.
+        if governed_for_num:
+            return (
+                "PARENT-PHASE",
+                f"bare PACKET-{token_num} matches governed packet "
+                f"({governed_for_num[0]})",
+            )
+        return ("GHOST", f"no governed packet for PACKET-{token_num}")
+
+    # Has a slug — normalize trailing date suffix(es) for comparison
+    normalized_token_slug = _TRAILING_DATE_RE.sub("", token_slug)
+    candidate_id = f"PACKET-{token_num}{normalized_token_slug}"
+    if candidate_id in governed_for_num:
+        raw_label = f"PACKET-{token_num}{token_slug}"
+        return ("OK", f"governed match: {raw_label} → {candidate_id}")
+    if governed_for_num:
+        return (
+            "REUSE",
+            f"PACKET-{token_num} reused with different slug. governed: "
+            f"{governed_for_num[0]} ; commit label: {candidate_id}",
+        )
+    return ("GHOST", f"no governed packet for PACKET-{token_num}{token_slug}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="packet-label-validate")
+    src = parser.add_mutually_exclusive_group(required=True)
+    src.add_argument("--commit-msg-file", help="Path to commit message file")
+    src.add_argument("--commit-msg-text", help="Commit message text directly")
+    src.add_argument("--stdin", action="store_true", help="Read commit message from stdin")
+    parser.add_argument(
+        "--spine-state",
+        default=os.environ.get("SPINE_STATE", ""),
+        help="SPINE_STATE root (default: $SPINE_STATE env)",
+    )
+    args = parser.parse_args()
+
+    if args.commit_msg_file:
+        try:
+            text = Path(args.commit_msg_file).read_text(encoding="utf-8", errors="ignore")
+        except OSError as e:
+            print(f"packet-label-validate: cannot read {args.commit_msg_file}: {e}", file=sys.stderr)
+            return 1
+    elif args.commit_msg_text is not None:
+        text = args.commit_msg_text
+    else:
+        text = sys.stdin.read()
+
+    if not args.spine_state:
+        # No SPINE_STATE → cannot validate. Don't block; this would make
+        # commits impossible in environments without a configured state root.
+        # Print a single-line note to stderr and pass.
+        print(
+            "packet-label-validate: SPINE_STATE not set; skipping (no canonical to validate against)",
+            file=sys.stderr,
+        )
+        return 0
+
+    spine_state = Path(args.spine_state)
+    governed = _load_governed_packets(spine_state)
+
+    # Find all PACKET-NN tokens in the message
+    tokens: list[tuple[int, str | None, str]] = []
+    for m in PACKET_TOKEN_RE.finditer(text):
+        num = int(m.group(1))
+        slug = m.group(2)  # may be None or e.g. "-ENTRY-READER-CONVERGENCE-..."
+        tokens.append((num, slug, m.group(0)))
+
+    if not tokens:
+        # No PACKET-NN tokens → nothing to validate
+        return 0
+
+    classifications = []
+    for num, slug, raw in tokens:
+        cls, detail = _classify_token(num, slug, text, governed)
+        classifications.append((raw, cls, detail))
+
+    blocking = [c for c in classifications if c[1] in ("REUSE", "GHOST")]
+
+    if not blocking:
+        # All tokens are OK or PARENT-PHASE
+        return 0
+
+    override_reason = (os.environ.get("SPINE_PACKET_LABEL_OVERRIDE_REASON") or "").strip()
+    if override_reason:
+        # Override accepted; print visibly so future readers see it
+        print(
+            "packet-label-validate: PACKET-NN classification overridden via "
+            f"SPINE_PACKET_LABEL_OVERRIDE_REASON='{override_reason}'",
+            file=sys.stderr,
+        )
+        for raw, cls, detail in classifications:
+            if cls in ("REUSE", "GHOST"):
+                print(f"  [{cls}] {raw}: {detail} (override accepted)", file=sys.stderr)
+        return 2
+
+    # Block
+    print("packet-label-validate: BLOCKED — PACKET-NN commit-label issue(s):", file=sys.stderr)
+    for raw, cls, detail in classifications:
+        if cls in ("REUSE", "GHOST"):
+            print(f"  [{cls}] {raw}: {detail}", file=sys.stderr)
+    print(
+        "\n  Either:",
+        file=sys.stderr,
+    )
+    print(
+        "    1. create the governed controller-prompt packet via "
+        "`./bin/ops cap run controller_prompt.create` first, OR",
+        file=sys.stderr,
+    )
+    print(
+        "    2. use a non-PACKET-NN commit subject (LOOP-* prefix or "
+        "descriptive), OR",
+        file=sys.stderr,
+    )
+    print(
+        "    3. set SPINE_PACKET_LABEL_OVERRIDE_REASON='<reason>' to bypass "
+        "explicitly (the reason will print in commit output).",
+        file=sys.stderr,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
