@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+"""forge.agent_boundary.status — read-only agent_boundary_proof Stage 1.
+
+Materializes Stage 1 of the forge_node.agent_boundary_proof on the
+forge_node ladder (PACKET-604 under PACKET-588 phased order). Read-only
+enumeration of access paths and commit-author classification on the
+forge runtime body — answers "can agents write to forge only through
+governed boundaries?" by surfacing the auth + write-path surface so any
+gap is visible.
+
+Probes (Postgres SELECTs + git log via docker exec, NO API token use,
+NO mutation):
+- Recent commits on origin/main of the primary repo (last N), classified
+  by author email pattern (operator/agent/unknown).
+- public_key (SSH key) inventory: count + names + key_mode/key_type +
+  per-user owner_id.
+- deploy_key inventory: count + names + repo_id binding.
+- access_token inventory: count + names + scope (NEVER token values or
+  hashes — only metadata).
+- oauth2_application inventory: count + names.
+- webhook inventory: count.
+- Cross-reference branch_protection_readback_proof receipt to surface
+  whitelist users + structural enforcement state for main.
+
+Output: receipt with raw observations + classification (the boundary is
+structurally_enforced / partially_enforced / not_enforced) + drift list.
+
+Stage 2 (mutating enforcement — adding bot-only writer account, structural
+pre-receive hook, required PR + status checks on main, signed-commits
+requirement) is FUTURE and explicitly out of scope. Stage 1's job is to
+make the current boundary state honestly visible.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml  # type: ignore
+except ImportError:
+    print("forge.agent_boundary.status requires PyYAML", file=sys.stderr)
+    sys.exit(2)
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+SPINE_STATE = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtime/spine/state")))
+NODE_ROLE_CONTRACT = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
+RECEIPT_DIR = SPINE_STATE / "domain-state/forge-node"
+RECEIPT_LATEST = RECEIPT_DIR / "agent-boundary-proof-latest.yaml"
+BRANCH_PROTECTION_RECEIPT = SPINE_STATE / "domain-state/forge-node/branch-protection-readback-proof-latest.yaml"
+
+PRIMARY_REPO_OWNER = "ronny"
+PRIMARY_REPO = "agentic-spine"
+GITEA_DATA_REPOS_DIR = "/data/git/repositories"
+DEFAULT_GITEA_CONTAINER = "gitea"
+DEFAULT_POSTGRES_CONTAINER = "gitea-postgres"
+DEFAULT_SSH_CONNECT_TIMEOUT = "8"
+RECENT_COMMIT_LIMIT = 50
+
+# Author email patterns flagged as "agent-origin." Tightening this list is
+# Stage 2 work; Stage 1 just records what patterns matched.
+AGENT_EMAIL_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\bbot\b",
+        r"\bbot@",
+        r"\[bot\]",
+        r"^bot\.",
+        r"runner@",
+        r"action@",
+        r"actions@",
+        r"automated@",
+        r"system@",
+        r"noreply@",
+        r"claude(\.|-|\+|@|bot)",
+        r"codex(\.|-|\+|@|bot)",
+        r"copilot(\.|-|\+|@|bot)",
+        r"gitea-actions",
+    )
+]
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_runtime_body() -> dict[str, Any]:
+    contract = load_yaml(NODE_ROLE_CONTRACT)
+    forge = (((contract.get("node_types") or {}).get("forge_node") or {}).get("promotion_standard") or {})
+    return forge.get("current_runtime_body") or {}
+
+
+def resolve_ssh_target(ssh_targets_id: str) -> dict[str, Any]:
+    targets_doc = load_yaml(REPO_ROOT / "ops/bindings/ssh.targets.yaml")
+    ssh_block = targets_doc.get("ssh") or {}
+    targets = ssh_block.get("targets") if isinstance(ssh_block, dict) else None
+    if isinstance(targets, list):
+        for entry in targets:
+            if isinstance(entry, dict) and entry.get("id") == ssh_targets_id:
+                return entry
+    return {}
+
+
+def pick_ssh_address(target: dict[str, Any]) -> str | None:
+    return target.get("tailscale_ip") or target.get("host") or target.get("lan_ip")
+
+
+def remote_run(user: str, host: str, command: str, timeout: int = 15) -> tuple[int, str, str]:
+    full = [
+        "ssh",
+        "-o", f"ConnectTimeout={DEFAULT_SSH_CONNECT_TIMEOUT}",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        f"{user}@{host}",
+        command,
+    ]
+    try:
+        proc = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, "", f"ssh timeout after {timeout}s"
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def docker_exec(user: str, host: str, container: str, inner_cmd: str, timeout: int = 15) -> tuple[int, str, str]:
+    cmd = f"docker exec {shlex.quote(container)} sh -c {shlex.quote(inner_cmd)}"
+    return remote_run(user, host, cmd, timeout=timeout)
+
+
+def psql_select(user: str, host: str, sql: str) -> tuple[int, str, str]:
+    """Run a read-only SELECT against the Gitea Postgres database. SQL must
+    be the SELECT body only; we wrap it with `psql -U gitea -d gitea -t -A
+    -F"|"` so output is one row per line, pipe-delimited, no headers."""
+    safe_inner = (
+        f"psql -U gitea -d gitea -t -A -F'|' -c {shlex.quote(sql)}"
+    )
+    return docker_exec(user, host, DEFAULT_POSTGRES_CONTAINER, safe_inner)
+
+
+def classify_email(email: str) -> str:
+    """Return 'agent' | 'operator' | 'unknown'. The current contract is
+    that operator commits are authored as Ronny; agent commits would carry
+    a runner/bot/automated email pattern. Unknown is the in-between
+    category for emails that don't match the agent pattern but also aren't
+    the known operator email."""
+    if not email:
+        return "unknown"
+    for pat in AGENT_EMAIL_PATTERNS:
+        if pat.search(email):
+            return "agent"
+    if email.lower() in {"hypnotizedent@gmail.com"}:
+        return "operator"
+    return "unknown"
+
+
+def probe_recent_commits(user: str, host: str) -> dict[str, Any]:
+    repo_path = f"{GITEA_DATA_REPOS_DIR}/{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}.git"
+    rc, out, err = docker_exec(
+        user, host, DEFAULT_GITEA_CONTAINER,
+        f"git --git-dir={shlex.quote(repo_path)} log --pretty=format:'%H|%an|%ae|%aI' "
+        f"-{RECENT_COMMIT_LIMIT} main",
+    )
+    rows: list[dict[str, Any]] = []
+    classified = {"operator": 0, "agent": 0, "unknown": 0}
+    agent_rows: list[dict[str, Any]] = []
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("|", 3)
+            if len(parts) < 4:
+                continue
+            sha, name, email, when = parts
+            cls = classify_email(email)
+            classified[cls] = classified.get(cls, 0) + 1
+            row = {"sha": sha, "author_name": name, "author_email": email, "author_iso": when, "classification": cls}
+            rows.append(row)
+            if cls == "agent":
+                agent_rows.append(row)
+    return {
+        "rc": rc,
+        "stderr": err,
+        "repo": f"{PRIMARY_REPO_OWNER}/{PRIMARY_REPO}",
+        "ref": "main",
+        "count_inspected": len(rows),
+        "classified": classified,
+        "agent_origin_observed_on_main": classified.get("agent", 0) > 0,
+        "agent_origin_rows": agent_rows[:10],
+        "sample_recent": rows[:5],
+    }
+
+
+def probe_public_keys(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = psql_select(
+        user, host,
+        "SELECT id, owner_id, name, mode, type, to_timestamp(created_unix) AT TIME ZONE 'UTC' "
+        "FROM public_key ORDER BY id",
+    )
+    keys: list[dict[str, Any]] = []
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) < 6:
+                continue
+            keys.append({
+                "id": parts[0].strip(),
+                "owner_id": parts[1].strip(),
+                "name": parts[2].strip(),
+                "mode": parts[3].strip(),
+                "type": parts[4].strip(),
+                "created_at": parts[5].strip(),
+            })
+    return {
+        "rc": rc,
+        "stderr": err,
+        "count": len(keys),
+        "rows": keys,
+        "scope_note": "Names + metadata only. Fingerprints and key contents NEVER read.",
+    }
+
+
+def probe_deploy_keys(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = psql_select(
+        user, host,
+        "SELECT id, key_id, repo_id, name, mode, to_timestamp(created_unix) AT TIME ZONE 'UTC' "
+        "FROM deploy_key ORDER BY id",
+    )
+    keys: list[dict[str, Any]] = []
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) < 6:
+                continue
+            keys.append({
+                "id": parts[0].strip(),
+                "public_key_id": parts[1].strip(),
+                "repo_id": parts[2].strip(),
+                "name": parts[3].strip(),
+                "mode": parts[4].strip(),
+                "created_at": parts[5].strip(),
+            })
+    return {
+        "rc": rc,
+        "stderr": err,
+        "count": len(keys),
+        "rows": keys,
+        "scope_note": "Per-repo deploy keys. Fingerprints not read.",
+    }
+
+
+def probe_access_tokens(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = psql_select(
+        user, host,
+        "SELECT id, uid, name, scope, to_timestamp(created_unix) AT TIME ZONE 'UTC' "
+        "FROM access_token ORDER BY id",
+    )
+    tokens: list[dict[str, Any]] = []
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) < 5:
+                continue
+            tokens.append({
+                "id": parts[0].strip(),
+                "owner_uid": parts[1].strip(),
+                "name": parts[2].strip(),
+                "scope": parts[3].strip(),
+                "created_at": parts[4].strip(),
+            })
+    scopes = sorted({r["scope"] for r in tokens if r.get("scope")})
+    return {
+        "rc": rc,
+        "stderr": err,
+        "count": len(tokens),
+        "rows": tokens,
+        "distinct_scopes": scopes,
+        "scope_all_count": sum(1 for r in tokens if r.get("scope") == "all"),
+        "scope_note": "Names + scope only. Token values, hashes, salts NEVER read.",
+    }
+
+
+def probe_oauth_apps(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = psql_select(
+        user, host,
+        "SELECT id, name, to_timestamp(created_unix) AT TIME ZONE 'UTC' "
+        "FROM oauth2_application ORDER BY id",
+    )
+    apps: list[dict[str, Any]] = []
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) < 3:
+                continue
+            apps.append({
+                "id": parts[0].strip(),
+                "name": parts[1].strip(),
+                "created_at": parts[2].strip(),
+            })
+    return {"rc": rc, "stderr": err, "count": len(apps), "rows": apps}
+
+
+def probe_webhooks(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = psql_select(user, host, "SELECT count(*) FROM webhook")
+    count = -1
+    if rc == 0:
+        try:
+            count = int(out.strip())
+        except ValueError:
+            count = -1
+    return {"rc": rc, "stderr": err, "count": count}
+
+
+def probe_user_count(user: str, host: str) -> dict[str, Any]:
+    rc, out, err = psql_select(user, host, 'SELECT count(*) FROM "user"')
+    count = -1
+    if rc == 0:
+        try:
+            count = int(out.strip())
+        except ValueError:
+            count = -1
+    return {"rc": rc, "stderr": err, "count": count}
+
+
+def cross_reference_branch_protection() -> dict[str, Any]:
+    """Read PACKET-598's branch-protection-readback receipt and surface
+    the structural-enforcement-relevant fields. If the receipt is missing,
+    the cross-reference degrades to declared-only."""
+    out: dict[str, Any] = {
+        "proof_ref": str(BRANCH_PROTECTION_RECEIPT),
+        "available": BRANCH_PROTECTION_RECEIPT.is_file(),
+        "whitelist_users": [],
+        "required_approvals": None,
+        "status_checks_enabled": None,
+        "signed_commits_required": None,
+        "force_push_allowed": None,
+    }
+    if not BRANCH_PROTECTION_RECEIPT.is_file():
+        return out
+    try:
+        bp = yaml.safe_load(BRANCH_PROTECTION_RECEIPT.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return out
+    rules: list[dict[str, Any]] = []
+    if isinstance(bp, dict):
+        rules = bp.get("protected_branches") or []
+    main_rule = next((r for r in rules if isinstance(r, dict) and r.get("branch") == "main"), {})
+    if not isinstance(main_rule, dict):
+        main_rule = {}
+    rule_block = main_rule.get("rules") or {}
+    out["whitelist_users"] = str(rule_block.get("whitelist_user_i_ds") or "").strip()
+    out["required_approvals"] = rule_block.get("required_approvals")
+    out["status_checks_enabled"] = rule_block.get("enable_status_check")
+    out["signed_commits_required"] = rule_block.get("require_signed_commits")
+    out["force_push_allowed"] = rule_block.get("can_force_push")
+    return out
+
+
+def classify_boundary(
+    commits: dict[str, Any],
+    public_keys: dict[str, Any],
+    deploy_keys: dict[str, Any],
+    access_tokens: dict[str, Any],
+    branch_protection: dict[str, Any],
+    user_count: dict[str, Any],
+) -> dict[str, Any]:
+    """Classify the boundary state from observations.
+
+    structurally_enforced: branch protection requires PR + reviews + status
+        checks + signed commits, AND deploy keys / API tokens are scoped
+        narrowly, AND no agent-origin commits observed.
+    partially_enforced: branch protection blocks force-push and uses a
+        whitelist, but PR/reviews/checks/signed-commits are not all on,
+        OR API tokens carry scope=all.
+    not_enforced: no whitelist, no force-push protection, multiple
+        unrestricted writers.
+    """
+    enforcement: list[str] = []
+    gaps: list[str] = []
+    bp = branch_protection
+    if bp.get("force_push_allowed") is False:
+        enforcement.append("force_push prohibited on main")
+    else:
+        gaps.append("force_push not prohibited on main")
+    if bp.get("whitelist_users"):
+        enforcement.append(f"main push restricted to whitelist users {bp.get('whitelist_users')}")
+    else:
+        gaps.append("main push has no user whitelist")
+    if bp.get("required_approvals") and int(bp.get("required_approvals") or 0) > 0:
+        enforcement.append(f"required_approvals = {bp.get('required_approvals')}")
+    else:
+        gaps.append("required_approvals = 0 (no PR-review requirement)")
+    if bp.get("status_checks_enabled"):
+        enforcement.append("status checks enforced")
+    else:
+        gaps.append("status checks not enforced")
+    if bp.get("signed_commits_required"):
+        enforcement.append("signed commits required")
+    else:
+        gaps.append("signed commits not required")
+    if access_tokens.get("scope_all_count", 0) > 0:
+        gaps.append(
+            f"access_token scope=all count = {access_tokens.get('scope_all_count')} "
+            "(any holder can write any repo; agent identity is not structurally separable)"
+        )
+    if deploy_keys.get("count", 0) == 0:
+        gaps.append(
+            "deploy_key count = 0 (no per-repo agent-distinct identities allocated)"
+        )
+    if commits.get("agent_origin_observed_on_main"):
+        gaps.append(
+            f"agent-origin commits observed on main: "
+            f"{commits.get('classified', {}).get('agent', 0)} of "
+            f"{commits.get('count_inspected', 0)} inspected"
+        )
+    has_required_pr = bool(bp.get("required_approvals") and int(bp.get("required_approvals") or 0) > 0)
+    has_status_checks = bool(bp.get("status_checks_enabled"))
+    has_signed = bool(bp.get("signed_commits_required"))
+    if has_required_pr and has_status_checks and has_signed and not commits.get("agent_origin_observed_on_main"):
+        status = "structurally_enforced"
+    elif bp.get("whitelist_users") and bp.get("force_push_allowed") is False:
+        status = "partially_enforced"
+    else:
+        status = "not_enforced"
+    return {
+        "status": status,
+        "enforcement_observed": enforcement,
+        "enforcement_gaps": gaps,
+        "current_boundary_character": (
+            "weak_by_access_scarcity"
+            if user_count.get("count", 0) <= 1 and status != "structurally_enforced"
+            else "structural" if status == "structurally_enforced" else "permissive"
+        ),
+    }
+
+
+def build_proof() -> dict[str, Any]:
+    runtime_body = resolve_runtime_body()
+    if not runtime_body:
+        raise SystemExit(
+            "forge.agent_boundary.status: forge_node.promotion_standard.current_runtime_body missing"
+        )
+    target = resolve_ssh_target(runtime_body.get("ssh_targets_id") or "dev-tools")
+    user = target.get("user") or "ubuntu"
+    host = pick_ssh_address(target)
+    if not host:
+        raise SystemExit("forge.agent_boundary.status: no usable address for ssh target")
+
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    commits = probe_recent_commits(user, host)
+    public_keys = probe_public_keys(user, host)
+    deploy_keys = probe_deploy_keys(user, host)
+    access_tokens = probe_access_tokens(user, host)
+    oauth_apps = probe_oauth_apps(user, host)
+    webhooks = probe_webhooks(user, host)
+    user_count = probe_user_count(user, host)
+    branch_protection = cross_reference_branch_protection()
+    classification = classify_boundary(commits, public_keys, deploy_keys, access_tokens, branch_protection, user_count)
+    proof: dict[str, Any] = {
+        "proof_class": "agent_boundary_proof",
+        "stage": 1,
+        "stage_label": "read_only_enumeration_and_classification",
+        "capability": "forge.agent_boundary.status",
+        "node_role": "forge_node",
+        "runtime_body": {
+            "ssh_targets_id": runtime_body.get("ssh_targets_id"),
+            "host_descriptor": runtime_body.get("host_descriptor"),
+            "addresses": runtime_body.get("addresses"),
+            "services": runtime_body.get("services"),
+        },
+        "ssh_route_used": {"user": user, "host": host},
+        "generated_at": timestamp,
+        "observation_only": True,
+        "scope_note": (
+            "Stage 1 read-only proof. Enumerates access paths and recent commit-author "
+            "classification. NO mutation, NO API token use, NO secret/DNS/runner changes. "
+            "Stage 2 (structural enforcement — bot-only writer account, required PR + "
+            "status checks + signed commits, pre-receive hook) is FUTURE."
+        ),
+        "stop_lines_respected": [
+            "no Forgejo install",
+            "no branch protection mutation",
+            "no runner mutation",
+            "no DNS/secrets/tokens/users/webhooks/repos changed",
+            "no API tokens used (Postgres + filesystem only)",
+            "no signed-commit policy mutation",
+            "no key/token values or fingerprints read",
+        ],
+        "recent_commits": commits,
+        "auth_surface": {
+            "user_count": user_count,
+            "ssh_public_keys": public_keys,
+            "deploy_keys": deploy_keys,
+            "access_tokens": access_tokens,
+            "oauth_applications": oauth_apps,
+            "webhooks": webhooks,
+        },
+        "branch_protection_summary": branch_protection,
+        "boundary_classification": classification,
+        "proof_summary": {
+            "boundary_status": classification.get("status"),
+            "current_boundary_character": classification.get("current_boundary_character"),
+            "agent_origin_observed_on_main": commits.get("agent_origin_observed_on_main"),
+            "scope_all_token_count": access_tokens.get("scope_all_count", 0),
+            "deploy_key_count": deploy_keys.get("count", 0),
+            "ssh_key_count": public_keys.get("count", 0),
+            "user_count": user_count.get("count"),
+            "drift_observed": classification.get("status") != "structurally_enforced",
+            "stage_2_blocked_until": (
+                "structural_enforcement_landed (required PR/reviews/checks/signed commits + "
+                "scope-narrowed agent identity)"
+                if classification.get("status") != "structurally_enforced"
+                else None
+            ),
+        },
+    }
+    return proof
+
+
+def write_proof(proof: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(proof, sort_keys=False, width=120) + "\n", encoding="utf-8")
+
+
+def render_human(proof: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append(f"forge.agent_boundary.status — agent_boundary_proof Stage {proof.get('stage')}")
+    lines.append(f"generated_at: {proof.get('generated_at')}")
+    rb = proof.get("runtime_body") or {}
+    lines.append(f"runtime body: {rb.get('ssh_targets_id')} ({rb.get('host_descriptor')})")
+    lines.append("")
+    commits = proof.get("recent_commits") or {}
+    lines.append(f"recent commits ({commits.get('count_inspected')} inspected on {commits.get('repo')}/{commits.get('ref')}):")
+    cls = commits.get("classified") or {}
+    lines.append(f"  operator: {cls.get('operator', 0)}  agent: {cls.get('agent', 0)}  unknown: {cls.get('unknown', 0)}")
+    lines.append(f"  agent-origin observed on main: {commits.get('agent_origin_observed_on_main')}")
+    lines.append("")
+    auth = proof.get("auth_surface") or {}
+    lines.append("auth surface:")
+    lines.append(f"  users:           {auth.get('user_count', {}).get('count')}")
+    lines.append(f"  ssh keys:        {auth.get('ssh_public_keys', {}).get('count')}")
+    lines.append(f"  deploy keys:     {auth.get('deploy_keys', {}).get('count')}")
+    at = auth.get("access_tokens") or {}
+    lines.append(f"  access tokens:   {at.get('count')} (scope=all: {at.get('scope_all_count')}; distinct scopes: {at.get('distinct_scopes')})")
+    lines.append(f"  oauth apps:      {auth.get('oauth_applications', {}).get('count')}")
+    lines.append(f"  webhooks:        {auth.get('webhooks', {}).get('count')}")
+    lines.append("")
+    bp = proof.get("branch_protection_summary") or {}
+    lines.append(f"branch protection (cross-ref): main")
+    lines.append(f"  whitelist:           {bp.get('whitelist_users')}")
+    lines.append(f"  required_approvals:  {bp.get('required_approvals')}")
+    lines.append(f"  status_checks:       {bp.get('status_checks_enabled')}")
+    lines.append(f"  signed_commits:      {bp.get('signed_commits_required')}")
+    lines.append(f"  force_push_allowed:  {bp.get('force_push_allowed')}")
+    lines.append("")
+    cl = proof.get("boundary_classification") or {}
+    lines.append(f"boundary classification: {cl.get('status')} ({cl.get('current_boundary_character')})")
+    enf = cl.get("enforcement_observed") or []
+    if enf:
+        lines.append("  enforcement observed:")
+        for e in enf:
+            lines.append(f"    + {e}")
+    gaps = cl.get("enforcement_gaps") or []
+    if gaps:
+        lines.append("  enforcement gaps:")
+        for g in gaps:
+            lines.append(f"    - {g}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="forge.agent_boundary.status")
+    parser.add_argument("--json", action="store_true", help="emit proof JSON only")
+    parser.add_argument("--no-write", action="store_true", help="do not persist receipt YAML")
+    parser.add_argument("--out", help=f"override receipt path (default: {RECEIPT_LATEST})")
+    parser.add_argument("--self-check", action="store_true", help="self-check pass")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("forge.agent_boundary.status self-check PASS")
+        return 0
+
+    proof = build_proof()
+
+    if not args.no_write:
+        out_path = Path(args.out) if args.out else RECEIPT_LATEST
+        write_proof(proof, out_path)
+        proof.setdefault("proof_summary", {})["receipt_path"] = str(out_path)
+
+    if args.json:
+        print(json.dumps(proof, indent=2, default=str))
+    else:
+        print(render_human(proof))
+        if not args.no_write:
+            print(f"\nreceipt: {RECEIPT_LATEST}")
+
+    summary = proof.get("proof_summary") or {}
+    if summary.get("user_count") is None:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

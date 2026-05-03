@@ -572,6 +572,50 @@ if "backup_restore_proof" not in present_for_devtools:
 if "backup_restore_proof" in gaps_for_devtools:
     fail("backup_restore_proof must be removed from candidate_gaps.dev-tools when present in proofs_present (no double-listing)")
 
+# PACKET-604 (agent_boundary_proof Stage 1): the fourth proof on the
+# forge_node ladder. Stage 1 is read-only enumeration + classification of
+# the forge auth + write-path surface (recent commits classified by
+# author email pattern, SSH/deploy keys, API tokens with scope, OAuth
+# apps, webhooks, branch-protection cross-reference). Stage 2 (mutating
+# enforcement, FUTURE) is explicitly out of scope. Locks: cap script
+# exists + executable + self-identifies as Stage 1; cap is registered
+# safety: read-only; agent_boundary_proof has a proof_ref pointing at
+# the receipt path; the proof is listed in proofs_present.dev-tools and
+# removed from candidate_gaps; the requirement text declares the
+# staged_delivery block (operator-approved 2026-05-02 staged-delivery
+# model — same shape as backup_restore_proof landed in PACKET-602).
+# Subtraction: agent_boundary_proof retired from candidate_gaps ->
+# proofs_present. Extension of D447 only — NO new D-gate.
+forge_ab_script = root / "ops/plugins/infra/host/bin/forge-agent-boundary-status"
+if not forge_ab_script.is_file():
+    fail("ops/plugins/infra/host/bin/forge-agent-boundary-status missing (PACKET-604 agent_boundary_proof Stage 1)")
+if not os.access(str(forge_ab_script), os.X_OK):
+    fail("forge-agent-boundary-status must be executable")
+forge_ab_text = forge_ab_script.read_text(encoding="utf-8")
+if "forge.agent_boundary.status" not in forge_ab_text or "agent_boundary_proof" not in forge_ab_text:
+    fail("forge-agent-boundary-status must self-identify as forge.agent_boundary.status capability and emit agent_boundary_proof Stage 1 receipts")
+for required_term in ("probe_recent_commits", "probe_public_keys", "probe_deploy_keys", "probe_access_tokens", "probe_webhooks", "classify_boundary", "cross_reference_branch_protection"):
+    if required_term not in forge_ab_text:
+        fail(f"forge-agent-boundary-status must implement {required_term} (Stage 1 read-only probe set)")
+caps_doc_forge_ab = (caps_map.get("forge.agent_boundary.status") or {})
+if caps_doc_forge_ab.get("safety") != "read-only":
+    fail("forge.agent_boundary.status must be safety: read-only (PACKET-604 — Stage 1 must not mutate forge state, must not read key/token values or fingerprints)")
+if caps_doc_forge_ab.get("script_path") != "./ops/plugins/infra/host/bin/forge-agent-boundary-status":
+    fail("forge.agent_boundary.status script_path must point at ops/plugins/infra/host/bin/forge-agent-boundary-status")
+forge_ab_required = (forge_required_proofs.get("agent_boundary_proof") or {})
+if not forge_ab_required.get("proof_ref"):
+    fail("forge_node.required_proofs.agent_boundary_proof must declare proof_ref (PACKET-604 Stage 1 receipt pointer)")
+expected_ab_ref = "$SPINE_STATE/domain-state/forge-node/agent-boundary-proof-latest.yaml"
+if forge_ab_required.get("proof_ref") != expected_ab_ref:
+    fail(f"agent_boundary_proof.proof_ref must equal {expected_ab_ref}")
+ab_staged = forge_ab_required.get("staged_delivery") or {}
+if not ab_staged.get("stage_1_enumeration") or not ab_staged.get("stage_2_enforcement"):
+    fail("agent_boundary_proof.staged_delivery must declare stage_1_enumeration and stage_2_enforcement (operator-approved staged delivery model)")
+if "agent_boundary_proof" not in present_for_devtools:
+    fail("forge_node.promotion_standard.proofs_present.dev-tools must list agent_boundary_proof (PACKET-604 Stage 1 ladder progression)")
+if "agent_boundary_proof" in gaps_for_devtools:
+    fail("agent_boundary_proof must be removed from candidate_gaps.dev-tools when present in proofs_present (no double-listing)")
+
 # node-role-candidate-status must derive contract status from node.role.contract.yaml
 # so the readback flips from candidate-only to contracted/not-delivered when
 # the nameplate lands. This is the load-bearing piece that makes Phase 4

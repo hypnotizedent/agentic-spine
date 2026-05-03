@@ -271,7 +271,33 @@ node_types:
             stage_2_drill: future
             stage_2_blocked_until: at_least_one_fresh_backup_artifact_present
         agent_boundary_proof:
-          requirement: "AI agents writing to forge are bounded by mailroom/runner contract: no direct push to origin/main outside governed pipeline. PR/branch shape enforced. Receipt class shows agent-origin commits arrived through governed lane only."
+          source:
+            - ops/plugins/infra/host/bin/forge-agent-boundary-status
+            - ops/bindings/node.role.contract.yaml
+          requirement: |
+            Two-stage proof. Stage 1 (read-only enumeration + classification):
+            recent commits on origin/main are inspected and classified by
+            author email (operator/agent/unknown), the auth surface is
+            enumerated (SSH keys, deploy keys, API tokens with scope, OAuth
+            apps, webhooks — names + metadata only, never values or
+            fingerprints), branch-protection state is cross-referenced from
+            branch_protection_readback_proof, and the boundary is classified
+            (structurally_enforced / partially_enforced / not_enforced) with
+            named enforcement gaps. Stage 2 (mutating enforcement, FUTURE):
+            AI agents writing to forge are bounded by mailroom/runner
+            contract — no direct push to origin/main outside governed
+            pipeline; PR/branch shape enforced via required_approvals +
+            status_checks + signed_commits; agent-distinct identities
+            allocated as deploy keys or scope-narrowed tokens; receipt
+            class shows agent-origin commits arrived through governed
+            lane only. Stage 1 is the current proof_ref artifact. Stage 2
+            advances when structural enforcement on main + agent-identity
+            separation are landed.
+          proof_ref: "$SPINE_STATE/domain-state/forge-node/agent-boundary-proof-latest.yaml"
+          staged_delivery:
+            stage_1_enumeration: present_when_proof_ref_artifact_exists
+            stage_2_enforcement: future
+            stage_2_blocked_until: structural_enforcement_landed_with_agent_identity_separation
         runner_cache_boundary_proof:
           requirement: "Runner caches and ephemeral runner state cannot leak across jobs/branches/repos. Proof: cache-scope readback + clean-room job demonstration that no prior-job artifact bleeds into a fresh job."
         branch_protection_readback_proof:
@@ -285,9 +311,9 @@ node_types:
           - forge_status_proof
           - branch_protection_readback_proof
           - backup_restore_proof
+          - agent_boundary_proof
       candidate_gaps:
         dev-tools:
-          - agent_boundary_proof
           - runner_cache_boundary_proof
     physical_separation_posture:
       operator_console: permitted_no_preference
