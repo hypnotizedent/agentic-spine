@@ -918,6 +918,66 @@ node_authority = node_readback.get("authority") or {}
 if node_authority.get("expected_authority_state") != "executable_readback":
     fail("node admission readback must be registered as executable_readback")
 
+help_proc = subprocess.run(
+    [str(node_admission), "--help"],
+    text=True,
+    capture_output=True,
+)
+if help_proc.returncode != 0:
+    fail(help_proc.stderr.strip() or help_proc.stdout.strip() or "node.admission.status --help failed")
+help_text = help_proc.stdout
+help_flat = " ".join(help_text.split())
+for phrase in [
+    "Canonical node admission readback",
+    "Limit readback to one governed subject id",
+    "line-oriented for id parsers",
+    "evidence only, not promotion",
+    "first-touch -> runtime proof path",
+]:
+    if phrase not in help_flat:
+        fail(f"node.admission.status --help must teach canonical/demoted readback semantics: missing {phrase!r}")
+
+list_proc = subprocess.run(
+    [str(node_admission), "--list"],
+    text=True,
+    capture_output=True,
+)
+if list_proc.returncode != 0:
+    fail(list_proc.stderr.strip() or list_proc.stdout.strip() or "node.admission.status --list failed")
+list_text = list_proc.stdout
+for phrase in [
+    "# node.admission.status --list",
+    "Canonical readbacks:",
+    "node.recovery.status",
+    "appliance.health.status",
+    "Subordinate evidence (demoted; do not read as authority):",
+    "ops/bindings/ssh.targets.yaml",
+    "ops/bindings/operator.hardware.inventory.yaml",
+    "ops/bindings/hardware.inventory.yaml",
+    "ops/bindings/home.device.registry.yaml",
+    "ops/bindings/shop.device.registry.yaml",
+    "ops/bindings/home.hardware.inventory.yaml",
+    "ops/bindings/internet.asset.registry.yaml",
+    "ops/bindings/master.inventory.registry.yaml",
+    "ops/bindings/fleet.admission.classification.yaml",
+]:
+    if phrase not in list_text:
+        fail(f"node.admission.status --list must surface demoted evidence header: missing {phrase!r}")
+listed_ids = [line.strip() for line in list_text.splitlines() if line.strip() and not line.startswith("#")]
+for node_id in ["pve-r620", "shuttle-xpc-xc60j-002", "sandisk-cruzer-stage0-bootstrap-16gb-01"]:
+    if node_id not in listed_ids:
+        fail(f"node.admission.status --list must preserve subject id: {node_id}")
+
+list_json_proc = subprocess.run(
+    [str(node_admission), "--list", "--json"],
+    text=True,
+    capture_output=True,
+)
+if list_json_proc.returncode != 0:
+    fail(list_json_proc.stderr.strip() or list_json_proc.stdout.strip() or "node.admission.status --list --json failed")
+if any(line.startswith("#") for line in list_json_proc.stdout.splitlines() if line.strip()):
+    fail("node.admission.status --list --json must stay line-oriented without comment header for id parsers")
+
 for path in [
     Path("ops/bindings/internet.asset.registry.yaml"),
     Path("ops/bindings/home.hardware.inventory.yaml"),
@@ -936,6 +996,25 @@ proc = subprocess.run(
 if proc.returncode != 0:
     fail(proc.stderr.strip() or proc.stdout.strip() or "node.admission.status sample failed")
 payload = json.loads(proc.stdout)
+if payload.get("canonical_authority") != "node.admission.status":
+    fail("node.admission.status JSON must name canonical_authority")
+if payload.get("recovery_evidence") != "node.recovery.status":
+    fail("node.admission.status JSON must name node.recovery.status as recovery evidence")
+if payload.get("appliance_evidence") != "appliance.health.status":
+    fail("node.admission.status JSON must name appliance.health.status as appliance evidence")
+expected_subtracted = {
+    "ops/bindings/ssh.targets.yaml",
+    "ops/bindings/operator.hardware.inventory.yaml",
+    "ops/bindings/hardware.inventory.yaml",
+    "ops/bindings/home.device.registry.yaml",
+    "ops/bindings/shop.device.registry.yaml",
+    "ops/bindings/home.hardware.inventory.yaml",
+    "ops/bindings/internet.asset.registry.yaml",
+    "ops/bindings/master.inventory.registry.yaml",
+    "ops/bindings/fleet.admission.classification.yaml",
+}
+if set(payload.get("subtracted_peer_authority") or []) != expected_subtracted:
+    fail("node.admission.status JSON subtracted_peer_authority must enumerate all demoted evidence surfaces")
 rows = payload.get("rows") or []
 if len(rows) != 1:
     fail("node.admission.status --node pve-r620 must emit exactly one row")
