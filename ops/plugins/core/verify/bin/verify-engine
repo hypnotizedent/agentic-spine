@@ -561,16 +561,32 @@ import sqlite3
 conn = sqlite3.connect(str(db_path))
 conn.row_factory = sqlite3.Row
 rows = conn.execute(
-    "SELECT loop_id FROM loops WHERE status IN (?, ?)", ["active", "open"]
+    "SELECT loop_id, data_json FROM loops WHERE status IN (?, ?)", ["active", "open"]
 ).fetchall()
 conn.close()
 
 if not rows:
     raise SystemExit(0)
 
+# PACKET-620 custody exemption: a loop may be intentionally exempt from the
+# E14 custody-scaffolding check (observation-only or otherwise exempt). The
+# exemption + reason live in data_json (set via loops.amend --custody-exempt
+# true --exempt-reason "..."). Exempt loops are reported in a separate
+# Exempt section and do NOT trigger the warn.
 active_loops = set()
+exempt_loops = {}
 for r in rows:
-    active_loops.add(r["loop_id"])
+    lid = r["loop_id"]
+    active_loops.add(lid)
+    raw = r["data_json"] or ""
+    if not raw:
+        continue
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        continue
+    if isinstance(parsed, dict) and parsed.get("custody_exempt"):
+        exempt_loops[lid] = str(parsed.get("custody_exempt_reason") or "(no reason recorded)")
 
 def clean_scalar(value):
     return value.strip().strip(chr(34) + chr(39))
@@ -743,9 +759,18 @@ covered = (
     | loops_with_heartbeat
 )
 uncovered = active_loops - covered
-if uncovered:
-    print("%d active loop(s) with no custody seam (checked: delegation, packet, handoff, wave, worktree, heartbeat):" % len(uncovered))
-    for lid in sorted(uncovered):
+# Partition uncovered into exempt + truly-uncovered. Exempt loops report
+# in a separate section and do NOT trigger the warn (operator vocabulary:
+# "custody OR clearly classified as exempt").
+truly_uncovered = uncovered - set(exempt_loops.keys())
+exempt_in_scope = sorted(uncovered & set(exempt_loops.keys()))
+if exempt_in_scope:
+    print("%d active loop(s) custody-exempt (reported, not failing):" % len(exempt_in_scope))
+    for lid in exempt_in_scope:
+        print("  %s — exempt; reason: %s" % (lid, exempt_loops[lid]))
+if truly_uncovered:
+    print("%d active loop(s) with no custody seam (checked: delegation, packet, handoff, wave, worktree, heartbeat):" % len(truly_uncovered))
+    for lid in sorted(truly_uncovered):
         absent = []
         if lid not in loops_with_delegation:
             absent.append("delegation")
@@ -759,7 +784,7 @@ if uncovered:
             absent.append("worktree")
         if lid not in loops_with_heartbeat:
             absent.append("heartbeat")
-        # By construction `absent` lists every checked class, since `lid in uncovered`
+        # By construction `absent` lists every checked class, since `lid in truly_uncovered`
         # means no class matched. Spelling them out makes the trigger class explicit.
         print("  %s — absent: %s" % (lid, ", ".join(absent)))
     raise SystemExit(1)

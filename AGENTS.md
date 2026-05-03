@@ -231,7 +231,11 @@ path is the bug. For loops, the lifecycle repair primitive is `loops.amend`
 (`./bin/ops cap run loops.amend -- --loop-id <id> --reason "<why>"` plus the
 field to change); never delete a `.scope.md` to repair lifecycle state. A
 suggestion to delete/recreate/move telemetry to repair state should be filed as
-friction with `--capability telemetry_surgery_attempt`.
+friction with `--capability telemetry_surgery_attempt`. An active loop without
+custody scaffolding (packet/delegation/handoff/wave/worktree/heartbeat) may be
+classified `custody_exempt` with a reason via `loops.amend --custody-exempt
+true --exempt-reason "<text>"`; verify-engine E14 reports exempt loops
+separately and does not warn on them.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
 RAG retrieval is allowed as a discovery aid, not as authority. Use

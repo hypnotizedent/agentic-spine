@@ -138,7 +138,11 @@ surgery is not an acceptable substitute. For loops specifically, lifecycle
 repair (horizon/status/priority/readiness/execution_mode) goes through
 `loops.amend` — never delete a `.scope.md` to repair lifecycle state. A
 suggestion to delete/recreate/move telemetry to repair state should be filed as
-friction with `--capability telemetry_surgery_attempt`.
+friction with `--capability telemetry_surgery_attempt`. An active loop without
+custody scaffolding (packet/delegation/handoff/wave/worktree/heartbeat) may be
+classified `custody_exempt` with a reason via `loops.amend --custody-exempt
+true --exempt-reason "<text>"`; verify-engine E14 reports exempt loops
+separately and does not warn on them.
 
 Human intent is provenance and acceptance input, not standalone authority.
 Before mutation, resolve the owning canonical surface, confirm the request fits

@@ -53,7 +53,19 @@ Usage:
               [--priority high|medium|low] \
               [--readiness runnable|blocked] \
               [--execution-mode single_worker|orchestrator_subagents] \
+              [--custody-exempt true|false [--exempt-reason "<text>"]] \
               [--dry-run] [--json]
+
+Custody exemption:
+  --custody-exempt true   marks the loop intentionally exempt from the
+                          verify-engine E14 active-loop custody check
+                          (loop is observation-only or otherwise exempt
+                          from the packet/delegation/handoff/wave/
+                          worktree/heartbeat scaffolding requirement).
+                          Requires --exempt-reason "<text>" for honest
+                          evidence in the receipt and the readback.
+  --custody-exempt false  clears the exemption and drops the reason.
+  Stored in DB row data_json as custody_exempt + custody_exempt_reason.
 
 Required:
   --loop-id   Existing loop identity (LOOP-NAME-YYYYMMDD).
@@ -77,21 +89,25 @@ NEW_HORIZON=""
 NEW_PRIORITY=""
 NEW_READINESS=""
 NEW_EXEC_MODE=""
+NEW_CUSTODY_EXEMPT=""        # "" | "true" | "false"
+NEW_EXEMPT_REASON=""
 DRY_RUN=0
 JSON_OUTPUT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
-    --loop-id)        LOOP_ID="${2:?--loop-id requires a value}"; shift 2 ;;
-    --reason)         REASON="${2:?--reason requires a value}"; shift 2 ;;
-    --horizon)        NEW_HORIZON="${2:?--horizon requires a value}"; shift 2 ;;
-    --priority)       NEW_PRIORITY="${2:?--priority requires a value}"; shift 2 ;;
-    --readiness)      NEW_READINESS="${2:?--readiness requires a value}"; shift 2 ;;
-    --execution-mode) NEW_EXEC_MODE="${2:?--execution-mode requires a value}"; shift 2 ;;
-    --dry-run)        DRY_RUN=1; shift ;;
-    --json)           JSON_OUTPUT=1; shift ;;
-    -h|--help)        usage; exit 0 ;;
+    --loop-id)         LOOP_ID="${2:?--loop-id requires a value}"; shift 2 ;;
+    --reason)          REASON="${2:?--reason requires a value}"; shift 2 ;;
+    --horizon)         NEW_HORIZON="${2:?--horizon requires a value}"; shift 2 ;;
+    --priority)        NEW_PRIORITY="${2:?--priority requires a value}"; shift 2 ;;
+    --readiness)       NEW_READINESS="${2:?--readiness requires a value}"; shift 2 ;;
+    --execution-mode)  NEW_EXEC_MODE="${2:?--execution-mode requires a value}"; shift 2 ;;
+    --custody-exempt)  NEW_CUSTODY_EXEMPT="${2:?--custody-exempt requires a value (true|false)}"; shift 2 ;;
+    --exempt-reason)   NEW_EXEMPT_REASON="${2:?--exempt-reason requires a value}"; shift 2 ;;
+    --dry-run)         DRY_RUN=1; shift ;;
+    --json)            JSON_OUTPUT=1; shift ;;
+    -h|--help)         usage; exit 0 ;;
     *) echo "FAIL: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -108,9 +124,17 @@ case "$NEW_HORIZON" in ""|now|later|future) ;; *) echo "FAIL: --horizon must be 
 case "$NEW_PRIORITY" in ""|low|medium|high) ;; *) echo "FAIL: --priority must be low, medium, or high (got '$NEW_PRIORITY')" >&2; exit 2 ;; esac
 case "$NEW_READINESS" in ""|runnable|blocked) ;; *) echo "FAIL: --readiness must be runnable or blocked (got '$NEW_READINESS')" >&2; exit 2 ;; esac
 case "$NEW_EXEC_MODE" in ""|single_worker|orchestrator_subagents) ;; *) echo "FAIL: --execution-mode must be single_worker or orchestrator_subagents (got '$NEW_EXEC_MODE')" >&2; exit 2 ;; esac
+case "$NEW_CUSTODY_EXEMPT" in ""|true|false) ;; *) echo "FAIL: --custody-exempt must be true or false (got '$NEW_CUSTODY_EXEMPT')" >&2; exit 2 ;; esac
 
-if [[ -z "$NEW_HORIZON$NEW_PRIORITY$NEW_READINESS$NEW_EXEC_MODE" ]]; then
-  echo "FAIL: no lifecycle fields provided; supply at least one of --horizon, --priority, --readiness, --execution-mode" >&2
+# When setting custody_exempt=true, an explicit --exempt-reason is required.
+# Marking exempt without a reason is what the operator vocabulary forbids.
+if [[ "$NEW_CUSTODY_EXEMPT" == "true" && -z "$NEW_EXEMPT_REASON" ]]; then
+  echo "FAIL: --custody-exempt true requires --exempt-reason '<text>' (no reason, no exemption)" >&2
+  exit 2
+fi
+
+if [[ -z "$NEW_HORIZON$NEW_PRIORITY$NEW_READINESS$NEW_EXEC_MODE$NEW_CUSTODY_EXEMPT" ]]; then
+  echo "FAIL: no lifecycle fields provided; supply at least one of --horizon, --priority, --readiness, --execution-mode, --custody-exempt" >&2
   exit 2
 fi
 
@@ -195,6 +219,21 @@ def derive_created(loop_id):
 # row as base64-encoded JSON so the merge stage gets the whole thing without
 # shell quoting hell.
 import base64
+
+# Custody exemption lives in data_json (no schema migration required). Read
+# the existing values so an amend that doesn't touch them preserves them.
+existing_data = {}
+raw_data_json = db_row.get("data_json") or ""
+if raw_data_json:
+    try:
+        parsed = json.loads(raw_data_json)
+        if isinstance(parsed, dict):
+            existing_data = parsed
+    except json.JSONDecodeError:
+        existing_data = {}
+db_custody_exempt = bool(existing_data.get("custody_exempt"))
+db_custody_exempt_reason = str(existing_data.get("custody_exempt_reason") or "")
+
 preserved = {
     "loop_id":             db_row.get("loop_id") or "",
     "owner":               db_row.get("owner") or fmval("owner") or "@ronny",
@@ -215,16 +254,22 @@ preserved = {
     "priority":            db_row.get("priority") or fmval("priority") or "medium",
     "execution_readiness": db_row.get("execution_readiness") or fmval("execution_readiness") or "runnable",
     "execution_mode":      db_row.get("execution_mode") or fmval("execution_mode") or "single_worker",
+    # PACKET-620 custody exemption fields (top-level so they round-trip
+    # through bridge upsert into data_json):
+    "custody_exempt":         db_custody_exempt,
+    "custody_exempt_reason":  db_custody_exempt_reason,
 }
 out = {
-    "db_status":      str(db_row.get("status") or ""),
-    "db_horizon":     str(db_row.get("horizon") or ""),
-    "db_priority":    str(db_row.get("priority") or ""),
-    "db_readiness":   str(db_row.get("execution_readiness") or ""),
-    "db_exec_mode":   str(db_row.get("execution_mode") or ""),
-    "db_disposition": str(db_row.get("disposition") or ""),
-    "db_completion":  str(db_row.get("completion_level") or ""),
-    "preserved_b64":  base64.b64encode(json.dumps(preserved).encode("utf-8")).decode("ascii"),
+    "db_status":             str(db_row.get("status") or ""),
+    "db_horizon":            str(db_row.get("horizon") or ""),
+    "db_priority":           str(db_row.get("priority") or ""),
+    "db_readiness":          str(db_row.get("execution_readiness") or ""),
+    "db_exec_mode":          str(db_row.get("execution_mode") or ""),
+    "db_disposition":        str(db_row.get("disposition") or ""),
+    "db_completion":         str(db_row.get("completion_level") or ""),
+    "db_custody_exempt":     "true" if db_custody_exempt else "false",
+    "db_exempt_reason":      db_custody_exempt_reason,
+    "preserved_b64":         base64.b64encode(json.dumps(preserved).encode("utf-8")).decode("ascii"),
 }
 for k, v in out.items():
     print(f"{k}={v}")
@@ -248,6 +293,15 @@ RESOLVED_HORIZON="${NEW_HORIZON:-$db_horizon}"
 RESOLVED_PRIORITY="${NEW_PRIORITY:-$db_priority}"
 RESOLVED_READINESS="${NEW_READINESS:-$db_readiness}"
 RESOLVED_EXEC_MODE="${NEW_EXEC_MODE:-$db_exec_mode}"
+RESOLVED_CUSTODY_EXEMPT="${NEW_CUSTODY_EXEMPT:-$db_custody_exempt}"
+# When clearing exemption (custody_exempt=false), drop the reason.
+# When keeping exemption value unchanged but supplying a new reason,
+# update the reason; otherwise keep the existing reason.
+if [[ "$RESOLVED_CUSTODY_EXEMPT" == "true" ]]; then
+  RESOLVED_EXEMPT_REASON="${NEW_EXEMPT_REASON:-$db_exempt_reason}"
+else
+  RESOLVED_EXEMPT_REASON=""
+fi
 
 # Status follows horizon (boundary model: active loops must be horizon=now).
 if [[ "$RESOLVED_HORIZON" == "now" ]]; then
@@ -263,6 +317,10 @@ declare -a CHANGES=()
 [[ "$db_priority"  != "$RESOLVED_PRIORITY"  ]] && CHANGES+=("priority: $db_priority -> $RESOLVED_PRIORITY")
 [[ "$db_readiness" != "$RESOLVED_READINESS" ]] && CHANGES+=("execution_readiness: $db_readiness -> $RESOLVED_READINESS")
 [[ "$db_exec_mode" != "$RESOLVED_EXEC_MODE" ]] && CHANGES+=("execution_mode: $db_exec_mode -> $RESOLVED_EXEC_MODE")
+[[ "$db_custody_exempt" != "$RESOLVED_CUSTODY_EXEMPT" ]] && CHANGES+=("custody_exempt: $db_custody_exempt -> $RESOLVED_CUSTODY_EXEMPT")
+if [[ "$RESOLVED_CUSTODY_EXEMPT" == "true" && "$db_exempt_reason" != "$RESOLVED_EXEMPT_REASON" ]]; then
+  CHANGES+=("custody_exempt_reason: ${db_exempt_reason:-<none>} -> $RESOLVED_EXEMPT_REASON")
+fi
 
 if (( ${#CHANGES[@]} == 0 )); then
   # Exit 2 (not 0) for no-op so cap-level outcome reads "skipped/no mutation"
@@ -339,14 +397,17 @@ verify_body_unchanged
 # --- Build the FULL merged row for upsert. The bridge's upsert_loop is a
 # full-row UPSERT — passing only lifecycle keys would null owner / objective /
 # scope / created / etc. Merge the lifecycle delta over the preserved row. ---
-MERGED_ROW_JSON="$(python3 - "$preserved_b64" "$RESOLVED_HORIZON" "$RESOLVED_STATUS" "$RESOLVED_PRIORITY" "$RESOLVED_READINESS" "$RESOLVED_EXEC_MODE" <<'PY'
+MERGED_ROW_JSON="$(python3 - "$preserved_b64" "$RESOLVED_HORIZON" "$RESOLVED_STATUS" "$RESOLVED_PRIORITY" "$RESOLVED_READINESS" "$RESOLVED_EXEC_MODE" "$RESOLVED_CUSTODY_EXEMPT" "$RESOLVED_EXEMPT_REASON" <<'PY'
 import base64, json, sys
 preserved = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
-preserved["horizon"]             = sys.argv[2]
-preserved["status"]              = sys.argv[3]
+preserved["horizon"]              = sys.argv[2]
+preserved["status"]               = sys.argv[3]
 preserved["priority"]             = sys.argv[4]
 preserved["execution_readiness"]  = sys.argv[5]
 preserved["execution_mode"]       = sys.argv[6]
+# PACKET-620 custody exemption — round-trip through bridge upsert into data_json.
+preserved["custody_exempt"]        = (sys.argv[7] == "true")
+preserved["custody_exempt_reason"] = sys.argv[8]
 print(json.dumps(preserved))
 PY
 )"
@@ -369,13 +430,13 @@ RECEIPT_PATH="$RECEIPTS_DIR/loops-amend-${LOOP_ID}-${TS//[:Z]/}.yaml"
 RUN_KEY="${SPINE_CAP_RUN_KEY:-loops-amend-direct}"
 
 python3 - "$RECEIPT_PATH" "$LOOP_ID" "$REASON" "$TS" "$RUN_KEY" \
-  "$db_horizon" "$db_status" "$db_priority" "$db_readiness" "$db_exec_mode" \
-  "$RESOLVED_HORIZON" "$RESOLVED_STATUS" "$RESOLVED_PRIORITY" "$RESOLVED_READINESS" "$RESOLVED_EXEC_MODE" \
+  "$db_horizon" "$db_status" "$db_priority" "$db_readiness" "$db_exec_mode" "$db_custody_exempt" "$db_exempt_reason" \
+  "$RESOLVED_HORIZON" "$RESOLVED_STATUS" "$RESOLVED_PRIORITY" "$RESOLVED_READINESS" "$RESOLVED_EXEC_MODE" "$RESOLVED_CUSTODY_EXEMPT" "$RESOLVED_EXEMPT_REASON" \
   <<'PY'
 import sys, yaml
 (_, path, loop_id, reason, ts, run_key,
- b_horizon, b_status, b_priority, b_readiness, b_exec_mode,
- a_horizon, a_status, a_priority, a_readiness, a_exec_mode) = sys.argv
+ b_horizon, b_status, b_priority, b_readiness, b_exec_mode, b_custody_exempt, b_exempt_reason,
+ a_horizon, a_status, a_priority, a_readiness, a_exec_mode, a_custody_exempt, a_exempt_reason) = sys.argv
 doc = {
     "receipt_class": "loops_amend",
     "loop_id": loop_id,
@@ -389,6 +450,8 @@ doc = {
         "priority": b_priority,
         "execution_readiness": b_readiness,
         "execution_mode": b_exec_mode,
+        "custody_exempt": b_custody_exempt == "true",
+        "custody_exempt_reason": b_exempt_reason,
     },
     "after": {
         "horizon": a_horizon,
@@ -396,6 +459,8 @@ doc = {
         "priority": a_priority,
         "execution_readiness": a_readiness,
         "execution_mode": a_exec_mode,
+        "custody_exempt": a_custody_exempt == "true",
+        "custody_exempt_reason": a_exempt_reason,
     },
     "telemetry_preservation": {
         "scope_file_body_unchanged": True,
