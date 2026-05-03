@@ -51,7 +51,8 @@ READBACK_VOCABULARY = {
         ),
     },
     "promotion": {
-        "delivered": "Contract proofs landed (proofs_present in node.role.contract or runtime_truth.active).",
+        "delivered": "Contract proofs landed (proofs_present in node.role.contract or runtime_truth.active) unless the role contract explicitly says delivered:false.",
+        "contracted_not_delivered": "Role candidacy and proof visibility exist, but the role contract explicitly keeps delivered:false until a later enforcement stage.",
         "bootstrap-joined": "Appliance admitted via bootstrap; not runtime-activated.",
         "taxonomy": "No first-class candidacy yet; subject is inventory/access evidence only.",
     },
@@ -856,6 +857,7 @@ def forge_node_promotion_standard_for(node_id: str) -> dict[str, Any]:
     forge_node = ((node_role.get("node_types") or {}).get("forge_node") or {})
     standard = forge_node.get("promotion_standard") or {}
     required = standard.get("required_proofs") or {}
+    explicit_delivered = standard.get("delivered")
     contract_proofs_for_node = (standard.get("proofs_present") or {}).get(node_id, [])
 
     state_root = _resolve_spine_state()
@@ -889,7 +891,15 @@ def forge_node_promotion_standard_for(node_id: str) -> dict[str, Any]:
 
     on_disk_missing = [name for name, proof in proofs.items() if proof.get("status") == "missing"]
     contract_complete = bool(contract_proofs_for_node) and all(p in contract_proofs_for_node for p in proofs.keys())
-    if not on_disk_missing:
+    # Honor explicit delivered:false over proof coverage. PACKET-605 locked this
+    # in node.role.candidate.status; PACKET-618 applies the same rule here so
+    # node.admission.status does not promote Stage 1 proof coverage into role
+    # delivery before Stage 2 enforcement lands.
+    if explicit_delivered is False:
+        state = "contracted_not_delivered"
+    elif explicit_delivered is True:
+        state = "delivered" if not on_disk_missing else "delivered_per_contract"
+    elif not on_disk_missing:
         state = "delivered"
     elif contract_complete:
         state = "delivered_per_contract"
@@ -899,11 +909,12 @@ def forge_node_promotion_standard_for(node_id: str) -> dict[str, Any]:
     return {
         "role": "forge_node",
         "state": state,
+        "explicit_delivered": explicit_delivered,
         "standard_source": "ops/bindings/node.role.contract.yaml",
         "proofs": proofs,
         "missing_proofs": on_disk_missing,
         "candidate_gaps": (standard.get("candidate_gaps") or {}).get(node_id, on_disk_missing),
-        "subtraction_note": "ssh.targets supplies access evidence only; delivered forge_node requires the five proof classes here",
+        "subtraction_note": "ssh.targets supplies access evidence only; Stage 1 proof coverage is not delivered forge_node while promotion_standard.delivered is false",
     }
 
 
@@ -1045,6 +1056,11 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
             contract_delivered = True
         if contract_delivered:
             promotion_stage = "delivered"
+        elif (
+            forge_node_standard.get("state") == "contracted_not_delivered"
+            and node_id_str in forge_node_candidate_set()
+        ):
+            promotion_stage = "contracted_not_delivered"
 
     placement_truth = dict(estate_truth)
     if runtime_truth.get("active"):
@@ -1358,7 +1374,10 @@ def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False, golden_pa
     print("              delivered or bootstrap-joined for appliance lifecycle,")
     print("              not first-class node admission.")
     print("  promotion   delivered = contract proofs landed (proofs_present or")
-    print("              runtime_truth.active); bootstrap-joined = appliance")
+    print("              runtime_truth.active) unless the role contract explicitly")
+    print("              says delivered:false; contracted_not_delivered =")
+    print("              candidacy/proofs exist but role contract keeps delivery")
+    print("              gated; bootstrap-joined = appliance")
     print("              admitted, not runtime-activated; taxonomy = no candidacy")
     print("              yet (inventory/access evidence only).")
     print("  lifecycle   admitted_runtime_present | admitted_not_activated |")

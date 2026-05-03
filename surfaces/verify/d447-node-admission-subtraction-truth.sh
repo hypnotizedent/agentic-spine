@@ -758,6 +758,22 @@ for required_term in ("_extract_stage_2_state", "stage_2_state_by_proof", "stage
     if required_term not in candidate_status_text:
         fail(f"node-role-candidate-status must implement {required_term} (PACKET-609 Stage 2 readback teaching)")
 
+# PACKET-618: node.admission.status must honor the same explicit
+# delivered:false invariant as node.role.candidate.status. Stage 1 proof
+# coverage can create candidacy and proof visibility; it must not promote
+# dev-tools to delivered forge_node while the contract header keeps
+# promotion_standard.delivered false.
+node_admission_text = node_admission.read_text(encoding="utf-8")
+for required_term in (
+    "explicit_delivered = standard.get(\"delivered\")",
+    "contracted_not_delivered",
+    "Stage 1 proof coverage is not delivered forge_node",
+    "unless the role contract explicitly",
+    "contracted_not_delivered =",
+):
+    if required_term not in node_admission_text:
+        fail(f"node.admission.status must honor forge_node delivered:false: missing {required_term}")
+
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
 # structurally prevents drift like 'pve-730xd' (non-canonical machine identity)
