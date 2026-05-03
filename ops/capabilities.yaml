@@ -1420,6 +1420,28 @@ capabilities:
     domain: infra
     plane: fabric
     layer: L2_shared_infrastructure
+  forge.branch_protection.tighten:
+    description: Smallest governed mutating primitive for branch-protection enforcement on the forge_node primary repo (PACKET-665 under PACKET-588 forge_node Stage 2 sequence). DEFAULT BEHAVIOR IS DRY-RUN — reads current protected_branch row, computes target row, prints before/after diff, writes a dry-run receipt with rollback_sql staged inline, and exits with status 2 (SKIPPED). Mutating apply requires explicit --apply AND --reason; without both, no mutation occurs. With --apply true and --reason supplied, the cap UPDATEs only the named columns (required_approvals, enable_status_check, status_check_contexts, require_signed_commits) on the protected_branch row, then re-reads to confirm. Stop lines enforced in script — psql_exec rejects DELETE / DROP / TRUNCATE / ALTER and only operates on the protected_branch table; never reads token_hash, token_salt, access_token / oauth / deploy_key value columns. Receipt at $SPINE_STATE/domain-state/forge-node/branch-protection-tighten-latest.yaml carries before/after, change list, rollback_sql, mode (dry_run|applied), reason. The receipt is consumed by node.role.contract.yaml forge_node.required_proofs.agent_boundary_proof.staged_delivery.stage_2_enforcement when an apply produces a confirmed enforcement step.
+    tags:
+      - infra
+      - forge
+      - branch-protection
+      - mutating
+      - stage_2
+      - agent-boundary
+    command: ./ops/plugins/infra/host/bin/forge-branch-protection-tighten
+    script_path: ./ops/plugins/infra/host/bin/forge-branch-protection-tighten
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: argparse
+    lifecycle: ready
+    outputs:
+      - stdout
+      - $SPINE_STATE/domain-state/forge-node/branch-protection-tighten-latest.yaml
+    domain: infra
+    plane: fabric
+    layer: L2_shared_infrastructure
   forge.status:
     description: Read-only forge_status_proof inspection (PACKET-588 Phase 5 under Phase 4 nameplate). Probes the forge_node runtime body (dev-tools VM 206 Gitea + Postgres + Actions runner) via SSH+docker-exec; captures Gitea/runner versions, repo inventory by name (filesystem listing), origin/main HEAD for the primary repo, declared SSH/HTTP routes, backup pointer scan, branch surface (names only). Writes a YAML receipt at $SPINE_STATE/domain-state/forge-node/forge-status-proof-latest.yaml. NO Forgejo install, NO runner changes, NO branch protection mutation, NO DNS/secrets/tokens/users/webhooks/repos. The receipt is the proof_ref consumed by node.role.contract.yaml forge_node.required_proofs.forge_status_proof.
     tags:

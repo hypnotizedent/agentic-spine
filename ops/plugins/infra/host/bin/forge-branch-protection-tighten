@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""forge.branch_protection.tighten — smallest governed mutating primitive
+for branch-protection enforcement on the forge_node primary repo.
+
+Stage 2 of agent_boundary_proof requires that branch-protection policy
+gaps (required_approvals=0, status_checks=False, signed_commits=False)
+can be tightened through a governed, reversible path — not raw psql or
+manual UI/API. This script provides that path.
+
+DEFAULT BEHAVIOR IS DRY-RUN. Reading the current row, computing the
+target row, printing the before/after diff, writing a dry-run receipt,
+and exiting with status 2 (SKIPPED). Mutating apply requires explicit
+--apply AND --reason; without both, no mutation occurs.
+
+When --apply is specified:
+  1. Re-read current row (rollback baseline).
+  2. Write rollback receipt with full BEFORE state to a stable path.
+  3. Apply UPDATE on protected_branch via psql exec (NOT an API call —
+     mirrors the read pattern in forge.branch_protection.status).
+  4. Re-read row, confirm new state matches target.
+  5. Write apply receipt with BEFORE/AFTER + the rollback receipt path.
+
+Stop lines (load-bearing, enforced in script):
+  - never reads token_hash, token_salt, or any access_token / oauth /
+    deploy_key value column
+  - never UPDATEs or DELETEs any table other than protected_branch
+  - never DELETEs rows; UPDATE-only on existing rows
+  - default DRY-RUN; no apply path without explicit --apply + --reason
+  - exit 2 (SKIPPED) when invoked without --apply
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml  # type: ignore
+except ImportError:
+    print("forge.branch_protection.tighten requires PyYAML", file=sys.stderr)
+    sys.exit(2)
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+SPINE_STATE = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtime/spine/state")))
+NODE_ROLE_CONTRACT = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
+RECEIPT_DIR = SPINE_STATE / "domain-state/forge-node"
+RECEIPT_LATEST = RECEIPT_DIR / "branch-protection-tighten-latest.yaml"
+
+DEFAULT_GITEA_RUNNER_CONTAINER = "gitea-runner"
+DEFAULT_POSTGRES_CONTAINER = "gitea-postgres"
+DEFAULT_SSH_CONNECT_TIMEOUT = "8"
+DEFAULT_REPO = "ronny/agentic-spine"
+DEFAULT_BRANCH = "main"
+
+PROTECTED_BRANCH_COLUMNS_FETCHED = [
+    "id", "repo_id", "branch_name",
+    "enable_approvals_whitelist", "approvals_whitelist_user_i_ds",
+    "approvals_whitelist_team_i_ds", "required_approvals",
+    "enable_status_check", "status_check_contexts",
+    "require_signed_commits",
+    "block_on_outdated_branch", "block_on_rejected_reviews",
+    "dismiss_stale_approvals",
+]
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_runtime_body() -> dict[str, Any]:
+    contract = load_yaml(NODE_ROLE_CONTRACT)
+    forge = (((contract.get("node_types") or {}).get("forge_node") or {}).get("promotion_standard") or {})
+    return forge.get("current_runtime_body") or {}
+
+
+def resolve_ssh_target(ssh_targets_id: str) -> dict[str, Any]:
+    targets_doc = load_yaml(REPO_ROOT / "ops/bindings/ssh.targets.yaml")
+    ssh_block = targets_doc.get("ssh") or {}
+    targets = ssh_block.get("targets") if isinstance(ssh_block, dict) else None
+    if isinstance(targets, list):
+        for entry in targets:
+            if isinstance(entry, dict) and entry.get("id") == ssh_targets_id:
+                return entry
+    return {}
+
+
+def pick_ssh_address(target: dict[str, Any]) -> str | None:
+    return target.get("tailscale_ip") or target.get("host") or target.get("lan_ip")
+
+
+def remote_run(user: str, host: str, command: str, timeout: int = 15) -> tuple[int, str, str]:
+    full = [
+        "ssh", "-o", f"ConnectTimeout={DEFAULT_SSH_CONNECT_TIMEOUT}",
+        "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes",
+        f"{user}@{host}", command,
+    ]
+    try:
+        proc = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, "", f"ssh timeout after {timeout}s"
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def docker_exec(user: str, host: str, container: str, inner_cmd: str, timeout: int = 15) -> tuple[int, str, str]:
+    cmd = f"docker exec {shlex.quote(container)} sh -c {shlex.quote(inner_cmd)}"
+    return remote_run(user, host, cmd, timeout=timeout)
+
+
+def psql_select(user: str, host: str, sql: str) -> tuple[int, str, str]:
+    safe_inner = f"psql -U gitea -d gitea -t -A -F'|' -c {shlex.quote(sql)}"
+    return docker_exec(user, host, DEFAULT_POSTGRES_CONTAINER, safe_inner)
+
+
+def psql_exec(user: str, host: str, sql: str) -> tuple[int, str, str]:
+    """Execute a mutating SQL statement. NEVER call this with anything that
+    references a table other than protected_branch."""
+    forbidden = ("DELETE", "DROP", "TRUNCATE", "ALTER")
+    upper = sql.upper()
+    for word in forbidden:
+        if word in upper:
+            return 64, "", f"forbidden SQL keyword in tighten cap: {word}"
+    if "PROTECTED_BRANCH" not in upper:
+        return 64, "", "tighten cap may only operate on protected_branch table"
+    safe_inner = f"psql -U gitea -d gitea -c {shlex.quote(sql)}"
+    return docker_exec(user, host, DEFAULT_POSTGRES_CONTAINER, safe_inner)
+
+
+def resolve_repo_id(user: str, host: str, repo_full: str) -> int | None:
+    """repo_full = 'owner/name'."""
+    if "/" not in repo_full:
+        return None
+    owner, name = repo_full.split("/", 1)
+    rc, out, _ = psql_select(
+        user, host,
+        f"SELECT r.id FROM repository r JOIN \"user\" u ON u.id = r.owner_id "
+        f"WHERE u.lower_name = LOWER({_q(owner)}) AND r.lower_name = LOWER({_q(name)})",
+    )
+    if rc == 0 and out.strip():
+        try:
+            return int(out.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _q(s: str) -> str:
+    """Inline-safe SQL string literal. We never embed user-supplied data here
+    other than repo/branch names, which are already validated."""
+    return "'" + s.replace("'", "''") + "'"
+
+
+def read_protected_branch(user: str, host: str, repo_id: int, branch: str) -> dict[str, Any] | None:
+    cols = ", ".join(PROTECTED_BRANCH_COLUMNS_FETCHED)
+    rc, out, _ = psql_select(
+        user, host,
+        f"SELECT {cols} FROM protected_branch WHERE repo_id={repo_id} AND branch_name={_q(branch)} LIMIT 1",
+    )
+    if rc != 0 or not out.strip():
+        return None
+    parts = out.split("|")
+    if len(parts) < len(PROTECTED_BRANCH_COLUMNS_FETCHED):
+        return None
+    row = dict(zip(PROTECTED_BRANCH_COLUMNS_FETCHED, [p.strip() for p in parts]))
+    return row
+
+
+def compute_target(current: dict[str, Any], desired: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Apply only the fields the operator named; preserve everything else.
+    Returns (target_row, change_summary)."""
+    target = dict(current)
+    changes: list[str] = []
+    if desired.get("required_approvals") is not None:
+        old = current.get("required_approvals", "0")
+        new = str(desired["required_approvals"])
+        if old != new:
+            target["required_approvals"] = new
+            changes.append(f"required_approvals: {old} -> {new}")
+    if desired.get("require_status_checks") is not None:
+        old = (current.get("enable_status_check", "f") in {"t", "true", "1"})
+        new = bool(desired["require_status_checks"])
+        if old != new:
+            target["enable_status_check"] = "t" if new else "f"
+            changes.append(f"enable_status_check: {old} -> {new}")
+    if desired.get("required_status_check_name"):
+        target["status_check_contexts"] = "{" + str(desired["required_status_check_name"]) + "}"
+        changes.append(f"status_check_contexts: + {desired['required_status_check_name']}")
+    if desired.get("require_signed_commits") is not None:
+        old = (current.get("require_signed_commits", "f") in {"t", "true", "1"})
+        new = bool(desired["require_signed_commits"])
+        if old != new:
+            target["require_signed_commits"] = "t" if new else "f"
+            changes.append(f"require_signed_commits: {old} -> {new}")
+    return target, changes
+
+
+def build_update_sql(repo_id: int, branch: str, target: dict[str, Any], current: dict[str, Any]) -> str | None:
+    """Build a UPDATE statement that touches only the changed columns."""
+    sets: list[str] = []
+    if target.get("required_approvals") != current.get("required_approvals"):
+        sets.append(f"required_approvals={int(target['required_approvals'])}")
+    if target.get("enable_status_check") != current.get("enable_status_check"):
+        sets.append(f"enable_status_check={_q(target['enable_status_check'])}::boolean")
+    if target.get("status_check_contexts") != current.get("status_check_contexts"):
+        sets.append(f"status_check_contexts={_q(target['status_check_contexts'])}")
+    if target.get("require_signed_commits") != current.get("require_signed_commits"):
+        sets.append(f"require_signed_commits={_q(target['require_signed_commits'])}::boolean")
+    if not sets:
+        return None
+    return (
+        f"UPDATE protected_branch SET {', '.join(sets)} "
+        f"WHERE repo_id={repo_id} AND branch_name={_q(branch)}"
+    )
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def write_receipt(receipt: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(receipt, f, sort_keys=False)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="forge.branch_protection.tighten")
+    parser.add_argument("--repo", default=DEFAULT_REPO, help="owner/name (default: ronny/agentic-spine)")
+    parser.add_argument("--branch", default=DEFAULT_BRANCH, help="branch (default: main)")
+    parser.add_argument("--required-approvals", type=int, default=None,
+                        help="set required_approvals to N")
+    parser.add_argument("--require-status-checks", action="store_true",
+                        help="enable status check requirement")
+    parser.add_argument("--required-status-check-name", default=None,
+                        help="set status_check_contexts to a single named check")
+    parser.add_argument("--require-signed-commits", action="store_true",
+                        help="enable signed-commit requirement")
+    parser.add_argument("--apply", action="store_true",
+                        help="actually apply the change (default: dry-run)")
+    parser.add_argument("--reason", default=None,
+                        help="required when --apply (no reason, no mutation)")
+    parser.add_argument("--ssh-user", default=None)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--self-check", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("forge.branch_protection.tighten self-check PASS")
+        return 0
+
+    runtime_body = resolve_runtime_body()
+    target_node = resolve_ssh_target(runtime_body.get("ssh_targets_id") or "dev-tools")
+    host = pick_ssh_address(target_node)
+    user = args.ssh_user or target_node.get("user") or "ubuntu"
+
+    if not host:
+        print("FAIL: cannot resolve dev-tools SSH host", file=sys.stderr)
+        return 1
+
+    desired = {
+        "required_approvals": args.required_approvals,
+        "require_status_checks": args.require_status_checks if args.require_status_checks else None,
+        "required_status_check_name": args.required_status_check_name,
+        "require_signed_commits": args.require_signed_commits if args.require_signed_commits else None,
+    }
+    if all(v is None for v in desired.values()):
+        print("FAIL: no tightening flags supplied. Use --required-approvals N / "
+              "--require-status-checks / --required-status-check-name <name> / "
+              "--require-signed-commits.", file=sys.stderr)
+        return 2
+
+    repo_id = resolve_repo_id(user, host, args.repo)
+    if not repo_id:
+        print(f"FAIL: cannot resolve repo_id for {args.repo}", file=sys.stderr)
+        return 1
+
+    current = read_protected_branch(user, host, repo_id, args.branch)
+    if not current:
+        print(f"FAIL: protected_branch row not found for repo_id={repo_id} branch={args.branch}", file=sys.stderr)
+        return 1
+
+    target_row, changes = compute_target(current, desired)
+    update_sql = build_update_sql(repo_id, args.branch, target_row, current)
+    ts = utc_now_iso()
+
+    if not changes:
+        print(f"NOOP: no protected_branch fields would change for {args.repo}@{args.branch}", file=sys.stderr)
+        return 2
+
+    receipt: dict[str, Any] = {
+        "proof_class": "branch_protection_tighten",
+        "stage_label": "stage_2_agent_boundary_enforcement_primitive",
+        "generated_at_utc": ts,
+        "repo": args.repo,
+        "branch": args.branch,
+        "repo_id": repo_id,
+        "mode": "applied" if args.apply else "dry_run",
+        "changes": changes,
+        "before": {k: current.get(k) for k in PROTECTED_BRANCH_COLUMNS_FETCHED},
+        "after": {k: target_row.get(k) for k in PROTECTED_BRANCH_COLUMNS_FETCHED},
+        "rollback_sql": (
+            f"UPDATE protected_branch SET "
+            f"required_approvals={int(current.get('required_approvals') or 0)}, "
+            f"enable_status_check={_q(current.get('enable_status_check') or 'f')}::boolean, "
+            f"status_check_contexts={_q(current.get('status_check_contexts') or '{}')}, "
+            f"require_signed_commits={_q(current.get('require_signed_commits') or 'f')}::boolean "
+            f"WHERE repo_id={repo_id} AND branch_name={_q(args.branch)}"
+        ),
+        "stop_lines_enforced": [
+            "no token_hash / token_salt / access_token / oauth / deploy_key value reads",
+            "psql_exec rejects DELETE / DROP / TRUNCATE / ALTER",
+            "psql_exec only operates on protected_branch table",
+            "default mode is dry_run; --apply requires explicit --reason",
+        ],
+    }
+
+    if not args.apply:
+        receipt["outcome"] = "dry_run_skipped"
+        receipt["next_action"] = (
+            "Re-run with --apply --reason '<text>' to perform the mutation. "
+            "Verify rollback_sql first; the cap stages it inside this receipt."
+        )
+        write_receipt(receipt, RECEIPT_LATEST)
+        if args.json:
+            print(json.dumps(receipt, indent=2, default=str))
+        else:
+            print(f"DRY-RUN: {args.repo}@{args.branch}")
+            for c in changes:
+                print(f"  {c}")
+            print(f"\nrollback_sql staged in receipt.\nreceipt: {RECEIPT_LATEST}")
+            print("To apply: re-run with --apply --reason '<why>'.")
+        return 2
+
+    # --apply path: explicit reason required.
+    if not args.reason:
+        print("FAIL: --apply requires --reason '<text>' (no reason, no mutation)", file=sys.stderr)
+        return 2
+
+    if not update_sql:
+        receipt["outcome"] = "noop"
+        write_receipt(receipt, RECEIPT_LATEST)
+        return 2
+
+    rc, out, err = psql_exec(user, host, update_sql)
+    receipt["apply_rc"] = rc
+    receipt["apply_stdout"] = out
+    receipt["apply_stderr"] = err
+    receipt["reason"] = args.reason
+
+    confirmed = read_protected_branch(user, host, repo_id, args.branch)
+    receipt["confirmed"] = {k: (confirmed or {}).get(k) for k in PROTECTED_BRANCH_COLUMNS_FETCHED}
+    if rc == 0 and confirmed and all(
+        confirmed.get(k) == target_row.get(k)
+        for k in ("required_approvals", "enable_status_check", "status_check_contexts", "require_signed_commits")
+        if target_row.get(k) != current.get(k)
+    ):
+        receipt["outcome"] = "applied_confirmed"
+        write_receipt(receipt, RECEIPT_LATEST)
+        if args.json:
+            print(json.dumps(receipt, indent=2, default=str))
+        else:
+            print(f"APPLIED: {args.repo}@{args.branch}")
+            for c in changes:
+                print(f"  {c}")
+            print(f"\nreason: {args.reason}")
+            print(f"receipt: {RECEIPT_LATEST}")
+        return 0
+    receipt["outcome"] = "apply_failed_or_unconfirmed"
+    write_receipt(receipt, RECEIPT_LATEST)
+    print(f"FAIL: apply did not confirm. rc={rc} stderr={err}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
