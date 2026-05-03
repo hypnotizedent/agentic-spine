@@ -164,7 +164,7 @@ truthful core would be:
 | `bin/ops` + governed capability registry | `keep` | Named capabilities are the boring execution/control surface. |
 | terminal identity + execution class | `keep` | Custody and legal mutation boundaries must be explicit. |
 | request / governed birth object | `keep` | Bounded work must have a governed birth object; loop shape is an internal materialization. |
-| execution request / governed execution birth object | `keep` | Execution still needs a governed birth object; delegation and packet transport are internal or expert-visible materializations. |
+| execution request / governed execution birth object | `keep` | Execution still needs a governed birth object; delegation, orchestration manifest, and wave runtime state are internal or expert-visible materializations of the request. |
 | claim | `keep` | Custody proof is core kernel truth. |
 | heartbeat | `keep` | Liveness proof is core kernel truth. |
 | outcome/result/failure | `keep` | Completion truth must be explicit and machine-readable. |

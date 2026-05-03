@@ -37,7 +37,7 @@ canonical classes, not a single artifact.
 |--------|---------------|
 | **Canonical authority** | `workflow.vocabulary.contract.yaml` `kernel_lifecycle_protocol.request` (protocol authority), with class authorities in `dispatch.envelope.contract.yaml` (execution-request) and loop scope + SQLite loop row (work-request) |
 | **Canonical form** | Request protocol with two canonical classes: `work_request` and `execution_request` |
-| **Birth paths** | (a) `delegate.to.execution` — creates DEL-*.yaml delegation envelope; (b) `controller_prompt.create` — creates controller packet (pre-delegation); (c) `loops.create` — creates loop scope (work-level request); (d) `wave.sh start` — creates wave state (execution-level request); (e) mailroom task write (operational dispatch) |
+| **Birth paths** | (a) `delegate.to.execution` — creates DEL-*.yaml delegation envelope; (b) `controller_prompt.create` — creates controller-prompt packet (pre-delegation); (c) `loops.create` — creates loop scope (work-level request); (d) `wave.sh start` — creates wave runtime state (execution-level request); (e) mailroom task write (operational dispatch) |
 | **Read/query paths** | `delegation.status`, `orchestration.status`, `loops.status`, `session.v3.attach` (compiled entry) |
 | **Verify gates** | D34 (work-request integrity), D433 (execution-request integrity via delegation state), D435 (kernel primitive lifecycle truth) |
 | **Classification** | **First-class** — request is explicitly named as a kernel primitive protocol with two canonical classes and governed birth/read paths |
@@ -71,7 +71,7 @@ A valid request must declare:
 | Request Class | Meaning | Birth Surface | Canonical Artifact | Canonical Read Surface |
 |---|---|---|---|---|
 | `work_request` | This bounded work should exist | `loops.create` | SQLite loop row + loop scope projection | `loops.status`, `ops status` |
-| `execution_request` | This bounded work should be executed by a governed execution lane | `delegate.to.execution` (interactive), `mailroom.task.enqueue` (operational), `durable.transfer.adopt` (host-durable existing transfer), `durable.transfer.start` (contracted future launch) | dispatch envelope lifecycle via realization-specific queue artifact | `delegation.status` (interactive); controller packet runtime state + task envelope (operational); `durable.transfer.status` (host-durable transfer) |
+| `execution_request` | This bounded work should be executed by a governed execution lane | `delegate.to.execution` (interactive), `mailroom.task.enqueue` (operational), `durable.transfer.adopt` (host-durable existing transfer), `durable.transfer.start` (contracted future launch) | dispatch envelope lifecycle via realization-specific queue artifact | `delegation.status` (interactive); controller-prompt packet runtime state + task envelope (operational); `durable.transfer.status` (host-durable transfer) |
 
 **What is canonical:** work-request class via loop birth and loop authority;
 execution-request class via dispatch envelope contract and its execution-lane
@@ -96,8 +96,8 @@ Interactive delegation and operational mailroom execution are realizations of
 one execution-request contract, not competing kernels. Interactive delegation
 remains manual/explicit today. Operational mailroom execution remains the
 autonomous realization. Controller-prompt work can now enter that lane
-truthfully with synchronized packet runtime state, but packet closeout remains
-explicit rather than autonomous.
+truthfully with synchronized controller-prompt packet runtime state, but
+controller-prompt packet closeout remains explicit rather than autonomous.
 
 ### 2. CLAIM
 

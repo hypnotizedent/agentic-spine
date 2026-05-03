@@ -199,19 +199,32 @@ without the row is not a loop, and the row without the file cannot close.
 
 ### Packet
 
-The bounded instruction set for work inside a loop. Says what to do, what to
-load, what artifact to produce, and what is out of scope. A loop contains one
-or many packets. A packet's frontmatter carries `loop_id`.
+The taught/public meaning of "packet" is the **controller-prompt packet** —
+the operator-authored Markdown bounded-instruction artifact named
+`PACKET-XXX-NAME-DATE.md`. When this protocol or any other surface uses
+"packet" without a qualifier, this is the meaning.
 
-- Orchestration packets: `$SPINE_STATE/orchestration/{LOOP_ID}/packet.yaml` — governed create/amend/close
-- Controller-prompt packets: `$SPINE_STATE/controller-prompts/` — governed create (`controller_prompt.create`) and governed close (`controller_prompt.close`); packet frontmatter/identity/path binding is governed at birth and death, packet body remains operator-authored; historical packets (pre-governed-create) are valid legacy, not drift
+- **Controller-prompt packet** (operator-facing, primary): `$SPINE_STATE/controller-prompts/PACKET-{NAME}-{DATE}.md`. Says what to do, what to load, what artifact to produce, and what is out of scope. A loop contains one or many controller-prompt packets. Packet frontmatter/identity/path binding is governed at birth (`controller_prompt.create`) and death (`controller_prompt.close`). Body is operator-authored. Historical packets (pre-governed-create) are valid legacy, not drift.
 
-Controller-prompt packet birth is subtraction-biased: if a live packet already
-exists for the same loop, the default path is `controller_prompt.amend`. A new
-live sibling packet must explicitly declare either `--allow-sibling` with a
-human-readable justification or `--supersedes-packet PACKET-ID`. This prevents
-loop-local packet split-brain where agents see multiple draft packets as
-parallel truths.
+Controller-prompt packet birth is subtraction-biased: if a live packet
+already exists for the same loop, the default path is `controller_prompt.amend`.
+A new live sibling packet must explicitly declare either `--allow-sibling`
+with a human-readable justification or `--supersedes-packet PACKET-ID`. This
+prevents loop-local packet split-brain where agents see multiple draft
+packets as parallel truths.
+
+#### Engine-internal packet-shaped artifacts (not the taught "packet")
+
+Two other artifacts share the word "packet" historically. They are
+engine-internal lane machinery, not the taught operator vocabulary, and
+should be referred to by their qualified names:
+
+- **Orchestration manifest** (engine-internal lane scaffold): file lives at `$SPINE_STATE/orchestration/{LOOP_ID}/packet.yaml`. Governed create/amend/close via the orchestration capabilities. The historical filename `packet.yaml` is preserved for compatibility; the canonical class noun is "orchestration manifest." It scaffolds the wave/worktree lane, not operator intent.
+- **Wave runtime state** (engine-internal execution state): the in-flight execution state owned by `wave.execute` / `wave.finish` while a wave is running. Sometimes informally called "wave packet state" in older notes; the canonical name is "wave runtime state." It is transient runtime, not a durable artifact class.
+
+When a surface needs to refer to one of the engine-internal classes, use the
+qualified name. When a surface uses "packet" alone, it means controller-prompt
+packet.
 
 ### Wave
 
@@ -341,7 +354,8 @@ operator intent
             → wave finished with receipt     [governed: wave.finish]
           → worktree merged, then pruned     [manual: agent pushes/merges, runs hygiene]
         → delegation state updated           [automatic: wave-close hook]
-    → packet closed with artifact            [governed: orchestration via wave.finish, prompts via controller_prompt.close]
+    → controller-prompt packet closed         [governed: controller_prompt.close]
+       (orchestration manifest closed by wave.finish; engine-internal)
   → loop closed with acceptance              [governed: loop-closeout-finalize]
   → handoff emitted at session boundary      [manual: session.handoff.create]
 ```
@@ -420,7 +434,8 @@ operator intent
           → wave dispatched                  [governed: wave.execute]
           → wave finished with receipt       [governed: wave.finish]
       → operator switches back               [manual: terminal switch]
-    → packet closed with artifact            [governed: orchestration via wave.finish, prompts via controller_prompt.close]
+    → controller-prompt packet closed         [governed: controller_prompt.close]
+       (orchestration manifest closed by wave.finish; engine-internal)
   → loop closed with acceptance              [governed: loop-closeout-finalize]
   → handoff emitted at session boundary      [manual: session.handoff.create]
 ```
