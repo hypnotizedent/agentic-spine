@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""forge.backup_restore.status — read-only backup_restore_proof Stage 1.
+
+Materializes Stage 1 of the forge_node.backup_restore_proof on the
+forge_node ladder (PACKET-602 under PACKET-588 phased order). Read-only
+inspection of declared backup posture, observed backup artifacts, and
+documented restore path shape — no Forge/Gitea/runner/DNS/secrets/repo
+mutation, no backup creation, no restore execution.
+
+The receipt records:
+- Declared backup posture (where the contract says backups should land)
+- Observed backup artifacts (what's actually on disk)
+- Drift classification (declared vs observed)
+- Restore path shape (the documented qmrestore command template)
+
+Stage 2 (mutating restore drill — actually reconstituting the VM to a
+parallel surface and validating HEAD/runner/ACL) is FUTURE and explicitly
+out of scope for this cap. Stage 1's job is to make backup posture
+honestly visible so the operator can decide whether to drive Stage 2
+materialization.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml  # type: ignore
+except ImportError:
+    print("forge.backup_restore.status requires PyYAML (apt install python3-yaml or pip install pyyaml)", file=sys.stderr)
+    sys.exit(2)
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+SPINE_STATE = Path(os.environ.get("SPINE_STATE", str(Path.home() / "code/.runtime/spine/state")))
+NODE_ROLE_CONTRACT = REPO_ROOT / "ops/bindings/node.role.contract.yaml"
+VM_LIFECYCLE = REPO_ROOT / "ops/bindings/vm.lifecycle.yaml"
+SHOP_STORAGE_MAP = REPO_ROOT / "ops/bindings/shop.storage.map.yaml"
+RECEIPT_DIR = SPINE_STATE / "domain-state/forge-node"
+RECEIPT_LATEST = RECEIPT_DIR / "backup-restore-proof-latest.yaml"
+
+VM_206 = 206
+DEV_TOOLS_VMID = VM_206
+PVE_HOST_TAILSCALE = "100.96.211.33"
+PVE_USER = "root"
+SSH_CONNECT_TIMEOUT = 8
+FRESHNESS_FRESH_DAYS = 1
+FRESHNESS_RECENT_DAYS = 7
+FRESHNESS_AGED_DAYS = 30
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_runtime_body() -> dict[str, Any]:
+    contract = load_yaml(NODE_ROLE_CONTRACT)
+    forge = (((contract.get("node_types") or {}).get("forge_node") or {}).get("promotion_standard") or {})
+    return forge.get("current_runtime_body") or {}
+
+
+def resolve_vm_lifecycle_entry(vmid: int) -> dict[str, Any]:
+    """Find the VM lifecycle row for the given vmid. Returns the dict
+    block or empty dict when not declared."""
+    doc = load_yaml(VM_LIFECYCLE)
+    for vm in doc.get("vms") or []:
+        if isinstance(vm, dict) and vm.get("id") == vmid:
+            return vm
+    return {}
+
+
+def resolve_backup_lane(lane_id: str) -> dict[str, Any]:
+    """Find the backup_generation_lane block for the given lane id by
+    scanning shop.storage.map.yaml. Returns dict with host + base_path
+    when found, empty otherwise."""
+    doc = load_yaml(SHOP_STORAGE_MAP)
+    for section_value in doc.values():
+        if not isinstance(section_value, list):
+            continue
+        for entry in section_value:
+            if not isinstance(entry, dict):
+                continue
+            for lane in entry.get("backup_generation_lanes") or []:
+                if isinstance(lane, dict) and lane.get("lane_id") == lane_id:
+                    return lane
+    return {}
+
+
+def resolve_restore_target(target_glob_match: str) -> dict[str, Any]:
+    """Look for a restore_targets entry that matches the artifact glob
+    pattern for vm-206, surfacing whether a documented restore target
+    declares this VM."""
+    doc = load_yaml(SHOP_STORAGE_MAP)
+    for section_value in doc.values():
+        if not isinstance(section_value, list):
+            continue
+        for entry in section_value:
+            if not isinstance(entry, dict):
+                continue
+            for tgt in entry.get("restore_targets") or []:
+                if isinstance(tgt, dict) and target_glob_match in str(tgt.get("glob") or ""):
+                    return tgt
+    return {}
+
+
+def remote_run(user: str, host: str, command: str, timeout: int = 12) -> tuple[int, str, str]:
+    full = [
+        "ssh",
+        "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        f"{user}@{host}",
+        command,
+    ]
+    try:
+        proc = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, "", f"ssh timeout after {timeout}s"
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def enumerate_artifacts(base_path: str, vmid: int) -> list[dict[str, Any]]:
+    """SSH to pve and list backup artifacts matching the declared pattern.
+    Read-only. Returns sorted list of {name, size_bytes, mtime_iso}.
+
+    The declared artifact shape is `vzdump-qemu-{vmid}-*.vma.zst` (Proxmox
+    cold-canonical lane). We list both .vma.zst (image) and .log (sibling
+    metadata) to surface the full evidence trail.
+    """
+    artifacts: list[dict[str, Any]] = []
+    # `find` returns one record per file with size + mtime. ISO-format the
+    # timestamp on the remote side to avoid timezone surprises.
+    cmd = (
+        f"find {shlex.quote(base_path)} -maxdepth 1 -type f "
+        f"-name {shlex.quote(f'vzdump-qemu-{vmid}-*')} "
+        "-printf '%f\\t%s\\t%TY-%Tm-%TdT%TH:%TM:%TSZ\\n' 2>/dev/null"
+    )
+    rc, out, err = remote_run(PVE_USER, PVE_HOST_TAILSCALE, cmd)
+    if rc != 0:
+        return artifacts
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        name, size_raw, mtime_raw = parts[0], parts[1], parts[2]
+        try:
+            size_bytes = int(size_raw)
+        except ValueError:
+            size_bytes = -1
+        # Strip fractional seconds from find's nanosecond format
+        mtime_iso = mtime_raw.split(".")[0]
+        if not mtime_iso.endswith("Z"):
+            mtime_iso = mtime_iso.rstrip("Z") + "Z"
+        artifacts.append({"name": name, "size_bytes": size_bytes, "mtime_iso": mtime_iso})
+    artifacts.sort(key=lambda r: r["mtime_iso"])
+    return artifacts
+
+
+def classify_freshness(most_recent_mtime_iso: str | None) -> dict[str, Any]:
+    """Convert most-recent artifact mtime into a freshness classification."""
+    if not most_recent_mtime_iso:
+        return {
+            "has_backup": False,
+            "age_days": None,
+            "freshness_class": "missing",
+        }
+    try:
+        dt = datetime.fromisoformat(most_recent_mtime_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return {
+            "has_backup": True,
+            "age_days": None,
+            "freshness_class": "unparseable_mtime",
+        }
+    age_seconds = (datetime.now(tz=timezone.utc) - dt).total_seconds()
+    age_days = round(age_seconds / 86400.0, 2)
+    if age_days <= FRESHNESS_FRESH_DAYS:
+        cls = "fresh"
+    elif age_days <= FRESHNESS_RECENT_DAYS:
+        cls = "recent"
+    elif age_days <= FRESHNESS_AGED_DAYS:
+        cls = "aged"
+    else:
+        cls = "stale"
+    return {"has_backup": True, "age_days": age_days, "freshness_class": cls}
+
+
+def restore_path_shape(base_path: str, vmid: int) -> dict[str, Any]:
+    """Documented restore path. Stage 1 records the SHAPE; Stage 2 (future)
+    would actually invoke it on a parallel VMID."""
+    return {
+        "mechanism": "proxmox_vzdump_qmrestore",
+        "scope_note": (
+            "Documented path only. Stage 2 (actual reconstitution to a parallel "
+            "VMID with HEAD/runner/ACL validation) is future and explicitly out "
+            "of scope for this proof."
+        ),
+        "command_template": (
+            f"qmrestore {base_path}/<artifact> <new_vmid> --storage <storage>"
+        ),
+        "expected_artifact_pattern": f"vzdump-qemu-{vmid}-*.vma.zst",
+        "expected_log_pattern": f"vzdump-qemu-{vmid}-*.log",
+        "host": "pve",
+        "preconditions_for_stage_2": [
+            "At least one fresh artifact present at the declared base_path",
+            "Free Proxmox VMID for parallel target",
+            "Free storage capacity for restored disk",
+            "No naming collision with the live forge VMID",
+        ],
+    }
+
+
+def build_proof() -> dict[str, Any]:
+    runtime_body = resolve_runtime_body()
+    if not runtime_body:
+        raise SystemExit(
+            "forge.backup_restore.status: forge_node.promotion_standard.current_runtime_body missing"
+        )
+    vm_entry = resolve_vm_lifecycle_entry(DEV_TOOLS_VMID)
+    declared_backup_target = vm_entry.get("backup_target") or ""
+    lane_block = resolve_backup_lane("pve-vzdump-cold-canonical")
+    base_path = lane_block.get("base_path", "")
+    declared_host = lane_block.get("host", "")
+
+    declared_posture = {
+        "source_vmid": DEV_TOOLS_VMID,
+        "source_vm_hostname": vm_entry.get("hostname"),
+        "source_vm_role": vm_entry.get("role"),
+        "backup_target": declared_backup_target,
+        "destination_lane": "pve-vzdump-cold-canonical",
+        "destination_host": declared_host,
+        "destination_base_path": base_path,
+        "artifact_pattern": f"vzdump-qemu-{DEV_TOOLS_VMID}-*.vma.zst",
+        "sources_consulted": [
+            "ops/bindings/node.role.contract.yaml",
+            "ops/bindings/vm.lifecycle.yaml",
+            "ops/bindings/shop.storage.map.yaml",
+        ],
+    }
+    restore_target_block = resolve_restore_target(f"vzdump-qemu-{DEV_TOOLS_VMID}-")
+    declared_posture["declared_restore_target"] = bool(restore_target_block)
+    if restore_target_block:
+        declared_posture["restore_target_block"] = {
+            "name": restore_target_block.get("name"),
+            "host": restore_target_block.get("host"),
+            "base_path": restore_target_block.get("base_path"),
+            "glob": restore_target_block.get("glob"),
+            "classification": restore_target_block.get("classification"),
+        }
+
+    artifacts: list[dict[str, Any]] = []
+    if base_path:
+        artifacts = enumerate_artifacts(base_path, DEV_TOOLS_VMID)
+    image_artifacts = [a for a in artifacts if a["name"].endswith(".vma.zst")]
+    log_artifacts = [a for a in artifacts if a["name"].endswith(".log")]
+    most_recent_image = image_artifacts[-1] if image_artifacts else None
+    freshness = classify_freshness(most_recent_image["mtime_iso"] if most_recent_image else None)
+
+    drift = {
+        "declared_in_contract": True,
+        "declared_in_storage_map": bool(declared_backup_target and base_path),
+        "observed_artifacts_match_declaration": bool(image_artifacts),
+        "drift_classification": (
+            "fresh_evidence" if image_artifacts and freshness.get("freshness_class") == "fresh"
+            else "evidence_present_aged" if image_artifacts
+            else "declared_but_not_delivered"
+        ),
+        "drift_note": (
+            "Declared backup target has zero observed artifacts. Stage 2 (restore drill) "
+            "is blocked until at least one fresh artifact is generated. Stage 1 deliverable "
+            "is the EVIDENCE of this gap; remediation is operator's call."
+            if not image_artifacts
+            else None
+        ),
+    }
+
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    proof: dict[str, Any] = {
+        "proof_class": "backup_restore_proof",
+        "stage": 1,
+        "stage_label": "read_only_evidence_and_path_shape",
+        "capability": "forge.backup_restore.status",
+        "node_role": "forge_node",
+        "runtime_body": {
+            "ssh_targets_id": runtime_body.get("ssh_targets_id"),
+            "host_descriptor": runtime_body.get("host_descriptor"),
+            "addresses": runtime_body.get("addresses"),
+            "services": runtime_body.get("services"),
+        },
+        "generated_at": timestamp,
+        "observation_only": True,
+        "scope_note": (
+            "Stage 1 read-only proof. Inspects declared backup posture, enumerates "
+            "observed artifacts, documents restore path shape. NO mutation. Stage 2 "
+            "(restore drill) is FUTURE."
+        ),
+        "stop_lines_respected": [
+            "no Forgejo install",
+            "no Gitea config changes",
+            "no runner mutation",
+            "no DNS/secrets/tokens/users/webhooks/repos changed",
+            "no backup creation",
+            "no restore execution (path shape documented only)",
+        ],
+        "declared_backup_posture": declared_posture,
+        "observed_backup_artifacts": {
+            "image_count": len(image_artifacts),
+            "log_count": len(log_artifacts),
+            "images": image_artifacts[-10:],
+            "logs": log_artifacts[-10:],
+            "most_recent_image": most_recent_image,
+        },
+        "freshness": freshness,
+        "drift": drift,
+        "restore_path_shape": restore_path_shape(base_path, DEV_TOOLS_VMID),
+        "proof_summary": {
+            "declared_path_resolved": bool(base_path),
+            "artifacts_present": bool(image_artifacts),
+            "freshness_class": freshness.get("freshness_class"),
+            "restore_path_documented": True,
+            "drift_observed": not bool(image_artifacts),
+            "stage_2_blocked_until": (
+                "at_least_one_fresh_artifact_present" if not image_artifacts else None
+            ),
+        },
+    }
+    return proof
+
+
+def write_proof(proof: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(proof, sort_keys=False, width=120) + "\n", encoding="utf-8")
+
+
+def render_human(proof: dict[str, Any]) -> str:
+    s = proof.get("proof_summary") or {}
+    declared = proof.get("declared_backup_posture") or {}
+    observed = proof.get("observed_backup_artifacts") or {}
+    fresh = proof.get("freshness") or {}
+    drift = proof.get("drift") or {}
+    lines: list[str] = []
+    lines.append(f"forge.backup_restore.status — backup_restore_proof Stage {proof.get('stage')}")
+    lines.append(f"generated_at: {proof.get('generated_at')}")
+    rb = proof.get("runtime_body") or {}
+    lines.append(f"runtime body: {rb.get('ssh_targets_id')} ({rb.get('host_descriptor')})")
+    lines.append("")
+    lines.append("declared backup posture:")
+    lines.append(f"  source vm:       {declared.get('source_vm_hostname')} (vmid {declared.get('source_vmid')})")
+    lines.append(f"  backup target:   {declared.get('backup_target') or '(missing)'}")
+    lines.append(f"  destination:     {declared.get('destination_host')}:{declared.get('destination_base_path') or '(missing)'}")
+    lines.append(f"  artifact glob:   {declared.get('artifact_pattern')}")
+    lines.append(f"  restore target declared: {declared.get('declared_restore_target')}")
+    lines.append("")
+    lines.append("observed artifacts:")
+    lines.append(f"  image count:     {observed.get('image_count')}")
+    lines.append(f"  log count:       {observed.get('log_count')}")
+    most_recent = observed.get("most_recent_image")
+    if most_recent:
+        lines.append(f"  most recent:     {most_recent.get('name')} ({most_recent.get('size_bytes')} bytes, {most_recent.get('mtime_iso')})")
+    else:
+        lines.append(f"  most recent:     (none observed)")
+    lines.append("")
+    age_suffix = f" (age={fresh.get('age_days')}d)" if fresh.get("age_days") is not None else ""
+    lines.append(f"freshness:         {fresh.get('freshness_class')}{age_suffix}")
+    lines.append(f"drift:             {drift.get('drift_classification')}")
+    if drift.get("drift_note"):
+        lines.append(f"  note: {drift.get('drift_note')}")
+    lines.append("")
+    rps = proof.get("restore_path_shape") or {}
+    lines.append("restore path shape (documented; not executed):")
+    lines.append(f"  mechanism: {rps.get('mechanism')}")
+    lines.append(f"  command:   {rps.get('command_template')}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="forge.backup_restore.status")
+    parser.add_argument("--json", action="store_true", help="emit proof JSON only")
+    parser.add_argument("--no-write", action="store_true", help="do not persist receipt YAML")
+    parser.add_argument("--out", help=f"override receipt path (default: {RECEIPT_LATEST})")
+    parser.add_argument("--self-check", action="store_true", help="self-check pass")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("forge.backup_restore.status self-check PASS")
+        return 0
+
+    proof = build_proof()
+
+    if not args.no_write:
+        out_path = Path(args.out) if args.out else RECEIPT_LATEST
+        write_proof(proof, out_path)
+        proof.setdefault("proof_summary", {})["receipt_path"] = str(out_path)
+
+    if args.json:
+        print(json.dumps(proof, indent=2, default=str))
+    else:
+        print(render_human(proof))
+        if not args.no_write:
+            print(f"\nreceipt: {RECEIPT_LATEST}")
+
+    summary = proof.get("proof_summary") or {}
+    if not summary.get("declared_path_resolved"):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -249,7 +249,27 @@ node_types:
           requirement: "Read-only readback proves origin/main HEAD is reachable, runner state is observable, and repo ACL surface (orgs/teams/branches/protection rules) is enumerable. Surfaces drift between declared state and observed state. NO mutation."
           proof_ref: "$SPINE_STATE/domain-state/forge-node/forge-status-proof-latest.yaml"
         backup_restore_proof:
-          requirement: "Fresh restore drill receipt: a known commit + Gitea config + runner registration can be reconstituted from off-host backup to a parallel surface. Restore validated by readback (HEAD matches, runner registers, ACL re-applies), not just file copy."
+          source:
+            - ops/plugins/infra/host/bin/forge-backup-restore-status
+            - ops/bindings/vm.lifecycle.yaml
+            - ops/bindings/shop.storage.map.yaml
+          requirement: |
+            Two-stage proof. Stage 1 (read-only evidence + restore path shape):
+            backup posture is enumerable from contracts (declared lane + base_path),
+            observed artifacts at the declared path are listed with timestamps so
+            drift between declared and observed is honestly visible, and the
+            restore path shape (qmrestore command template) is documented without
+            execution. Stage 2 (mutating restore drill, FUTURE): a known commit +
+            Gitea config + runner registration are reconstituted from the off-host
+            backup to a parallel VMID. Restore validated by readback (HEAD matches,
+            runner registers, ACL re-applies), not just file copy. Stage 1 is the
+            current proof_ref artifact. Stage 2 advances when at least one fresh
+            backup artifact exists and a parallel VMID is allocated for drill.
+          proof_ref: "$SPINE_STATE/domain-state/forge-node/backup-restore-proof-latest.yaml"
+          staged_delivery:
+            stage_1_evidence: present_when_proof_ref_artifact_exists
+            stage_2_drill: future
+            stage_2_blocked_until: at_least_one_fresh_backup_artifact_present
         agent_boundary_proof:
           requirement: "AI agents writing to forge are bounded by mailroom/runner contract: no direct push to origin/main outside governed pipeline. PR/branch shape enforced. Receipt class shows agent-origin commits arrived through governed lane only."
         runner_cache_boundary_proof:
@@ -264,9 +284,9 @@ node_types:
         dev-tools:
           - forge_status_proof
           - branch_protection_readback_proof
+          - backup_restore_proof
       candidate_gaps:
         dev-tools:
-          - backup_restore_proof
           - agent_boundary_proof
           - runner_cache_boundary_proof
     physical_separation_posture:
