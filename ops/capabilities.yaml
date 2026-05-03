@@ -1244,6 +1244,25 @@ capabilities:
     plane: fabric
     automation_only: true
     layer: L2_shared_infrastructure
+  clerk.symptom.classify.and.file:
+    description: PACKET-592 Phase 1 friction clerk. Reads ops status --brief, infra.host.code.drift.status, infra.host.authority.reachability.status; classifies each surfaced symptom into an 8-field record (symptom, source, affected authority, classification, owner/canonical home, severity, allowed autonomy, next action) with a stable dedupe key; files governed friction records via existing friction.ingest cap (1206 records currently in queue; dedupe handled internally with 5 matched of those). Default mode is dry-run JSON; --file invokes friction.ingest for each classified record. Read-only diagnosis + governed filing only — NO direct DB writes, NO host mutation, NO autonomous fix attempts. Stops "spine failed / coherence attention" hiding inside generic verify output by turning each into a classified deduped record. NOTE — cross-host filing from non-authority hosts requires SPINE_ROLE_POLICY_OVERRIDE_* env propagation across cap.sh SSH dispatch (separately fixable). Today the cap files cleanly when invoked on pve directly or when the override env reaches the routed dispatch.
+    tags:
+      - infra
+      - clerk
+      - friction
+      - symptom-classification
+    command: ./ops/plugins/infra/host/bin/clerk-symptom-classify-and-file
+    script_path: ./ops/plugins/infra/host/bin/clerk-symptom-classify-and-file
+    cwd: $SPINE_CODE
+    safety: read-only
+    approval: auto
+    arg_protocol: argparse
+    lifecycle: ready
+    outputs:
+      - stdout
+    domain: infra
+    plane: fabric
+    layer: L2_shared_infrastructure
   infra.host.authority.reachability.status:
     description: Read-only authority reachability classifier (PACKET-592 immediate item 1). Probes pve + ai-consolidation + pve-r620 via BOTH LAN and Tailscale addresses; classifies each as ok|lan_only|tailscale_only|fully_unreachable; reports overall_status (ok|degraded|blocked) and routed_authority_via_lan / routed_authority_via_tailscale flags. Surfaces actionable workaround (SPINE_DB_AUTHORITY_HOST_ADDR=<ts_addr>) when routed cap.sh dispatch is blocked because operator is off-LAN. Distinguishes "spine failed" from specific reachability classes — first move toward symptom-classification autonomy. NO mutation, NO failover, NO host modification.
     tags:

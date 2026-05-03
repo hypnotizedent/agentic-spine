@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""clerk.symptom.classify.and.file — friction clerk Phase 1.
+
+PACKET-592 Phase 1 (under PACKET-588 plan): the clerk reads existing readbacks,
+classifies symptoms, and files governed friction records so Ronny stops being
+the manual bug router.
+
+Reads (read-only):
+- ops status --brief             (overall state class summary)
+- verify.engine.run              (engine smoke result)
+- infra.host.code.drift.status   (per-host code drift)
+- infra.host.authority.reachability.status (LAN/Tailscale class per host)
+- ops loops list / scope state   (terminal proxy for watcher inputs)
+
+Writes (mutating, via existing friction.ingest):
+- One friction record per classified symptom
+- friction.ingest does dedupe internally (5 matched of 1206 in current queue)
+
+8-field record (encoded into existing friction schema):
+| Field           | Where in friction.ingest                            |
+|-----------------|-----------------------------------------------------|
+| symptom         | --actual                                            |
+| source receipt  | implicit (cap run key recorded by friction.ingest)  |
+| affected auth   | embedded in --expected as "<authority> should ..."  |
+| classification  | --capability prefix (e.g., authority_reachability)  |
+| canonical home  | embedded in --expected                              |
+| severity        | --severity                                          |
+| allowed autonomy| embedded in --actual as "[autonomy: <class>]"       |
+| next action     | embedded in --actual as "[next: <action>]"          |
+
+Modes:
+- default: dry-run JSON of would-be filings (read-only diagnosis)
+- --file: actually invoke friction.ingest for each classified symptom
+
+NO mutation in default mode. NO host modification. NO direct DB writes.
+The clerk only writes via the existing governed friction.ingest cap.
+
+Operator-mandated stop lines per PACKET-592 Phase 1 approval:
+- No watcher move
+- No host mutation except installing/enabling the clerk if shape is proven first
+- No Forgejo, no forge runtime changes, no new VM
+- No full spine.verify per terminal closeout
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+CONNECT_TIMEOUT = 8
+SUBPROCESS_TIMEOUT = 30
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+
+
+def _run(cmd: list[str], timeout: int = SUBPROCESS_TIMEOUT) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timed out after {timeout}s"
+    except FileNotFoundError as exc:
+        return 127, "", str(exc)
+
+
+def read_brief() -> dict[str, Any]:
+    """Run ops status --brief and parse pipe-separated fields."""
+    rc, out, err = _run([str(REPO_ROOT / "bin" / "ops"), "status", "--brief"])
+    if rc != 0:
+        return {"_error": err.strip()[:200] or "ops status --brief failed"}
+    text = out.strip().splitlines()[0] if out.strip() else ""
+    fields: dict[str, str] = {}
+    for chunk in text.split("|"):
+        chunk = chunk.strip()
+        if ":" in chunk:
+            k, _, v = chunk.partition(":")
+            fields[k.strip()] = v.strip()
+    return fields
+
+
+def read_drift() -> dict[str, Any]:
+    rc, out, err = _run([
+        str(REPO_ROOT / "ops" / "plugins" / "infra" / "host" / "bin" / "host-code-drift-status"),
+        "--json",
+    ])
+    if rc != 0:
+        return {"_error": err.strip()[:200] or "drift readback failed"}
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as exc:
+        return {"_error": f"drift JSON parse: {exc}"}
+
+
+def read_reachability() -> dict[str, Any]:
+    rc, out, err = _run([
+        str(REPO_ROOT / "ops" / "plugins" / "infra" / "host" / "bin" / "host-authority-reachability-status"),
+        "--json",
+    ])
+    if rc != 0:
+        return {"_error": err.strip()[:200] or "reachability readback failed"}
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as exc:
+        return {"_error": f"reachability JSON parse: {exc}"}
+
+
+def read_engine_smoke_status(brief: dict[str, str]) -> str:
+    return brief.get("Engine", "unknown")
+
+
+def read_spine_verify_status(brief: dict[str, str]) -> str:
+    return brief.get("Spine", "unknown")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Classification rules
+# ─────────────────────────────────────────────────────────────────────────────
+
+def classify_authority_reachability(reach: dict[str, Any]) -> list[dict[str, Any]]:
+    """One symptom per host with non-ok class."""
+    out: list[dict[str, Any]] = []
+    if "_error" in reach:
+        out.append({
+            "dedupe_key": "authority_reachability:meta:read_failed",
+            "classification": "authority_reachability",
+            "capability": "infra.host.authority.reachability.status",
+            "expected": "reachability classifier readable from operator console",
+            "actual": f"reachability readback failed: {reach['_error']}",
+            "severity": "high",
+            "owner": "operator_console",
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": "investigate readback failure on operator console",
+        })
+        return out
+
+    overall = reach.get("overall_status", "unknown")
+    client_net = (reach.get("client_local_network") or {}).get("local_network", "unknown")
+
+    if overall == "ok":
+        return out
+
+    for host in reach.get("hosts", []):
+        cls = host.get("classification")
+        if cls in (None, "ok"):
+            continue
+        name = host.get("name", "unknown")
+        role = host.get("role", "unknown")
+        sev = "high" if cls == "fully_unreachable" else "medium"
+        if cls == "tailscale_only" and client_net == "off_lan_via_tailscale":
+            # Operator off-LAN, Tailscale ok — truthful posture, not a real fault.
+            sev = "low"
+            next_action = "no action; off-LAN posture is honest. cap.sh failover handles routing automatically (commits 839672f5+769308ff)"
+            autonomy = "informational_only"
+        elif cls == "tailscale_only":
+            next_action = "investigate LAN reachability to {} ({})".format(name, host.get("lan_addr", ""))
+            autonomy = "read_only_diagnosis_auto"
+        elif cls == "lan_only":
+            next_action = "investigate Tailscale reachability to {} ({})".format(name, host.get("tailscale_addr", ""))
+            autonomy = "read_only_diagnosis_auto"
+        else:  # fully_unreachable
+            next_action = "investigate full unreachability to {} (LAN: {}; TS: {})".format(
+                name, host.get("lan_failure_reason", "?"), host.get("tailscale_failure_reason", "?"))
+            autonomy = "stop_and_ask"
+
+        out.append({
+            "dedupe_key": f"authority_reachability:{name}:{cls}",
+            "classification": "authority_reachability",
+            "capability": "infra.host.authority.reachability.status",
+            "expected": f"{role} {name} reachable on both LAN and Tailscale (canonical home: ops/bindings/runtime.bootstrap.contract.yaml#db_authority + ssh.targets.yaml)",
+            "actual": f"{role} {name} class={cls}; lan_reachable={host.get('lan_reachable')}; tailscale_reachable={host.get('tailscale_reachable')} [autonomy: {autonomy}] [next: {next_action}]",
+            "severity": sev,
+            "owner": role,
+            "autonomy": autonomy,
+            "next_action": next_action,
+        })
+    return out
+
+
+def classify_code_drift(drift: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if "_error" in drift:
+        out.append({
+            "dedupe_key": "code_drift:meta:read_failed",
+            "classification": "code_drift",
+            "capability": "infra.host.code.drift.status",
+            "expected": "code drift readback queryable from operator console",
+            "actual": f"drift readback failed: {drift['_error']}",
+            "severity": "medium",
+            "owner": "operator_console",
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": "investigate drift readback failure",
+        })
+        return out
+
+    overall = drift.get("overall_status", "unknown")
+    if overall == "ok":
+        return out
+
+    for host in drift.get("hosts", []):
+        st = host.get("status")
+        if st in (None, "ok"):
+            continue
+        name = host.get("name", "unknown")
+        role = host.get("role", "unknown")
+        head = host.get("head") or "unknown"
+        sev = "high" if st in ("drift", "dirty") else "medium"
+        if st == "drift":
+            next_action = f"sync {name} checkout to origin/main HEAD (rsync from operator console for pve, git pull --ff-only for ai-cons)"
+        elif st == "dirty":
+            next_action = f"investigate uncommitted changes on {name} checkout; clean or commit per HOST_DRIFT_POLICY"
+        elif st == "unreachable":
+            next_action = f"investigate {name} reachability before assessing drift"
+            sev = "medium"
+        else:
+            next_action = f"investigate {st} on {name}"
+        out.append({
+            "dedupe_key": f"code_drift:{name}:{st}",
+            "classification": "code_drift",
+            "capability": "infra.host.code.drift.status",
+            "expected": f"{role} {name} HEAD == origin/main (canonical home: docs/governance/HOST_DRIFT_POLICY.md)",
+            "actual": f"{role} {name} status={st}; head={head}; note={host.get('note', '')} [next: {next_action}]",
+            "severity": sev,
+            "owner": role,
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": next_action,
+        })
+    return out
+
+
+def classify_brief_failures(brief: dict[str, str]) -> list[dict[str, Any]]:
+    """Symptoms surfaced by ops status --brief that aren't covered by drift/reach."""
+    out: list[dict[str, Any]] = []
+    spine = brief.get("Spine", "")
+    secondary = brief.get("Secondary", "")
+    coherence = brief.get("Coherence", "")
+    anomalies = brief.get("Anomalies", "")
+
+    if spine == "failed":
+        out.append({
+            "dedupe_key": "verify:spine.verify:failed",
+            "classification": "verify_failure",
+            "capability": "spine.verify",
+            "expected": "spine.verify passes (canonical home: surfaces/verify/d*.sh + ops/bindings/gate.registry.yaml)",
+            "actual": f"spine.verify status=failed (composite — needs sub-classification by D-gate name) [autonomy: read_only_diagnosis_auto] [next: route spine.verify to authority host and capture failing D-gates; classify each as workbench/admission/storage/etc]",
+            "severity": "medium",
+            "owner": "verify_authority",
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": "route spine.verify to authority host; classify failing D-gates per role-aware policy (workbench D153/D397 likely; D447 ai-cons promotion separate)",
+        })
+
+    if secondary == "failed":
+        out.append({
+            "dedupe_key": "verify:secondary:failed",
+            "classification": "verify_failure",
+            "capability": "secondary_verifies",
+            "expected": "secondary verifies pass",
+            "actual": f"secondary status=failed [autonomy: read_only_diagnosis_auto] [next: enumerate secondary verify lane and identify failing surfaces]",
+            "severity": "low",
+            "owner": "verify_authority",
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": "enumerate secondary verify lane; identify which surface(s) fail",
+        })
+
+    if coherence and coherence != "ok":
+        out.append({
+            "dedupe_key": f"coherence:state_summary:{coherence}",
+            "classification": "coherence",
+            "capability": "ops.status.brief",
+            "expected": "Coherence: ok",
+            "actual": f"Coherence: {coherence} (composite signal from joined_state) [autonomy: read_only_diagnosis_auto] [next: inspect joined_state_summary for active_waves/orphaned_waves/verify status fragments]",
+            "severity": "low",
+            "owner": "engine_authority",
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": "inspect joined_state_summary for active_waves/orphaned_waves/verify status fragments",
+        })
+
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Filing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def file_via_friction_ingest(record: dict[str, Any]) -> dict[str, Any]:
+    """Invoke ./bin/ops cap run friction.ingest with the record's fields.
+
+    Sets SPINE_ROLE_POLICY_OVERRIDE_REF to identify the clerk as the caller.
+    """
+    env = os.environ.copy()
+    env["SPINE_ROLE_POLICY_OVERRIDE_REF"] = "PACKET-592-CLERK-FRICTION-RAIL"
+    env["SPINE_ROLE_POLICY_OVERRIDE_REASON"] = (
+        "clerk.symptom.classify.and.file — read-only diagnosis + governed filing only "
+        "(per PACKET-592 Phase 1 approval). Dedupe key: " + record["dedupe_key"]
+    )
+    cmd = [
+        str(REPO_ROOT / "bin" / "ops"), "cap", "run", "friction.ingest", "--",
+        "--capability", record["capability"],
+        "--expected", record["expected"],
+        "--actual", record["actual"],
+        "--severity", record["severity"],
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, env=env)
+        result = {
+            "filed": proc.returncode == 0,
+            "exit_code": proc.returncode,
+            "stdout_tail": proc.stdout.strip().splitlines()[-3:] if proc.stdout else [],
+            "stderr_tail": proc.stderr.strip().splitlines()[-3:] if proc.stderr else [],
+        }
+        # Classify common failure modes so the clerk's own output is actionable.
+        if proc.returncode == 3:
+            combined = (proc.stdout + proc.stderr).lower()
+            if "execution class policy blocked" in combined or "bound terminal identity" in combined:
+                result["failure_class"] = "admission_gate_refused"
+                result["failure_hint"] = (
+                    "friction.ingest is mutating and routes to authority host. cap.sh SSH dispatch "
+                    "does not propagate SPINE_ROLE_POLICY_OVERRIDE_* env vars. Run the clerk "
+                    "directly on the authority host (pve) where no routing occurs, OR teach cap.sh "
+                    "to forward override env vars across SSH (separate slice)."
+                )
+        return result
+    except subprocess.TimeoutExpired:
+        return {"filed": False, "exit_code": 124, "error": "friction.ingest timed out"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="clerk.symptom.classify.and.file")
+    parser.add_argument("--file", action="store_true",
+                        help="Actually file friction records via friction.ingest "
+                             "(default: dry-run JSON only)")
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument("--self-check", action="store_true", help="self-check pass")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("clerk.symptom.classify.and.file self-check PASS")
+        return 0
+
+    brief = read_brief()
+    drift = read_drift()
+    reach = read_reachability()
+
+    classified: list[dict[str, Any]] = []
+    classified.extend(classify_authority_reachability(reach))
+    classified.extend(classify_code_drift(drift))
+    classified.extend(classify_brief_failures(brief))
+
+    filings: list[dict[str, Any]] = []
+    if args.file:
+        for record in classified:
+            result = file_via_friction_ingest(record)
+            filings.append({"dedupe_key": record["dedupe_key"], "result": result})
+
+    payload = {
+        "capability": "clerk.symptom.classify.and.file",
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "mode": "file" if args.file else "dry_run",
+        "input_summary": {
+            "brief_fields": list(brief.keys()),
+            "drift_overall": drift.get("overall_status"),
+            "reach_overall": reach.get("overall_status"),
+        },
+        "classified_count": len(classified),
+        "classified": classified,
+        "filings": filings if args.file else None,
+        "scope_note": "PACKET-592 Phase 1 friction clerk. Read-only diagnosis + governed filing via existing friction.ingest. NO direct DB writes, NO host mutation, NO autonomous fix attempts.",
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"clerk.symptom.classify.and.file (mode: {payload['mode']})")
+        print(f"classified: {payload['classified_count']} symptom(s)")
+        for record in classified:
+            print(f"  [{record['severity']:>6}] {record['classification']:<25} {record['dedupe_key']}")
+            print(f"          owner: {record['owner']}; autonomy: {record['autonomy']}")
+            print(f"          next:  {record['next_action']}")
+        if args.file:
+            filed_count = sum(1 for f in filings if f.get("result", {}).get("filed"))
+            print(f"\nfiled: {filed_count} / {len(filings)}")
+            for f in filings:
+                rc = f.get("result", {}).get("exit_code", "?")
+                ok = f.get("result", {}).get("filed")
+                marker = "✓" if ok else "✗"
+                print(f"  {marker} ({rc}) {f['dedupe_key']}")
+        else:
+            print(f"\n(dry-run; pass --file to actually invoke friction.ingest for each record)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

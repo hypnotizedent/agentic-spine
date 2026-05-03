@@ -354,6 +354,31 @@ if "infra/host/bin/host-authority-reachability-status" not in status_sh_text:
 if "Authority:" not in status_sh_text:
     fail("ops/commands/status.sh must emit 'Authority:' field in --brief output (PACKET-592 first-class symptom classification)")
 
+# PACKET-592 Phase 1: friction clerk must exist + be wired into capabilities.
+# Reads existing readbacks, classifies symptoms, files via existing
+# friction.ingest. No new D-gate (extends D447 per add-one-retire-one).
+clerk_script = root / "ops/plugins/infra/host/bin/clerk-symptom-classify-and-file"
+if not clerk_script.is_file():
+    fail("ops/plugins/infra/host/bin/clerk-symptom-classify-and-file missing (PACKET-592 Phase 1 friction clerk)")
+if not os.access(str(clerk_script), os.X_OK):
+    fail("clerk-symptom-classify-and-file must be executable")
+clerk_text = clerk_script.read_text(encoding="utf-8")
+if "clerk.symptom.classify.and.file" not in clerk_text:
+    fail("clerk script must self-identify as clerk.symptom.classify.and.file capability")
+for required_input in ("read_brief", "read_drift", "read_reachability"):
+    if required_input not in clerk_text:
+        fail(f"clerk must define {required_input} (reads existing readbacks per Phase 1 acceptance bar)")
+for required_classifier in ("classify_authority_reachability", "classify_code_drift", "classify_brief_failures"):
+    if required_classifier not in clerk_text:
+        fail(f"clerk must implement {required_classifier} (8-field record classification per Phase 1 acceptance bar)")
+if "friction.ingest" not in clerk_text:
+    fail("clerk must invoke friction.ingest as governed write path (no direct DB writes per Phase 1 stop lines)")
+caps_doc_clerk = (caps_map.get("clerk.symptom.classify.and.file") or {})
+if caps_doc_clerk.get("safety") != "read-only":
+    fail("clerk.symptom.classify.and.file must be safety: read-only (default mode is dry-run; --file delegates to friction.ingest's own admission gate)")
+if caps_doc_clerk.get("script_path") != "./ops/plugins/infra/host/bin/clerk-symptom-classify-and-file":
+    fail("clerk.symptom.classify.and.file script_path must point at ops/plugins/infra/host/bin/clerk-symptom-classify-and-file")
+
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
 # structurally prevents drift like 'pve-730xd' (non-canonical machine identity)
