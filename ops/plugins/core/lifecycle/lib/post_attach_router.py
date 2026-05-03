@@ -21,8 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-from importlib.machinery import SourceFileLoader
-from pathlib import Path
 from typing import Any
 
 from control_loop_status import collect_control_loop_status
@@ -141,18 +139,6 @@ def _load_entry_compile_from_raw(raw: object) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _compile_entry_assignment(state_root: str) -> tuple[dict[str, Any] | None, str | None]:
-    """Load the existing entry-compile implementation and run it in-process."""
-    try:
-        helper = Path(__file__).resolve().parents[1] / "bin" / "entry-compile"
-        loader = SourceFileLoader("_spine_entry_compile_for_router", str(helper))
-        module = loader.load_module()
-        compiled = module.compile_assignment(state_root)
-    except Exception as exc:  # pragma: no cover - exercised by degraded installs
-        return None, f"entry compile unavailable: {exc.__class__.__name__}"
-    return compiled if isinstance(compiled, dict) else None, None
-
-
 def _candidate_from_compiled_loop(compiled: dict[str, Any]) -> dict[str, Any] | None:
     loop_id = str(compiled.get("loop_id") or "").strip()
     if not loop_id or loop_id.lower() in {"none", "<none>", "unknown"}:
@@ -238,10 +224,6 @@ def compute_routing(
     compiled = _load_entry_compile_from_raw(entry_compile)
     if compiled is None:
         compiled = _load_entry_compile_from_raw(env.get("ENTRY_COMPILE_JSON"))
-    if compiled is None:
-        compiled, compile_warning = _compile_entry_assignment(state_root)
-        if compile_warning:
-            warnings.append(compile_warning)
 
     candidates, compile_state, compile_warnings = _entry_compile_candidates(compiled)
     warnings.extend(compile_warnings)
