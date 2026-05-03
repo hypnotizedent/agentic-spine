@@ -121,7 +121,7 @@ _spine_load_execution_host_env() {
     [[ -n "$key" ]] || continue
     [[ "$key" == \#* ]] && continue
     case "$key" in
-      SPINE_REPO|SPINE_CODE|SPINE_TARGET_REPO|SPINE_WORKSPACE_ROOT|SPINE_RUNTIME_ROOT|SPINE_MAILROOM_ROOT|SPINE_INBOX|SPINE_OUTBOX|SPINE_STATE|SPINE_LOCKS|SPINE_LOGS|SPINE_TMP|SPINE_EVIDENCE_ROOT|SPINE_RECEIPTS|SPINE_VERIFY_ROOT|SPINE_VERIFY_REPORTS_ROOT|SPINE_VERIFY_INDEXES_DIR|SPINE_RECEIPT_INDEX_FILE|SPINE_VERIFY_HISTORY_DIR|SPINE_VERIFY_FAILURE_HISTORY_FILE|SPINE_VERIFY_STATE_ROOT|SPINE_VERIFY_PASS_STREAK_FILE|SPINE_LOOP_CLOSEOUTS_ROOT|SPINE_CENSUS_ROOT|SPINE_CAP_RUNS_ROOT|SPINE_DATA_ROOT|SPINE_BACKUPS_ROOT|SPINE_FOUNDATION_ROOT|SPINE_DOMAIN_STATE|SPINE_AGENT_CONTEXT_ROOT|SPINE_AGENT_CONTEXT_FILE|PATH)
+      SPINE_REPO|SPINE_CODE|SPINE_TARGET_REPO|SPINE_WORKSPACE_ROOT|SPINE_RUNTIME_ROOT|SPINE_MAILROOM_ROOT|SPINE_INBOX|SPINE_OUTBOX|SPINE_STATE|SPINE_LOCKS|SPINE_LOGS|SPINE_TMP|SPINE_EVIDENCE_ROOT|SPINE_RECEIPTS|SPINE_VERIFY_ROOT|SPINE_VERIFY_REPORTS_ROOT|SPINE_VERIFY_INDEXES_DIR|SPINE_RECEIPT_INDEX_FILE|SPINE_VERIFY_HISTORY_DIR|SPINE_VERIFY_FAILURE_HISTORY_FILE|SPINE_VERIFY_STATE_ROOT|SPINE_VERIFY_PASS_STREAK_FILE|SPINE_LOOP_CLOSEOUTS_ROOT|SPINE_CENSUS_ROOT|SPINE_CAP_RUNS_ROOT|SPINE_DATA_ROOT|SPINE_BACKUPS_ROOT|SPINE_WORKBENCH_ROOT|SPINE_FOUNDATION_ROOT|SPINE_DOMAIN_STATE|SPINE_AGENT_CONTEXT_ROOT|SPINE_AGENT_CONTEXT_FILE|PATH)
         value="$(_spine_env_unquote "${value:-}")"
         export "$key=$value"
         ;;
@@ -351,7 +351,10 @@ spine_runtime_resolve_paths() {
   local data_root="${SPINE_DATA_ROOT:-}"
   local backups_root="${SPINE_BACKUPS_ROOT:-}"
   local domain_state="${SPINE_DOMAIN_STATE:-}"
-  local foundation_root="${SPINE_FOUNDATION_ROOT:-}"
+  # PACKET-597: SPINE_WORKBENCH_ROOT is the canonical name (the path resolves
+  # to the workbench repo, not the archived agentic-foundation repo).
+  # SPINE_FOUNDATION_ROOT is retained as a one-release compatibility alias.
+  local workbench_root="${SPINE_WORKBENCH_ROOT:-${SPINE_FOUNDATION_ROOT:-}}"
   local agent_context_root="${SPINE_AGENT_CONTEXT_ROOT:-}"
   local agent_context_file="${SPINE_AGENT_CONTEXT_FILE:-}"
 
@@ -502,8 +505,8 @@ spine_runtime_resolve_paths() {
   [[ -n "$backups_root" ]] || backups_root="$workspace_root/.backups"
   backups_root="$(_spine_expand_home_token "$backups_root")"
 
-  [[ -n "$foundation_root" ]] || foundation_root="$workspace_root/workbench"
-  foundation_root="$(_spine_expand_home_token "$foundation_root")"
+  [[ -n "$workbench_root" ]] || workbench_root="$workspace_root/workbench"
+  workbench_root="$(_spine_expand_home_token "$workbench_root")"
 
   if [[ -z "$domain_state" ]]; then
     domain_state="$(_spine_runtime_contract_value "$contract_file" '.domain_state_root' '')"
@@ -545,7 +548,8 @@ spine_runtime_resolve_paths() {
     SPINE_CAP_RUNS_ROOT="$cap_runs" \
     SPINE_DATA_ROOT="$data_root" \
     SPINE_BACKUPS_ROOT="$backups_root" \
-    SPINE_FOUNDATION_ROOT="$foundation_root" \
+    SPINE_WORKBENCH_ROOT="$workbench_root" \
+    SPINE_FOUNDATION_ROOT="$workbench_root" \
     SPINE_DOMAIN_STATE="$domain_state" \
     SPINE_AGENT_CONTEXT_ROOT="$agent_context_root" \
     SPINE_AGENT_CONTEXT_FILE="$agent_context_file"

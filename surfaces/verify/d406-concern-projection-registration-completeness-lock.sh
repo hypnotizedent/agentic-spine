@@ -114,7 +114,13 @@ for concern_id, payload in sorted(as_dict(authority.get("concerns")).items()):
         state = str(source_map.get("state", "")).strip()
         rel_path = normalize_repo_path(source_map.get("path", ""))
         current_state = str(source_map.get("current_state", "")).strip()
-        if state == "authoritative" and rel_path and not rel_path.startswith(("workbench/", "agentic-foundation/", "mint-modules/")):
+        # PACKET-597: agentic-foundation/ retired from this exception list.
+        # The agentic-foundation repo was archived 2026-04-09 (absorbed into
+        # workbench per LOCAL_CONTROL_PLANE_CONTRACT.md:26). The exception
+        # was dead code that silently allowed any future authoritative path
+        # rooted at agentic-foundation/ to bypass D406; the directory does
+        # not exist.
+        if state == "authoritative" and rel_path and not rel_path.startswith(("workbench/", "mint-modules/")):
             authoritative_paths.append(rel_path)
         if state != "projection":
             continue

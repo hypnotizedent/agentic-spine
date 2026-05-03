@@ -40,7 +40,9 @@ Secrets-bearing deploys:
 ## Change Flow (End-to-End)
 
 1. **Edit canonical SSOT** (spine-owned):
-   - Compose: `agentic-foundation/ops/{infra,domains}/**`
+   - Compose: `workbench/ops/{infra,domains}/**` (PACKET-597: was
+     `agentic-foundation/ops/...` — agentic-foundation was absorbed into
+     workbench on 2026-04-09 per LOCAL_CONTROL_PLANE_CONTRACT.md:26)
    - Service/host/stack projection authority: `ops/bindings/probe.registry.yaml`
    - Bindings: `ops/bindings/**`
 2. **Rebuild generated service projections**:

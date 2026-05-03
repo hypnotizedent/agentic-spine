@@ -43,23 +43,27 @@ required_external_dirs=(
   "$SPINE_BACKUPS_ROOT"
 )
 
-# Workbench foundation roots — required only on workbench-owning hosts.
-# PACKET-587: SPINE_FOUNDATION_ROOT is set in /etc/spine/execution-host.env on
+# Workbench roots — required only on workbench-owning hosts.
+# PACKET-587: workbench root is set in /etc/spine/execution-host.env on
 # workbench-owning Linux hosts (ai-consolidation execution_host) and defaulted
 # from root.authority on Darwin (MacBook operator_console). Non-workbench hosts
-# (pve storage_evidence_node, pve-r620 watcher_node) do NOT set
-# SPINE_FOUNDATION_ROOT and must not fail this gate for paths they do not own.
+# (pve storage_evidence_node, pve-r620 watcher_node) do NOT set the workbench
+# root and must not fail this gate for paths they do not own.
 # Per docs/governance/HOST_DRIFT_POLICY.md.
-if [[ -n "${SPINE_FOUNDATION_ROOT:-}" && -d "$SPINE_FOUNDATION_ROOT" ]]; then
+# PACKET-597: SPINE_WORKBENCH_ROOT is canonical; SPINE_FOUNDATION_ROOT is
+# retained as one-release compat alias because the path resolves to workbench,
+# not the archived agentic-foundation repo. Read either, prefer new.
+WORKBENCH_ROOT="${SPINE_WORKBENCH_ROOT:-${SPINE_FOUNDATION_ROOT:-}}"
+if [[ -n "$WORKBENCH_ROOT" && -d "$WORKBENCH_ROOT" ]]; then
   required_external_dirs+=(
-    "$SPINE_FOUNDATION_ROOT"
-    "$SPINE_FOUNDATION_ROOT/docs"
-    "$SPINE_FOUNDATION_ROOT/docs/agents"
-    "$SPINE_FOUNDATION_ROOT/docs/archive"
-    "$SPINE_FOUNDATION_ROOT/docs/product"
-    "$SPINE_FOUNDATION_ROOT/docs/reference"
-    "$SPINE_FOUNDATION_ROOT/ops/domains"
-    "$SPINE_FOUNDATION_ROOT/ops/infra"
+    "$WORKBENCH_ROOT"
+    "$WORKBENCH_ROOT/docs"
+    "$WORKBENCH_ROOT/docs/agents"
+    "$WORKBENCH_ROOT/docs/archive"
+    "$WORKBENCH_ROOT/docs/product"
+    "$WORKBENCH_ROOT/docs/reference"
+    "$WORKBENCH_ROOT/ops/domains"
+    "$WORKBENCH_ROOT/ops/infra"
   )
 fi
 
@@ -67,8 +71,8 @@ for path in "${required_external_dirs[@]}"; do
   [[ -d "$path" ]] || fail "required externalized path missing: $path"
 done
 
-if [[ -n "${SPINE_FOUNDATION_ROOT:-}" && -d "$SPINE_FOUNDATION_ROOT" ]]; then
-  echo "D397 PASS: runtime/evidence and typed foundation source families stay externalized"
+if [[ -n "$WORKBENCH_ROOT" && -d "$WORKBENCH_ROOT" ]]; then
+  echo "D397 PASS: runtime/evidence and typed workbench source families stay externalized"
 else
-  echo "D397 PASS: runtime/evidence externalized (workbench-foundation paths skipped — host does not own workbench)"
+  echo "D397 PASS: runtime/evidence externalized (workbench paths skipped — host does not own workbench)"
 fi
