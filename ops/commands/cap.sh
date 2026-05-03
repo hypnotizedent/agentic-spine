@@ -1281,12 +1281,18 @@ _route_to_db_authority_if_needed() {
     # authority host. Without this, mutating routed caps fail with admission
     # gate refused even when the caller had a governed override locally.
     # Only the named override env vars are forwarded — no wildcard env leak.
+    # PACKET-675 follow-on: also forward SPINE_PACKET_LABEL_OVERRIDE_REASON
+    # so the commit-msg hook's explicit bypass reaches packet.label.validate
+    # on the authority host.
     local override_prefix=""
     if [[ -n "${SPINE_ROLE_POLICY_OVERRIDE_REF:-}" ]]; then
         override_prefix+="export SPINE_ROLE_POLICY_OVERRIDE_REF=$(printf %q "$SPINE_ROLE_POLICY_OVERRIDE_REF") && "
     fi
     if [[ -n "${SPINE_ROLE_POLICY_OVERRIDE_REASON:-}" ]]; then
         override_prefix+="export SPINE_ROLE_POLICY_OVERRIDE_REASON=$(printf %q "$SPINE_ROLE_POLICY_OVERRIDE_REASON") && "
+    fi
+    if [[ -n "${SPINE_PACKET_LABEL_OVERRIDE_REASON:-}" ]]; then
+        override_prefix+="export SPINE_PACKET_LABEL_OVERRIDE_REASON=$(printf %q "$SPINE_PACKET_LABEL_OVERRIDE_REASON") && "
     fi
 
     local remote_cmd

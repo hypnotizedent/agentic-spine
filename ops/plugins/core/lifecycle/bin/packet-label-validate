@@ -37,11 +37,11 @@ Override:
   An empty reason is treated as no override.
 
 Exit codes:
-  0 — all PACKET-NN tokens are OK or PARENT-PHASE
-  1 — at least one REUSE or GHOST classification, no override
-  2 — REUSE/GHOST present but override accepted (validator prints
-       acknowledgment to stderr; commit proceeds — caller treats
-       this as success)
+  0 — all PACKET-NN tokens are OK or PARENT-PHASE,
+       OR REUSE/GHOST present with explicit override (override notice
+       printed to stderr so future readers see the bypass)
+  1 — at least one REUSE or GHOST classification, no override (commit
+       blocked; caller (e.g. commit-msg hook) should fail the commit)
 
 Usage:
   packet-label-validate --commit-msg-file <path>
@@ -223,7 +223,10 @@ def main() -> int:
         for raw, cls, detail in classifications:
             if cls in ("REUSE", "GHOST"):
                 print(f"  [{cls}] {raw}: {detail} (override accepted)", file=sys.stderr)
-        return 2
+        # Exit 0 (allow) so cap.sh propagates success and the hook lets
+        # the commit proceed. The override notice is printed to stderr
+        # so future readers see the bypass happened.
+        return 0
 
     # Block
     print("packet-label-validate: BLOCKED — PACKET-NN commit-label issue(s):", file=sys.stderr)
