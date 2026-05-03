@@ -1243,6 +1243,29 @@ _route_to_db_authority_if_needed() {
         quoted_args+=" $(printf %q "$arg")"
     done
 
+    # B2.5: forward canonical admission identity across SSH dispatch so the
+    # remote admission guard reads the same bound badge as the caller. Per
+    # role.runtime.control.contract.yaml, the role-policy guard checks
+    # SPINE_TERMINAL_ID, SPINE_EXECUTION_CLASS, and SPINE_SESSION_POSTURE.
+    # Only those canonical admission vars are forwarded; aliases, broad shell
+    # env, and secrets stay local. Forwarded only when set locally — never
+    # invents identity, so unbound callers still hit the unbound-identity gate
+    # on the remote. Distinct from the SPINE_ROLE_POLICY_OVERRIDE_* path below,
+    # which is the governed override channel, not the normal admission badge.
+    local admission_prefix=""
+    local _resolved_terminal_id _resolved_execution_class
+    _resolved_terminal_id="$(current_terminal_id)"
+    _resolved_execution_class="${SPINE_EXECUTION_CLASS:-${SPINE_RUNTIME_ROLE:-}}"
+    if [[ -n "$_resolved_terminal_id" ]]; then
+        admission_prefix+="export SPINE_TERMINAL_ID=$(printf %q "$_resolved_terminal_id") && "
+    fi
+    if [[ -n "$_resolved_execution_class" ]]; then
+        admission_prefix+="export SPINE_EXECUTION_CLASS=$(printf %q "$_resolved_execution_class") && "
+    fi
+    if [[ -n "${SPINE_SESSION_POSTURE:-}" ]]; then
+        admission_prefix+="export SPINE_SESSION_POSTURE=$(printf %q "$SPINE_SESSION_POSTURE") && "
+    fi
+
     # PACKET-592 Phase 2: forward SPINE_ROLE_POLICY_OVERRIDE_* env vars across
     # the SSH dispatch so admission overrides set by the caller (e.g., the
     # PACKET-592 clerk filing friction records) reach the routed cap on the
@@ -1258,7 +1281,7 @@ _route_to_db_authority_if_needed() {
     fi
 
     local remote_cmd
-    remote_cmd="cd $(printf %q "$code_path") && ${override_prefix}./bin/ops cap run $(printf %q "$cap_name")${quoted_args}"
+    remote_cmd="cd $(printf %q "$code_path") && ${admission_prefix}${override_prefix}./bin/ops cap run $(printf %q "$cap_name")${quoted_args}"
 
     local routed_rc=0 route_addr route_label attempted_routes=()
     local route_addrs=("$host_addr")
