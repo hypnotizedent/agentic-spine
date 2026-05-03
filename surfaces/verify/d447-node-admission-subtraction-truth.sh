@@ -576,6 +576,21 @@ if forge_br_required.get("proof_ref") != expected_br_ref:
 br_staged = forge_br_required.get("staged_delivery") or {}
 if not br_staged.get("stage_1_evidence") or not br_staged.get("stage_2_drill"):
     fail("backup_restore_proof.staged_delivery must declare stage_1_evidence and stage_2_drill (operator-approved staged delivery model)")
+# PACKET-608 (Stage 2.2 restore drill): when stage_2_drill is `delivered`,
+# the drill_proof_ref + drill_packet pointers MUST be present so the
+# transition is auditable. The drill receipt artifact must exist at the
+# declared path (host-relative; check tolerates non-canonical SPINE_STATE
+# resolution paths since Stage 1 already validates that). delivered: false
+# on the role MUST remain (drill alone does not promote forge to delivered;
+# Stage 2 backlog has more items).
+if br_staged.get("stage_2_drill") == "delivered":
+    if not br_staged.get("stage_2_drill_proof_ref"):
+        fail("backup_restore_proof.staged_delivery.stage_2_drill_proof_ref required when stage_2_drill == delivered (PACKET-608)")
+    if not br_staged.get("stage_2_drill_packet"):
+        fail("backup_restore_proof.staged_delivery.stage_2_drill_packet required when stage_2_drill == delivered (PACKET-608)")
+    expected_drill_ref = "$SPINE_STATE/domain-state/forge-node/restore-drill-receipt-latest.yaml"
+    if br_staged.get("stage_2_drill_proof_ref") != expected_drill_ref:
+        fail(f"backup_restore_proof.staged_delivery.stage_2_drill_proof_ref must equal {expected_drill_ref}")
 if "backup_restore_proof" not in present_for_devtools:
     fail("forge_node.promotion_standard.proofs_present.dev-tools must list backup_restore_proof (PACKET-602 Stage 1 ladder progression)")
 if "backup_restore_proof" in gaps_for_devtools:
