@@ -324,6 +324,32 @@ if "infra/host/bin/host-code-drift-status" not in status_sh_text:
 if "Code drift:" not in status_sh_text:
     fail("ops/commands/status.sh must emit 'Code drift:' field in --brief output (PACKET-589)")
 
+# PACKET-592 immediate item 1: authority reachability classifier must exist,
+# be wired into capabilities.yaml, and integrate into ops status --brief.
+# Extends D447 (no new D-gate per add-one-retire-one). Surfaces the
+# storage_evidence_node availability symptom as a first-class class instead of
+# letting it hide inside generic "spine failed" verify output.
+reach_cap_script = root / "ops/plugins/infra/host/bin/host-authority-reachability-status"
+if not reach_cap_script.is_file():
+    fail("ops/plugins/infra/host/bin/host-authority-reachability-status missing (PACKET-592 authority reachability classifier)")
+if not os.access(str(reach_cap_script), os.X_OK):
+    fail("host-authority-reachability-status must be executable")
+reach_cap_text = reach_cap_script.read_text(encoding="utf-8")
+if "infra.host.authority.reachability.status" not in reach_cap_text:
+    fail("host-authority-reachability-status must self-identify as infra.host.authority.reachability.status capability")
+for required_addr_field in ("lan_addr", "tailscale_addr"):
+    if required_addr_field not in reach_cap_text:
+        fail(f"host-authority-reachability-status must probe {required_addr_field} (multi-address classification is the load-bearing piece)")
+caps_doc_reach = (caps_map.get("infra.host.authority.reachability.status") or {})
+if caps_doc_reach.get("safety") != "read-only":
+    fail("infra.host.authority.reachability.status must be safety: read-only in capabilities.yaml")
+if caps_doc_reach.get("script_path") != "./ops/plugins/infra/host/bin/host-authority-reachability-status":
+    fail("infra.host.authority.reachability.status script_path must point at ops/plugins/infra/host/bin/host-authority-reachability-status")
+if "infra/host/bin/host-authority-reachability-status" not in status_sh_text:
+    fail("ops/commands/status.sh brief output must integrate host-authority-reachability-status (PACKET-592 ops status --brief Authority field)")
+if "Authority:" not in status_sh_text:
+    fail("ops/commands/status.sh must emit 'Authority:' field in --brief output (PACKET-592 first-class symptom classification)")
+
 # Candidate name resolution: every candidate in any role's candidate_gaps and
 # deferred_candidates blocks must resolve through node.admission.status. This
 # structurally prevents drift like 'pve-730xd' (non-canonical machine identity)

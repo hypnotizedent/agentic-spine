@@ -2068,6 +2068,41 @@ if mode == "--brief":
                         parts.append(f"Code drift: {_drift_overall}")
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
             parts.append("Code drift: unknown")
+    # PACKET-592 immediate item 1: authority reachability classifier.
+    # Surfaces "spine failed" hidden conditions like "pve LAN unreachable
+    # but Tailscale ok" as classified symptoms. Read-only, fast (~5-15s).
+    _reach_bin = spine / "ops/plugins/infra/host/bin/host-authority-reachability-status"
+    if _reach_bin.is_file() and os.access(str(_reach_bin), os.X_OK):
+        try:
+            _reach_proc = subprocess.run(
+                [str(_reach_bin), "--json"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if _reach_proc.returncode == 0 and _reach_proc.stdout.strip():
+                _reach_payload = json.loads(_reach_proc.stdout)
+                _reach_overall = _reach_payload.get("overall_status", "unknown")
+                if _reach_overall == "ok":
+                    parts.append("Authority: ok")
+                elif _reach_overall == "blocked":
+                    _blocked_hosts = [
+                        h.get("name", "?")
+                        for h in _reach_payload.get("hosts", [])
+                        if h.get("classification") == "fully_unreachable"
+                    ]
+                    parts.append(f"Authority: BLOCKED ({', '.join(_blocked_hosts) or 'pve'})")
+                else:
+                    # degraded — name the class for actionable readback
+                    _degraded_summary = []
+                    for h in _reach_payload.get("hosts", []):
+                        cls = h.get("classification")
+                        if cls in ("ok", None):
+                            continue
+                        _degraded_summary.append(f"{h.get('name', '?')}={cls}")
+                    parts.append(f"Authority: degraded ({', '.join(_degraded_summary)})")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+            parts.append("Authority: unknown")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(1 if strict_mode and len(anomalies) > 0 else 0)

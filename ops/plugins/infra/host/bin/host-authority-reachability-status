@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""infra.host.authority.reachability.status — read-only authority reachability classifier.
+
+PACKET-592 (under PACKET-591 frame, immediate item 1). Classifies estate
+authority reachability as a first-class symptom so generic "spine failed"
+no longer hides a specific condition like "storage_evidence_node LAN
+unreachable but Tailscale reachable."
+
+Probes each authority host via BOTH LAN and Tailscale addresses. Reports:
+- per-host: ok | lan_only | tailscale_only | fully_unreachable
+- overall: ok | degraded | blocked
+- routed_authority_via_lan: bool (pve LAN reachable — cap.sh routing works)
+- routed_authority_via_tailscale: bool (pve TS reachable — workaround:
+  SPINE_DB_AUTHORITY_HOST_ADDR=<ts-addr> ./bin/ops cap run X)
+
+NO mutation. NO network changes. NO host modification. Read-only diagnosis
+class per PACKET-592 autonomy classification — auto-runnable.
+
+Output: human-readable or --json.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import socket
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+CONNECT_TIMEOUT = 5
+
+HOSTS = [
+    {
+        "name": "pve",
+        "role": "storage_evidence_node",
+        "criticality": "blocks_routed_db_backed_caps_when_lan_unreachable",
+        "lan_addr": "192.168.1.184",
+        "tailscale_addr": "100.96.211.33",
+        "ssh_user": "root",
+        "ssh_key": str(Path.home() / ".ssh" / "spine_machine_ed25519"),
+    },
+    {
+        "name": "ai-consolidation",
+        "role": "execution_host",
+        "criticality": "blocks_workbench_workers_when_unreachable",
+        "lan_addr": "192.168.1.8",
+        "tailscale_addr": "100.71.17.29",
+        "ssh_user": "ubuntu",
+        "ssh_key": None,
+    },
+    {
+        "name": "pve-r620",
+        "role": "watcher_node",
+        "criticality": "watcher_silence_means_no_external_observation",
+        "lan_addr": "192.168.1.126",
+        "tailscale_addr": "100.92.252.36",
+        "ssh_user": "root",
+        "ssh_key": str(Path.home() / ".ssh" / "spine_machine_ed25519"),
+    },
+]
+
+
+def _ssh_probe(target: str, user: str, key: str | None) -> tuple[bool, str]:
+    """Try SSH and run `hostname`. Returns (ok, observed_hostname_or_error)."""
+    cmd = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={CONNECT_TIMEOUT}",
+    ]
+    if key:
+        cmd.extend(["-i", key])
+    cmd.extend([f"{user}@{target}", "hostname -s 2>/dev/null || hostname"])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=CONNECT_TIMEOUT + 3)
+    except subprocess.TimeoutExpired:
+        return False, "timed-out"
+    except FileNotFoundError:
+        return False, "ssh-binary-missing"
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip().splitlines()[0:1]
+        return False, ((err[0] if err else "ssh-failed")[:120])
+    return True, proc.stdout.strip()
+
+
+def probe_host(host: dict[str, Any]) -> dict[str, Any]:
+    lan_ok, lan_evidence = _ssh_probe(host["lan_addr"], host["ssh_user"], host.get("ssh_key"))
+    ts_ok, ts_evidence = _ssh_probe(host["tailscale_addr"], host["ssh_user"], host.get("ssh_key"))
+
+    if lan_ok and ts_ok:
+        cls = "ok"
+        note = None
+    elif lan_ok and not ts_ok:
+        cls = "lan_only"
+        note = "tailscale path failed; LAN works (uncommon — consumers on Tailscale will fail)"
+    elif not lan_ok and ts_ok:
+        cls = "tailscale_only"
+        note = "LAN path failed; Tailscale works (common when operator is off-LAN; cap.sh LAN routing fails by default)"
+    else:
+        cls = "fully_unreachable"
+        note = f"both LAN and Tailscale failed (lan: {lan_evidence}; ts: {ts_evidence})"
+
+    return {
+        "name": host["name"],
+        "role": host["role"],
+        "criticality": host["criticality"],
+        "lan_addr": host["lan_addr"],
+        "lan_reachable": lan_ok,
+        "lan_evidence": lan_evidence if lan_ok else None,
+        "lan_failure_reason": None if lan_ok else lan_evidence,
+        "tailscale_addr": host["tailscale_addr"],
+        "tailscale_reachable": ts_ok,
+        "tailscale_evidence": ts_evidence if ts_ok else None,
+        "tailscale_failure_reason": None if ts_ok else ts_evidence,
+        "classification": cls,
+        "note": note,
+    }
+
+
+def classify_overall(hosts_result: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    """Return (overall_status, attention_messages)."""
+    pve = next((h for h in hosts_result if h["name"] == "pve"), None)
+    ai_cons = next((h for h in hosts_result if h["name"] == "ai-consolidation"), None)
+
+    msgs: list[str] = []
+    overall = "ok"
+
+    if pve is None or pve["classification"] == "fully_unreachable":
+        overall = "blocked"
+        msgs.append("storage_evidence_node fully unreachable — DB-backed routed caps blocked from this client")
+    elif pve["classification"] == "tailscale_only":
+        overall = "degraded"
+        msgs.append("storage_evidence_node LAN unreachable from this client; Tailscale path works "
+                    "(routed caps via cap.sh use LAN by default — workaround: "
+                    "SPINE_DB_AUTHORITY_HOST_ADDR=" + pve["tailscale_addr"] + ")")
+    elif pve["classification"] == "lan_only":
+        overall = "degraded"
+        msgs.append("storage_evidence_node Tailscale unreachable; LAN works (consumers on Tailscale will fail)")
+
+    if ai_cons is not None and ai_cons["classification"] == "fully_unreachable":
+        if overall == "ok":
+            overall = "degraded"
+        msgs.append("execution_host fully unreachable — workers/mailroom invocations blocked from this client")
+    elif ai_cons is not None and ai_cons["classification"] == "tailscale_only":
+        if overall == "ok":
+            overall = "degraded"
+        msgs.append("execution_host LAN unreachable from this client; Tailscale works")
+
+    return overall, msgs
+
+
+def detect_local_network_class() -> dict[str, Any]:
+    """Heuristic: are we on the home LAN at all?"""
+    try:
+        # Resolve any LAN address; if route is via Tailscale interface, we're off-LAN.
+        proc = subprocess.run(
+            ["route", "get", "192.168.1.184"],
+            capture_output=True, text=True, timeout=3,
+        )
+        out = proc.stdout
+        on_tailscale = "utun" in out or "tailscale" in out.lower()
+        on_lan = "interface: en" in out or "interface: eth" in out
+        if on_tailscale and not on_lan:
+            return {"local_network": "off_lan_via_tailscale", "evidence": "route to LAN goes via tailscale interface"}
+        if on_lan:
+            return {"local_network": "on_lan", "evidence": "route to LAN via local ethernet/wifi"}
+        return {"local_network": "unknown", "evidence": out[:200]}
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return {"local_network": "unknown", "evidence": "could not inspect local route"}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="infra.host.authority.reachability.status")
+    parser.add_argument("--json", action="store_true", help="emit JSON only")
+    parser.add_argument("--self-check", action="store_true", help="self-check pass")
+    args = parser.parse_args()
+
+    if args.self_check:
+        print("infra.host.authority.reachability.status self-check PASS")
+        return 0
+
+    local_net = detect_local_network_class()
+    hosts_result = [probe_host(h) for h in HOSTS]
+    overall, attention_msgs = classify_overall(hosts_result)
+
+    pve = next((h for h in hosts_result if h["name"] == "pve"), {})
+    payload = {
+        "capability": "infra.host.authority.reachability.status",
+        "client_hostname": socket.gethostname(),
+        "client_local_network": local_net,
+        "overall_status": overall,
+        "attention": attention_msgs,
+        "routed_authority_via_lan": bool(pve.get("lan_reachable")),
+        "routed_authority_via_tailscale": bool(pve.get("tailscale_reachable")),
+        "hosts": hosts_result,
+        "scope_note": "PACKET-592 immediate item 1: read-only authority reachability classifier. NO mutation, NO failover. Workaround for tailscale_only: SPINE_DB_AUTHORITY_HOST_ADDR=<tailscale_addr> ./bin/ops cap run X.",
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("infra.host.authority.reachability.status")
+        print(f"client:          {payload['client_hostname']} ({local_net.get('local_network', 'unknown')})")
+        print(f"overall:         {overall}")
+        print(f"routed_via_lan:  {payload['routed_authority_via_lan']}")
+        print(f"routed_via_ts:   {payload['routed_authority_via_tailscale']}")
+        for h in hosts_result:
+            label = f"{h['name']:<22} ({h['role']})"
+            line = f"  {label} {h['classification']}"
+            if h.get("note"):
+                line += f" — {h['note']}"
+            print(line)
+        if attention_msgs:
+            print("\nattention:")
+            for msg in attention_msgs:
+                print(f"  - {msg}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
