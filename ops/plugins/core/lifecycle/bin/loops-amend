@@ -99,6 +99,10 @@ done
 [[ -n "$LOOP_ID" ]] || { echo "FAIL: --loop-id required" >&2; exit 2; }
 [[ -n "$REASON"  ]] || { echo "FAIL: --reason required (no reason, no mutation)" >&2; exit 2; }
 
+# Acquire loop mutation lock; mirror loops-create.
+acquire_git_lock loops || exit 1
+trap 'release_git_lock loops 2>/dev/null || true' EXIT
+
 # Validate enum inputs early.
 case "$NEW_HORIZON" in ""|now|later|future) ;; *) echo "FAIL: --horizon must be now, later, or future (got '$NEW_HORIZON')" >&2; exit 2 ;; esac
 case "$NEW_PRIORITY" in ""|low|medium|high) ;; *) echo "FAIL: --priority must be low, medium, or high (got '$NEW_PRIORITY')" >&2; exit 2 ;; esac
@@ -135,6 +139,8 @@ if [[ -z "$DB_ROW_JSON" ]]; then
 fi
 
 # --- Extract current values (frontmatter + DB), refuse terminal states ---
+# We read the full DB row so we can merge into a complete upsert later
+# (sparse upsert would null owner/objective/scope/created/etc.).
 read_current() {
 python3 - "$SCOPE_FILE" "$DB_ROW_JSON" <<'PY'
 import json, re, sys
@@ -150,19 +156,41 @@ fm = m.group(1)
 def fmval(key):
     mm = re.search(rf"^{re.escape(key)}:\s*(.+?)\s*$", fm, re.MULTILINE)
     return mm.group(1).strip().strip('"') if mm else ""
+
+# Print the lifecycle deltas as shell-eval'd vars; print the full preserved
+# row as base64-encoded JSON so the merge stage gets the whole thing without
+# shell quoting hell.
+import base64
+preserved = {
+    "loop_id":             db_row.get("loop_id") or "",
+    "owner":               db_row.get("owner") or fmval("owner") or "@ronny",
+    "created":             db_row.get("created") or fmval("created") or "",
+    "scope":               db_row.get("scope") or fmval("scope") or "",
+    "objective":           db_row.get("objective") or fmval("objective") or "",
+    "next_action":         db_row.get("next_action") or fmval("next_action") or "",
+    "blocked_by":          db_row.get("blocked_by") or "",
+    "linked_gaps":         db_row.get("linked_gaps") or "",
+    "data_json":           db_row.get("data_json") or "",
+    "evidence_refs":       db_row.get("evidence_refs") or "",
+    "disposition":         db_row.get("disposition") or "",
+    "completion_level":    db_row.get("completion_level") or "",
+    "closed_at":           db_row.get("closed_at") or "",
+    # lifecycle fields the amend will set on top of preserved row:
+    "status":              db_row.get("status") or fmval("status") or "",
+    "horizon":             db_row.get("horizon") or fmval("horizon") or "",
+    "priority":            db_row.get("priority") or fmval("priority") or "medium",
+    "execution_readiness": db_row.get("execution_readiness") or fmval("execution_readiness") or "runnable",
+    "execution_mode":      db_row.get("execution_mode") or fmval("execution_mode") or "single_worker",
+}
 out = {
-    "fm_status":     fmval("status"),
-    "fm_horizon":    fmval("horizon"),
-    "fm_priority":   fmval("priority"),
-    "fm_readiness":  fmval("execution_readiness"),
-    "fm_exec_mode":  fmval("execution_mode"),
-    "db_status":     str(db_row.get("status") or ""),
-    "db_horizon":    str(db_row.get("horizon") or ""),
-    "db_priority":   str(db_row.get("priority") or ""),
-    "db_readiness":  str(db_row.get("execution_readiness") or ""),
-    "db_exec_mode":  str(db_row.get("execution_mode") or ""),
-    "db_disposition":str(db_row.get("disposition") or ""),
-    "db_completion": str(db_row.get("completion_level") or ""),
+    "db_status":      str(db_row.get("status") or ""),
+    "db_horizon":     str(db_row.get("horizon") or ""),
+    "db_priority":    str(db_row.get("priority") or ""),
+    "db_readiness":   str(db_row.get("execution_readiness") or ""),
+    "db_exec_mode":   str(db_row.get("execution_mode") or ""),
+    "db_disposition": str(db_row.get("disposition") or ""),
+    "db_completion":  str(db_row.get("completion_level") or ""),
+    "preserved_b64":  base64.b64encode(json.dumps(preserved).encode("utf-8")).decode("ascii"),
 }
 for k, v in out.items():
     print(f"{k}={v}")
@@ -214,10 +242,12 @@ if (( DRY_RUN )); then
   exit 0
 fi
 
-# --- Mutate scope file frontmatter (lifecycle keys only) ---
+# --- Stage scope file mutation in tmp; we will only rename into place AFTER
+# the DB upsert succeeds, so a failed DB write never produces split-brain. ---
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT
+# Replace lock-only EXIT trap with combined cleanup.
+trap 'rm -f "$TMP"; release_git_lock loops 2>/dev/null || true' EXIT
 cp "$SCOPE_FILE" "$TMP"
 
 update_fm_field() {
@@ -252,7 +282,7 @@ update_fm_field "priority"            "$RESOLVED_PRIORITY"
 update_fm_field "execution_readiness" "$RESOLVED_READINESS"
 update_fm_field "execution_mode"      "$RESOLVED_EXEC_MODE"
 
-# Verify scope file body did not change outside frontmatter.
+# Verify scope file body did not change outside frontmatter (telemetry guard).
 verify_body_unchanged() {
 python3 - "$SCOPE_FILE" "$TMP" <<'PY'
 import re, sys
@@ -269,27 +299,31 @@ PY
 }
 verify_body_unchanged
 
-# Atomic move into place.
-mv "$TMP" "$SCOPE_FILE"
-trap - EXIT
-
-# --- Update DB row via governed bridge upsert ---
-DELTA_JSON="$(python3 - <<PY
-import json
-delta = {"loop_id": "$LOOP_ID"}
-delta["horizon"] = "$RESOLVED_HORIZON"
-delta["status"] = "$RESOLVED_STATUS"
-delta["priority"] = "$RESOLVED_PRIORITY"
-delta["execution_readiness"] = "$RESOLVED_READINESS"
-delta["execution_mode"] = "$RESOLVED_EXEC_MODE"
-print(json.dumps(delta))
+# --- Build the FULL merged row for upsert. The bridge's upsert_loop is a
+# full-row UPSERT — passing only lifecycle keys would null owner / objective /
+# scope / created / etc. Merge the lifecycle delta over the preserved row. ---
+MERGED_ROW_JSON="$(python3 - "$preserved_b64" "$RESOLVED_HORIZON" "$RESOLVED_STATUS" "$RESOLVED_PRIORITY" "$RESOLVED_READINESS" "$RESOLVED_EXEC_MODE" <<'PY'
+import base64, json, sys
+preserved = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
+preserved["horizon"]             = sys.argv[2]
+preserved["status"]              = sys.argv[3]
+preserved["priority"]             = sys.argv[4]
+preserved["execution_readiness"]  = sys.argv[5]
+preserved["execution_mode"]       = sys.argv[6]
+print(json.dumps(preserved))
 PY
 )"
 
-if ! python3 "$LOOPS_BRIDGE" upsert --json "$DELTA_JSON" --actor "loops.amend" >&2; then
-  echo "FAIL: bridge upsert failed; scope file was updated but DB write failed — file friction immediately" >&2
+# --- DB upsert FIRST. On failure, the staged tmp scope file is discarded by
+# the EXIT trap; the canonical projection on disk is left untouched. ---
+if ! python3 "$LOOPS_BRIDGE" upsert --json "$MERGED_ROW_JSON" --actor "loops.amend" >&2; then
+  echo "FAIL: bridge upsert failed; scope file untouched (tmp staged write discarded)" >&2
   exit 1
 fi
+
+# DB write succeeded; now atomically swap the staged scope file into place.
+mv "$TMP" "$SCOPE_FILE"
+trap 'release_git_lock loops 2>/dev/null || true' EXIT
 
 # --- Write narrative amend-receipt YAML ---
 RECEIPTS_DIR="$SPINE_STATE/domain-state/engine-loop-lifecycle"
