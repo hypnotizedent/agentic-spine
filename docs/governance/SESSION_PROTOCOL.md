@@ -134,7 +134,14 @@ uses the governed lifecycle capability for that artifact class. If telemetry is
 wrongly shaped, blocked, duplicate, stale, or non-promotable, file or attach
 friction and use an existing amend/promote/close/cleanup capability. If no such
 capability exists, the missing governed repair path is the work; raw filesystem
-surgery is not an acceptable substitute. For loops specifically, lifecycle
+surgery is not an acceptable substitute.
+
+Lifecycle repair starts at the owning object, not the visible residue. A
+worktree, branch, lease, heartbeat, or delegation created by a wave is
+wave-owned; use the wave close/retire path surfaced by the engine so cleanup
+cascades through the wave's side effects. Leaf cleanup is only correct after the
+owning lifecycle/readback classifies the leaf as orphaned or explicitly hands it
+to the worktree lifecycle. For loops specifically, lifecycle
 repair (horizon/status/priority/readiness/execution_mode) goes through
 `loops.amend` — never delete a `.scope.md` to repair lifecycle state. A
 suggestion to delete/recreate/move telemetry to repair state should be filed as
@@ -499,6 +506,12 @@ receipt. Agents use the internal machinery that applies to the work item:
 3. **Loop continuity** — close the loop when acceptance is met, or update continuity when more bounded work remains
 4. **Handoff** — emit `session.handoff.create --summary "..." --loops LOOP-ID` only at a real session boundary
 5. **Git hygiene** — inspect with `worktree.lifecycle.report` and `wave.residue`; use `worktree.lifecycle.cleanup` only for explicit archive/delete cleanup
+
+When residue appears as a stale worktree, branch, or lease, first identify the
+owning lifecycle object. If a live or stranded wave owns it, close or retire the
+wave; the wave lifecycle owns the cascade that releases the worktree, branch,
+lease, delegation, and linked loop. Worktree cleanup is the leaf cleanup path,
+not a substitute for closing the wave that created the leaf.
 
 If the normal wave-finish close path cannot complete and a control-plane recovery close is required, use `./bin/ops cap run orchestration.loop.close`. That is the explicit manual recovery surface. Do not fall through to raw `shared_authority.db` mutation as an operator path.
 

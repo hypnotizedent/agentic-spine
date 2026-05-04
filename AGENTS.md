@@ -242,7 +242,11 @@ claims, heartbeats, receipts, handoffs, worktree leases, and managed worktrees
 created by another lane are protected evidence. Read and cite them; do not
 delete, rewrite, recreate, or "fix" them directly. Use the governed lifecycle
 capability for that artifact class, or file friction when the missing repair
-path is the bug. For loops, the lifecycle repair primitive is `loops.amend`
+path is the bug. Repair lifecycle residue at the owning object, not the visible
+leaf: if a wave created a worktree, branch, lease, or heartbeat, close or retire
+the wave through its governed close path so cleanup cascades; do not clean the
+leaf directly unless the owning lifecycle/readback has classified it orphaned.
+For loops, the lifecycle repair primitive is `loops.amend`
 (`./bin/ops cap run loops.amend -- --loop-id <id> --reason "<why>"` plus the
 field to change); never delete a `.scope.md` to repair lifecycle state. A
 suggestion to delete/recreate/move telemetry to repair state should be filed as
