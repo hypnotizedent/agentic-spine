@@ -363,36 +363,22 @@ if ((caps_doc_deploy.get("routing") or {}).get("db_authority")) != "skip":
 if caps_doc_deploy.get("script_path") != "./ops/plugins/infra/host/bin/host-code-deploy-update":
     fail("runtime.checkout.deploy.update script_path must point at ops/plugins/infra/host/bin/host-code-deploy-update")
 
-# PACKET-1105 canonical rename lock — old names must remain as compatibility
-# wrappers with explicit demotion metadata; old names must NOT be taught as
-# canonical operator grammar. Extension of D447 only — NO new D-gate.
-for old_name, new_name in (
-    ("infra.host.code.drift.status", "runtime.checkout.drift.status"),
-    ("infra.host.code.deploy.update", "runtime.checkout.deploy.update"),
-):
-    compat_entry = (caps_map.get(old_name) or {})
-    if not compat_entry:
-        fail(f"{old_name} must remain in capabilities.yaml as a compatibility wrapper (PACKET-1105)")
-    if compat_entry.get("compatibility_alias_of") != new_name:
-        fail(f"{old_name} must declare compatibility_alias_of: {new_name} (PACKET-1105 canonical rename)")
-    if compat_entry.get("public_grammar") != "hidden":
-        fail(f"{old_name} must declare public_grammar: hidden (PACKET-1105 demotion)")
-    if not str(compat_entry.get("sunset_condition") or "").strip():
-        fail(f"{old_name} must declare a non-empty sunset_condition (PACKET-1105)")
-    if not str(compat_entry.get("description") or "").startswith("Compatibility wrapper"):
-        fail(f"{old_name} description must start with 'Compatibility wrapper' (PACKET-1105 demotion)")
-# Old names must NOT appear as canonical update/drift capability in placement
-if "canonical_update_capability: infra.host.code.deploy.update" in placement_text:
-    fail("runtime.checkout.placement.yaml must not name infra.host.code.deploy.update as canonical (PACKET-1105 canonical rename)")
-if "canonical_drift_readback_capability: infra.host.code.drift.status" in placement_text:
-    fail("runtime.checkout.placement.yaml must not name infra.host.code.drift.status as canonical (PACKET-1105 canonical rename)")
-
 # PACKET-1125 canonical operator-discovery filter — bin/ops cap list must
-# honor public_grammar: hidden so PACKET-1105 compat wrappers stop appearing
-# as peer grammar. Default hides; --include-compat surfaces them with
-# compat->canonical labeling. Extension of D447 only — NO new D-gate.
+# honor public_grammar: hidden. Generalized in PACKET-1165 to discover compat
+# targets from the registry instead of hardcoding specific names. The lock
+# remains useful for any future hidden compatibility cap; when no caps carry
+# public_grammar: hidden the rendering tests skip cleanly.
+# PACKET-1105 metadata for-loop + placement-text negative checks were retired
+# in PACKET-1165 along with their target compat caps. Extension of D447
+# only — NO new D-gate.
+hidden_compat_targets = []
+for cap_name, cap_payload in caps_map.items():
+    payload = cap_payload if isinstance(cap_payload, dict) else {}
+    if str(payload.get("public_grammar") or "").strip().lower() == "hidden":
+        hidden_compat_targets.append((cap_name, str(payload.get("compatibility_alias_of") or "").strip()))
+
 ops_bin = root / "bin/ops"
-if ops_bin.is_file():
+if ops_bin.is_file() and hidden_compat_targets:
     try:
         default_proc = subprocess.run(
             [str(ops_bin), "cap", "list"],
@@ -406,24 +392,27 @@ if ops_bin.is_file():
         fail(f"bin/ops cap list invocation failed: {exc} (PACKET-1125)")
     default_out = default_proc.stdout or ""
     compat_out = compat_proc.stdout or ""
-    # Cap-line entries render as "  <name> [<label>] <description>"; the same
-    # cap names also appear inside canonical cap *descriptions* as historical
-    # rename attribution. The filter test must match cap-line entries only,
-    # not in-description prose. Match the leading two-space + name + space.
+    # Cap-line entries render as "  <name>:<25-pad> [<label>] <description>".
+    # The same cap names may appear inside canonical cap descriptions as
+    # historical rename attribution. The filter test must match cap-line
+    # entries only, not in-description prose. Iterate lines and detect the
+    # `  <name>` prefix so it works regardless of padding (PACKET-1165
+    # generalization: handles cap names shorter than the 25-char pad).
     def _cap_line_present(text: str, name: str) -> bool:
-        return f"  {name} [" in text
-    for compat_name in ("infra.host.code.drift.status", "infra.host.code.deploy.update"):
+        prefix = f"  {name}"
+        for line in text.splitlines():
+            if line.startswith(prefix) and (len(line) == len(prefix) or line[len(prefix)] in (" ", "\t")):
+                return True
+        return False
+    for compat_name, canonical_name in hidden_compat_targets:
         if _cap_line_present(default_out, compat_name):
             fail(f"bin/ops cap list (default) must NOT render {compat_name} as a cap-line entry — public_grammar: hidden filter not honored (PACKET-1125)")
         if not _cap_line_present(compat_out, compat_name):
             fail(f"bin/ops cap list --include-compat must render {compat_name} as a cap-line entry (PACKET-1125)")
-    for compat_name, canonical_name in (
-        ("infra.host.code.drift.status", "runtime.checkout.drift.status"),
-        ("infra.host.code.deploy.update", "runtime.checkout.deploy.update"),
-    ):
-        expected_label = f"compat->{canonical_name}"
-        if expected_label not in compat_out:
-            fail(f"bin/ops cap list --include-compat must label {compat_name} with {expected_label} (PACKET-1125)")
+        if canonical_name:
+            expected_label = f"compat->{canonical_name}"
+            if expected_label not in compat_out:
+                fail(f"bin/ops cap list --include-compat must label {compat_name} with {expected_label} (PACKET-1125)")
     if "Hidden:" in default_out and "compatibility (public_grammar: hidden)" not in default_out:
         fail("bin/ops cap list default Hidden: line must name 'compatibility (public_grammar: hidden)' count (PACKET-1125)")
 status_sh_text = (root / "ops/commands/status.sh").read_text(encoding="utf-8")
