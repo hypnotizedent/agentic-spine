@@ -229,6 +229,20 @@ canonical.
 The primary `agentic-spine` checkout must stay on `main` and clean. If repo
 mutation is needed, do the work in a managed worktree; do not use the primary
 checkout as a work lane.
+
+Cross-repo symlinks are an edit-prevention hazard: editing the path you see
+silently mutates the target's repo, not yours. Known cross-repo symlink
+surfaces today include `workbench/bin/{ops,verify}` → `agentic-spine/...`
+and `~/.config/opencode/{commands,opencode.json,OPENCODE.md,
+oh-my-opencode.json}` → `workbench/dotfiles/opencode/...`. Before editing
+any file under `workbench/bin/` or under a tool-config directory like
+`~/.config/<tool>/`, run `ls -la <path>` first; if the path is a symlink,
+treat the **target** as the canonical edit surface (commit there, in that
+repo's worktree, under that repo's verify gates). Never `vi` a symlink
+into a different repo to "patch quickly" — the diff lands in the target's
+git index without your repo's verify or commit chain. New cross-repo
+symlinks should not be added; intra-repo symlinks (e.g.,
+`workbench/bin/mint` → `workbench/scripts/root/mint`) are fine.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
 Governed session start/admission:
