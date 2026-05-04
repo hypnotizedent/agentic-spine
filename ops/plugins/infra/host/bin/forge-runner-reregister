@@ -82,6 +82,18 @@ RUNNER_SERVICE="gitea-runner"
 RUNNER_STATE_FILE="/data/.runner"
 
 ssh_remote(){
+  # -n closes stdin for ssh so that probe commands don't consume the cap's
+  # piped-in stdin (the new registration token). Without -n, the first
+  # probe ssh call drains stdin and leaves cat with nothing to read.
+  ssh -n -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    "${SSH_USER}@${SSH_HOST}" "$1"
+}
+
+# Stdin-bound version: used in the apply path where we need to feed
+# content to the remote command via the consumer-side pipe (e.g. python3
+# script that takes args; we don't actually pipe to remote stdin in this
+# cap, so this is effectively a non-issue — kept distinct for clarity).
+ssh_remote_with_stdin(){
   ssh -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
     "${SSH_USER}@${SSH_HOST}" "$1"
 }
@@ -228,7 +240,10 @@ if [[ "$OUTCOME" == "idempotent_no_op_token_unchanged" ]]; then
   exit 0
 fi
 
-# Step 1: update .env with new token (atomic via temp file + rename)
+# Step 1: update .env with new token. .env is ubuntu:ubuntu but parent
+# /opt/stacks/gitea/ is root:root so creating .env.tmp requires sudo.
+# Restore ownership to ubuntu:ubuntu after rename so the original
+# permission profile is preserved.
 ENV_PATCH_SCRIPT='
 import sys, os
 env_path, new_token = sys.argv[1], sys.argv[2]
@@ -244,10 +259,18 @@ with open(tmp, "w") as f:
     f.writelines(lines)
 os.chmod(tmp, 0o600)
 os.rename(tmp, env_path)
+# Restore ubuntu:ubuntu ownership preserved through atomic rename.
+import pwd, grp
+try:
+    uid = pwd.getpwnam("ubuntu").pw_uid
+    gid = grp.getgrnam("ubuntu").gr_gid
+    os.chown(env_path, uid, gid)
+except KeyError:
+    pass
 '
-if ! ssh_remote "python3 -c $(printf %q "$ENV_PATCH_SCRIPT") ${ENV_PATH} $(printf %q "$NEW_TOKEN")"; then
+if ! ssh_remote "sudo -n python3 -c $(printf %q "$ENV_PATCH_SCRIPT") ${ENV_PATH} $(printf %q "$NEW_TOKEN")"; then
   unset NEW_TOKEN
-  stop 1 "failed to patch ${ENV_PATH}"
+  stop 1 "failed to patch ${ENV_PATH} (sudo -n required since /opt/stacks/gitea is root-owned)"
 fi
 
 # Step 2: delete /data/.runner inside container so run.sh re-registers on next start
