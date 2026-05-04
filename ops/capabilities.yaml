@@ -3139,6 +3139,45 @@ capabilities:
     domain: secrets
     plane: fabric
     layer: L2_shared_infrastructure
+  secrets.set.placement.ensure:
+    description: |
+      Smallest governed mutating secrets-placement primitive (PACKET-905).
+      Wraps the existing infisical-agent.sh set path with stdin-only value
+      handling (NO --value flag), idempotent no-op detection via current-value
+      sha256 comparison, and a governed receipt at
+      $SPINE_STATE/domain-state/secrets/placement/{project}-{key}-latest.yaml
+      that records project + env + key + sha256 fingerprints + outcome but
+      NEVER the value itself. Default behavior is dry-run; --apply --reason
+      both required to mutate. Path resolution + path-registration guards
+      delegate to infisical-agent.sh resolve_secret_path; this cap does NOT
+      register new secret paths and does NOT delete. Closes the missing L2
+      placement primitive named in PACKET-895 (all prior secrets.* caps were
+      read-only).
+      Args: --project <name> [--env prod] --key <KEY> [--apply --reason '<text>'] [--dry-run]. Value piped via stdin.
+    tags:
+      - secrets
+      - placement
+      - mutating
+      - idempotent
+    command: ./ops/plugins/infra/secrets/bin/secrets-set-placement-ensure
+    script_path: ./ops/plugins/infra/secrets/bin/secrets-set-placement-ensure
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    routing:
+      db_authority: skip
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs:
+      - stdout
+      - $SPINE_STATE/domain-state/secrets/placement/
+    touches_api: true
+    domain: secrets
+    plane: fabric
+    layer: L2_shared_infrastructure
   secrets.status:
     description: 'Read-only: validate secrets plumbing is configured (deps, env, bindings). Prints NO secret values.'
     tags:
