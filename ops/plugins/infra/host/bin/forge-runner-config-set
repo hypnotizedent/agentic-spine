@@ -100,18 +100,36 @@ set -e
 [[ "$PROBE_RC" -eq 0 ]] || stop 1 "could not read ${COMPOSE_PATH} on ${SSH_HOST}"
 [[ -n "$COMPOSE_CONTENT" ]] || stop 1 "${COMPOSE_PATH} is empty on ${SSH_HOST}"
 
-# Parse compose locally to determine current command field on gitea-runner
-HAS_COMMAND="$(python3 -c "
+# Parse compose locally. The gitea/act_runner entrypoint (/usr/local/bin/run.sh)
+# reads the CONFIG_FILE env var to construct '--config <path>' for act_runner;
+# overriding the docker-compose 'command' field is bypassed by the entrypoint
+# because run.sh assembles its own args. Detect the env var instead.
+HAS_CONFIG_FILE_ENV="$(python3 -c "
+import sys, yaml
+data = yaml.safe_load(sys.stdin)
+svc = (data.get('services') or {}).get('${RUNNER_SERVICE}', {})
+env = svc.get('environment') or []
+# Compose accepts environment as list ['KEY=VAL'] or dict {'KEY': 'VAL'}
+found = ''
+if isinstance(env, list):
+    for item in env:
+        if isinstance(item, str) and item.startswith('CONFIG_FILE='):
+            found = item.split('=', 1)[1]; break
+elif isinstance(env, dict):
+    found = env.get('CONFIG_FILE', '') or ''
+print(found)
+" <<<"$COMPOSE_CONTENT")"
+
+# Also detect any prior PACKET-965 'command' field from earlier broken
+# attempts so we can revert it. The entrypoint ignores command-overrides
+# under run.sh, so leftover 'command:' is a no-op but should still be
+# cleaned up.
+HAS_LEGACY_COMMAND="$(python3 -c "
 import sys, yaml
 data = yaml.safe_load(sys.stdin)
 svc = (data.get('services') or {}).get('${RUNNER_SERVICE}', {})
 cmd = svc.get('command')
-if cmd is None:
-    print('null')
-elif isinstance(cmd, list):
-    print(' '.join(cmd))
-else:
-    print(str(cmd))
+print('true' if cmd else 'false')
 " <<<"$COMPOSE_CONTENT")"
 
 set +e
@@ -127,14 +145,14 @@ if [[ -n "$EXISTING_CONFIG_YAML" && "$EXISTING_CONFIG_YAML" != "null" ]]; then
   fi
 fi
 
-# Determine current command override
-CURRENT_HAS_CMD_CONFIG="false"
-if [[ "$HAS_COMMAND" == *"--config"* ]]; then
-  CURRENT_HAS_CMD_CONFIG="true"
+# Determine current entrypoint config wiring
+CURRENT_HAS_CONFIG_FILE_ENV="false"
+if [[ "$HAS_CONFIG_FILE_ENV" == "/data/config.yaml" ]]; then
+  CURRENT_HAS_CONFIG_FILE_ENV="true"
 fi
 
 # Plan
-TARGET_HAS_CMD_CONFIG="true"
+TARGET_CONFIG_FILE_ENV="/data/config.yaml"
 NEEDS_CONFIG_WRITE="false"
 NEEDS_COMPOSE_PATCH="false"
 NEEDS_RESTART="false"
@@ -143,7 +161,7 @@ if [[ "$CURRENT_CACHE_ENABLED" != "$ENABLE_CACHE" ]]; then
   NEEDS_CONFIG_WRITE="true"
   NEEDS_RESTART="true"
 fi
-if [[ "$CURRENT_HAS_CMD_CONFIG" != "$TARGET_HAS_CMD_CONFIG" ]]; then
+if [[ "$CURRENT_HAS_CONFIG_FILE_ENV" != "true" || "$HAS_LEGACY_COMMAND" == "true" ]]; then
   NEEDS_COMPOSE_PATCH="true"
   NEEDS_RESTART="true"
 fi
@@ -162,11 +180,11 @@ GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 write_receipt() {
   local mode="$1"
   python3 - "$RECEIPT_PATH" "$mode" "$ENABLE_CACHE" "$CURRENT_CACHE_ENABLED" \
-    "$CURRENT_HAS_CMD_CONFIG" "$NEEDS_CONFIG_WRITE" "$NEEDS_COMPOSE_PATCH" \
+    "$CURRENT_HAS_CONFIG_FILE_ENV" "$NEEDS_CONFIG_WRITE" "$NEEDS_COMPOSE_PATCH" \
     "$NEEDS_RESTART" "$OUTCOME" "$GENERATED_AT" "$REASON" \
     "$SSH_HOST" "$SSH_USER" "$COMPOSE_PATH" <<'PYEOF'
 import sys, yaml
-(out, mode, enable_cache, current_cache, current_has_cmd, needs_config_write,
+(out, mode, enable_cache, current_cache, current_has_env, needs_config_write,
  needs_compose_patch, needs_restart, outcome, generated_at, reason,
  host, user, compose_path) = sys.argv[1:]
 data = {
@@ -182,14 +200,15 @@ data = {
     "compose_path": compose_path,
     "service": "gitea-runner",
     "container_config_path": "/data/config.yaml",
+    "wiring": "CONFIG_FILE env var read by /usr/local/bin/run.sh entrypoint",
   },
   "before": {
     "cache_enabled": current_cache,
-    "compose_command_has_config_flag": (current_has_cmd == "true"),
+    "compose_has_config_file_env": (current_has_env == "true"),
   },
   "after_plan": {
     "cache_enabled": enable_cache,
-    "compose_command_has_config_flag": True,
+    "compose_has_config_file_env": True,
     "needs_config_write": (needs_config_write == "true"),
     "needs_compose_patch": (needs_compose_patch == "true"),
     "needs_runner_restart": (needs_restart == "true"),
@@ -228,10 +247,11 @@ print_render() {
   if [[ -n "$REASON" ]]; then echo "reason: $REASON"; fi
   echo "before:"
   echo "  cache_enabled: $CURRENT_CACHE_ENABLED"
-  echo "  compose_command_has_config_flag: $CURRENT_HAS_CMD_CONFIG"
+  echo "  compose_has_config_file_env: $CURRENT_HAS_CONFIG_FILE_ENV"
+  echo "  has_legacy_command_field: $HAS_LEGACY_COMMAND"
   echo "after_plan:"
   echo "  cache_enabled: $ENABLE_CACHE"
-  echo "  compose_command_has_config_flag: $TARGET_HAS_CMD_CONFIG"
+  echo "  compose_has_config_file_env: true (CONFIG_FILE=/data/config.yaml)"
   echo "  needs_config_write: $NEEDS_CONFIG_WRITE"
   echo "  needs_compose_patch: $NEEDS_COMPOSE_PATCH"
   echo "  needs_runner_restart: $NEEDS_RESTART"
@@ -266,10 +286,12 @@ if [[ "$NEEDS_CONFIG_WRITE" == "true" ]]; then
   fi
 fi
 
-# Step 2: patch docker-compose.yml to add command field on gitea-runner only.
-# /opt/stacks/gitea/docker-compose.yml is owned root:root; ubuntu user needs
-# sudo to write. Cap uses passwordless sudo (sudo -n) for the patch step;
-# the python script is restricted to gitea-runner service mutation.
+# Step 2: patch docker-compose.yml — add CONFIG_FILE=/data/config.yaml env
+# var on gitea-runner so the run.sh entrypoint constructs `--config /data/
+# config.yaml` for act_runner. Also remove any prior 'command:' field on
+# gitea-runner (legacy from PACKET-965 first attempts; ignored by run.sh
+# entrypoint anyway). /opt/stacks/gitea/docker-compose.yml is owned root:
+# root so sudo -n is required. Mutation is scoped to gitea-runner service.
 if [[ "$NEEDS_COMPOSE_PATCH" == "true" ]]; then
   PATCH_SCRIPT='
 import sys, yaml
@@ -278,7 +300,20 @@ with open(path) as f: data = yaml.safe_load(f)
 svc = data.get("services", {}).get("gitea-runner")
 if not svc:
     print("STOP: gitea-runner service not found", file=sys.stderr); sys.exit(1)
-svc["command"] = ["daemon", "--config", "/data/config.yaml"]
+# Drop legacy command override (run.sh ignores it anyway).
+svc.pop("command", None)
+# Ensure CONFIG_FILE=/data/config.yaml env var is present.
+env = svc.get("environment")
+new_entry = "CONFIG_FILE=/data/config.yaml"
+if isinstance(env, list):
+    env = [e for e in env if not (isinstance(e, str) and e.startswith("CONFIG_FILE="))]
+    env.append(new_entry)
+    svc["environment"] = env
+elif isinstance(env, dict):
+    env["CONFIG_FILE"] = "/data/config.yaml"
+    svc["environment"] = env
+else:
+    svc["environment"] = [new_entry]
 with open(path, "w") as f:
     yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False)
 '
