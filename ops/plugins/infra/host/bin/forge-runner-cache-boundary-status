@@ -254,16 +254,25 @@ def probe_cache_layout(user: str, host: str, cache_path: str) -> dict[str, Any]:
 
 
 def probe_volume_mounts(user: str, host: str) -> dict[str, Any]:
-    """Enumerate volume mounts on the runner container. The docker.sock
-    binding is the load-bearing finding for cache-isolation analysis: if
-    the runner has /var/run/docker.sock mounted, jobs spawn sibling
-    containers (host's docker daemon visible), not docker-in-docker."""
+    """Enumerate volume mounts on the runner container. Host-visibility
+    of /var/run/docker.sock is the load-bearing finding for cache-
+    isolation analysis: if the runner has /var/run/docker.sock BIND-
+    mounted from the host, jobs spawn sibling containers with the
+    host's docker daemon visible. An anonymous *volume* whose
+    destination path happens to be /var/run/docker.sock (created by
+    the gitea/act_runner image's VOLUME declaration when no explicit
+    binding overrides it) is NOT host-visibility — that's an empty
+    in-container directory the runner cannot reach the host through.
+    Distinguish on Type+Source so the readback flips correctly post-
+    fence (PACKET-1075 — pre-fix the readback called both states
+    'docker_sock_mounted=True' which made post-apply look broken)."""
     rc, out, err = remote_run(
         user, host,
         f"docker inspect {DEFAULT_GITEA_RUNNER_CONTAINER} --format '{{{{json .Mounts}}}}' 2>&1",
     )
     mounts: list[dict[str, Any]] = []
-    docker_sock_mounted = False
+    docker_sock_host_bind = False
+    docker_sock_destination_present = False
     if rc == 0:
         try:
             raw = json.loads(out)
@@ -277,8 +286,13 @@ def probe_volume_mounts(user: str, host: str) -> dict[str, Any]:
                     "mode": m.get("Mode"),
                     "rw": m.get("RW"),
                 })
-                if str(m.get("Source") or "").endswith("docker.sock") or str(m.get("Destination") or "").endswith("docker.sock"):
-                    docker_sock_mounted = True
+                mtype = str(m.get("Type") or "")
+                msrc = str(m.get("Source") or "")
+                mdst = str(m.get("Destination") or "")
+                if mtype == "bind" and msrc == "/var/run/docker.sock":
+                    docker_sock_host_bind = True
+                if mdst == "/var/run/docker.sock":
+                    docker_sock_destination_present = True
         except json.JSONDecodeError:
             pass
     return {
@@ -286,11 +300,21 @@ def probe_volume_mounts(user: str, host: str) -> dict[str, Any]:
         "stderr": err,
         "count": len(mounts),
         "mounts": mounts,
-        "docker_sock_mounted": docker_sock_mounted,
+        # docker_sock_mounted retained for compatibility — now narrowed
+        # to host-bind only (anonymous-volume destination at same path
+        # no longer triggers it).
+        "docker_sock_mounted": docker_sock_host_bind,
+        "docker_sock_host_bind": docker_sock_host_bind,
+        "docker_sock_destination_present": docker_sock_destination_present,
         "scope_note": (
-            "docker.sock mounted = sibling-container execution (host's docker daemon "
-            "visible to runner). Job containers are fresh per job, but the runner's "
-            "own filesystem (cache dirs) persists across jobs."
+            "docker_sock_host_bind=True means /var/run/docker.sock is "
+            "bind-mounted from host into runner — sibling-container "
+            "execution with host docker daemon visible. "
+            "docker_sock_destination_present=True with host_bind=False "
+            "means the runner has an anonymous volume at /var/run/"
+            "docker.sock (image VOLUME declaration) but no host "
+            "visibility — the path inside the container is an empty "
+            "directory; runner reaches Docker only via DOCKER_HOST."
         ),
     }
 

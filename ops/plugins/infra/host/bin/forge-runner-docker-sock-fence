@@ -551,10 +551,22 @@ if [[ "$NEEDS_PROXY_ADD" == "true" || "$NEEDS_RUNNER_PATCH" == "true" ]]; then
   fi
 fi
 
-# Compose recreate. Single-pass `up -d` recreates affected services
-# (gitea-runner because spec changed; docker-socket-proxy because new).
-# gitea + gitea-postgres untouched (no spec change).
+# Compose recreate. The gitea/act_runner image declares
+# VOLUME /var/run/docker.sock; when compose `up -d` recreates the
+# runner with a NEW spec that drops the docker.sock bind, the previous
+# bind mount is silently preserved — `--force-recreate` does NOT clear
+# it. Only an explicit `docker rm` of the runner before `up` produces
+# a clean container that has only the spec-declared volumes (anonymous
+# volume at /var/run/docker.sock from image VOLUME, no host bind).
+# Verified empirically against gitea/act_runner:latest + docker compose
+# v2 / engine 29.2 on dev-tools (PACKET-1075 apply 2026-05-04). For
+# revert, also rm the proxy so it goes away cleanly.
 if [[ "$NEEDS_RESTART" == "true" ]]; then
+  if [[ "$REVERT" -eq 1 ]]; then
+    ssh_remote "cd /opt/stacks/gitea && sudo -n docker rm -f docker-socket-proxy 2>/dev/null; sudo -n docker rm -f gitea-runner 2>/dev/null; true" || true
+  else
+    ssh_remote "cd /opt/stacks/gitea && sudo -n docker rm -f gitea-runner 2>/dev/null; true" || true
+  fi
   if ! ssh_remote "cd /opt/stacks/gitea && sudo -n docker compose up -d"; then
     stop 1 "docker compose up failed (sudo -n required)"
   fi
@@ -602,6 +614,31 @@ else
   [[ "$NEW_PROXY_PRESENT" == "true" ]] || stop 1 "post-apply: proxy service not present in compose"
   [[ "$NEW_RUNNER_SOCKETED" == "false" ]] || stop 1 "post-apply: runner still socketed to host docker.sock"
   [[ "$NEW_RUNNER_DOCKER_HOST" == "$TARGET_DOCKER_HOST" ]] || stop 1 "post-apply: runner DOCKER_HOST=$NEW_RUNNER_DOCKER_HOST, expected $TARGET_DOCKER_HOST"
+fi
+
+# Live-container check: confirm the running gitea-runner has NO host-
+# bind of /var/run/docker.sock (PACKET-1075 — guards against the
+# compose-recreate-preserves-bind quirk; the rm-before-up in the apply
+# step above is supposed to prevent this, but verify post-state).
+LIVE_MOUNTS_JSON="$(ssh_remote "docker inspect ${RUNNER_SERVICE} --format '{{json .Mounts}}' 2>&1" || echo '[]')"
+LIVE_HAS_HOST_BIND="$(python3 -c "
+import sys, json
+try:
+    raw = json.loads('''${LIVE_MOUNTS_JSON//\'/\\\'}''')
+except json.JSONDecodeError:
+    raw = []
+hit = False
+for m in raw or []:
+    if not isinstance(m, dict):
+        continue
+    if str(m.get('Type','')) == 'bind' and str(m.get('Source','')) == '/var/run/docker.sock':
+        hit = True; break
+print('true' if hit else 'false')
+")"
+if [[ "$REVERT" -eq 1 ]]; then
+  [[ "$LIVE_HAS_HOST_BIND" == "true" ]] || stop 1 "post-revert: live runner container has no /var/run/docker.sock host bind (compose recreate may have failed)"
+else
+  [[ "$LIVE_HAS_HOST_BIND" == "false" ]] || stop 1 "post-apply: live runner container STILL has /var/run/docker.sock host-bind despite spec change — recreate did not pick up volume change (try docker rm -f gitea-runner; docker compose up -d)"
 fi
 
 # Update probe state for receipt rendering

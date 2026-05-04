@@ -447,20 +447,39 @@ node_types:
               CopyFromContainer reads of any container filesystem also
               remain by allowlist design.
 
-              Stage 2 advances along this trajectory:
-                - unfenced (current substrate, cap not applied):
-                  stage_2_blocked_until = docker_sock_fence_apply_or_
-                  explicit_acceptance
-                - api_surface_fenced (post-cap-apply):
+              PACKET-1075 APPLIED 2026-05-04 with operator reason "PACKET-
+              1075 apply: fence runner docker socket with researched
+              allowlist". Substrate now reports
+              cache_scope_classification = isolated_per_job
+              (api_surface_fenced); docker.sock fence:
+              proxy_running=True runner_DOCKER_HOST=tcp://docker-socket-
+              proxy:2375 classification=api_surface_fenced. Apply ladder
+              required a hardening on the cap's restart step: gitea/
+              act_runner declares VOLUME /var/run/docker.sock; compose
+              up -d (even with --force-recreate) silently preserved the
+              previous container's docker.sock bind even after the spec
+              dropped it. Only `docker rm -f gitea-runner; docker
+              compose up -d` produced a clean container. The cap apply
+              path now does this by default. The boundary readback was
+              also tightened: pre-fix, both host-bind AND anonymous-
+              volume at the same destination triggered docker_sock_
+              mounted=True, which made post-fence look broken; post-fix,
+              docker_sock_host_bind discriminates Type==bind+Source==/var/
+              run/docker.sock vs anonymous-volume-with-coincidental-
+              destination, and the latter no longer counts as host
+              visibility.
+
+              Stage 2 trajectory (apply leg now COMPLETE):
+                - api_surface_fenced (current substrate post-apply):
                   stage_2_blocked_until = host_config_escape_residual_
                   acceptance_or_further_hardening
-              forge_node.delivered remains false in both states until
-              operator either explicitly accepts the residual or pursues
+              forge_node.delivered remains false until operator either
+              explicitly accepts the HostConfig residual OR pursues
               further hardening (payload-inspecting proxy, gVisor/Kata
               runtime isolation, userns-remapping with no privileged
               ContainerCreate paths — architectural slices outside this
               cap's aperture).
-            stage_2_blocked_until: docker_sock_fence_apply_or_host_config_escape_residual_acceptance_or_further_hardening
+            stage_2_blocked_until: host_config_escape_residual_acceptance_or_further_hardening
         branch_protection_readback_proof:
           source:
             - ops/plugins/infra/host/bin/forge-branch-protection-status
