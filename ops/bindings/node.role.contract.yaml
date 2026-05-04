@@ -400,12 +400,71 @@ node_types:
                 Tighten via forge.branch_protection.tighten (PACKET-665)
                 ONLY after the missing primitives land as separate
                 slices:
-                  (a) [LANDED 2026-05-04 PACKET-1135]
+                  (a) [PARTIALLY LANDED — workflow file on origin
+                      2026-05-04 PACKET-1135; checkout fix
+                      2026-05-04 PACKET-1145 fix 1; verify caps
+                      themselves cannot run on the vanilla runner
+                      class — see (a.1) below]
                       .gitea/workflows/spine-verify.yml on origin/main
-                      so the status_check context defined in branch
-                      protection actually has a workflow file producing
-                      it. Pre-1135 the workflow existed only in local
-                      working dir; post-1135 it is on origin/main.
+                      with manual git-init checkout via public URL
+                      (act_runner job containers can't resolve internal
+                      `gitea` hostname; gitea_default network is not
+                      attached to per-job networks). Bootstrap step
+                      installs python3 + python3-yaml + git + curl +
+                      ca-certificates on the vanilla ubuntu-latest
+                      Gitea runner image. SPINE_ROOT and SPINE_STATE
+                      set workspace-local. action_run #1765 against
+                      commit f676578d confirmed checkout + bootstrap
+                      + workspace-state setup all pass; failure now
+                      surfaces at the next layer.
+                  (a.1) [MISSING] CI-safe path for verify caps that
+                      depend on shared_authority_db. action_run #1765
+                      failed at the verify.engine.run step:
+                        cap.sh: db_authority routing failed via all
+                        declared routes: tailscale:100.96.211.33
+                        lan:192.168.1.184
+                      verify.engine.run carries
+                      state_authority=shared_authority_db, so cap.sh
+                      correctly tries to route the cap to the
+                      storage_evidence_node (pve) for canonical
+                      SQLite access (E3/E15 checks). The vanilla
+                      ubuntu-latest runner job container has no SSH
+                      key for pve, no known_hosts entry, no Tailscale
+                      attachment, and no /md1400 NFS mount. Without
+                      one of three substrate primitives the gate
+                      cannot run honestly:
+                        (a.1.i)  substrate-aware runner image: bind-
+                                 mount /md1400 NFS into the runner
+                                 host, ship pre-baked SSH key for
+                                 pve in the image, attach known_hosts
+                                 — image build + kept-current is its
+                                 own multi-slice arc.
+                        (a.1.ii) thin CI-safe verify variant: a
+                                 sibling cap (e.g.
+                                 verify.engine.smoke.local) that
+                                 declares routing.db_authority:skip
+                                 and runs only the self-contained
+                                 checks (E1, E5, E6, E7, E8, E16);
+                                 omits E3/E15 which need the canon
+                                 SQLite. Smaller scope; adds cap
+                                 surface; gate name in branch
+                                 protection would change to the new
+                                 thinner variant.
+                        (a.1.iii) replicated SQLite copy: rsync the
+                                  canonical SQLite db into the
+                                  runner workspace at job start;
+                                  verify.engine.run uses the local
+                                  copy. Adds infrastructure (rsync
+                                  auth + delivery cadence) and a
+                                  window where the local copy is
+                                  stale. Probably worst of three.
+                      All three are out-of-aperture for this slice.
+                      Direct-push by whitelist user (operator) still
+                      works through pre-receive (status_check is
+                      checked but does not synchronously block the
+                      push). PR-merge into main IS bricked while
+                      gate is failing; no PR-flow consumer exists
+                      today.
                   (b) [MISSING] GPG signing path for spine-agent
                       commits so signed_commits=true is satisfiable.
                       Substrate audit: no signing config in .git/config;
