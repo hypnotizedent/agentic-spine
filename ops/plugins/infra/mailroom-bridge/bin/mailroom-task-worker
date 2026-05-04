@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,10 +19,16 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[5]
 CONTRACT = ROOT / "ops" / "bindings" / "mailroom.task.worker.contract.yaml"
+RUNTIME_BOOTSTRAP_CONTRACT = ROOT / "ops" / "bindings" / "runtime.bootstrap.contract.yaml"
+SSH_RESOLVER = ROOT / "ops" / "lib" / "ssh-resolve.sh"
+PROVIDERS_STATUS_BIN = ROOT / "ops" / "plugins" / "providers" / "bin" / "providers-status"
 STATE_ROOT = os.environ.get("SPINE_STATE", "")
 TASK_ROOT = Path(STATE_ROOT) / "agent-tasks" if STATE_ROOT else Path()
 QUEUED_DIR = TASK_ROOT / "queued"
 STATUS_PATH = TASK_ROOT / "mailroom-task-worker.status.json"
+CANONICAL_TASK_ROOT_DEFAULT = "/md1400/spine/state/agent-tasks"
+DISABLE_CANONICAL_QUEUE = os.environ.get("MAILROOM_WORKER_DISABLE_CANONICAL_QUEUE", "").strip() == "1"
+DISABLE_PROVIDER_PLACEMENT = os.environ.get("MAILROOM_WORKER_DISABLE_PROVIDER_PLACEMENT", "").strip() == "1"
 RUN_KEY_RE = re.compile(r"Run Key:\s+(\S+)")
 PROVIDER_RUN_RE = re.compile(r"PROVIDER_(REQUESTED|USED|MODEL)=(.+)")
 USAGE_RE = re.compile(r"USAGE_(INPUT|OUTPUT|TOTAL)_TOKENS=(\d+)")
@@ -1067,23 +1074,176 @@ def _execute_capability(task_id: str, doc: dict[str, Any], worker_id: str) -> di
     }
 
 
+def _db_authority_block() -> dict[str, Any]:
+    if not RUNTIME_BOOTSTRAP_CONTRACT.is_file():
+        return {}
+    try:
+        payload = yaml.safe_load(RUNTIME_BOOTSTRAP_CONTRACT.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    block = payload.get("db_authority") if isinstance(payload, dict) else None
+    return block if isinstance(block, dict) else {}
+
+
+def _local_hostname() -> str:
+    try:
+        proc = subprocess.run(["hostname", "-s"], capture_output=True, text=True, timeout=2, check=False)
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    try:
+        return subprocess.check_output(["hostname"], text=True, timeout=2).strip()
+    except Exception:
+        return ""
+
+
+def _canonical_queue_target() -> tuple[str, str, str]:
+    """Return (host_ref, remote_root, reason).
+
+    reason: 'fetch' (do canonical fetch), 'authority_local' (this host owns canonical),
+    'disabled_env', 'disabled_contract', 'no_host'.
+    """
+    if DISABLE_CANONICAL_QUEUE:
+        return "", "", "disabled_env"
+    block = _db_authority_block()
+    if not block or block.get("enabled") is not True:
+        return "", "", "disabled_contract"
+    authority_hostnames = block.get("authority_hostnames") or []
+    if not isinstance(authority_hostnames, list):
+        authority_hostnames = []
+    if _local_hostname() in {str(h) for h in authority_hostnames}:
+        return "", "", "authority_local"
+    host_ref = str(block.get("host") or block.get("host_addr_lan") or "").strip()
+    if not host_ref:
+        return "", "", "no_host"
+    return host_ref, CANONICAL_TASK_ROOT_DEFAULT, "fetch"
+
+
+def _load_canonical_queued_docs(host_ref: str, remote_root: str) -> tuple[list[dict[str, Any]], str]:
+    """SSH-fetch canonical queued/*.yaml. Returns (docs, status: 'ok'|'unreachable')."""
+    if not SSH_RESOLVER.is_file():
+        return [], "unreachable"
+    remote_dir = f"{remote_root}/queued"
+    script = f'''
+set -euo pipefail
+source {shlex.quote(str(SSH_RESOLVER))}
+target={shlex.quote(host_ref)}
+dir={shlex.quote(remote_dir)}
+resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
+user="$(ssh_resolve_user "$target" ubuntu)"
+identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
+ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" \
+    "for f in \\"$dir\\"/TASK-*.yaml; do [ -f \\"\\$f\\" ] || continue; echo '---'; cat \\"\\$f\\"; done"
+'''
+    try:
+        proc = subprocess.run(["bash", "-lc", script], cwd=str(ROOT), capture_output=True, text=True, timeout=20, check=False)
+    except Exception:
+        return [], "unreachable"
+    if proc.returncode != 0:
+        return [], "unreachable"
+    text = proc.stdout
+    if not text.strip():
+        return [], "ok"
+    try:
+        docs = list(yaml.safe_load_all(text))
+    except Exception:
+        return [], "unreachable"
+    return [d for d in docs if isinstance(d, dict)], "ok"
+
+
+_PROVIDER_CACHE: dict[str, bool] = {}
+
+
+def _provider_ready_locally(provider_id: str) -> tuple[bool, str]:
+    """Run providers-status --provider <id> --json and return (ready, reason).
+
+    Cached per worker pass to avoid re-spawning the status probe per task.
+    Failure to invoke providers-status is treated as 'unknown' (allow claim) so
+    we do not block work when the readiness probe itself is broken.
+    """
+    if DISABLE_PROVIDER_PLACEMENT or not provider_id:
+        return True, "placement_check_disabled"
+    if provider_id in _PROVIDER_CACHE:
+        return _PROVIDER_CACHE[provider_id], "cached"
+    if not PROVIDERS_STATUS_BIN.is_file():
+        return True, "providers_status_missing"
+    try:
+        proc = subprocess.run(
+            [str(PROVIDERS_STATUS_BIN), "--surface", "spine_engine", "--provider", provider_id, "--json"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except Exception:
+        return True, "providers_status_error"
+    if proc.returncode != 0:
+        return True, f"providers_status_rc={proc.returncode}"
+    try:
+        payload = json.loads(proc.stdout)
+    except Exception:
+        return True, "providers_status_parse_error"
+    candidates = payload.get("candidates") or []
+    if not isinstance(candidates, list):
+        return True, "providers_status_bad_shape"
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        if str(cand.get("id") or "") == provider_id:
+            ready = bool(cand.get("ready"))
+            _PROVIDER_CACHE[provider_id] = ready
+            reason = "ready" if ready else str(cand.get("reason") or "not_ready")
+            return ready, reason
+    _PROVIDER_CACHE[provider_id] = False
+    return False, "provider_not_in_candidates"
+
+
+def _agent_tool_provider_for(doc: dict[str, Any]) -> str:
+    payload = _normalize_payload(doc)
+    return str(payload.get("provider") or os.environ.get("SPINE_AGENT_BRIDGE_PROVIDER") or "zai").strip()
+
+
 def _process_once(*, worker_id: str, claim_limit: int, allowlist: set[str], supported_routes: set[str]) -> dict[str, Any]:
     QUEUED_DIR.mkdir(parents=True, exist_ok=True)
-    queued = sorted(QUEUED_DIR.glob("TASK-*.yaml"))
+    _PROVIDER_CACHE.clear()
+    canonical_host, canonical_root, canonical_reason = _canonical_queue_target()
+    canonical_docs: list[dict[str, Any]] = []
+    canonical_fetch_status = canonical_reason
+    seen_task_ids: set[str] = set()
+    queue_entries: list[tuple[str, dict[str, Any] | None, Path | None]] = []
+
+    if canonical_reason == "fetch":
+        canonical_docs, fetch_status = _load_canonical_queued_docs(canonical_host, canonical_root)
+        canonical_fetch_status = "merged" if fetch_status == "ok" else "unreachable"
+        for doc in canonical_docs:
+            tid = str(doc.get("task_id") or "").strip()
+            if not tid or tid in seen_task_ids:
+                continue
+            seen_task_ids.add(tid)
+            queue_entries.append((tid, doc, None))
+
+    local_paths = sorted(QUEUED_DIR.glob("TASK-*.yaml"))
+    for path in local_paths:
+        tid = path.stem
+        if tid in seen_task_ids:
+            continue
+        seen_task_ids.add(tid)
+        queue_entries.append((tid, None, path))
+
+    queued = local_paths  # preserved for queued_seen accounting below
     claimed: list[dict[str, Any]] = []
     completed: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
 
-    for path in queued:
+    for entry_task_id, entry_doc, entry_path in queue_entries:
         if len(claimed) >= claim_limit:
             break
-        doc = _task_doc(path)
+        doc = entry_doc if entry_doc is not None else (_task_doc(entry_path) if entry_path else {})
         if not doc:
-            skipped.append({"task_id": path.stem, "reason": "unreadable task envelope"})
+            skipped.append({"task_id": entry_task_id, "reason": "unreadable task envelope"})
             continue
         supported, reason = _task_supported(doc, allowlist=allowlist, supported_routes=supported_routes)
-        task_id = str(doc.get("task_id") or path.stem).strip()
+        task_id = str(doc.get("task_id") or entry_task_id).strip()
         if not supported:
             route_target = str(doc.get("route_target") or "").strip().lower()
             if route_target == "agent_tool":
@@ -1099,6 +1259,25 @@ def _process_once(*, worker_id: str, claim_limit: int, allowlist: set[str], supp
             else:
                 skipped.append({"task_id": task_id, "reason": reason})
             continue
+        # Provider-placement honesty: for agent_tool tasks, check whether the
+        # requested provider is ready on this host BEFORE claiming. If not, leave
+        # the task queued for a host that can run it. This is a soft skip — no
+        # claim, no mutation, no fail. The worker contract surfaces this in
+        # canonical_queue_truth.provider_placement_check.
+        route_target_check = str(doc.get("route_target") or "").strip().lower()
+        if route_target_check == "agent_tool":
+            provider_id = _agent_tool_provider_for(doc)
+            ready, ready_reason = _provider_ready_locally(provider_id)
+            if not ready:
+                skipped.append({
+                    "task_id": task_id,
+                    "reason": (
+                        f"placement_unsuitable: provider={provider_id} "
+                        f"not ready on {_local_hostname() or 'this_host'} "
+                        f"({ready_reason}); leaving queued for provider-ready host"
+                    ),
+                })
+                continue
         claim_data = _claim_task(task_id, worker_id)
         claimed.append({"task_id": task_id, "state": "running", "worker": worker_id})
         running_file = Path(str(claim_data.get("file") or TASK_ROOT / "running" / f"{task_id}.yaml"))
@@ -1118,7 +1297,10 @@ def _process_once(*, worker_id: str, claim_limit: int, allowlist: set[str], supp
         "heartbeat_at": heartbeat_at,
         "worker_id": worker_id,
         "mode": "once",
-        "queued_seen": len(queued),
+        "queued_seen": len(queue_entries),
+        "queued_seen_local": len(queued),
+        "queued_seen_canonical": len(canonical_docs),
+        "canonical_queue_status": canonical_fetch_status,
         "claimed": claimed,
         "completed": completed,
         "failed": failed,

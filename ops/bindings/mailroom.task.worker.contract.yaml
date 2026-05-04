@@ -112,25 +112,47 @@ first_class_runtime_decision:
     standing_worker_responsibility: >
       The launchd-registered standing worker on ai-consolidation
       (com.ronny.mailroom-task-worker / spine-mailroom-task-worker.service)
-      polls only its local $SPINE_STATE/agent-tasks/queued/ projection,
-      which post-D.3b v4 is cache-only and DOES NOT contain canonical
-      enqueued tasks. The standing worker is therefore explicitly NOT
-      responsible for canonical queue pickup; it remains as honest legacy
-      operational hygiene pending a follow-on slice that either retires it
-      or routes its poll through canonical via the same SSH pattern. This
-      is a labeling clarification, not new authority — the worker contract
-      authority.does_not_decide list is unchanged.
-    provider_readiness_failure_mode: >
-      A provider-backed task that claims on a host where the requested
-      provider is not ready terminates honestly via existing worker code at
-      mailroom-task-worker._execute_agent_tool: the bridge subprocess
-      reports rc!=0, and the worker writes bridge_proof with status=failed,
-      failure_reason naming the unavailable provider, mutation_access=none,
-      worktree_mutation absent, push_performed/merge_performed absent. The
-      task moves to failed state with a structured terminal receipt — it
-      does NOT silently succeed, retry on another host, or mutate anything.
-      Pre-claim provider placement matching is intentionally not added in
-      this slice; the failure-mode receipt is the discipline enforcer.
+      now reads the canonical agent-tasks queue via SSH-merge in
+      mailroom-task-worker._load_canonical_queued_docs (same ssh-resolve
+      pattern as execution-pickup-status). Combined with the pre-claim
+      provider-placement check below, the standing worker is the canonical
+      queue picker for tasks whose requested provider is ready on
+      ai-consolidation. Worker contract authority.does_not_decide list is
+      unchanged — this is operational placement hygiene, not new authority.
+      A pve worker.once invocation continues to read canonical directly
+      (it lives on the authority host) and will claim provider-backed work
+      only when the same pre-claim provider check passes there; otherwise
+      it leaves the task queued for an upstream host that can run it.
+    provider_placement_check:
+      rule: >
+        Provider-backed tasks (route_target=agent_tool) are pre-claim
+        gated by mailroom-task-worker._provider_ready_locally, which
+        invokes ops/plugins/providers/bin/providers-status with
+        --surface=spine_engine --provider=<requested>. If the requested
+        provider is not ready on this host (missing credentials, missing
+        endpoint, or provider declared unsupported), the worker emits a
+        soft skip with reason 'placement_unsuitable: provider=<id> not
+        ready on <host> (<reason>); leaving queued for provider-ready
+        host'. The task stays queued — no claim, no mutation, no fail
+        receipt. Another worker pass on a host where the provider IS ready
+        can claim and execute. Pre-claim probe results are cached per
+        worker pass to avoid re-spawning the readiness probe per task.
+      failure_mode_complement: >
+        If a provider-backed task IS claimed (provider readiness probe
+        passed at claim time) but the bridge subprocess fails for any
+        runtime reason, the existing _execute_agent_tool failure path
+        still applies: bridge_proof.status=failed, failure_reason naming
+        the runtime cause, mutation_access=none, worktree_mutation absent,
+        push_performed/merge_performed absent. The task moves to failed
+        state with a structured terminal receipt. The pre-claim
+        placement check addresses the placement honesty question (is this
+        host even capable of running this work?); the post-claim failure
+        path addresses runtime honesty (did the bounded execution
+        actually succeed?). Both must hold. Neither is a substitute for
+        the other.
+      env_overrides:
+        MAILROOM_WORKER_DISABLE_CANONICAL_QUEUE: "1 disables canonical SSH-fetch (worker reads only local queue; legacy/test mode)"
+        MAILROOM_WORKER_DISABLE_PROVIDER_PLACEMENT: "1 disables pre-claim provider readiness check (worker claims agent_tool tasks regardless of provider readiness; legacy/test mode)"
   path_boundary:
     decision: "Do not create /code/mailroom as a live runtime or evidence home."
     reason: >
