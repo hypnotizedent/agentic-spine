@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Friction per-id disposition — closes a friction item with structured
+disposition + evidence_refs, so packets can retire friction through the
+engine instead of leaving resolved/superseded items as packet prose.
+
+Authority: shared_authority.db (friction + friction_events tables) via
+the existing close_friction lib hook. Encodes disposition + evidence_refs
++ free reason text as JSON in the closed_reason column (additive — no
+schema migration; legacy plain-text closed_reason still readable).
+
+Reasons covered:
+  resolved   — packet/receipt directly fixed the named expected vs actual gap
+  superseded — newer evidence/receipt makes this friction redundant
+  duplicate  — same root cause already tracked under another friction_id
+  invalid    — friction was misclassified or no longer applicable
+
+Audit:
+  - friction_events row recorded with event_type=<disposition> + run_key +
+    payload_json containing evidence_refs.
+  - friction.queue.status surfaces by_disposition counts post-close.
+
+Authority boundary: this cap can only mark a friction item terminal. It
+does not invent friction, modify gap state, or grant any other authority.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
+
+import gaps_sql_authority as authority  # noqa: E402
+
+
+VALID_DISPOSITIONS = ("resolved", "superseded", "duplicate", "invalid")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pack_closed_reason(disposition: str, evidence_refs: list[str], reason: str) -> str:
+    """Pack disposition + evidence_refs + reason into JSON for closed_reason.
+
+    Stable shape so friction.queue.status / future readers can parse it
+    without ambiguity. Free-text reason is preserved verbatim. Legacy
+    rows that hold plain-text closed_reason still parse cleanly under
+    the readers' try/except fallback.
+    """
+    return json.dumps(
+        {
+            "disposition": disposition,
+            "evidence_refs": evidence_refs,
+            "reason": reason,
+            "disposed_at_utc": utc_now(),
+        },
+        sort_keys=True,
+    )
+
+
+def main() -> int:
+    # Bypass required-args enforcement when --self-check is passed standalone.
+    if "--self-check" in sys.argv[1:]:
+        for fn in ("close_friction", "get_friction", "ensure_schema", "connect", "resolve_paths", "insert_friction_event"):
+            if not hasattr(authority, fn):
+                print(f"friction.dispose self-check FAIL: missing authority.{fn}", file=sys.stderr)
+                return 1
+        print("friction.dispose self-check PASS")
+        return 0
+
+    parser = argparse.ArgumentParser(
+        description="Per-id friction disposition with evidence_refs to the proof receipt."
+    )
+    parser.add_argument("--friction-id", required=True, help="Friction id (e.g., FR-20260504T053922Z-6dae16 or legacy short id)")
+    parser.add_argument(
+        "--disposition", required=True, choices=VALID_DISPOSITIONS,
+        help="resolved | superseded | duplicate | invalid",
+    )
+    parser.add_argument(
+        "--evidence-ref", action="append", default=[],
+        help="Run key, packet id, or receipt path. Repeatable.",
+    )
+    parser.add_argument("--reason", required=True, help="Operator-readable reason text.")
+    parser.add_argument(
+        "--actor", default="friction.dispose",
+        help="Actor identity for the close event (default: cap name).",
+    )
+    parser.add_argument(
+        "--force", action="store_true", default=False,
+        help="Re-dispose an already-closed friction (default: refuse)."
+    )
+    parser.add_argument("--json", action="store_true", dest="json_output")
+    args = parser.parse_args()
+
+    db_path, _ = authority.resolve_paths(ROOT)
+    conn = authority.connect(db_path)
+    try:
+        authority.ensure_schema(conn)
+
+        existing = authority.get_friction(conn, args.friction_id)
+        if existing is None:
+            payload = {"status": "error", "error": f"friction_id not found: {args.friction_id}"}
+            print(json.dumps(payload) if args.json_output else f"FAIL: {payload['error']}", file=sys.stderr)
+            return 1
+        if existing.get("status") == "closed" and not args.force:
+            payload = {
+                "status": "error",
+                "error": f"friction_id already closed: {args.friction_id} (use --force to re-dispose)",
+            }
+            print(json.dumps(payload) if args.json_output else f"FAIL: {payload['error']}", file=sys.stderr)
+            return 1
+
+        run_key = os.environ.get("SPINE_CAP_RUN_KEY", "").strip() or None
+        evidence_refs = [str(r).strip() for r in (args.evidence_ref or []) if str(r).strip()]
+        packed_reason = _pack_closed_reason(args.disposition, evidence_refs, args.reason)
+
+        # close_friction sets status=closed, closed_reason, closed_at_utc and
+        # inserts a friction_events row with event_type='close'. We also insert
+        # a second event row with event_type=<disposition> so the disposition
+        # is queryable from friction_events alone (auditors who look at events
+        # see the verb directly, not packed JSON).
+        item = authority.close_friction(
+            conn,
+            args.friction_id,
+            reason=packed_reason,
+            actor=args.actor,
+            run_key=run_key,
+            mutation_source="governed",
+        )
+        if item is None:
+            payload = {"status": "error", "error": f"close_friction returned None for {args.friction_id}"}
+            print(json.dumps(payload) if args.json_output else f"FAIL: {payload['error']}", file=sys.stderr)
+            return 1
+
+        authority.insert_friction_event(
+            conn,
+            friction_id=args.friction_id,
+            event_type=args.disposition,
+            from_status=existing.get("status", "unknown"),
+            to_status="closed",
+            reason=args.reason,
+            actor=args.actor,
+            run_key=run_key,
+            mutation_source="governed",
+            payload={"evidence_refs": evidence_refs},
+        )
+        conn.commit()
+
+        result = {
+            "status": "ok",
+            "friction_id": args.friction_id,
+            "disposition": args.disposition,
+            "evidence_refs": evidence_refs,
+            "from_status": existing.get("status"),
+            "to_status": "closed",
+            "actor": args.actor,
+            "run_key": run_key,
+        }
+        if args.json_output:
+            print(json.dumps(result, indent=2))
+        else:
+            print("friction.dispose")
+            print(f"friction_id: {args.friction_id}")
+            print(f"disposition: {args.disposition}")
+            print(f"from_status: {existing.get('status')} -> closed")
+            print(f"evidence_refs: {', '.join(evidence_refs) or '<none>'}")
+            print(f"reason: {args.reason}")
+        return 0
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

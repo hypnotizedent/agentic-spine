@@ -16,6 +16,30 @@ sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 import gaps_sql_authority as authority  # noqa: E402
 
 
+def _by_disposition(conn) -> dict[str, int]:
+    """Count closed friction rows by disposition encoded in closed_reason
+    JSON (PACKET-890). Legacy plain-text closed_reason rows fall under
+    'unstructured_legacy' so they remain visible without breaking parse."""
+    counts: dict[str, int] = {}
+    try:
+        cur = conn.execute("SELECT closed_reason FROM friction WHERE status = 'closed'")
+    except Exception:
+        return counts
+    for (reason_text,) in cur.fetchall():
+        disposition = "unstructured_legacy"
+        if reason_text:
+            try:
+                payload = json.loads(reason_text)
+                if isinstance(payload, dict):
+                    cand = str(payload.get("disposition") or "").strip()
+                    if cand:
+                        disposition = cand
+            except (TypeError, ValueError):
+                pass
+        counts[disposition] = counts.get(disposition, 0) + 1
+    return counts
+
+
 def main() -> int:
     db_path, _ = authority.resolve_paths(ROOT)
     conn = authority.connect(db_path)
@@ -23,6 +47,7 @@ def main() -> int:
 
     stats = authority.friction_stats(conn)
     total = authority.friction_count(conn)
+    by_disposition = _by_disposition(conn)
 
     status_counts = stats.get("by_status", {})
     open_count = sum(
@@ -39,6 +64,7 @@ def main() -> int:
         "open": open_count,
         "by_status": status_counts,
         "by_severity": stats.get("by_severity", {}),
+        "by_disposition": by_disposition,
     }
 
     conn.close()
@@ -54,6 +80,10 @@ def main() -> int:
         print(f"open: {payload['open']}")
         for s, c in sorted(status_counts.items()):
             print(f"  {s}: {c}")
+        if by_disposition:
+            print("by_disposition (closed):")
+            for d, c in sorted(by_disposition.items()):
+                print(f"  {d}: {c}")
         print(f"db_path: {db_path}")
     return 0
 
