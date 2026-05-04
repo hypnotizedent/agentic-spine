@@ -30,8 +30,38 @@ TASK_ROOT = STATE_ROOT / "agent-tasks"
 PATCH_REVIEW_ROOT = STATE_ROOT / "domain-state" / "ai-patch-reviews"
 SCHEDULER_REGISTRY = ROOT / "ops" / "bindings" / "launchd.scheduler.registry.yaml"
 RUNTIME_BOOTSTRAP_CONTRACT = ROOT / "ops" / "bindings" / "runtime.bootstrap.contract.yaml"
+MAILROOM_WORKER_CONTRACT = ROOT / "ops" / "bindings" / "mailroom.task.worker.contract.yaml"
 SSH_RESOLVER = ROOT / "ops" / "lib" / "ssh-resolve.sh"
-STALE_SECONDS = int(os.environ.get("EXECUTION_PICKUP_STALE_SECONDS") or "300")
+
+
+def _resolve_task_heartbeat_stale_threshold() -> int:
+    """Per-task heartbeat staleness threshold (PACKET-1225 canon line 199 closure).
+
+    Source-of-truth precedence:
+      1. EXECUTION_PICKUP_STALE_SECONDS env (escape hatch)
+      2. mailroom.task.worker.contract.yaml#kernel_realization.primitives.heartbeat
+         .task_heartbeat_staleness_threshold_seconds (canonical)
+      3. defensive 300s fallback (only if contract is unreadable / field missing)
+    """
+    env_value = os.environ.get("EXECUTION_PICKUP_STALE_SECONDS", "").strip()
+    if env_value:
+        try:
+            return int(env_value)
+        except ValueError:
+            pass
+    try:
+        contract = yaml.safe_load(MAILROOM_WORKER_CONTRACT.read_text(encoding="utf-8")) or {}
+        primitives = (((contract.get("kernel_realization") or {}).get("primitives") or {}))
+        heartbeat = primitives.get("heartbeat") or {}
+        contract_value = heartbeat.get("task_heartbeat_staleness_threshold_seconds")
+        if isinstance(contract_value, int) and contract_value > 0:
+            return contract_value
+    except Exception:
+        pass
+    return 300
+
+
+STALE_SECONDS = _resolve_task_heartbeat_stale_threshold()
 CANONICAL_TASK_ROOT_DEFAULT = "/md1400/spine/state/agent-tasks"
 LOCAL_CANONICAL_FETCH_DISABLE = os.environ.get("EXECUTION_PICKUP_DISABLE_CANONICAL_FETCH", "").strip() == "1"
 CANONICAL_PLANE_ACCESS_BINDING = "ops/bindings/node.role.contract.yaml#canonical_plane_access.by_role"

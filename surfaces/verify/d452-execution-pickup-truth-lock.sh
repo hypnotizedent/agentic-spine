@@ -627,6 +627,18 @@ pickup_status_text = pickup_status_path.read_text(encoding="utf-8")
 for required_token in ('"canonical_plane_access_role"', '"plane_access_source"', '"canonical_queue_source"', "canonical_plane_access_role()"):
     if required_token not in pickup_status_text:
         raise SystemExit(f"D452 FAIL: execution-pickup-status must emit canonical plane access metadata: missing {required_token} (PACKET-840 Stage 2 organ 2)")
+
+# PACKET-1225 task heartbeat staleness — contract carries the per-task
+# threshold and execution-pickup-status reads from it. Extension of D452
+# only — NO new D-gate. Closes KERNEL_PRIMITIVE_CANON.md line 199 gap.
+primitives = ((mailroom_contract.get("kernel_realization") or {}).get("primitives") or {})
+heartbeat_block = primitives.get("heartbeat") or {}
+threshold_value = heartbeat_block.get("task_heartbeat_staleness_threshold_seconds")
+if not isinstance(threshold_value, int) or threshold_value <= 0:
+    raise SystemExit("D452 FAIL: mailroom.task.worker.contract.yaml kernel_realization.primitives.heartbeat must declare task_heartbeat_staleness_threshold_seconds as a positive integer (PACKET-1225 canon line 199 closure)")
+for required_token in ("MAILROOM_WORKER_CONTRACT", "task_heartbeat_staleness_threshold_seconds", "_resolve_task_heartbeat_stale_threshold"):
+    if required_token not in pickup_status_text:
+        raise SystemExit(f"D452 FAIL: execution-pickup-status must read task heartbeat staleness threshold from mailroom worker contract: missing {required_token} (PACKET-1225)")
 PY
 
 echo "D452 PASS: execution pickup truth locked"
