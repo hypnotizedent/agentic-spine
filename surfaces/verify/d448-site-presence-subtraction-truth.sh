@@ -319,5 +319,41 @@ if proc_h.returncode != 0:
 if "Site Profiles:" not in proc_h.stdout:
     fail("site.presence.status human readback must teach 'Site Profiles:' section (PACKET-1115)")
 
-print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, and site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115)")
+# PACKET-1145: lock both authority carriers for home.unifi.network.inventory.yaml.
+# (t) Leaf carrier — file demoted from authoritative to compatibility_projection,
+#     declares subordinate_to site.profile.contract.yaml, must NOT carry an
+#     unqualified `authority` field (use evidence_lineage instead).
+# (u) Parent carrier — home.authority.contract.yaml row redirects to site.profile
+#     via subordinate_to AND to site.presence.status via replacement_readback,
+#     scope ends in _compatibility_evidence. Three-field lock on the parent.
+# Subtracts authority, not evidence; UDR API readback content preserved.
+
+home_unifi_path = root / "ops/bindings/home.unifi.network.inventory.yaml"
+if home_unifi_path.exists():
+    leaf = yaml.safe_load(home_unifi_path.read_text(encoding="utf-8")) or {}
+    if leaf.get("status") == "authoritative":
+        fail("home.unifi.network.inventory.yaml status must not be authoritative; HI doctrine: site.profile is canonical interpreter (PACKET-1145)")
+    if leaf.get("subordinate_to") != "ops/bindings/site.profile.contract.yaml":
+        fail("home.unifi.network.inventory.yaml must declare subordinate_to=ops/bindings/site.profile.contract.yaml (PACKET-1145)")
+    if "authority" in leaf:
+        fail("home.unifi.network.inventory.yaml must not declare unqualified 'authority' field (use evidence_lineage instead) (PACKET-1145)")
+
+home_auth_path = root / "ops/bindings/home.authority.contract.yaml"
+if home_auth_path.exists():
+    home_auth = yaml.safe_load(home_auth_path.read_text(encoding="utf-8")) or {}
+    inventories = home_auth.get("inventories") or []
+    unifi_entry = next(
+        (e for e in inventories if isinstance(e, dict) and e.get("path") == "ops/bindings/home.unifi.network.inventory.yaml"),
+        None,
+    )
+    if unifi_entry is not None:
+        scope_value = unifi_entry.get("scope") or ""
+        if not scope_value.endswith("_compatibility_evidence"):
+            fail(f"home.authority.contract.yaml inventories[home.unifi.network.inventory.yaml] scope must end in _compatibility_evidence, got {scope_value!r} (PACKET-1145)")
+        if unifi_entry.get("subordinate_to") != "ops/bindings/site.profile.contract.yaml":
+            fail("home.authority.contract.yaml inventories[home.unifi.network.inventory.yaml] must declare subordinate_to=ops/bindings/site.profile.contract.yaml (PACKET-1145)")
+        if unifi_entry.get("replacement_readback") != "site.presence.status":
+            fail("home.authority.contract.yaml inventories[home.unifi.network.inventory.yaml] must declare replacement_readback=site.presence.status (PACKET-1145)")
+
+print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), and home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145)")
 PY
