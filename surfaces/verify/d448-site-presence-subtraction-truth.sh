@@ -355,5 +355,24 @@ if home_auth_path.exists():
         if unifi_entry.get("replacement_readback") != "site.presence.status":
             fail("home.authority.contract.yaml inventories[home.unifi.network.inventory.yaml] must declare replacement_readback=site.presence.status (PACKET-1145)")
 
-print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), and home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145)")
+# PACKET-1215: lock Site Intelligence canonical-authority + evidence-boundary teaching.
+# (v) JSON subtracted_peer_authority must enumerate home.unifi.network.inventory.yaml
+#     (PACKET-1145 demoted it; cap-side enumeration must reflect that demotion).
+# (w) Human readback must teach the canonical authority chain (Site Intelligence is
+#     authority; topology stays separate; subordinate evidence is named).
+
+if "ops/bindings/home.unifi.network.inventory.yaml" not in (all_payload.get("subtracted_peer_authority") or []):
+    fail("site.presence.status JSON subtracted_peer_authority must enumerate ops/bindings/home.unifi.network.inventory.yaml (PACKET-1215; PACKET-1145 demoted it)")
+
+required_teaching_phrases = [
+    "Canonical authority chain:",
+    "ops/bindings/site.profile.contract.yaml",
+    "ops/bindings/topology.sites.yaml",
+    "Subordinate evidence (does not teach site-profile authority):",
+]
+for phrase in required_teaching_phrases:
+    if phrase not in proc_h.stdout:
+        fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
+
+print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), and Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215)")
 PY
