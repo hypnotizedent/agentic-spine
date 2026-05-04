@@ -1283,8 +1283,21 @@ def _process_once(*, worker_id: str, claim_limit: int, allowlist: set[str], supp
                 continue
         claim_data = _claim_task(task_id, worker_id)
         claimed.append({"task_id": task_id, "state": "running", "worker": worker_id})
-        running_file = Path(str(claim_data.get("file") or TASK_ROOT / "running" / f"{task_id}.yaml"))
-        running_doc = _task_doc(running_file)
+        # The post-claim envelope at $SPINE_STATE/agent-tasks/running/<task>.yaml
+        # only resolves locally on the canonical authority host. From a non-
+        # authority host (e.g. ai-consolidation) the envelope is on canonical
+        # pve and not readable through this script. The body of the envelope is
+        # invariant across the queued -> running transition, so we reuse the
+        # doc we already fetched (canonical via SSH-merge, or local). If the
+        # canonical authority host can read the running file directly, prefer
+        # that for freshness; otherwise fall back to the merge-time doc.
+        running_doc = doc
+        if claim_data.get("file"):
+            running_file = Path(str(claim_data.get("file")))
+            if running_file.is_file():
+                fresh = _task_doc(running_file)
+                if fresh:
+                    running_doc = fresh
         if str(running_doc.get("route_target") or "").strip().lower() == "agent_tool":
             result = _execute_agent_tool(task_id, running_doc, worker_id)
         else:
