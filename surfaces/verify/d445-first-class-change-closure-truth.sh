@@ -66,4 +66,55 @@ grep -q "cross-plane readback" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missi
 grep -q "D445" "$REGISTRY" || fail "gate registry missing D445"
 grep -q "D445" "$TOPOLOGY" || fail "gate topology core_mode missing D445"
 
-echo "D445 PASS: first-class change closure contract is authoritative, linked from workflow docs, and guarded by spine.verify"
+# --- propose.change.artery.v1 substrate proof (PACKET-845: smallest enforceable v1) ---
+ARTERY_CONTRACT="$ROOT/ops/bindings/propose.change.artery.contract.yaml"
+ARTERY_VALIDATE_BIN="$ROOT/ops/plugins/core/lifecycle/bin/propose-change-artery-validate"
+CAP_REGISTRY="$ROOT/ops/capabilities.yaml"
+
+[[ -f "$ARTERY_CONTRACT" ]] || fail "missing propose/change artery contract: $ARTERY_CONTRACT"
+[[ -x "$ARTERY_VALIDATE_BIN" ]] || fail "missing executable propose-change-artery-validate"
+
+python3 - "$ARTERY_CONTRACT" <<'PY' || exit 1
+import sys
+from pathlib import Path
+import yaml
+
+path = Path(sys.argv[1])
+data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+required_top = [
+    "artery_id", "schema", "stages", "terminal_disposition",
+    "out_of_scope", "deferred_to_v2", "receipt_schema", "rules",
+]
+missing_top = [k for k in required_top if k not in data]
+if missing_top:
+    raise SystemExit("artery contract missing top-level keys: " + ", ".join(missing_top))
+
+if data.get("artery_id") != "propose.change.artery.v1":
+    raise SystemExit(f"artery_id must be 'propose.change.artery.v1', got {data.get('artery_id')!r}")
+
+canonical = ["plan", "research", "plan_check", "review_checkpoint"]
+declared = [s.get("id") for s in (data.get("stages") or []) if isinstance(s, dict)]
+missing_stages = [s for s in canonical if s not in declared]
+if missing_stages:
+    raise SystemExit("artery contract missing canonical v1 stages: " + ", ".join(missing_stages))
+
+for stage in (data.get("stages") or []):
+    if not isinstance(stage, dict):
+        raise SystemExit("stage entry must be a mapping")
+    if "required_receipt_fields" not in stage or not stage["required_receipt_fields"]:
+        raise SystemExit(f"stage {stage.get('id')!r} missing required_receipt_fields")
+
+deferred = data.get("deferred_to_v2") or {}
+if not isinstance(deferred, dict) or "rationale" not in deferred:
+    raise SystemExit("artery contract deferred_to_v2 must be a mapping with rationale")
+PY
+
+grep -q "propose.change.artery.validate:" "$CAP_REGISTRY" || fail "ops/capabilities.yaml missing propose.change.artery.validate registration"
+grep -q "propose.change.artery.v1" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missing propose.change.artery.v1 doctrine paragraph"
+grep -q "propose.change.artery.validate" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md doctrine paragraph must name propose.change.artery.validate cap"
+
+# Substrate proof requires the validator cap to actually run its self-check.
+"$ARTERY_VALIDATE_BIN" --self-check >/dev/null 2>&1 || fail "propose-change-artery-validate --self-check failed"
+
+echo "D445 PASS: first-class change closure contract is authoritative, linked from workflow docs, guarded by spine.verify, and propose.change.artery.v1 substrate (contract + validator + doctrine) is proven"

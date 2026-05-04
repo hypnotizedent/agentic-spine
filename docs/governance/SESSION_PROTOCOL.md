@@ -328,6 +328,31 @@ stay on `main` and clean. All wave/feature work happens in managed worktrees.
 - Cleanup: `./bin/ops cap run worktree.lifecycle.cleanup -- --mode archive --json` only when explicit archive/delete cleanup is intended
 - Authority: `docs/governance/GIT_WORKTREE_HYGIENE.md`, `ops/bindings/worktree.lifecycle.contract.yaml`
 
+### Propose/change artery (v1)
+
+The canonical L2 workflow shape for AI-proposed change is
+`propose.change.artery.v1` (contract:
+[`ops/bindings/propose.change.artery.contract.yaml`](../../ops/bindings/propose.change.artery.contract.yaml)).
+A propose/change packet must traverse the four canonical stages — `plan`,
+`research`, `plan_check`, `review_checkpoint` — and emit an `artery_receipt`
+block with the per-stage required fields named in the contract. The
+`propose.change.artery.validate` cap rejects packet bodies or artery receipt
+YAML that violate the contract (missing fields, forbidden drivers,
+v2-deferred stages); D445 proves the contract, validator cap, and this
+paragraph all exist as substrate truth at `spine.verify` time. Ad hoc
+propose/change packet planning (write whatever prose you like, hand off
+informally) is demoted to expert/recovery only — the artery is the normal
+shape. v1 is workflow discipline only: it does NOT include autonomous patch
+execution, the V2.5 patch_apply_sandbox, the mailroom worker
+`route_target=artery` admission, `execution.pickup.status` artery projection,
+or the `ai.patch.review.{promote,reject,merge}` handoff. Those surfaces are
+deferred to v2 once the V2.5/D452 substrate is durably stable; the v1
+contract's `out_of_scope` and `deferred_to_v2` blocks name the v2 boundary
+explicitly. Other packet classes (research notes, status briefs, decisions,
+incident reports) remain valid as direct unstructured packet bodies — the
+artery contract applies only to packets that declare `artery_id:
+propose.change.artery.v1`.
+
 ## Execution Lifecycles
 
 No single autonomous execution handoff is taught as the default today.

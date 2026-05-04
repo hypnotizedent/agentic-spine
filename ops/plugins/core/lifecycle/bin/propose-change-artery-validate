@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""
+propose.change.artery.validate
+
+Read-only validator for propose/change artery v1.
+
+Modes:
+  --self-check
+      Verify the artery contract exists, parses as YAML, and carries the
+      required top-level keys. Used by spine.verify (D445) and as a smoke
+      check by callers.
+
+  --packet PATH
+      Validate a packet body or artery receipt YAML against the v1 contract.
+      Returns structured JSON: {status, missing_fields, malformed_fields,
+      forbidden_drivers, decision_reason}.
+
+      Reject conditions:
+        - missing artery_receipt envelope
+        - artery_id mismatch with contract artery_id
+        - missing required envelope fields
+        - traversed stage block missing required fields
+        - stage receipt names a forbidden driver (e.g., V2.5 in v1)
+        - receipt carries deferred_to_v2 stage blocks (scope creep)
+
+  --json
+      Emit machine-readable JSON. Default behavior when no other output
+      mode is requested.
+
+Exit codes:
+  0  validation passed (or self-check passed)
+  1  validation failed (or self-check failed)
+  2  invocation error (bad args, missing dependency)
+
+This validator does NOT mutate. It does not write receipts. It does not
+invoke other caps. It is read-only and idempotent.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    print(json.dumps({
+        "status": "error",
+        "decision_reason": "missing python dependency: PyYAML",
+    }))
+    sys.exit(2)
+
+
+REQUIRED_TOP_LEVEL_KEYS = [
+    "artery_id",
+    "schema",
+    "stages",
+    "terminal_disposition",
+    "out_of_scope",
+    "deferred_to_v2",
+    "receipt_schema",
+    "rules",
+]
+
+CANONICAL_STAGES_V1 = ["plan", "research", "plan_check", "review_checkpoint"]
+
+
+def _resolve_contract_path():
+    here = Path(__file__).resolve()
+    # bin is at <repo>/ops/plugins/core/lifecycle/bin/<this>
+    # parents[5] = <repo>; allow SPINE_REPO env override per cap.sh resolution chain.
+    repo_root = Path(os.environ.get("SPINE_REPO", here.parents[5]))
+    return repo_root / "ops" / "bindings" / "propose.change.artery.contract.yaml"
+
+
+def _load_contract():
+    path = _resolve_contract_path()
+    if not path.is_file():
+        return None, f"contract not found at {path}"
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        return None, f"contract YAML parse failed: {exc}"
+    if not isinstance(data, dict):
+        return None, "contract YAML did not parse as a mapping"
+    return data, None
+
+
+def self_check():
+    contract, err = _load_contract()
+    result = {
+        "mode": "self_check",
+        "status": "pass",
+        "contract_path": str(_resolve_contract_path()),
+        "missing_top_level_keys": [],
+        "missing_canonical_stages": [],
+        "decision_reason": None,
+    }
+    if err:
+        result["status"] = "fail"
+        result["decision_reason"] = err
+        return result, 1
+
+    missing = [k for k in REQUIRED_TOP_LEVEL_KEYS if k not in contract]
+    result["missing_top_level_keys"] = missing
+    declared_stages = [s.get("id") for s in (contract.get("stages") or []) if isinstance(s, dict)]
+    missing_stages = [s for s in CANONICAL_STAGES_V1 if s not in declared_stages]
+    result["missing_canonical_stages"] = missing_stages
+
+    if missing or missing_stages:
+        result["status"] = "fail"
+        bits = []
+        if missing:
+            bits.append("missing top-level keys: " + ", ".join(missing))
+        if missing_stages:
+            bits.append("missing canonical stages: " + ", ".join(missing_stages))
+        result["decision_reason"] = "; ".join(bits)
+        return result, 1
+
+    if contract.get("artery_id") != "propose.change.artery.v1":
+        result["status"] = "fail"
+        result["decision_reason"] = (
+            f"artery_id mismatch: contract declares "
+            f"{contract.get('artery_id')!r}, expected 'propose.change.artery.v1'"
+        )
+        return result, 1
+
+    result["decision_reason"] = "self-check passed: contract exists, parses, and carries required structure"
+    return result, 0
+
+
+def _extract_artery_receipt(packet_text):
+    """
+    Find an artery_receipt block. Two accepted forms:
+      1. The whole file is YAML with a top-level 'artery_receipt' key.
+      2. A fenced ```yaml ... ``` block in markdown containing 'artery_receipt'.
+    """
+    try:
+        whole = yaml.safe_load(packet_text)
+        if isinstance(whole, dict) and "artery_receipt" in whole:
+            return whole["artery_receipt"], None
+    except yaml.YAMLError:
+        pass
+
+    fence_pattern = re.compile(r"```ya?ml\s*\n(.*?)```", re.DOTALL)
+    for match in fence_pattern.finditer(packet_text):
+        try:
+            block = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            continue
+        if isinstance(block, dict) and "artery_receipt" in block:
+            return block["artery_receipt"], None
+
+    return None, "no artery_receipt block found in packet (expected top-level YAML key or fenced ```yaml block)"
+
+
+def validate_packet(packet_path):
+    contract, err = _load_contract()
+    result = {
+        "mode": "packet_validate",
+        "packet_path": str(packet_path),
+        "status": "pass",
+        "missing_envelope_fields": [],
+        "missing_stage_fields": {},
+        "forbidden_drivers": [],
+        "scope_creep_stages": [],
+        "decision_reason": None,
+    }
+    if err:
+        result["status"] = "error"
+        result["decision_reason"] = err
+        return result, 2
+
+    p = Path(packet_path)
+    if not p.is_file():
+        result["status"] = "error"
+        result["decision_reason"] = f"packet path not found: {packet_path}"
+        return result, 2
+
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        result["status"] = "error"
+        result["decision_reason"] = f"packet read failed: {exc}"
+        return result, 2
+
+    receipt, err = _extract_artery_receipt(text)
+    if err:
+        result["status"] = "fail"
+        result["decision_reason"] = err
+        return result, 1
+
+    expected_artery_id = contract.get("artery_id")
+    if receipt.get("artery_id") != expected_artery_id:
+        result["status"] = "fail"
+        result["decision_reason"] = (
+            f"artery_id mismatch: receipt={receipt.get('artery_id')!r}, "
+            f"contract={expected_artery_id!r}"
+        )
+        return result, 1
+
+    envelope_required = contract.get("receipt_schema", {}).get("envelope", [])
+    missing_env = [f for f in envelope_required if f not in receipt]
+    result["missing_envelope_fields"] = missing_env
+
+    stage_specs = {s["id"]: s for s in (contract.get("stages") or []) if isinstance(s, dict) and "id" in s}
+    receipt_stages = receipt.get("stages") or {}
+
+    if not isinstance(receipt_stages, dict):
+        result["status"] = "fail"
+        result["decision_reason"] = "receipt 'stages' must be a mapping of stage_id -> fields"
+        return result, 1
+
+    canonical = set(CANONICAL_STAGES_V1)
+    deferred_to_v2 = {"execute", "verify", "debug", "integration_check"}
+
+    scope_creep = [s for s in receipt_stages.keys() if s in deferred_to_v2]
+    result["scope_creep_stages"] = scope_creep
+
+    for stage_id, stage_block in receipt_stages.items():
+        if stage_id not in canonical:
+            continue
+        if not isinstance(stage_block, dict):
+            result["missing_stage_fields"][stage_id] = ["<stage block must be a mapping>"]
+            continue
+        spec = stage_specs.get(stage_id, {})
+        required = spec.get("required_receipt_fields", [])
+        missing_in_stage = [f for f in required if f not in stage_block]
+        if missing_in_stage:
+            result["missing_stage_fields"][stage_id] = missing_in_stage
+
+        driver = stage_block.get("driver")
+        forbidden = spec.get("drivers_forbidden", [])
+        if driver and driver in forbidden:
+            result["forbidden_drivers"].append({"stage": stage_id, "driver": driver})
+
+    decision_bits = []
+    if missing_env:
+        decision_bits.append(f"missing envelope fields: {missing_env}")
+    if result["missing_stage_fields"]:
+        decision_bits.append(f"missing stage fields: {result['missing_stage_fields']}")
+    if result["forbidden_drivers"]:
+        decision_bits.append(f"forbidden drivers in stages: {result['forbidden_drivers']}")
+    if scope_creep:
+        decision_bits.append(f"v2-deferred stages present in v1 receipt: {scope_creep}")
+
+    if decision_bits:
+        result["status"] = "fail"
+        result["decision_reason"] = "; ".join(decision_bits)
+        return result, 1
+
+    result["decision_reason"] = "packet validation passed: artery_id matches, envelope+stages complete, no forbidden drivers, no v2 scope creep"
+    return result, 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Read-only validator for propose.change.artery.v1",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--self-check", action="store_true",
+                       help="verify contract exists and is structurally sound")
+    group.add_argument("--packet", metavar="PATH",
+                       help="validate a packet body or artery receipt YAML against the contract")
+    parser.add_argument("--json", action="store_true", default=True,
+                        help="emit JSON output (default)")
+    args = parser.parse_args()
+
+    if args.self_check:
+        result, code = self_check()
+    else:
+        result, code = validate_packet(args.packet)
+
+    print(json.dumps(result, indent=2, sort_keys=True))
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()

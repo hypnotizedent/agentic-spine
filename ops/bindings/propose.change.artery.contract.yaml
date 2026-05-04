@@ -1,0 +1,184 @@
+---
+status: authoritative
+owner: "@human-steward"
+created: "2026-05-04"
+scope: propose-change-artery-v1
+parser_safe_single_doc: true
+
+contract_id: PROPOSE_CHANGE_ARTERY_V1
+artery_id: propose.change.artery.v1
+schema: 1
+
+purpose: >
+  Canonical L2 workflow shape for AI-proposed change. The artery defines the
+  required structured stages every propose/change packet must traverse to
+  produce a receipt-backed proposal package ready for operator review. v1 is
+  workflow discipline only; autonomous patch execution is explicitly deferred
+  to v2.
+
+authority:
+  owns:
+    - propose_change_workflow_shape_v1
+    - artery_receipt_schema_v1
+    - per_stage_required_field_taxonomy_v1
+  does_not_decide:
+    - autonomous_patch_execution
+    - mailroom_worker_route_target_taxonomy
+    - execution_pickup_truth
+    - ai_patch_review_lifecycle
+    - V2_5_patch_apply_sandbox
+
+stages:
+  - id: plan
+    order: 1
+    purpose: >
+      Produce a written plan in the packet body that names the change concern,
+      the canonical home(s) it touches, and the named subtraction target
+      (per dffebc72 doctrine).
+    required_receipt_fields:
+      - status                       # pass | skip
+      - plan_artifact_path
+      - cited_canonical_homes
+      - named_subtraction_target
+      - driver
+      - timestamp_utc
+    drivers_allowed:
+      - operator
+      - "agent_tool:tool_using_agent_v2_1_readonly_repo"
+      - "agent_tool:tool_using_agent_v2_2_readonly_capability_calls"
+    drivers_forbidden:
+      - "agent_tool:tool_using_agent_v2_5_patch_apply_sandbox"
+
+  - id: research
+    order: 2
+    purpose: >
+      Independent re-read of cited surfaces, current contract state, recent
+      commits on those paths, and any active loops on same surface. Produces a
+      research artifact with cited evidence refs.
+    required_receipt_fields:
+      - status                       # pass | fail
+      - cited_surfaces_read
+      - contract_state_summary
+      - same_surface_active_loops
+      - same_surface_recent_commits
+      - research_artifact_path
+      - driver
+      - timestamp_utc
+    drivers_allowed:
+      - operator
+      - "agent_tool:tool_using_agent_v2_1_readonly_repo"
+      - "agent_tool:tool_using_agent_v2_2_readonly_capability_calls"
+    drivers_forbidden:
+      - "agent_tool:tool_using_agent_v2_5_patch_apply_sandbox"
+
+  - id: plan_check
+    order: 3
+    purpose: >
+      Validate plan against research findings + aperture rules. PASS or FAIL
+      with reason. FAIL re-enters research (capped at 3 iterations).
+    required_receipt_fields:
+      - status                       # pass | fail
+      - aperture_rules_evaluated
+      - contradictions_found
+      - decision_reason
+      - driver
+      - timestamp_utc
+    drivers_allowed:
+      - operator
+      - "agent_tool:tool_using_agent_v2_2_readonly_capability_calls"
+    drivers_forbidden:
+      - "agent_tool:tool_using_agent_v2_5_patch_apply_sandbox"
+
+  - id: review_checkpoint
+    order: 4
+    purpose: >
+      Package plan + research + plan-check into a structured handoff for
+      operator review. Terminal stage. No autonomous mutation; operator
+      decides whether to authorize the actual change in a separate slice.
+    required_receipt_fields:
+      - status                       # pass (terminal stage always pass at write time)
+      - package_path
+      - handoff_disposition          # proposed_for_review | revisions_requested | abandoned
+      - next_action_for_operator
+      - driver
+      - timestamp_utc
+    drivers_allowed:
+      - operator
+    drivers_forbidden:
+      - "agent_tool:tool_using_agent_v2_5_patch_apply_sandbox"
+
+iteration_limits:
+  research_replays_after_plan_check_fail: 3
+
+terminal_disposition:
+  enum:
+    - delivered
+    - abandoned
+    - deferred
+  handoff_to:
+    - operator_review
+
+receipt_schema:
+  envelope:
+    - artery_id
+    - packet_id
+    - loop_id
+    - terminating_stage             # null = success
+    - iteration_count
+    - stages
+    - terminal_outcome
+
+out_of_scope:
+  - V2_5_patch_apply_sandbox
+  - autonomous_mutation
+  - ai_patch_review_handoff
+  - mailroom_worker_contract_changes
+  - execution_pickup_status_changes
+  - new_admitted_route_target
+
+deferred_to_v2:
+  rationale: >
+    Autonomous patch execution requires a stable D452 substrate (V2.5 bridge
+    proof terminal-row guarantee). v2 will plug autonomous patch execution
+    into this v1 artery shape after D452 is durably stable. v2 will add the
+    execute / verify / debug / integration_check stages, the
+    route_target=artery worker contract, and the ai.patch.review handoff
+    target — all built on top of this v1 contract without modifying it.
+  surfaces:
+    - new_admitted_route_target_artery_on_mailroom_worker
+    - execute_stage_via_V2_5_patch_apply_sandbox
+    - verify_stage_via_sandbox_integrity_checks
+    - debug_stage_conditional_retry
+    - integration_check_stage_d_gate_parity
+    - terminal_handoff_to_ai_patch_review_promote
+
+rules:
+  - id: artery_envelope_carries_required_fields
+    statement: >
+      Any artery_receipt block claiming to use this artery contract must
+      populate every required envelope field. Missing fields cause validator
+      rejection.
+  - id: every_traversed_stage_carries_required_fields
+    statement: >
+      For every stage block the receipt declares as traversed (status set),
+      every required_receipt_fields entry for that stage must be populated.
+      Missing fields cause validator rejection.
+  - id: terminating_stage_must_match_traversed
+    statement: >
+      If terminating_stage is non-null, that stage block must be the last
+      populated stage and its status must be fail (or pass for the terminal
+      review_checkpoint stage).
+  - id: drivers_forbidden_must_not_appear
+    statement: >
+      No stage receipt may declare a driver in that stage's drivers_forbidden
+      list. v1 explicitly forbids V2.5 in any stage.
+  - id: v2_concerns_stay_out_of_v1_receipts
+    statement: >
+      v1 artery receipts may NOT carry execute / verify / debug /
+      integration_check stage blocks. Those are deferred_to_v2 and would
+      indicate scope creep.
+
+operator_language:
+  v1_done: "the artery contract exists, the validator runs, D445 proves both, and SESSION_PROTOCOL.md names the artery as canonical workflow shape"
+  v1_not_done: "the validator was added but no real propose/change packet has been written through the artery yet"
+  v2_done_future: "autonomous patch execution rides this artery, V2.5 bridge proof is durable, and the ai.patch.review handoff is wired"
