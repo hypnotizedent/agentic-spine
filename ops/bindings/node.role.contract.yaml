@@ -654,6 +654,122 @@ state_access_model:
     mailroom_access: "none"
     path_authority_relationship: "Read-only access is limited to heartbeat and liveness observation surfaces; no general state ownership."
 
+canonical_plane_access:
+  # PACKET-840 Stage 1 substrate. Declares — per node role — how each role
+  # reaches the four canonical planes (state / evidence / runtime / mailroom)
+  # and what its authority relationship is. Additive to state_access_model
+  # (no field above is touched). Stage 1 is declarative-only; organ-private
+  # access helpers are NOT yet consumed against this block (Stage 2).
+  #
+  # Invariant (operator-named):
+  #   evidence proves work
+  #   runtime carries work
+  #   state decides current truth
+  # Runtime artifacts may be protected by custody, but they are NOT
+  # evidence. Receipts/attestations/RCAP/EXEC_RECEIPT/closeout-receipts are
+  # evidence; sandbox worktrees, leased lanes, in-flight task envelopes,
+  # provider-prompt fenced caches, deploy checkouts are runtime.
+  #
+  # Authority anchor:
+  #   storage_evidence_node (pve) is the canonical authority for the state,
+  #   evidence, and mailroom planes per
+  #   root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical.
+  #   The runtime plane is per-host: each role carries its own runtime
+  #   substrate; consumer-local copies of state/evidence/mailroom are
+  #   projection/cache per file_plane_policy.
+  #
+  # Plane definitions:
+  #   state — current canonical truth (shared_authority.db, loop scopes,
+  #     gap rows, friction rows, packets, gate registry, contracts as live
+  #     state). Authority host writes; consumers read through governed
+  #     transport.
+  #   evidence — durable proof: capability receipts (RCAP-*), wave-close
+  #     EXEC_RECEIPT, controller-prompt EXEC_RECEIPT, loop closeout
+  #     receipts, attestation receipts. Authority host stores; consumers
+  #     read via SSH-merge or routed cap.
+  #   runtime — live execution substrate per host: code checkouts,
+  #     worktrees, in-flight task envelopes that have not yet reached
+  #     terminal state, sandbox worktrees, provider prompt fence caches,
+  #     deploy receipts during transfer. Custody-protected, not evidence.
+  #   mailroom — task envelope queue (request/claim/heartbeat/result/
+  #     receipt). Canonical queue lives at storage_evidence_node;
+  #     execution_host reads canonical via SSH-merge and routes mutations
+  #     through cap.sh per mailroom.task.worker.contract.yaml#canonical_queue_truth.
+
+  by_role:
+    storage_evidence_node:
+      state_access: authority
+      evidence_access: authority
+      runtime_access: governed_local_substrate
+      mailroom_access: authority
+      authority_relationship: canonical_state_evidence_mailroom_authority
+      transport_patterns: "Direct local read/write at /md1400/spine/{state,evidence,mailroom}; cap.sh-routed mutations from non-authority hosts land here."
+      consumer_local_disposition: "n/a — this role IS the authority host."
+
+    execution_host:
+      state_access: read_via_routed_cap
+      evidence_access: read_via_ssh_merge_or_routed_cap
+      runtime_access: governed_local_substrate
+      mailroom_access: read_via_ssh_merge_then_routed_mutation
+      authority_relationship: consumer_with_canonical_access_not_authority
+      transport_patterns: "cap.sh routes mutating caps to storage_evidence_node; mailroom canonical queue read via SSH-merge in mailroom-task-worker._load_canonical_queued_docs; canonical envelope writeback via PACKET-880 boring scp+remote-merge primitive (canonical-envelope-merge.py)."
+      consumer_local_disposition: "$SPINE_STATE on execution_host is projection/cache per root.authority.contract.yaml#file_plane_policy. Local agent-tasks/done dirs are runtime, not evidence. ai-cons does not own any of state/evidence/mailroom authority."
+
+    operator_console:
+      state_access: read_via_routed_cap
+      evidence_access: read_via_ssh_merge_or_routed_cap
+      runtime_access: governed_local_substrate
+      mailroom_access: read_via_routed_cap
+      authority_relationship: operator_directed_governed_work_and_readback
+      transport_patterns: "cap.sh routes mutating caps to storage_evidence_node; pickup readbacks SSH-merge from canonical via execution-pickup-status load_remote_yaml_dir; deploy artery pulls origin/main from forge."
+      consumer_local_disposition: "Consumer-local $SPINE_STATE is projection/cache unless the cap that wrote it was routed (which lands canonical, not local). Repo at ~/code/agentic-spine is governed runtime checkout, not evidence."
+
+    watcher_node:
+      state_access: heartbeat_surfaces_only
+      evidence_access: none
+      runtime_access: governed_local_substrate_minimal
+      mailroom_access: none
+      authority_relationship: heartbeat_liveness_observer_only
+      transport_patterns: "HTTP/Tailscale probe + optional SSH for heartbeat surfaces only. No cap.sh routed mutating access. No canonical queue access. No general state read."
+      consumer_local_disposition: "No spine code checkout per HOST_DRIFT_POLICY.md — watcher is unmanaged witness surface. Heartbeat data is observation, not evidence."
+
+    forge_node:
+      state_access: none_for_spine_state
+      evidence_access: none_for_spine_evidence
+      runtime_access: source_truth_and_ci_write_boundary
+      mailroom_access: none
+      authority_relationship: source_truth_and_ci_write_boundary
+      transport_patterns: "Forge serves origin/main (read by deploy artery + governed checkouts) and accepts pushes through governed agent-boundary contract per node.role.contract.yaml#forge_node.required_proofs.agent_boundary_proof. Forge does NOT read or write spine state/evidence/mailroom authority paths."
+      consumer_local_disposition: "Forge has its own runtime substrate (Gitea + Postgres + Actions runner on dev-tools VM 206). That substrate is forge's own state, NOT spine state. Spine state on /md1400 is opaque to forge."
+
+    translator_node:
+      state_access: read_via_routed_cap
+      evidence_access: none
+      runtime_access: governed_local_substrate
+      mailroom_access: none
+      authority_relationship: classify_translate_only_no_authority
+      transport_patterns: "cap.sh-routed read for classification context only. No mailroom claim authority. No mutation."
+      consumer_local_disposition: "Membrane/translator role is classification surface; its local cache is operator-input intake, not evidence."
+
+    verification_node:
+      state_access: read_via_routed_cap
+      evidence_access: read_via_ssh_merge_or_routed_cap
+      runtime_access: governed_local_substrate
+      mailroom_access: read_only_for_gate_evaluation
+      authority_relationship: read_only_verify_operations_only
+      transport_patterns: "Verify gates read state via cap.sh routed reads; gate receipts are written through governed close paths (verify.engine.run, spine.verify, D-gate scripts). No general mutation."
+      consumer_local_disposition: "Verify-side caches are gate-evaluation runtime, not evidence. Gate receipts that land canonical ARE evidence."
+
+  what_this_does_not_do:
+    - "Does not promote any role beyond what node.role.contract.yaml#authority_matrix already grants."
+    - "Does not weaken D452 / file_plane_policy / mailroom canonical_queue_truth."
+    - "Does not collapse pve and ai-cons into one node despite shared physical substrate."
+    - "Does not promote watcher to general evidence reader."
+    - "Does not declare canonical access in multiple homes — this is the one home."
+    - "Does not change any organ behavior. Stage 2 organ-consumption slices land separately (mailroom worker → execution.pickup.status → deploy receipt writer → clerk/friction → verify enforcement)."
+
+  enforcement_note: "Readback: ./bin/ops cap run node.admission.status surfaces a CANONICAL PLANE ACCESS section per row plus the global by_role table in --json output. PACKET-840 closeout: Stage 1 substrate landed; not golden until organ-private access helpers are consumed or named as remaining subtraction follow-ons."
+
 connectivity_requirements:
   principle: "Relationships are device-agnostic L1 reachability requirements only. No hostnames, machine ids, or deployment topology are assigned here."
   links:

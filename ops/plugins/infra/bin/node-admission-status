@@ -16,6 +16,38 @@ ROOT = Path(__file__).resolve().parents[4]
 NODE_RECOVERY_STATUS = ROOT / "ops/plugins/infra/bin/node-recovery-status"
 LAUNCHD_SCHEDULER_REGISTRY = ROOT / "ops/bindings/launchd.scheduler.registry.yaml"
 NODE_ROLE_CONTRACT = ROOT / "ops/bindings/node.role.contract.yaml"
+
+
+_CANONICAL_PLANE_ACCESS_CACHE: dict[str, Any] | None = None
+
+
+def canonical_plane_access_block() -> dict[str, Any]:
+    """Load the canonical_plane_access block from node.role.contract.yaml.
+
+    PACKET-840 Stage 1 substrate. Cached per-process. Returns {} if the
+    block is missing (legacy contract before Stage 1 lands)."""
+    global _CANONICAL_PLANE_ACCESS_CACHE
+    if _CANONICAL_PLANE_ACCESS_CACHE is not None:
+        return _CANONICAL_PLANE_ACCESS_CACHE
+    contract = load_yaml(NODE_ROLE_CONTRACT)
+    block = contract.get("canonical_plane_access")
+    _CANONICAL_PLANE_ACCESS_CACHE = block if isinstance(block, dict) else {}
+    return _CANONICAL_PLANE_ACCESS_CACHE
+
+
+def plane_access_for_roles(role_candidacy: list[Any]) -> dict[str, Any]:
+    """Return the plane-access entries (from canonical_plane_access.by_role)
+    for each candidate role on this row. Stable order preserved."""
+    block = canonical_plane_access_block()
+    by_role = block.get("by_role") if isinstance(block, dict) else None
+    if not isinstance(by_role, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for role in role_candidacy or []:
+        role_str = str(role)
+        if role_str in by_role and isinstance(by_role[role_str], dict):
+            out[role_str] = by_role[role_str]
+    return out
 ALERTING_RULES = ROOT / "ops/bindings/alerting.rules.yaml"
 OPERATOR_HARDWARE_INVENTORY = ROOT / "ops/bindings/operator.hardware.inventory.yaml"
 APPLIANCE_IDENTITY_CONTRACT = ROOT / "ops/bindings/appliance.identity.contract.yaml"
@@ -1214,6 +1246,7 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         "durable_identifiers": durable_identifiers(recovery),
         "role_candidacy": role_candidacy,
         "promotion_stage": promotion_stage,
+        "canonical_plane_access": plane_access_for_roles(role_candidacy),
         "eligibility_state": first_present(operator.get("eligibility_state"), default="not_applicable"),
         "admission_state": object_truth.get("admission_state"),
         "first_touch_state": object_truth.get("first_touch_state"),
@@ -1709,6 +1742,48 @@ def build_rows(node_id: str | None, machine_spec: bool = False, golden_path: boo
     return rows
 
 
+def emit_canonical_plane_access_section() -> None:
+    """Print the global CANONICAL PLANE ACCESS section (PACKET-840 Stage 1).
+
+    Surfaces the per-role state/evidence/runtime/mailroom plane access
+    declared in node.role.contract.yaml#canonical_plane_access. Stage 1 is
+    declarative-only — this section makes the existing implicit access
+    model visible. Organ-private access helpers are NOT consumed against
+    this block yet (Stage 2)."""
+    block = canonical_plane_access_block()
+    if not block:
+        return
+    print("============================================================")
+    print("  CANONICAL PLANE ACCESS  (PACKET-840 Stage 1 substrate)")
+    print("============================================================")
+    print("")
+    print("Invariant: evidence proves work; runtime carries work; state decides current truth.")
+    print("Runtime artifacts may be protected by custody — they are NOT evidence.")
+    print("")
+    print("Authority: storage_evidence_node (pve) holds state + evidence + mailroom authority.")
+    print("Runtime is per-host: each role carries its own runtime substrate; consumer-local")
+    print("copies of state/evidence/mailroom are projection/cache per file_plane_policy.")
+    print("")
+    by_role = block.get("by_role") if isinstance(block.get("by_role"), dict) else {}
+    if by_role:
+        for role in sorted(by_role.keys()):
+            entry = by_role[role]
+            if not isinstance(entry, dict):
+                continue
+            print(f"- {role}")
+            print(f"    state_access:    {entry.get('state_access', 'unknown')}")
+            print(f"    evidence_access: {entry.get('evidence_access', 'unknown')}")
+            print(f"    runtime_access:  {entry.get('runtime_access', 'unknown')}")
+            print(f"    mailroom_access: {entry.get('mailroom_access', 'unknown')}")
+            print(f"    relationship:    {entry.get('authority_relationship', 'unknown')}")
+        print("")
+    print("Stage 1 is substrate only. Organ consumption (mailroom worker / pickup status /")
+    print("deploy receipt writer / clerk / verify enforcement) lands separately in Stage 2.")
+    print("Not golden until organ-private access helpers are consumed or named as remaining")
+    print("subtraction follow-ons.")
+    print("")
+
+
 def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False, golden_path: bool = False) -> None:
     print("============================================================")
     print("  node.admission.status")
@@ -1717,6 +1792,7 @@ def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False, golden_pa
     print("Canonical node admission readback. Inventory identifies subjects;")
     print("admission/promotion proof decides node truth.")
     print("")
+    emit_canonical_plane_access_section()
     print("Vocabulary:")
     print("  candidacy   First-class node roles {operator_console, execution_host,")
     print("              storage_evidence_node, watcher_node, forge_node,")
@@ -1765,6 +1841,20 @@ def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False, golden_pa
                 promotion_line += f" ({', '.join(bits)})"
         print(f"  promotion:  {promotion_line}")
         print(f"  access:     {(row.get('access_path') or {}).get('host', 'none')}")
+        # PACKET-840 Stage 1: surface canonical plane access posture per row
+        # using the role-keyed entries from canonical_plane_access.by_role.
+        plane_access_rows = row.get("canonical_plane_access") or {}
+        if plane_access_rows:
+            for role, entry in sorted(plane_access_rows.items()):
+                if not isinstance(entry, dict):
+                    continue
+                print(
+                    f"  plane_access[{role}]: state={entry.get('state_access', 'unknown')} "
+                    f"evidence={entry.get('evidence_access', 'unknown')} "
+                    f"runtime={entry.get('runtime_access', 'unknown')} "
+                    f"mailroom={entry.get('mailroom_access', 'unknown')} "
+                    f"({entry.get('authority_relationship', 'unknown')})"
+                )
         print(f"  recovery:   {json.dumps(row.get('recovery_planes') or {}, sort_keys=True)}")
         if machine_spec:
             spec = row.get("machine_spec") or {}
@@ -1916,6 +2006,7 @@ def main() -> None:
             "ops/bindings/fleet.admission.classification.yaml",
         ],
         "vocabulary": READBACK_VOCABULARY,
+        "canonical_plane_access": canonical_plane_access_block(),
         "rows": rows,
     }
 
