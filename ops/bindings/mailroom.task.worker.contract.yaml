@@ -153,6 +153,31 @@ first_class_runtime_decision:
       env_overrides:
         MAILROOM_WORKER_DISABLE_CANONICAL_QUEUE: "1 disables canonical SSH-fetch (worker reads only local queue; legacy/test mode)"
         MAILROOM_WORKER_DISABLE_PROVIDER_PLACEMENT: "1 disables pre-claim provider readiness check (worker claims agent_tool tasks regardless of provider readiness; legacy/test mode)"
+        MAILROOM_WORKER_DISABLE_CANONICAL_PROMPT_FETCH: "1 disables canonical-prompt SSH-fetch into the local prompt cache fence (worker rejects canonical-absolute route_prompt_ref instead of fetching it; legacy/test mode)"
+    canonical_prompt_resolution:
+      rule: >
+        agent_tool route_prompt_ref values that are absolute paths under the
+        storage_evidence_node canonical state root
+        (root.authority.contract.yaml#storage_evidence_node_canonical.primary_canonical_root,
+        currently /md1400/spine/state) and outside the executing host's
+        admitted local roots are SSH-fetched into a fenced local runtime
+        artifact at $SPINE_STATE/agent-bridge-prompt-cache/<task_id>/<basename>
+        before the provider subprocess spawns. The fenced local copy is
+        runtime-artifact only — pve remains the controller-prompt authority.
+        Refs that point outside both the admitted local roots AND the canonical
+        state root continue to fail with the same 'route_prompt_ref outside
+        admitted roots' refusal so unsafe paths are still rejected.
+      bridge_proof_fields:
+        canonical_prompt_ref: "the original route_prompt_ref value (canonical absolute path)"
+        local_prompt_copy: "the fenced local cache file actually read by the bridge"
+        prompt_copy_fence: "$SPINE_STATE/agent-bridge-prompt-cache (fence root)"
+        prompt_fetch_via: "ssh_canonical_state_root"
+        prompt_authority_host: "the storage_evidence_node host_ref the SSH read targeted"
+      authority_invariants:
+        - "controller-prompt authority remains on storage_evidence_node (pve)"
+        - "ai-cons does not become the home for controller prompts"
+        - "no ad-hoc prompt copy outside the named fence"
+        - "fenced cache is runtime-artifact, not authority"
   path_boundary:
     decision: "Do not create /code/mailroom as a live runtime or evidence home."
     reason: >

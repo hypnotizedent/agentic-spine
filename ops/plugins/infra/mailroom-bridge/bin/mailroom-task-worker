@@ -27,8 +27,11 @@ TASK_ROOT = Path(STATE_ROOT) / "agent-tasks" if STATE_ROOT else Path()
 QUEUED_DIR = TASK_ROOT / "queued"
 STATUS_PATH = TASK_ROOT / "mailroom-task-worker.status.json"
 CANONICAL_TASK_ROOT_DEFAULT = "/md1400/spine/state/agent-tasks"
+CANONICAL_STATE_ROOT_DEFAULT = "/md1400/spine/state"
+PROMPT_CACHE_FENCE = (Path(STATE_ROOT) / "agent-bridge-prompt-cache") if STATE_ROOT else Path()
 DISABLE_CANONICAL_QUEUE = os.environ.get("MAILROOM_WORKER_DISABLE_CANONICAL_QUEUE", "").strip() == "1"
 DISABLE_PROVIDER_PLACEMENT = os.environ.get("MAILROOM_WORKER_DISABLE_PROVIDER_PLACEMENT", "").strip() == "1"
+DISABLE_CANONICAL_PROMPT_FETCH = os.environ.get("MAILROOM_WORKER_DISABLE_CANONICAL_PROMPT_FETCH", "").strip() == "1"
 RUN_KEY_RE = re.compile(r"Run Key:\s+(\S+)")
 PROVIDER_RUN_RE = re.compile(r"PROVIDER_(REQUESTED|USED|MODEL)=(.+)")
 USAGE_RE = re.compile(r"USAGE_(INPUT|OUTPUT|TOTAL)_TOKENS=(\d+)")
@@ -681,23 +684,114 @@ def _build_readonly_repo_context(payload: dict[str, Any]) -> tuple[str, dict[str
     )
 
 
-def _resolve_prompt_ref(value: str) -> Path:
+def _is_under_canonical_state(value: str) -> bool:
+    """True if value is an absolute path under the storage_evidence_node
+    canonical state root (per root.authority.contract.yaml
+    storage_evidence_node_canonical.primary_canonical_root)."""
+    if not value or not value.startswith("/"):
+        return False
+    return value.startswith(CANONICAL_STATE_ROOT_DEFAULT + "/")
+
+
+def _fetch_canonical_prompt(canonical_path: str, task_id: str) -> tuple[Path, dict[str, Any]] | None:
+    """SSH-fetch a canonical controller-prompt to a fenced local runtime
+    artifact under $SPINE_STATE/agent-bridge-prompt-cache/<task_id>/. Returns
+    (local_path, fetch_proof) so bridge_proof can record both canonical and
+    local refs. Returns None on any failure (caller falls through to the
+    admitted-roots refusal). pve remains the controller-prompt authority;
+    the local copy is runtime-artifact only."""
+    if DISABLE_CANONICAL_PROMPT_FETCH:
+        return None
+    if not _is_under_canonical_state(canonical_path):
+        return None
+    if not SSH_RESOLVER.is_file():
+        return None
+    target, _root, reason = _canonical_queue_target()
+    if reason != "fetch" or not target:
+        return None
+    if not str(PROMPT_CACHE_FENCE):
+        return None
+    fence = PROMPT_CACHE_FENCE / task_id
+    try:
+        fence.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    local_path = fence / Path(canonical_path).name
+    script = f'''
+set -euo pipefail
+source {shlex.quote(str(SSH_RESOLVER))}
+target={shlex.quote(target["host_ref"])}
+src={shlex.quote(canonical_path)}
+resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
+user="$(ssh_resolve_user "$target" ubuntu)"
+identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
+ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" "cat \\"$src\\""
+'''
+    try:
+        proc = subprocess.run(["bash", "-lc", script], cwd=str(ROOT), capture_output=True, text=True, timeout=20, check=False)
+    except Exception:
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    try:
+        local_path.write_text(proc.stdout, encoding="utf-8")
+    except OSError:
+        return None
+    fetch_proof: dict[str, Any] = {
+        "canonical_prompt_ref": canonical_path,
+        "local_prompt_copy": str(local_path),
+        "prompt_copy_fence": str(PROMPT_CACHE_FENCE),
+        "prompt_fetch_via": "ssh_canonical_state_root",
+        "prompt_authority_host": target["host_ref"],
+    }
+    return local_path, fetch_proof
+
+
+def _resolve_prompt_ref(value: str, task_id: str = "") -> tuple[Path, dict[str, Any]]:
+    """Resolve route_prompt_ref to a local readable file plus a (possibly
+    empty) fetch_proof dict. If the ref is outside admitted local roots but
+    points at a controller-prompt under storage_evidence_node canonical state
+    root, SSH-fetch into a fenced local runtime artifact and admit that.
+    Refusals (unsafe path, unreadable file, fetch failure) preserve the
+    original 'outside admitted roots' shape so upstream auditors see the
+    same failure_reason vocabulary."""
     prompt_ref = Path(value).expanduser()
     if not prompt_ref.is_absolute():
         prompt_ref = ROOT / prompt_ref
     try:
-        resolved = prompt_ref.resolve()
+        resolved = prompt_ref.resolve(strict=False)
     except OSError as exc:
         raise WorkerError(f"route_prompt_ref cannot be resolved: {value}") from exc
-    allowed_roots = [
-        ROOT,
-        Path(os.environ.get("SPINE_STATE", "")).expanduser(),
-    ]
-    if not any(str(resolved).startswith(str(root.resolve())) for root in allowed_roots if str(root)):
-        raise WorkerError(f"route_prompt_ref outside admitted roots: {resolved}")
+    spine_state = Path(os.environ.get("SPINE_STATE", "")).expanduser()
+    admitted_roots = [ROOT]
+    if str(spine_state):
+        admitted_roots.append(spine_state)
+    if str(PROMPT_CACHE_FENCE):
+        admitted_roots.append(PROMPT_CACHE_FENCE)
+
+    def _within_admitted(p: Path) -> bool:
+        return any(
+            str(p).startswith(str(root.resolve(strict=False)))
+            for root in admitted_roots
+            if str(root)
+        )
+
+    fetch_proof: dict[str, Any] = {}
+    if not _within_admitted(resolved):
+        fetched = _fetch_canonical_prompt(str(resolved), task_id)
+        if fetched is None:
+            raise WorkerError(f"route_prompt_ref outside admitted roots: {resolved}")
+        resolved, fetch_proof = fetched
+        try:
+            resolved = resolved.resolve(strict=False)
+        except OSError as exc:
+            raise WorkerError(f"fetched prompt cannot be resolved: {value}") from exc
+        if not _within_admitted(resolved):
+            raise WorkerError(f"fetched prompt outside admitted roots: {resolved}")
     if not resolved.is_file():
         raise WorkerError(f"route_prompt_ref not readable file: {resolved}")
-    return resolved
+    return resolved, fetch_proof
 
 
 def _build_agent_context(doc: dict[str, Any], worker_id: str) -> tuple[str, dict[str, Any]]:
@@ -717,7 +811,7 @@ def _build_agent_context(doc: dict[str, Any], worker_id: str) -> tuple[str, dict
 def _build_agent_prompt(task_id: str, doc: dict[str, Any], worker_id: str) -> tuple[str, Path, dict[str, Any]]:
     payload = _normalize_payload(doc)
     prompt_ref = str(doc.get("route_prompt_ref") or payload.get("route_prompt_ref") or "").strip()
-    prompt_path = _resolve_prompt_ref(prompt_ref)
+    prompt_path, prompt_fetch_proof = _resolve_prompt_ref(prompt_ref, task_id=task_id)
     prompt_text = prompt_path.read_text(encoding="utf-8")
     max_prompt_bytes = int((_agent_bridge_contract().get("max_prompt_bytes")) or 12000)
     encoded = prompt_text.encode("utf-8")
@@ -725,6 +819,12 @@ def _build_agent_prompt(task_id: str, doc: dict[str, Any], worker_id: str) -> tu
         prompt_text = encoded[:max_prompt_bytes].decode("utf-8", errors="ignore")
     summary = str(doc.get("summary") or task_id).strip()
     tool_context, tool_proof = _build_agent_context(doc, worker_id)
+    if prompt_fetch_proof:
+        # Surface canonical_prompt_ref + local_prompt_copy + prompt_copy_fence
+        # in tool_proof so they reach bridge_proof at the join point in
+        # _execute_agent_tool. Local copy is runtime-artifact only; pve
+        # remains the controller-prompt authority.
+        tool_proof.update(prompt_fetch_proof)
     return (
         "You are a bounded AI agent running under the spine mailroom execution "
         "pickup bridge. You must not claim to mutate files, run shell commands, "
