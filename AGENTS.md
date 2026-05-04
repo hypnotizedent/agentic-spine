@@ -226,6 +226,17 @@ canonical.
 (Authority: [`NORTH_STAR.md`](NORTH_STAR.md),
 [`SPINE.md`](docs/governance/SPINE.md))
 
+When authoring CI workflows for a new repo (or modifying an existing one),
+read [`CI_GATE_AUTHORING_PATH.md`](docs/governance/CI_GATE_AUTHORING_PATH.md)
+**before** copying any existing workflow shape. The estate has a first-class
+split between `heavy_estate` (spine/workbench; substrate-aware runner) and
+`thin_vanilla` (product/L3 repos; vanilla runner only). The brittle failure
+mode is product-class repos copying the spine `heavy_estate` shape and
+bricking on a vanilla runner — the doc is the navigation guide that
+prevents that. Canonical taxonomy:
+[`cross-repo.authority.yaml`](ops/bindings/cross-repo.authority.yaml)
+`ci_gate_substrate_profiles:`.
+
 The primary `agentic-spine` checkout must stay on `main` and clean. If repo
 mutation is needed, do the work in a managed worktree; do not use the primary
 checkout as a work lane.
