@@ -260,13 +260,34 @@ STDIN_FIELDS
     return proc.returncode == 0
 
 
+def _local_to_canonical_state_path(local_path: str) -> str:
+    """Translate a $SPINE_STATE/agent-tasks/... local-projection path on a
+    non-authority host into the canonical /md1400/spine/state/agent-tasks/...
+    path so the SSH-write helper's canonical-state-root prefix guard accepts
+    it. Returns "" if the path does not look like an agent-tasks path under
+    the local SPINE_STATE projection."""
+    if not STATE_ROOT or not local_path:
+        return ""
+    spine_state_str = str(Path(STATE_ROOT).resolve(strict=False))
+    if not local_path.startswith(spine_state_str + "/"):
+        return ""
+    relative = local_path[len(spine_state_str) + 1 :]
+    if not relative.startswith("agent-tasks/"):
+        return ""
+    return f"{CANONICAL_STATE_ROOT_DEFAULT}/{relative}"
+
+
 def _write_task_fields(path: Path, fields: dict[str, Any]) -> None:
     doc = _task_doc(path)
     if not doc:
         # Non-authority host: envelope is on canonical pve; route the merge
         # via SSH so D452 still sees bridge_proof / terminal fields on the
-        # canonical envelope. Same canonical-vs-local class as queue/prompt.
-        _write_task_fields_via_ssh(str(path), fields)
+        # canonical envelope. Translate the local-projection path to canonical
+        # before invoking the SSH-write helper (which guards on canonical
+        # state-root prefix).
+        canonical = _local_to_canonical_state_path(str(path.resolve(strict=False)))
+        if canonical:
+            _write_task_fields_via_ssh(canonical, fields)
         return
     doc.update(fields)
     tmp = path.with_suffix(".yaml.tmp")
