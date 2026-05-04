@@ -136,6 +136,17 @@ friction and use an existing amend/promote/close/cleanup capability. If no such
 capability exists, the missing governed repair path is the work; raw filesystem
 surgery is not an acceptable substitute.
 
+Workflow telemetry is routing input. A terminal must not treat
+`entry.compile`, `ops status`, `worktree.lifecycle.report`, open delegations,
+or drift readbacks as advisory only. Before opening or executing adjacent work,
+classify the current work-state telemetry: open loops, active packets,
+delegations, blocked worktrees, cleanable worktrees, stale branches, packet
+collisions, and verify residue. If the classification shows same-surface
+contention, blocked residue, or WIP pressure, route to the owning lane, governed
+lifecycle repair, cleanup triage, or explicit operator override before starting
+a new nearby implementation. The failure mode is not "missing telemetry"; it is
+telemetry with no consequence.
+
 Lifecycle repair starts at the owning object, not the visible residue. A
 worktree, branch, lease, heartbeat, or delegation created by a wave is
 wave-owned; use the wave close/retire path surfaced by the engine so cleanup

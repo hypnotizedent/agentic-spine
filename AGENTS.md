@@ -257,6 +257,16 @@ true --exempt-reason "<text>"`; verify-engine E14 reports exempt loops
 separately and does not warn on them.
 (Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
+Telemetry is also routing input, not background decoration. Before opening or
+executing adjacent work, read the active assignment, open-loop/delegation state,
+and worktree lifecycle. If that readback shows same-surface contention, blocked
+worktrees, stale branches, or high WIP pressure, the next action is attach to
+the owning lane, route/triage cleanup through the governed lifecycle surface, or
+name an explicit operator override. Do not start another nearby packet just
+because the requested symptom is clear while the work-state telemetry is
+unresolved.
+(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
+
 RAG retrieval is allowed as a discovery aid, not as authority. Use
 `rag.direct.retrieve` or `rag.direct.query` to find likely governed source refs,
 then read the cited packet, loop scope, contract, receipt, or capability
