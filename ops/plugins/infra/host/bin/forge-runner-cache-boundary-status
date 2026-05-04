@@ -126,14 +126,17 @@ def probe_runner_registration_metadata(user: str, host: str) -> dict[str, Any]:
     """Read action_runner metadata. EXPLICITLY excludes token_hash and
     token_salt columns to prevent token-shaped data from leaking into the
     receipt. repo_id=0 + owner_id != 0 means a per-owner global runner;
-    repo_id != 0 means per-repo binding."""
+    repo_id != 0 means per-repo binding. Soft-deleted rows (deleted IS
+    NOT NULL — Gitea sets a timestamp when a runner is deleted via API
+    or web UI but keeps the row for audit history) are EXCLUDED so the
+    boundary readback reflects live runners only."""
     rc, out, err = psql_select(
         user, host,
         "SELECT id, name, version, owner_id, repo_id, "
         "to_timestamp(last_online) AT TIME ZONE 'UTC', "
         "to_timestamp(last_active) AT TIME ZONE 'UTC', "
         "agent_labels, ephemeral "
-        "FROM action_runner ORDER BY id",
+        "FROM action_runner WHERE deleted IS NULL ORDER BY id",
     )
     runners: list[dict[str, Any]] = []
     if rc == 0:
