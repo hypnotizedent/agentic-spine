@@ -41,24 +41,29 @@ jobs:
           python3 -V
           git --version
 
-      - name: Checkout (public URL via workflow token)
+      - name: Checkout (in-place git fetch via workflow token)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git config --global --add safe.directory '*'
-          rm -rf "${GITHUB_WORKSPACE}"
+          # GITHUB_WORKSPACE is a Docker volume mountpoint, so
+          # `rm -rf <workspace>` itself always fails EBUSY. Initialize
+          # in-place instead: clear contents (files inside the
+          # mountpoint, not the mountpoint itself), git init, set
+          # remote to public Tailscale-routable URL with workflow
+          # token auth, fetch the target sha, checkout.
           mkdir -p "${GITHUB_WORKSPACE}"
-          git clone --depth=1 \
-            "https://x-access-token:${GITHUB_TOKEN}@git.ronny.works/${GITHUB_REPOSITORY}.git" \
-            "${GITHUB_WORKSPACE}"
           cd "${GITHUB_WORKSPACE}"
-          if [ -n "${GITHUB_SHA:-}" ]; then
-            git fetch --depth=1 origin "${GITHUB_SHA}" || true
-            git checkout "${GITHUB_SHA}" || true
-          fi
-          git rev-parse HEAD
-          git status --short
+          find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
+          git config --global --add safe.directory '*'
+          git init -q -b main
+          git remote add origin \
+            "https://x-access-token:${GITHUB_TOKEN}@git.ronny.works/${GITHUB_REPOSITORY}.git"
+          TARGET_REF="${GITHUB_SHA:-main}"
+          git fetch --depth=1 origin "${TARGET_REF}"
+          git checkout -q FETCH_HEAD
+          echo "checked out: $(git rev-parse HEAD)"
+          git --no-pager log -1 --format='%h %s'
 
       - name: Set up workspace-local SPINE state
         run: |
