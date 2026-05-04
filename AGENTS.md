@@ -169,10 +169,16 @@ promotion and human-steward co-sign.
 (Authority: [`root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical.file_plane_policy`](ops/bindings/root.authority.contract.yaml),
 [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
 
-Tool-local agent-harness state — `~/.claude/{plans, projects/*/memory,
-todos, tasks, sessions, transcripts}` for Claude Code, and the equivalent
-per-machine homes from other harnesses — is **cache only**, not durable
-authority. Packet-shaped plans, durable behavioral rules, shared tasks,
+Tool-local agent-harness state — `~/.claude/{plans, commands,
+projects/*/memory, todos, tasks, sessions, transcripts}` for Claude Code,
+and the equivalent per-machine homes from other harnesses — is
+**cache only**, not durable authority. Slash-command files
+(`~/.claude/commands/*.md`) are part of this enumeration: they are
+muscle-memory aliases living in tool-local cache, never first-class
+entry/orientation surfaces. A slash-command file that re-implements
+its own checklist instead of routing to a canonical cap is the same
+disease class as a packet body in `~/.claude/plans/` — truth in the
+wrong home. Packet-shaped plans, durable behavioral rules, shared tasks,
 and proof of governed work must be promoted into the existing spine
 authority surface before being treated as durable truth. Promotion uses
 capabilities that already exist (`controller_prompt.create/amend/close`

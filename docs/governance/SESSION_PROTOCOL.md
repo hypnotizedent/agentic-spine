@@ -219,14 +219,15 @@ are projection unless the cap that wrote them was routed.
 
 ### Tool-local cache vs spine authority
 
-Agent-harness private homes — `~/.claude/{plans, projects/*/memory, todos,
-tasks, sessions, transcripts}` for Claude Code, and the equivalent
-per-machine homes from other harnesses — are **tool-local cache only**, not
-authority. They are fine as scratch and continuity for a single terminal on
-a single host. They become drift when they carry load-bearing work: packet
-bodies, durable behavioral rules, shared tasks, or governed receipts. That
-is the same disease class as a parallel local DB or a local rsync target —
-truth lives where the spine cannot read it.
+Agent-harness private homes — `~/.claude/{plans, commands,
+projects/*/memory, todos, tasks, sessions, transcripts}` for Claude Code,
+and the equivalent per-machine homes from other harnesses — are
+**tool-local cache only**, not authority. They are fine as scratch and
+continuity for a single terminal on a single host. They become drift when
+they carry load-bearing work: packet bodies, durable behavioral rules,
+shared tasks, governed receipts, or shadow entry/orientation surfaces.
+That is the same disease class as a parallel local DB or a local rsync
+target — truth lives where the spine cannot read it.
 
 Promotion mappings (use the existing capability; do not invent a new home):
 
@@ -236,6 +237,7 @@ Promotion mappings (use the existing capability; do not invent a new home):
 | Durable behavioral rule (rules future agents are expected to obey) | `AGENTS.md`, this file (`SESSION_PROTOCOL.md`), or the relevant contract under `ops/bindings/` | Edit committed governance directly. Auto-memory `feedback_*.md` files are local reinforcement only; they must point at committed governance, not be the governance. |
 | Shared task / multi-terminal work | Governed loop + `mailroom` request → claim → heartbeat → result/failure → receipt | `loops.create`, then submit work as a mailroom execution request bound to the loop. Tool-local TODO/task lists are session bookkeeping only; work invisible to `ops status` is ungoverned. |
 | Proof of governed work | `$SPINE_STATE/evidence/sessions/RCAP-*` and `$SPINE_STATE/domain-state/EXEC_RECEIPT-*.yaml` | Capability execution writes RCAP automatically. Closeout writes EXEC_RECEIPT via `controller_prompt.close` / `wave.finish` / `loop.closeout.finalize`. Tool transcripts and session logs are not receipts. |
+| Slash-command file (`~/.claude/commands/*.md`) | The canonical capability or doctrine doc the slash command wraps (e.g., `session.v3.attach` for `/ctx`-style orientation, `verify.engine.run` + `spine.verify` for `/verify`-style verify). | Replace the slash-command body with a thin pointer that invokes the canonical cap, so the slash invocation routes through governed truth instead of re-implementing it. If no canonical equivalent exists, delete the slash command — do not let it grow into a parallel entry/orientation/verify surface in tool-local cache. |
 
 The canonical packet home is `$SPINE_STATE/controller-prompts`. Repo-tracked
 `docs/packets/` is for explicitly-promoted historical packets only — never
