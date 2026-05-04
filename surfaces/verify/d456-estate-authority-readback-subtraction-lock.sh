@@ -231,5 +231,35 @@ if binding_failures:
     extra = "" if len(binding_failures) <= 80 else f"\n  ... {len(binding_failures) - 80} more"
     fail(f"binding provenance must be explicit and symlink targets must resolve:\n  - {detail}{extra}")
 
+# PACKET-840 Stage 2 organ 5 lock — facts (d) + (e): deploy receipt writer
+# distinguishes runtime mutation from canonical evidence; friction.queue.status
+# and clerk classify/file emit canonical_plane_access metadata; the placement
+# contract carries the consumes_canonical_plane_access binding block.
+# Extension of D456 only — NO new D-gate.
+root_dir = caps_path.parent.parent
+
+deploy_text = (root_dir / "ops/plugins/infra/host/bin/host-code-deploy-update").read_text(encoding="utf-8")
+for required_token in ('"canonical_plane_access_role"', '"plane_access_source"', '"evidence_plane_path"', '"local_receipt_disposition"', '"runtime_plane_action_summary"'):
+    if required_token not in deploy_text:
+        fail(f"host-code-deploy-update receipt must carry {required_token} (PACKET-840 Stage 2 organ 3)")
+
+placement_contract_path = root_dir / "ops/bindings/runtime.checkout.placement.yaml"
+placement_contract = yaml.safe_load(placement_contract_path.read_text(encoding="utf-8")) or {}
+placement_consumes = placement_contract.get("consumes_canonical_plane_access") or {}
+if not isinstance(placement_consumes, dict) or placement_consumes.get("role") != "execution_host":
+    fail("runtime.checkout.placement.yaml consumes_canonical_plane_access must declare role=execution_host (PACKET-840 Stage 2 organ 3)")
+if not str(placement_consumes.get("evidence_plane_path") or "").startswith("/md1400/spine/state/"):
+    fail("runtime.checkout.placement.yaml consumes_canonical_plane_access.evidence_plane_path must point at canonical /md1400/spine/state/ (PACKET-840 Stage 2 organ 3)")
+
+friction_queue_text = (root_dir / "ops/plugins/core/lifecycle/bin/friction-queue-status").read_text(encoding="utf-8")
+for required_token in ('"canonical_plane_access_role"', '"plane_access_source"', '"evidence_refs_classification"', "_classify_evidence_ref"):
+    if required_token not in friction_queue_text:
+        fail(f"friction-queue-status must emit {required_token} (PACKET-840 Stage 2 organ 4)")
+
+clerk_text = (root_dir / "ops/plugins/infra/host/bin/clerk-symptom-classify-and-file").read_text(encoding="utf-8")
+for required_token in ('"canonical_plane_access_role"', '"plane_access_source"', '"output_disposition"', '"canonical_filing_path"', "local_diagnostic_not_canonical_friction_state"):
+    if required_token not in clerk_text:
+        fail(f"clerk-symptom-classify-and-file must emit {required_token} (PACKET-840 Stage 2 organ 4)")
+
 print("D456 PASS: estate authority readbacks are first-class/subordinate and old expert probes cannot silently masquerade as drift")
 PY

@@ -1485,5 +1485,26 @@ for required_phrase in ("disabled_by_policy", "decommissioned_residue", "app_loc
     if required_phrase not in status_desc:
         fail(f"ops/capabilities.yaml backup.status description must name '{required_phrase}' classification (PACKET-612 — names live in backup.status description per redirect target)")
 
+# PACKET-840 Stage 2 organ 5 lock — fact (a): node-admission-status emits
+# the canonical_plane_access block sourced from node.role.contract.yaml
+# canonical_plane_access.by_role enumeration. Extension of D447 only — NO
+# new D-gate (subtraction discipline; gate count unchanged).
+node_role_contract_path = root / "ops/bindings/node.role.contract.yaml"
+node_role_contract = yaml.safe_load(node_role_contract_path.read_text(encoding="utf-8")) or {}
+cpa_block = node_role_contract.get("canonical_plane_access") or {}
+if not isinstance(cpa_block, dict):
+    fail("node.role.contract.yaml canonical_plane_access must be a mapping (PACKET-840 Stage 1)")
+by_role_block = cpa_block.get("by_role") or {}
+if not isinstance(by_role_block, dict) or not by_role_block:
+    fail("node.role.contract.yaml canonical_plane_access.by_role must be a non-empty mapping (PACKET-840 Stage 1)")
+required_role_keys = {"storage_evidence_node", "execution_host", "operator_console", "watcher_node"}
+missing_roles = required_role_keys - set(by_role_block.keys())
+if missing_roles:
+    fail(f"node.role.contract.yaml canonical_plane_access.by_role missing roles: {sorted(missing_roles)} (PACKET-840 Stage 1)")
+node_admission_text = (root / "ops/plugins/infra/bin/node-admission-status").read_text(encoding="utf-8")
+for required_token in ("canonical_plane_access", "plane_access_for_roles", "emit_canonical_plane_access_section"):
+    if required_token not in node_admission_text:
+        fail(f"node-admission-status must consume canonical_plane_access: missing token {required_token!r} (PACKET-840 Stage 1)")
+
 print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, machine specs stay inside admission, active role runtime truth is composed, and candidate evidence cannot promote itself")
 PY

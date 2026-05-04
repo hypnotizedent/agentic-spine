@@ -602,6 +602,31 @@ if "v2_4_patch_artifact_no_worktree_mutation" not in fixtures:
     raise SystemExit("D452 FAIL: recovery drill must cover V2.4 no-worktree-mutation proof")
 if "v2_5_patch_apply_sandbox_no_push_merge" not in fixtures:
     raise SystemExit("D452 FAIL: recovery drill must cover V2.5 no-push/no-merge sandbox proof")
+
+# PACKET-840 Stage 2 organ 5 lock — facts (b) + (c): mailroom-task-worker
+# emits canonical_plane_access_role=execution_host + plane_access_source;
+# execution-pickup-status emits the same fields plus canonical_queue_source.
+# Extension of D452 only — NO new D-gate.
+root_dir = capabilities_path.parent.parent
+mailroom_worker_path = root_dir / "ops/plugins/infra/mailroom-bridge/bin/mailroom-task-worker"
+mailroom_worker_text = mailroom_worker_path.read_text(encoding="utf-8")
+for required_token in ('"canonical_plane_access_role"', '"execution_host"', '"plane_access_source"'):
+    if required_token not in mailroom_worker_text:
+        raise SystemExit(f"D452 FAIL: mailroom-task-worker must emit canonical plane access metadata: missing {required_token} (PACKET-840 Stage 2 organ 1)")
+
+mailroom_contract_path = root_dir / "ops/bindings/mailroom.task.worker.contract.yaml"
+mailroom_contract = yaml.safe_load(mailroom_contract_path.read_text(encoding="utf-8")) or {}
+fcrd = mailroom_contract.get("first_class_runtime_decision") or {}
+queue_truth = fcrd.get("canonical_queue_truth") or {}
+consumes_block = queue_truth.get("consumes_canonical_plane_access") or {}
+if not isinstance(consumes_block, dict) or consumes_block.get("role") != "execution_host":
+    raise SystemExit("D452 FAIL: mailroom.task.worker.contract.yaml canonical_queue_truth.consumes_canonical_plane_access must declare role=execution_host (PACKET-840 Stage 2 organ 1)")
+
+pickup_status_path = root_dir / "ops/plugins/core/lifecycle/bin/execution-pickup-status"
+pickup_status_text = pickup_status_path.read_text(encoding="utf-8")
+for required_token in ('"canonical_plane_access_role"', '"plane_access_source"', '"canonical_queue_source"', "canonical_plane_access_role()"):
+    if required_token not in pickup_status_text:
+        raise SystemExit(f"D452 FAIL: execution-pickup-status must emit canonical plane access metadata: missing {required_token} (PACKET-840 Stage 2 organ 2)")
 PY
 
 echo "D452 PASS: execution pickup truth locked"
