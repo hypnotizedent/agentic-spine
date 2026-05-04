@@ -95,6 +95,42 @@ kernel_realization:
       boundary: "Task logs and narrative summaries are supporting evidence unless a governed writer produced the receipt."
 
 first_class_runtime_decision:
+  canonical_queue_truth:
+    rule: >
+      Single canonical agent-tasks queue. mailroom.task.enqueue routes via
+      cap.sh db_authority routing and lands queued task envelopes at
+      /md1400/spine/state/agent-tasks/queued/ on storage_evidence_node (pve).
+      Worker pickup runs against the same canonical queue via routed
+      mailroom.task.worker.once (which lands on pve as a mutating cap), so
+      the request/claim/heartbeat/result/receipt protocol fires against the
+      same task envelopes that mailroom.task.enqueue created. Operator-side
+      readback via execution.pickup.status SSH-fetches canonical agent-tasks
+      using the existing ssh-resolve helper pattern (load_remote_yaml_dir),
+      so the operator-console readback shows the same task lifecycle the
+      worker is operating on. No projection sync, no new mailroom queue, no
+      ad-hoc replication.
+    standing_worker_responsibility: >
+      The launchd-registered standing worker on ai-consolidation
+      (com.ronny.mailroom-task-worker / spine-mailroom-task-worker.service)
+      polls only its local $SPINE_STATE/agent-tasks/queued/ projection,
+      which post-D.3b v4 is cache-only and DOES NOT contain canonical
+      enqueued tasks. The standing worker is therefore explicitly NOT
+      responsible for canonical queue pickup; it remains as honest legacy
+      operational hygiene pending a follow-on slice that either retires it
+      or routes its poll through canonical via the same SSH pattern. This
+      is a labeling clarification, not new authority — the worker contract
+      authority.does_not_decide list is unchanged.
+    provider_readiness_failure_mode: >
+      A provider-backed task that claims on a host where the requested
+      provider is not ready terminates honestly via existing worker code at
+      mailroom-task-worker._execute_agent_tool: the bridge subprocess
+      reports rc!=0, and the worker writes bridge_proof with status=failed,
+      failure_reason naming the unavailable provider, mutation_access=none,
+      worktree_mutation absent, push_performed/merge_performed absent. The
+      task moves to failed state with a structured terminal receipt — it
+      does NOT silently succeed, retry on another host, or mutate anything.
+      Pre-claim provider placement matching is intentionally not added in
+      this slice; the failure-mode receipt is the discipline enforcer.
   path_boundary:
     decision: "Do not create /code/mailroom as a live runtime or evidence home."
     reason: >

@@ -29,8 +29,11 @@ DELEGATIONS_ROOT = STATE_ROOT / "delegations"
 TASK_ROOT = STATE_ROOT / "agent-tasks"
 PATCH_REVIEW_ROOT = STATE_ROOT / "domain-state" / "ai-patch-reviews"
 SCHEDULER_REGISTRY = ROOT / "ops" / "bindings" / "launchd.scheduler.registry.yaml"
+RUNTIME_BOOTSTRAP_CONTRACT = ROOT / "ops" / "bindings" / "runtime.bootstrap.contract.yaml"
 SSH_RESOLVER = ROOT / "ops" / "lib" / "ssh-resolve.sh"
 STALE_SECONDS = int(os.environ.get("EXECUTION_PICKUP_STALE_SECONDS") or "300")
+CANONICAL_TASK_ROOT_DEFAULT = "/md1400/spine/state/agent-tasks"
+LOCAL_CANONICAL_FETCH_DISABLE = os.environ.get("EXECUTION_PICKUP_DISABLE_CANONICAL_FETCH", "").strip() == "1"
 
 
 ACTIVE_DELEGATION_STATES = {"delegated", "picked_up", "executing", "running"}
@@ -487,9 +490,178 @@ def collect_task_dir(rows: list[dict[str, Any]], state_name: str) -> None:
         )
 
 
-def collect_operational_tasks(rows: list[dict[str, Any]]) -> None:
+def _db_authority_block() -> dict[str, Any]:
+    block = load_yaml(RUNTIME_BOOTSTRAP_CONTRACT).get("db_authority")
+    return block if isinstance(block, dict) else {}
+
+
+def _local_hostname() -> str:
+    try:
+        proc = subprocess.run(
+            ["hostname", "-s"], capture_output=True, text=True, timeout=2, check=False
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    try:
+        return subprocess.check_output(["hostname"], text=True, timeout=2).strip()
+    except Exception:
+        return ""
+
+
+def _canonical_fetch_target() -> tuple[dict[str, str], str]:
+    """Return ({host_ref, remote_root}, reason).
+
+    reason is one of:
+      - 'fetch'             : target valid; do canonical fetch
+      - 'authority_local'   : this host IS the canonical authority; no fetch needed
+      - 'disabled_env'      : EXECUTION_PICKUP_DISABLE_CANONICAL_FETCH=1
+      - 'disabled_contract' : db_authority disabled or contract missing
+      - 'no_host'           : contract enabled but host_ref unresolved
+    """
+    if LOCAL_CANONICAL_FETCH_DISABLE:
+        return {}, "disabled_env"
+    block = _db_authority_block()
+    if not block or block.get("enabled") is not True:
+        return {}, "disabled_contract"
+    authority_hostnames = block.get("authority_hostnames") or []
+    if not isinstance(authority_hostnames, list):
+        authority_hostnames = []
+    if _local_hostname() in {str(h) for h in authority_hostnames}:
+        return {}, "authority_local"
+    host_ref = str(block.get("host") or block.get("host_addr_lan") or "").strip()
+    if not host_ref:
+        return {}, "no_host"
+    return {"host_ref": host_ref, "remote_root": CANONICAL_TASK_ROOT_DEFAULT}, "fetch"
+
+
+def load_remote_yaml_dir(host_ref: str, remote_dir: str) -> tuple[list[dict[str, Any]], str]:
+    """SSH to host_ref, list TASK-*.yaml under remote_dir, return (docs, status).
+
+    status: 'ok' on success (possibly empty list); 'unreachable' on SSH/parse failure.
+    Reuses the ssh-resolve helper used by load_remote_json so identity/key/host
+    resolution stays consistent with the existing remote-readback pattern.
+    """
+    if not host_ref or not remote_dir or not SSH_RESOLVER.is_file():
+        return [], "unreachable"
+    script = f'''
+set -euo pipefail
+source {shlex.quote(str(SSH_RESOLVER))}
+target={shlex.quote(host_ref)}
+dir={shlex.quote(remote_dir)}
+resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
+user="$(ssh_resolve_user "$target" ubuntu)"
+identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
+ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" \
+    "for f in \\"$dir\\"/TASK-*.yaml; do [ -f \\"\\$f\\" ] || continue; echo '---'; cat \\"\\$f\\"; done"
+'''
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", script],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except Exception:
+        return [], "unreachable"
+    if proc.returncode != 0:
+        return [], "unreachable"
+    text = proc.stdout
+    if not text.strip():
+        return [], "ok"
+    try:
+        docs = list(yaml.safe_load_all(text))
+    except Exception:
+        return [], "unreachable"
+    return [d for d in docs if isinstance(d, dict)], "ok"
+
+
+def _add_task_row(rows: list[dict[str, Any]], doc: dict[str, Any], state_name: str, source_locality: str) -> None:
+    task_id = str(doc.get("task_id") or "")
+    if not task_id:
+        return
+    heartbeat = doc.get("heartbeat_at") or doc.get("updated_at")
+    heartbeat_age = age_seconds(heartbeat)
+    if state_name == "queued":
+        pickup_state = "not_claimed"
+    elif state_name == "running":
+        pickup_state = "stale" if heartbeat_age is None or heartbeat_age > STALE_SECONDS else "claimed"
+    else:
+        pickup_state = state_name
+    add_request(
+        rows,
+        request_id=task_id,
+        source="operational_task",
+        realization="operational_capability_worker",
+        pickup_state=pickup_state,
+        loop_id=doc.get("loop_id"),
+        packet_id=doc.get("packet_id"),
+        worker=doc.get("claimed_by"),
+        heartbeat_at=heartbeat,
+        heartbeat_age_seconds=heartbeat_age,
+        route_target=doc.get("route_target"),
+        route_capability=doc.get("route_capability"),
+        route_prompt_ref=doc.get("route_prompt_ref"),
+        bridge_allowed=doc.get("bridge_allowed"),
+        payload=normalize_task_payload(doc.get("payload")),
+        bridge_proof=doc.get("bridge_proof") if isinstance(doc.get("bridge_proof"), dict) else None,
+        task=str(doc.get("summary") or "")[:180],
+        result=doc.get("result"),
+        failure_reason=doc.get("failure_reason"),
+        updated_at=doc.get("updated_at"),
+        task_source=source_locality,
+    )
+
+
+def collect_operational_tasks(rows: list[dict[str, Any]]) -> tuple[str, int]:
+    """Merge local + canonical task envelopes; canonical wins on dedupe.
+
+    Returns (canonical_status, canonical_row_count) for summary surfacing:
+      - 'authority_local'   : running on the canonical authority host; local IS canonical
+      - 'merged'            : fetched canonical via SSH and merged with local (canonical preferred)
+      - 'unreachable'       : canonical fetch attempted but failed; local-only fallback
+      - 'disabled'          : canonical fetch disabled via env or contract
+    """
+    target, reason = _canonical_fetch_target()
+    canonical_rows = 0
+    canonical_status = reason
+    seen: dict[str, str] = {}
+
+    if reason == "fetch" and target:
+        merged_any = False
+        canonical_status = "unreachable"
+        for state_name in ("queued", "running", "done", "failed"):
+            remote_dir = f"{target['remote_root']}/{state_name}"
+            docs, fetch_status = load_remote_yaml_dir(target["host_ref"], remote_dir)
+            if fetch_status == "ok":
+                merged_any = True
+                for doc in docs:
+                    task_id = str(doc.get("task_id") or "")
+                    if not task_id or task_id in seen:
+                        continue
+                    seen[task_id] = "canonical"
+                    _add_task_row(rows, doc, state_name, "canonical")
+                    canonical_rows += 1
+        if merged_any:
+            canonical_status = "merged"
+
     for state_name in ("queued", "running", "done", "failed"):
-        collect_task_dir(rows, state_name)
+        directory = TASK_ROOT / state_name
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("TASK-*.yaml")):
+            doc = load_yaml(path)
+            task_id = str(doc.get("task_id") or path.stem)
+            if task_id in seen:
+                continue
+            seen[task_id] = "local"
+            _add_task_row(rows, doc, state_name, "local")
+
+    return canonical_status, canonical_rows
 
 
 def worker_status() -> dict[str, Any]:
@@ -636,12 +808,15 @@ def collect() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     collect_wave_dispatches(rows)
     collect_delegations(rows)
-    collect_operational_tasks(rows)
+    canonical_status, canonical_rows = collect_operational_tasks(rows)
     rows.sort(key=lambda row: (str(row.get("pickup_state")), str(row.get("request_id"))))
+    summary = summarize(rows)
+    summary["canonical_task_source"] = canonical_status
+    summary["canonical_task_rows"] = canonical_rows
     return {
         "capability": "execution.pickup.status",
         "generated_at": now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "summary": summarize(rows),
+        "summary": summary,
         "worker": worker_status(),
         "requests": rows,
         "subtraction": {
@@ -688,6 +863,20 @@ def render_human(data: dict[str, Any]) -> None:
     if worker.get("generated_at"):
         worker_line += f" ({worker.get('generated_at')}, age={worker.get('age_seconds')}s)"
     print(f"  capability worker: {worker_line}")
+    canonical_status = str(summary.get("canonical_task_source") or "unknown")
+    canonical_rows = summary.get("canonical_task_rows") or 0
+    if canonical_status == "merged":
+        print(f"  canonical queue:   merged ({canonical_rows} canonical rows)")
+    elif canonical_status == "authority_local":
+        print(f"  canonical queue:   authority_local (this host owns canonical)")
+    elif canonical_status == "unreachable":
+        print(f"  canonical queue:   unreachable — local-only fallback (set EXECUTION_PICKUP_DISABLE_CANONICAL_FETCH=1 to suppress this attempt)")
+    elif canonical_status == "disabled_env":
+        print(f"  canonical queue:   disabled_env (EXECUTION_PICKUP_DISABLE_CANONICAL_FETCH=1)")
+    elif canonical_status == "disabled_contract":
+        print(f"  canonical queue:   disabled_contract (db_authority off or contract missing)")
+    elif canonical_status == "no_host":
+        print(f"  canonical queue:   no_host (db_authority enabled but host_ref unresolved)")
     print()
     rows = [row for row in data["requests"] if row.get("pickup_state") not in TERMINAL_TASK_STATES]
     if rows:
