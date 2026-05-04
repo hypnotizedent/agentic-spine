@@ -371,7 +371,7 @@ node_types:
           proof_ref: "$SPINE_STATE/domain-state/forge-node/runner-cache-boundary-proof-latest.yaml"
           staged_delivery:
             stage_1_enumeration: present_when_proof_ref_artifact_exists
-            stage_2_clean_room_demo: isolated_per_job_partial_remaining_owner_global_and_docker_sock
+            stage_2_clean_room_demo: isolated_per_job_partial_remaining_docker_sock_fence
             stage_2_clean_room_demo_proof_ref: "$SPINE_STATE/domain-state/forge-node/runner-cache-boundary-demo-latest.yaml"
             stage_2_clean_room_demo_packet: PACKET-660-FORGE-RUNNER-CACHE-STAGE-2-DEMO
             stage_2_clean_room_demo_scope_note: >
@@ -392,23 +392,47 @@ node_types:
               server no longer starts (/root/.cache/actcache directory removed)
               and the persistent layer cache /root/.cache/act was cleared by
               container recreate. forge.runner_cache_boundary.status now
-              classifies isolated_per_job (structural). Two of four PACKET-800
-              gaps are closed: gap 2 (persistent /root/.cache/act) and gap 3
-              (actcache bolt.db).
+              classifies isolated_per_job (structural). Gaps 2 (persistent
+              /root/.cache/act) and 3 (actcache bolt.db) closed.
 
-              Two named residuals remain and require separate L2 build slices,
-              so this stage is partial-isolation, not delivered: gap 1
-              (owner-global runner registration — runner is registered with
-              per_owner_global scope so any repo owned by the owner can use it;
-              fixing requires re-registration with per_repo scope, token
-              rotation, and container restart) and gap 4 (docker.sock mount
-              fence — runner has /var/run/docker.sock mounted so it can
-              read/write any container on the host; fixing requires
-              architectural redesign of job spawning model away from the
-              sibling-container pattern). forge_node delivered:false stays
-              while either residual is unaddressed; Stage 2 is honest
-              partial-isolation, not a full clean-room demonstration.
-            stage_2_blocked_until: owner_global_runner_re_registration_and_docker_sock_fence_or_explicit_acceptance_of_remaining_residuals
+              PACKET-1015 (2026-05-04, commits 05e68fdc + c0d9edc2 + aec3744f)
+              built and applied forge.runner.reregister: rotated the runner
+              registration token via the Gitea repo-scoped admin API, removed
+              /data/.runner, and restarted the gitea-runner service. Live
+              registration is now id=3 dev-tools-runner scope=per_repo
+              (repo_id=1 ronny/agentic-spine). Stale registrations
+              (id=1 + id=2) carry Gitea action_runner.deleted timestamps and
+              are filtered out of the canonical readback by aec3744f
+              (`WHERE deleted IS NULL`). Gap 1 (owner-global runner
+              registration) closed end-to-end.
+
+              One named residual remains and forge_node delivered:false stays
+              while it is unaddressed: gap 4 (docker.sock mount fence — the
+              gitea-runner container has /var/run/docker.sock bind-mounted
+              into the runner image, so a malicious or buggy CI job can talk
+              directly to the host Docker daemon and read/write any
+              container, mount any host path, and inspect or kill sibling
+              services on dev-tools VM 206). Smallest governed mutation path
+              is a docker-socket-proxy sidecar pattern (e.g.
+              tecnativa/docker-socket-proxy added to /opt/stacks/gitea/
+              docker-compose.yml; gitea-runner volume rebound to use
+              DOCKER_HOST=tcp://docker-socket-proxy:2375 instead of the
+              docker.sock bind; restart-only via single-service
+              `docker compose up -d gitea-runner`). The sibling-container
+              job-spawning topology stays — the fence is at API surface, not
+              at topology — so this is NOT an architectural redesign. The
+              prerequisite that BLOCKS landing this fence cap today is
+              runner-API-surface research: act_runner's actual Docker API
+              call set across job lifecycle (create/exec/wait/logs/rm/build/
+              pull) must be empirically observed before a precise proxy
+              allowlist policy can be authored. A permissive proxy that
+              allows everything is theatrics, not enforcement, and would
+              violate the no-fake-progress stop line. Stage 2 advances when
+              either: (a) docker_sock_fence_proxy_primitive lands as a
+              governed L2 host-orchestration cap with researched allowlist
+              and is applied, OR (b) operator explicitly accepts the
+              remaining docker.sock residual.
+            stage_2_blocked_until: docker_sock_fence_proxy_primitive_or_explicit_acceptance
         branch_protection_readback_proof:
           source:
             - ops/plugins/infra/host/bin/forge-branch-protection-status
