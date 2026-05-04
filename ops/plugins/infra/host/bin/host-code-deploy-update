@@ -322,6 +322,19 @@ def mirror_canonical_receipt(placement: dict[str, Any], latest_name: str, stampe
     return result
 
 
+CANONICAL_PLANE_ACCESS_ROLE = "execution_host"
+CANONICAL_PLANE_ACCESS_SOURCE = (
+    "ops/bindings/node.role.contract.yaml#canonical_plane_access.by_role.execution_host"
+)
+
+
+def runtime_action_summary(records: list[dict[str, Any]]) -> str:
+    if not records:
+        return "no_managed_checkouts"
+    parts = [f"{r.get('host_id','?')}:{r.get('status','?')}" for r in records]
+    return ", ".join(parts)
+
+
 def write_receipt(payload: dict[str, Any], placement: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
     root = receipt_dir()
     root.mkdir(parents=True, exist_ok=True)
@@ -331,11 +344,24 @@ def write_receipt(payload: dict[str, Any], placement: dict[str, Any]) -> tuple[P
     latest = root / latest_name
     stamped = root / stamped_name
     payload["local_receipt"] = str(latest)
+    payload["canonical_plane_access_role"] = CANONICAL_PLANE_ACCESS_ROLE
+    payload["plane_access_source"] = CANONICAL_PLANE_ACCESS_SOURCE
+    payload["runtime_plane_action_summary"] = runtime_action_summary(payload.get("records") or [])
     text = yaml.safe_dump(payload, sort_keys=False)
     latest.write_text(text, encoding="utf-8")
     stamped.write_text(text, encoding="utf-8")
     canonical = mirror_canonical_receipt(placement, latest_name, stamped_name, text)
     payload["canonical_receipt"] = canonical
+    if canonical.get("status") in {"mirrored", "local_canonical"} and canonical.get("latest_path"):
+        payload["evidence_plane_path"] = str(canonical.get("latest_path"))
+        payload["local_receipt_disposition"] = (
+            "projection_of_canonical_evidence"
+            if canonical.get("status") == "mirrored"
+            else "local_is_canonical_authority_host"
+        )
+    else:
+        payload["evidence_plane_path"] = None
+        payload["local_receipt_disposition"] = "local_only_no_canonical_evidence"
     final_text = yaml.safe_dump(payload, sort_keys=False)
     latest.write_text(final_text, encoding="utf-8")
     stamped.write_text(final_text, encoding="utf-8")
@@ -396,13 +422,25 @@ def main() -> int:
     else:
         print("infra.host.code.deploy.update")
         print(f"overall: {payload['overall_status']}")
-        print(f"receipt: {receipt}")
-        if canonical_receipt.get("latest_path"):
-            print(f"canonical_receipt: {canonical_receipt.get('latest_path')}")
+        print(f"plane access role: {CANONICAL_PLANE_ACCESS_ROLE}")
+        print(f"plane access source: {CANONICAL_PLANE_ACCESS_SOURCE}")
+        print()
+        print("runtime mutation (per managed checkout):")
         for record in records:
             before = (record.get("pre_head") or "-")[:8]
             after = (record.get("post_head") or record.get("pre_head") or "-")[:8]
             print(f"  {record['host_id']:<22} {record['status']:<28} {before} -> {after}")
+        print()
+        print("canonical evidence receipt:")
+        canonical_status = str(canonical_receipt.get("status") or "not_configured")
+        canonical_latest = canonical_receipt.get("latest_path")
+        if canonical_status in {"mirrored", "local_canonical"} and canonical_latest:
+            print(f"  status:          {canonical_status}")
+            print(f"  evidence_path:   {canonical_latest}")
+            print(f"  local_receipt:   {receipt} (projection_of_canonical_evidence)")
+        else:
+            print(f"  status:          {canonical_status} (no canonical evidence written)")
+            print(f"  local_receipt:   {receipt} (local_only_no_canonical_evidence)")
     return 1 if payload["overall_status"] == "attention" else 0
 
 
