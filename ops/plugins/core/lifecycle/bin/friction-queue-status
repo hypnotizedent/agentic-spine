@@ -7,6 +7,7 @@ Legacy: friction.queue.yaml is no longer read by this surface.
 from __future__ import annotations
 
 import json
+import socket
 import sys
 from pathlib import Path
 
@@ -14,6 +15,79 @@ ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 
 import gaps_sql_authority as authority  # noqa: E402
+
+CANONICAL_PLANE_ACCESS_BINDING = (
+    "ops/bindings/node.role.contract.yaml#canonical_plane_access.by_role"
+)
+
+
+def _local_hostname() -> str:
+    try:
+        return socket.gethostname().split(".")[0].lower()
+    except Exception:
+        return ""
+
+
+def _plane_access_role() -> str:
+    """Friction queue authority lives on storage_evidence_node (pve).
+    A reader running on pve sees authority-local; readers off-authority
+    are external_consumer so consumers cannot mistake the readback for
+    canonical authority just because it ran."""
+    host = _local_hostname()
+    if host == "pve":
+        return "storage_evidence_node"
+    if host.startswith("ai-cons") or "ai-consolidation" in host:
+        return "execution_host"
+    return "external_consumer"
+
+
+def _classify_evidence_ref(ref: str) -> str:
+    text = (ref or "").strip()
+    if not text:
+        return "unclassified_prose_or_other"
+    lowered = text.lower()
+    if text.startswith("RCAP-") or "/md1400/spine/evidence/sessions/" in text:
+        return "governed_canonical_path"
+    if text.startswith("/md1400/spine/state/") or text.startswith(
+        "canonical_evidence:"
+    ):
+        return "governed_canonical_evidence"
+    if lowered.startswith("commit:") or lowered.startswith("receipt:"):
+        return "governed_commit_or_receipt_ref"
+    return "unclassified_prose_or_other"
+
+
+def _evidence_refs_summary(conn) -> dict[str, int]:
+    counts = {
+        "governed_canonical_path": 0,
+        "governed_canonical_evidence": 0,
+        "governed_commit_or_receipt_ref": 0,
+        "unclassified_prose_or_other": 0,
+        "no_evidence_refs": 0,
+    }
+    try:
+        cur = conn.execute(
+            "SELECT closed_reason FROM friction WHERE status = 'closed'"
+        )
+    except Exception:
+        return counts
+    for (reason_text,) in cur.fetchall():
+        refs: list[str] = []
+        if reason_text:
+            try:
+                payload = json.loads(reason_text)
+                if isinstance(payload, dict):
+                    candidate = payload.get("evidence_refs") or []
+                    if isinstance(candidate, list):
+                        refs = [str(r) for r in candidate if r]
+            except (TypeError, ValueError):
+                pass
+        if not refs:
+            counts["no_evidence_refs"] += 1
+            continue
+        for r in refs:
+            counts[_classify_evidence_ref(r)] += 1
+    return counts
 
 
 def _by_disposition(conn) -> dict[str, int]:
@@ -48,6 +122,7 @@ def main() -> int:
     stats = authority.friction_stats(conn)
     total = authority.friction_count(conn)
     by_disposition = _by_disposition(conn)
+    evidence_refs_classification = _evidence_refs_summary(conn)
 
     status_counts = stats.get("by_status", {})
     open_count = sum(
@@ -55,16 +130,22 @@ def main() -> int:
         if k not in ("closed",)
     )
 
+    role = _plane_access_role()
     payload = {
         "capability": "friction.queue.status",
         "status": "ok",
         "authority": "sqlite",
+        "canonical_plane_access_role": role,
+        "plane_access_source": f"{CANONICAL_PLANE_ACCESS_BINDING}.{role}"
+        if role != "external_consumer"
+        else f"{CANONICAL_PLANE_ACCESS_BINDING} (reader_off_authority_external_consumer)",
         "db_path": str(db_path),
         "total": total,
         "open": open_count,
         "by_status": status_counts,
         "by_severity": stats.get("by_severity", {}),
         "by_disposition": by_disposition,
+        "evidence_refs_classification": evidence_refs_classification,
     }
 
     conn.close()
@@ -76,6 +157,8 @@ def main() -> int:
         print("friction.queue.status")
         print("status: ok")
         print(f"authority: sqlite")
+        print(f"plane access role: {payload['canonical_plane_access_role']}")
+        print(f"plane access source: {payload['plane_access_source']}")
         print(f"total: {payload['total']}")
         print(f"open: {payload['open']}")
         for s, c in sorted(status_counts.items()):
@@ -84,6 +167,10 @@ def main() -> int:
             print("by_disposition (closed):")
             for d, c in sorted(by_disposition.items()):
                 print(f"  {d}: {c}")
+        if any(evidence_refs_classification.values()):
+            print("evidence_refs_classification (closed):")
+            for cls, count in sorted(evidence_refs_classification.items()):
+                print(f"  {cls}: {count}")
         print(f"db_path: {db_path}")
     return 0
 

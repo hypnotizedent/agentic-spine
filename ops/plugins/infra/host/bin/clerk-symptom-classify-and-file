@@ -48,11 +48,35 @@ import argparse
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+CANONICAL_PLANE_ACCESS_BINDING = (
+    "ops/bindings/node.role.contract.yaml#canonical_plane_access.by_role"
+)
+
+
+def _local_hostname() -> str:
+    try:
+        return socket.gethostname().split(".")[0].lower()
+    except Exception:
+        return ""
+
+
+def clerk_plane_access_role() -> str:
+    """Clerk runs as a consumer of state/runtime symptoms; canonical filing
+    happens via friction.ingest (routed to storage_evidence_node when
+    db_authority is enabled)."""
+    host = _local_hostname()
+    if host == "pve":
+        return "storage_evidence_node"
+    if host.startswith("ai-cons") or "ai-consolidation" in host:
+        return "execution_host"
+    return "operator_console"
 
 
 CONNECT_TIMEOUT = 8
@@ -713,10 +737,15 @@ def main() -> int:
             result = file_via_friction_ingest(record)
             filings.append({"dedupe_key": record["dedupe_key"], "result": result})
 
+    role = clerk_plane_access_role()
     payload = {
         "capability": "clerk.symptom.classify.and.file",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "mode": "file" if args.file else "dry_run",
+        "canonical_plane_access_role": role,
+        "plane_access_source": f"{CANONICAL_PLANE_ACCESS_BINDING}.{role}",
+        "output_disposition": "local_diagnostic_not_canonical_friction_state",
+        "canonical_filing_path": "friction.ingest -> shared_authority.db (storage_evidence_node)",
         "input_summary": {
             "brief_fields": list(brief.keys()),
             "drift_overall": drift.get("overall_status"),
@@ -738,6 +767,10 @@ def main() -> int:
         print(json.dumps(payload, indent=2))
     else:
         print(f"clerk.symptom.classify.and.file (mode: {payload['mode']})")
+        print(f"plane access role: {payload['canonical_plane_access_role']}")
+        print(f"plane access source: {payload['plane_access_source']}")
+        print(f"output disposition: {payload['output_disposition']}")
+        print(f"canonical filing path: {payload['canonical_filing_path']}")
         print(f"classified: {payload['classified_count']} symptom(s)")
         for record in classified:
             print(f"  [{record['severity']:>6}] {record['classification']:<25} {record['dedupe_key']}")
