@@ -10,6 +10,7 @@ Reads (read-only):
 - verify.engine.run              (engine smoke result)
 - infra.host.code.drift.status   (per-host code drift)
 - infra.host.authority.reachability.status (LAN/Tailscale class per host)
+- wave.residue                  (wave-owned residue / ambiguous cleanup state)
 - ops loops list / scope state   (terminal proxy for watcher inputs)
 
 Writes (mutating, via existing friction.ingest):
@@ -71,6 +72,20 @@ def _run(cmd: list[str], timeout: int = SUBPROCESS_TIMEOUT) -> tuple[int, str, s
         return 127, "", str(exc)
 
 
+def _extract_first_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _end = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
 def read_brief() -> dict[str, Any]:
     """Run ops status --brief and parse pipe-separated fields."""
     rc, out, err = _run([str(REPO_ROOT / "bin" / "ops"), "status", "--brief"])
@@ -110,6 +125,23 @@ def read_reachability() -> dict[str, Any]:
         return json.loads(out)
     except json.JSONDecodeError as exc:
         return {"_error": f"reachability JSON parse: {exc}"}
+
+
+def read_wave_residue() -> dict[str, Any]:
+    rc, out, err = _run([
+        str(REPO_ROOT / "bin" / "ops"),
+        "cap",
+        "run",
+        "wave.residue",
+        "--",
+        "--json",
+    ])
+    if rc != 0:
+        return {"_error": err.strip()[:200] or "wave residue readback failed"}
+    payload = _extract_first_json_object(out)
+    if payload is None:
+        return {"_error": "wave residue JSON parse: no JSON object in cap output"}
+    return payload
 
 
 def read_engine_smoke_status(brief: dict[str, str]) -> str:
@@ -396,6 +428,53 @@ def classify_code_drift(drift: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def classify_wave_residue(wave_residue: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if "_error" in wave_residue:
+        out.append({
+            "dedupe_key": "wave_residue:meta:read_failed",
+            "classification": "wave_residue",
+            "capability": "wave.residue",
+            "expected": "wave residue readback is queryable (canonical home: wave.residue + worktree.lifecycle.cleanup)",
+            "actual": f"wave.residue readback failed: {wave_residue['_error']} [autonomy: read_only_diagnosis_auto] [next: investigate wave.residue readback before cleanup]",
+            "severity": "medium",
+            "owner": "orchestration_authority",
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": "investigate wave.residue readback before cleanup",
+        })
+        return out
+
+    report = wave_residue.get("report", {}) if isinstance(wave_residue, dict) else {}
+    items = report.get("items", []) if isinstance(report, dict) else []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if bool(item.get("safe_to_sweep")):
+            continue
+        cls = str(item.get("class") or "unknown").strip()
+        wave_id = str(item.get("wave_id") or "unknown").strip()
+        identity = str(item.get("identity") or item.get("path") or item.get("branch") or "unknown").strip()
+        wave_status = str(item.get("wave_status") or "unknown").strip()
+        reason = str(item.get("ambiguous_reason") or f"wave_status={wave_status}").strip()
+        severity = "high" if wave_status == "unknown" else "medium"
+        next_action = (
+            "route to owning wave lifecycle if the wave exists; if wave authority is missing, "
+            "use governed lifecycle reconciliation/recovery. Do not delete the leaf worktree/branch/lease directly."
+        )
+        out.append({
+            "dedupe_key": f"wave_residue:{wave_id}:{cls}:{identity}",
+            "classification": "wave_residue",
+            "capability": "wave.residue",
+            "expected": "wave-owned worktree/branch residue is either active under wave authority, safely sweepable after close, or repaired through governed lifecycle reconciliation",
+            "actual": f"{identity}; class={cls}; wave={wave_id}; wave_status={wave_status}; reason={reason} [autonomy: read_only_diagnosis_auto] [next: {next_action}]",
+            "severity": severity,
+            "owner": "orchestration_authority",
+            "autonomy": "read_only_diagnosis_auto",
+            "next_action": next_action,
+        })
+    return out
+
+
 def classify_brief_failures(brief: dict[str, str]) -> list[dict[str, Any]]:
     """Symptoms surfaced by ops status --brief that aren't covered by drift/reach."""
     out: list[dict[str, Any]] = []
@@ -609,15 +688,22 @@ def main() -> int:
             reach = json.loads(_reach_json) if _reach_json else read_reachability()
         except json.JSONDecodeError:
             reach = read_reachability()
+        _wave_residue_json = os.environ.get("CLERK_WAVE_RESIDUE_JSON", "").strip()
+        try:
+            wave_residue = json.loads(_wave_residue_json) if _wave_residue_json else read_wave_residue()
+        except json.JSONDecodeError:
+            wave_residue = read_wave_residue()
     else:
         brief = read_brief()
         drift = read_drift()
         reach = read_reachability()
+        wave_residue = read_wave_residue()
     entry_policy_signals = read_entry_policy_signals()
 
     classified: list[dict[str, Any]] = []
     classified.extend(classify_authority_reachability(reach))
     classified.extend(classify_code_drift(drift))
+    classified.extend(classify_wave_residue(wave_residue))
     classified.extend(classify_brief_failures(brief))
     classified.extend(classify_entry_policy(entry_policy_signals))
 
@@ -635,6 +721,7 @@ def main() -> int:
             "brief_fields": list(brief.keys()),
             "drift_overall": drift.get("overall_status"),
             "reach_overall": reach.get("overall_status"),
+            "wave_residue_total": ((wave_residue.get("report") or {}).get("counts") or {}).get("total") if isinstance(wave_residue, dict) else None,
             "entry_policy": {
                 "fresh_unbound_root_terminals": len(entry_policy_signals.get("fresh_unbound_root_terminals", [])),
                 "visible_worker_without_lane": len(entry_policy_signals.get("visible_worker_without_lane", [])),
