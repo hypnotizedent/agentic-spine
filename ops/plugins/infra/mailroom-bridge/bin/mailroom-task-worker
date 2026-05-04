@@ -115,79 +115,82 @@ def _task_supported(doc: dict[str, Any], *, allowlist: set[str], supported_route
     return True, ""
 
 
-def _claim_task(task_id: str, worker_id: str) -> dict[str, Any]:
-    proc = subprocess.run(
-        [
-            str(ROOT / "ops" / "plugins" / "infra" / "mailroom-bridge" / "bin" / "mailroom-task-claim"),
-            "--task-id",
-            task_id,
-            "--worker",
-            worker_id,
-            "--json",
-        ],
+def _route_via_cap_sh(cap_name: str, args: list[str]) -> subprocess.CompletedProcess:
+    """Invoke a mutating mailroom.task.* cap through ./bin/ops cap run so
+    cap.sh's db_authority routing handles canonical placement.
+
+    On the storage_evidence_node (pve) cap.sh detects local hostname is in
+    db_authority.authority_hostnames and runs the cap locally (no SSH hop).
+    On non-authority hosts (ai-cons, macbook) cap.sh routes the cap to pve
+    via SSH so the queue-state mutation lands on canonical. Either way the
+    queue file the worker SSH-merge-fetched in this pass is the same file
+    the routed cap reads on canonical.
+    """
+    return subprocess.run(
+        [str(ROOT / "bin" / "ops"), "cap", "run", cap_name, "--", *args],
         capture_output=True,
         text=True,
         check=False,
         env=os.environ.copy(),
     )
+
+
+def _route_via_cap_sh_extract_data(cap_name: str, args: list[str], task_id: str) -> dict[str, Any]:
+    """Run a routed cap and parse its JSON `data` field tolerating cap.sh's
+    surrounding receipt/header text. We scan stdout for the last JSON object
+    that contains a `data` key, which works for both local and routed paths."""
+    proc = _route_via_cap_sh(cap_name, args)
     if proc.returncode != 0:
-        raise WorkerError(proc.stderr.strip() or proc.stdout.strip() or f"mailroom.task.claim failed for {task_id}")
-    payload = json.loads(proc.stdout)
-    return payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        raise WorkerError(proc.stderr.strip() or proc.stdout.strip() or f"{cap_name} failed for {task_id}")
+    text = proc.stdout
+    decoder = json.JSONDecoder()
+    idx = 0
+    last_obj: dict[str, Any] = {}
+    while True:
+        start = text.find("{", idx)
+        if start < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        if isinstance(obj, dict) and "data" in obj:
+            last_obj = obj
+        idx = end
+    return last_obj.get("data") if isinstance(last_obj.get("data"), dict) else {}
+
+
+def _claim_task(task_id: str, worker_id: str) -> dict[str, Any]:
+    return _route_via_cap_sh_extract_data(
+        "mailroom.task.claim",
+        ["--task-id", task_id, "--worker", worker_id, "--json"],
+        task_id,
+    )
 
 
 def _heartbeat_task(task_id: str, progress: str) -> None:
-    proc = subprocess.run(
-        [
-            str(ROOT / "ops" / "plugins" / "infra" / "mailroom-bridge" / "bin" / "mailroom-task-heartbeat"),
-            "--task-id",
-            task_id,
-            "--progress",
-            progress,
-            "--json",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=os.environ.copy(),
+    proc = _route_via_cap_sh(
+        "mailroom.task.heartbeat",
+        ["--task-id", task_id, "--progress", progress, "--json"],
     )
     if proc.returncode != 0:
         raise WorkerError(proc.stderr.strip() or proc.stdout.strip() or f"mailroom.task.heartbeat failed for {task_id}")
 
 
 def _complete_task(task_id: str, result: str) -> None:
-    proc = subprocess.run(
-        [
-            str(ROOT / "ops" / "plugins" / "infra" / "mailroom-bridge" / "bin" / "mailroom-task-complete"),
-            "--task-id",
-            task_id,
-            "--result",
-            result,
-            "--json",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=os.environ.copy(),
+    proc = _route_via_cap_sh(
+        "mailroom.task.complete",
+        ["--task-id", task_id, "--result", result, "--json"],
     )
     if proc.returncode != 0:
         raise WorkerError(proc.stderr.strip() or proc.stdout.strip() or f"mailroom.task.complete failed for {task_id}")
 
 
 def _fail_task(task_id: str, reason: str) -> None:
-    proc = subprocess.run(
-        [
-            str(ROOT / "ops" / "plugins" / "infra" / "mailroom-bridge" / "bin" / "mailroom-task-fail"),
-            "--task-id",
-            task_id,
-            "--reason",
-            reason,
-            "--json",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=os.environ.copy(),
+    proc = _route_via_cap_sh(
+        "mailroom.task.fail",
+        ["--task-id", task_id, "--reason", reason, "--json"],
     )
     if proc.returncode != 0:
         raise WorkerError(proc.stderr.strip() or proc.stdout.strip() or f"mailroom.task.fail failed for {task_id}")
