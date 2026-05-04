@@ -266,7 +266,10 @@ if [[ "$NEEDS_CONFIG_WRITE" == "true" ]]; then
   fi
 fi
 
-# Step 2: patch docker-compose.yml to add command field on gitea-runner only
+# Step 2: patch docker-compose.yml to add command field on gitea-runner only.
+# /opt/stacks/gitea/docker-compose.yml is owned root:root; ubuntu user needs
+# sudo to write. Cap uses passwordless sudo (sudo -n) for the patch step;
+# the python script is restricted to gitea-runner service mutation.
 if [[ "$NEEDS_COMPOSE_PATCH" == "true" ]]; then
   PATCH_SCRIPT='
 import sys, yaml
@@ -279,15 +282,17 @@ svc["command"] = ["daemon", "--config", "/data/config.yaml"]
 with open(path, "w") as f:
     yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False)
 '
-  if ! ssh_remote "python3 -c $(printf %q "$PATCH_SCRIPT") ${COMPOSE_PATH}"; then
-    stop 1 "failed to patch ${COMPOSE_PATH}"
+  if ! ssh_remote "sudo -n python3 -c $(printf %q "$PATCH_SCRIPT") ${COMPOSE_PATH}"; then
+    stop 1 "failed to patch ${COMPOSE_PATH} (sudo -n required; ubuntu needs NOPASSWD sudo)"
   fi
 fi
 
-# Step 3: restart runner via docker-compose
+# Step 3: restart runner via docker-compose. Single-service restart (`up -d
+# gitea-runner`) limits scope to the gitea-runner container only; gitea +
+# gitea-postgres untouched. Compose project owned by root requires sudo.
 if [[ "$NEEDS_RESTART" == "true" ]]; then
-  if ! ssh_remote "cd /opt/stacks/gitea && docker-compose up -d gitea-runner"; then
-    stop 1 "docker-compose up failed"
+  if ! ssh_remote "cd /opt/stacks/gitea && sudo -n docker-compose up -d gitea-runner"; then
+    stop 1 "docker-compose up failed (sudo -n required)"
   fi
 fi
 
