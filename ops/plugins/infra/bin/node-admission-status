@@ -1128,6 +1128,115 @@ def operator_console_candidate_set() -> set[str]:
     return candidates
 
 
+# PACKET-985: subject_class + access_class as first-class row fields.
+# object_kind is preserved as source/provenance (D447/D455 consume it); these
+# two fields are the operator-facing teaching that splits subject-of-admission
+# truth from access-path truth. Approved enums from PACKET-975 review.
+
+SUBJECT_CLASS_VALUES: set[str] = {
+    "physical_machine",
+    "vm",
+    "appliance",
+    "network_device",
+    "portable_media",
+    "unknown",
+}
+
+ACCESS_CLASS_VALUES: set[str] = {
+    "ssh",
+    "bmc",
+    "tailscale",
+    "lan",
+    "declared_only",
+    "unreachable",
+    "absent",
+}
+
+NETWORK_DEVICE_ID_PREFIXES: tuple[str, ...] = ("udr-", "switch-", "ap-", "nvr-")
+BMC_ID_PREFIXES: tuple[str, ...] = ("idrac-",)
+
+
+def derive_subject_class(
+    recovery: dict[str, Any],
+    *,
+    node_id: str | None,
+    object_kind: str | None,
+    role_candidacy: list[Any],
+) -> str:
+    """Resolve subject_class from existing row evidence.
+
+    Uses kind_separation logic for appliance fan-out and shop_device.name to
+    detect VMs (per shop.device.registry naming convention 'Foo VM'). Falls
+    through to 'unknown' rather than faking a class — D447 catches missing
+    fields; honest unknowns get reported, not hidden.
+    """
+    nid = node_id or ""
+    kind = object_kind or ""
+    candidacy = {str(c) for c in (role_candidacy or [])}
+
+    # 1) BMC endpoints (out-of-band management interface) classify as network_device.
+    if any(nid.startswith(p) for p in BMC_ID_PREFIXES):
+        return "network_device"
+
+    # 2) Network devices by id pattern (switches, routers, APs, NVRs).
+    if any(nid.startswith(p) for p in NETWORK_DEVICE_ID_PREFIXES):
+        return "network_device"
+
+    # 3) Portable media: candidacy includes a portable appliance class.
+    if candidacy & portable_appliance_classes():
+        return "portable_media"
+
+    # 4) Appliance proper (storage, dns, service).
+    if kind == "appliance":
+        return "appliance"
+
+    # 5) VM detection via shop_device.name (shop.device.registry naming
+    # convention: VM rows carry name ending in ' VM' or containing ' VM ').
+    sources = recovery.get("source_surfaces") or {}
+    shop_name = str(((sources.get("shop_device") or {}).get("name") or "")).strip().lower()
+    if shop_name.endswith(" vm") or " vm " in f" {shop_name} ":
+        return "vm"
+
+    # 6) Established physical-machine kinds.
+    if kind in {"operator_hardware", "infra_machine", "shop_physical_machine"}:
+        return "physical_machine"
+
+    # 7) ssh_target_only with no other signal: honest unknown (access shadow only).
+    return "unknown"
+
+
+def derive_access_class(
+    *,
+    node_id: str | None,
+    primary_access: dict[str, Any] | None,
+) -> str:
+    """Resolve access_class from primary_access evidence.
+
+    Maps existing access_method values plus BMC id prefix into the approved
+    7-value enum. tailscale/unreachable are reachable from this readback only
+    if the cap surfaces them as access_method values; today neither is emitted,
+    so those buckets stay reserved for future evidence shape.
+    """
+    nid = node_id or ""
+    pa = primary_access or {}
+    method = str(pa.get("access_method") or "").strip()
+
+    # BMC interfaces classify access as bmc regardless of access_method.
+    if any(nid.startswith(p) for p in BMC_ID_PREFIXES):
+        return "bmc"
+
+    if method == "ssh":
+        return "ssh"
+    if method == "lan_only":
+        return "lan"
+    if method in {"physical_usb_attachment", "operator_hardware_inventory"}:
+        return "declared_only"
+    if not method:
+        return "absent"
+    # Unmatched method token: honest absent rather than misclassified ssh/lan.
+    return "absent"
+
+
 def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     sources = recovery.get("source_surfaces") or {}
     operator = sources.get("operator_hardware") or {}
@@ -1241,6 +1350,16 @@ def row_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     return {
         "node_id": recovery.get("node_id"),
         "object_kind": recovery.get("node_kind"),
+        "subject_class": derive_subject_class(
+            recovery,
+            node_id=recovery.get("node_id"),
+            object_kind=recovery.get("node_kind"),
+            role_candidacy=role_candidacy,
+        ),
+        "access_class": derive_access_class(
+            node_id=recovery.get("node_id"),
+            primary_access=primary_access,
+        ),
         "site": recovery.get("node_site"),
         "lifecycle_state": lifecycle_state(recovery),
         "durable_identifiers": durable_identifiers(recovery),
@@ -1814,10 +1933,19 @@ def emit_human(rows: list[dict[str, Any]], machine_spec: bool = False, golden_pa
     print("              = contract declares delivered but receipt canonical on")
     print("              storage_evidence_node (pve), not visible from this host;")
     print("              missing = no receipt and not in proofs_present.")
+    print("  subject_class  what the row's subject IS — physical_machine | vm |")
+    print("                 appliance | network_device | portable_media | unknown.")
+    print("                 First-class row field; replaces the earlier single")
+    print("                 'kind:' teaching that conflated subject with access.")
+    print("  access_class   how the subject is reachable — ssh | bmc | tailscale |")
+    print("                 lan | declared_only | unreachable | absent. First-class")
+    print("                 row field; orthogonal to subject_class.")
+    print("                 (object_kind is preserved in JSON as source/provenance)")
     print("")
     for row in rows:
         print(f"- {row['node_id']}")
-        print(f"  kind:       {row['object_kind']}")
+        print(f"  subject_class: {row['subject_class']}")
+        print(f"  access_class:  {row['access_class']}")
         print(f"  site:       {row['site']}")
         print(f"  lifecycle:  {row['lifecycle_state']}")
         print(f"  admission:  {row['admission_state']} / {row['first_touch_state']}")

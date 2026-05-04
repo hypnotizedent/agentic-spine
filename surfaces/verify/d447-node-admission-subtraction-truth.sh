@@ -1022,6 +1022,8 @@ row = rows[0]
 required_fields = [
     "node_id",
     "object_kind",
+    "subject_class",
+    "access_class",
     "site",
     "lifecycle_state",
     "durable_identifiers",
@@ -1506,5 +1508,92 @@ for required_token in ("canonical_plane_access", "plane_access_for_roles", "emit
     if required_token not in node_admission_text:
         fail(f"node-admission-status must consume canonical_plane_access: missing token {required_token!r} (PACKET-840 Stage 1)")
 
-print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, machine specs stay inside admission, active role runtime truth is composed, and candidate evidence cannot promote itself")
+# PACKET-985: subject_class + access_class as first-class row fields.
+# Asserts (a) every emitted row carries both, (b) values are inside approved
+# enums, (c) operator-facing readback teaches the two fields and the old
+# single "kind:" public teaching line is gone, (d) object_kind remains in JSON
+# for D447 + D455 + downstream compatibility.
+SUBJECT_CLASS_VALUES = {
+    "physical_machine",
+    "vm",
+    "appliance",
+    "network_device",
+    "portable_media",
+    "unknown",
+}
+ACCESS_CLASS_VALUES = {
+    "ssh",
+    "bmc",
+    "tailscale",
+    "lan",
+    "declared_only",
+    "unreachable",
+    "absent",
+}
+
+proc = subprocess.run(
+    [str(node_admission), "--json"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    fail(f"node.admission.status --json must succeed (exit {proc.returncode}; stderr: {proc.stderr[:200]})")
+full_payload = json.loads(proc.stdout)
+full_rows = full_payload.get("rows") or []
+if not full_rows:
+    fail("node.admission.status --json must emit at least one row for subject_class/access_class enforcement")
+
+missing_subject = [r.get("node_id") for r in full_rows if "subject_class" not in r]
+missing_access = [r.get("node_id") for r in full_rows if "access_class" not in r]
+if missing_subject:
+    fail(f"node.admission.status rows missing subject_class field: {missing_subject[:5]}")
+if missing_access:
+    fail(f"node.admission.status rows missing access_class field: {missing_access[:5]}")
+
+bad_subject = [
+    (r.get("node_id"), r.get("subject_class"))
+    for r in full_rows
+    if r.get("subject_class") not in SUBJECT_CLASS_VALUES
+]
+bad_access = [
+    (r.get("node_id"), r.get("access_class"))
+    for r in full_rows
+    if r.get("access_class") not in ACCESS_CLASS_VALUES
+]
+if bad_subject:
+    fail(f"node.admission.status subject_class values outside approved enum: {bad_subject[:5]}")
+if bad_access:
+    fail(f"node.admission.status access_class values outside approved enum: {bad_access[:5]}")
+
+# object_kind remains present on every row (D455 + cap internals depend on it).
+missing_object_kind = [r.get("node_id") for r in full_rows if "object_kind" not in r]
+if missing_object_kind:
+    fail(f"node.admission.status rows missing object_kind (compatibility regression): {missing_object_kind[:5]}")
+
+# Operator-facing readback: must teach subject_class + access_class, and the
+# old single "  kind:       " teaching line must be gone. object_kind value
+# may still appear elsewhere (vocabulary mention, JSON), but the public
+# per-row "kind:       <value>" line is the named subtraction.
+proc_human = subprocess.run(
+    [str(node_admission)],
+    text=True,
+    capture_output=True,
+)
+if proc_human.returncode != 0:
+    fail(f"node.admission.status (human readback) must succeed (exit {proc_human.returncode})")
+human_out = proc_human.stdout
+if "subject_class:" not in human_out:
+    fail("node.admission.status human readback must teach subject_class field per row")
+if "access_class:" not in human_out:
+    fail("node.admission.status human readback must teach access_class field per row")
+# The retired single public "kind:" teaching line was: "  kind:       <object_kind>"
+# Detect by looking for the per-row kind line shape (two leading spaces, "kind:",
+# whitespace, value). Use a regex anchored to line start to avoid matching
+# "subject_class" or vocabulary descriptions.
+import re as _re
+retired_kind_line = _re.compile(r"^  kind:\s+\S+$", _re.MULTILINE)
+if retired_kind_line.search(human_out):
+    fail("node.admission.status human readback still emits retired single 'kind:' per-row line (PACKET-985 subtraction target)")
+
+print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, machine specs stay inside admission, active role runtime truth is composed, candidate evidence cannot promote itself, canonical_plane_access is locked from contract through cap (PACKET-840 Stage 2 organ 5 / PACKET-1045), and per-row subject_class + access_class are first-class with object_kind preserved (PACKET-985)")
 PY
