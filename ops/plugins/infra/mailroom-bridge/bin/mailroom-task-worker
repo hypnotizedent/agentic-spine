@@ -259,6 +259,49 @@ def _writeback_log(message: str) -> None:
         pass
 
 
+def _run_with_retry(
+    cmd: list[str],
+    *,
+    label: str,
+    canonical_path: str,
+    attempts: int = 4,
+    timeout: int = 15,
+) -> tuple[int, str, str]:
+    """Run a transport command with brief backoff."""
+    backoff = 1.5
+    for attempt in range(1, attempts + 1):
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+            rc = p.returncode
+            stdout = p.stdout or ""
+            stderr = (p.stderr or "").strip()[:240]
+        except Exception as exc:
+            rc = -1
+            stdout = ""
+            stderr = f"exception={exc!r}"
+        if rc == 0:
+            return 0, stdout, stderr
+        transient = (
+            "Connection closed" in stderr
+            or "Connection reset" in stderr
+            or "Connection timed out" in stderr
+            or "kex_exchange_identification" in stderr
+        )
+        if not transient or attempt == attempts:
+            _writeback_log(
+                f"{label} failed canonical={canonical_path} attempt={attempt}/{attempts} "
+                f"rc={rc} stderr={stderr}"
+            )
+            return rc, stdout, stderr
+        _writeback_log(
+            f"{label} transient canonical={canonical_path} attempt={attempt}/{attempts} "
+            f"rc={rc} stderr={stderr} — backing off {backoff:.1f}s"
+        )
+        time.sleep(backoff)
+        backoff *= 2
+    return -1, "", "retry loop exhausted"
+
+
 def _write_task_fields_via_ssh(canonical_path: str, fields: dict[str, Any]) -> bool:
     """Boring transfer + atomic remote merge (PACKET-880 replacement).
 
@@ -295,43 +338,6 @@ def _write_task_fields_via_ssh(canonical_path: str, fields: dict[str, Any]) -> b
         ssh_base.extend(shlex.split(identity_opts))
     target_spec = f"{user}@{resolved_host}"
 
-    def _run_with_retry(cmd: list[str], label: str, attempts: int = 4) -> int:
-        """Run a transport command with brief backoff. Standing-worker passes
-        fire many SSH connections per task (cap.sh routes claim/heartbeat/
-        complete/fail) and pve sshd's MaxStartups can briefly close new
-        connections — log shows 'Connection closed by ... port 22' before
-        auth. Backoff retries absorb the burst without authority change."""
-        backoff = 1.5
-        for attempt in range(1, attempts + 1):
-            try:
-                p = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
-                rc = p.returncode
-                stderr = (p.stderr or "").strip()[:240]
-            except Exception as exc:
-                rc = -1
-                stderr = f"exception={exc!r}"
-            if rc == 0:
-                return 0
-            transient = (
-                "Connection closed" in stderr
-                or "Connection reset" in stderr
-                or "Connection timed out" in stderr
-                or "kex_exchange_identification" in stderr
-            )
-            if not transient or attempt == attempts:
-                _writeback_log(
-                    f"{label} failed canonical={canonical_path} attempt={attempt}/{attempts} "
-                    f"rc={rc} stderr={stderr}"
-                )
-                return rc
-            _writeback_log(
-                f"{label} transient canonical={canonical_path} attempt={attempt}/{attempts} "
-                f"rc={rc} stderr={stderr} — backing off {backoff:.1f}s"
-            )
-            time.sleep(backoff)
-            backoff *= 2
-        return -1
-
     try:
         # 1. write fields YAML locally
         with tempfile.NamedTemporaryFile(
@@ -351,7 +357,8 @@ def _write_task_fields_via_ssh(canonical_path: str, fields: dict[str, Any]) -> b
         if identity_opts:
             scp_cmd.extend(shlex.split(identity_opts))
         scp_cmd.extend([local_tmp, f"{target_spec}:{remote_tmp}"])
-        if _run_with_retry(scp_cmd, "scp") != 0:
+        rc, _stdout, _stderr = _run_with_retry(scp_cmd, label="scp", canonical_path=canonical_path)
+        if rc != 0:
             return False
 
         # 3. ssh + invoke named remote merge script (retry on transient close)
@@ -359,7 +366,8 @@ def _write_task_fields_via_ssh(canonical_path: str, fields: dict[str, Any]) -> b
             target_spec,
             "python3", REMOTE_MERGE_SCRIPT, canonical_path, remote_tmp,
         ]
-        if _run_with_retry(merge_cmd, "merge") != 0:
+        rc, _stdout, _stderr = _run_with_retry(merge_cmd, label="merge", canonical_path=canonical_path)
+        if rc != 0:
             return False
         return True
     except Exception as exc:
@@ -901,11 +909,14 @@ def _fetch_canonical_prompt(canonical_path: str, task_id: str) -> tuple[Path, di
         return None
     if not _is_under_canonical_state(canonical_path):
         return None
-    if not SSH_RESOLVER.is_file():
-        return None
     host_ref, _remote_root, reason = _canonical_queue_target()
     if reason != "fetch" or not host_ref:
         return None
+    endpoint = _ssh_endpoint(host_ref)
+    if endpoint is None:
+        _writeback_log(f"prompt-fetch endpoint resolve failed host_ref={host_ref} canonical={canonical_path}")
+        return None
+    user, resolved_host, identity_opts = endpoint
     if not str(PROMPT_CACHE_FENCE):
         return None
     fence = PROMPT_CACHE_FENCE / task_id
@@ -914,25 +925,26 @@ def _fetch_canonical_prompt(canonical_path: str, task_id: str) -> tuple[Path, di
     except OSError:
         return None
     local_path = fence / Path(canonical_path).name
-    script = f'''
-set -euo pipefail
-source {shlex.quote(str(SSH_RESOLVER))}
-target={shlex.quote(host_ref)}
-src={shlex.quote(canonical_path)}
-resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
-user="$(ssh_resolve_user "$target" ubuntu)"
-identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
-ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" "cat \\"$src\\""
-'''
-    try:
-        proc = subprocess.run(["bash", "-lc", script], cwd=str(ROOT), capture_output=True, text=True, timeout=20, check=False)
-    except Exception:
+    ssh_cmd = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=8",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+    ]
+    if identity_opts:
+        ssh_cmd.extend(shlex.split(identity_opts))
+    ssh_cmd.extend([f"{user}@{resolved_host}", "cat", canonical_path])
+    rc, stdout, _stderr = _run_with_retry(
+        ssh_cmd,
+        label="prompt-fetch",
+        canonical_path=canonical_path,
+        timeout=20,
+    )
+    if rc != 0 or not stdout:
         return None
-    if proc.returncode != 0 or not proc.stdout:
-        return None
     try:
-        local_path.write_text(proc.stdout, encoding="utf-8")
+        local_path.write_text(stdout, encoding="utf-8")
     except OSError:
         return None
     fetch_proof: dict[str, Any] = {
