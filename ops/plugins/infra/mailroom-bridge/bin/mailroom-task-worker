@@ -295,6 +295,43 @@ def _write_task_fields_via_ssh(canonical_path: str, fields: dict[str, Any]) -> b
         ssh_base.extend(shlex.split(identity_opts))
     target_spec = f"{user}@{resolved_host}"
 
+    def _run_with_retry(cmd: list[str], label: str, attempts: int = 4) -> int:
+        """Run a transport command with brief backoff. Standing-worker passes
+        fire many SSH connections per task (cap.sh routes claim/heartbeat/
+        complete/fail) and pve sshd's MaxStartups can briefly close new
+        connections — log shows 'Connection closed by ... port 22' before
+        auth. Backoff retries absorb the burst without authority change."""
+        backoff = 1.5
+        for attempt in range(1, attempts + 1):
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+                rc = p.returncode
+                stderr = (p.stderr or "").strip()[:240]
+            except Exception as exc:
+                rc = -1
+                stderr = f"exception={exc!r}"
+            if rc == 0:
+                return 0
+            transient = (
+                "Connection closed" in stderr
+                or "Connection reset" in stderr
+                or "Connection timed out" in stderr
+                or "kex_exchange_identification" in stderr
+            )
+            if not transient or attempt == attempts:
+                _writeback_log(
+                    f"{label} failed canonical={canonical_path} attempt={attempt}/{attempts} "
+                    f"rc={rc} stderr={stderr}"
+                )
+                return rc
+            _writeback_log(
+                f"{label} transient canonical={canonical_path} attempt={attempt}/{attempts} "
+                f"rc={rc} stderr={stderr} — backing off {backoff:.1f}s"
+            )
+            time.sleep(backoff)
+            backoff *= 2
+        return -1
+
     try:
         # 1. write fields YAML locally
         with tempfile.NamedTemporaryFile(
@@ -303,7 +340,7 @@ def _write_task_fields_via_ssh(canonical_path: str, fields: dict[str, Any]) -> b
             fh.write(fields_yaml)
             local_tmp = fh.name
 
-        # 2. scp local tempfile to remote tempdir
+        # 2. scp local tempfile to remote tempdir (retry on transient close)
         scp_cmd = [
             "scp",
             "-o", "BatchMode=yes",
@@ -314,25 +351,15 @@ def _write_task_fields_via_ssh(canonical_path: str, fields: dict[str, Any]) -> b
         if identity_opts:
             scp_cmd.extend(shlex.split(identity_opts))
         scp_cmd.extend([local_tmp, f"{target_spec}:{remote_tmp}"])
-        scp_proc = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=15, check=False)
-        if scp_proc.returncode != 0:
-            _writeback_log(
-                f"scp failed canonical={canonical_path} rc={scp_proc.returncode} "
-                f"stderr={(scp_proc.stderr or '').strip()[:240]}"
-            )
+        if _run_with_retry(scp_cmd, "scp") != 0:
             return False
 
-        # 3. ssh + invoke named remote merge script
+        # 3. ssh + invoke named remote merge script (retry on transient close)
         merge_cmd = ssh_base + [
             target_spec,
             "python3", REMOTE_MERGE_SCRIPT, canonical_path, remote_tmp,
         ]
-        merge_proc = subprocess.run(merge_cmd, capture_output=True, text=True, timeout=15, check=False)
-        if merge_proc.returncode != 0:
-            _writeback_log(
-                f"merge failed canonical={canonical_path} rc={merge_proc.returncode} "
-                f"stderr={(merge_proc.stderr or '').strip()[:240]}"
-            )
+        if _run_with_retry(merge_cmd, "merge") != 0:
             return False
         return True
     except Exception as exc:
