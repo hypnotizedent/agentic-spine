@@ -207,9 +207,66 @@ def _terminal_file(task_id: str, state: str) -> Path:
     return TASK_ROOT / state / f"{task_id}.yaml"
 
 
+def _write_task_fields_via_ssh(canonical_path: str, fields: dict[str, Any]) -> bool:
+    """SSH-fetch the canonical task envelope, merge fields, write back via SSH.
+
+    Used when the worker host is not the canonical authority host (so the
+    envelope file does not exist locally) but the worker still needs to land
+    bridge_proof or terminal-state fields on the canonical envelope per
+    D452 verify gate. Reuses the ssh-resolve helper pattern. Refuses
+    non-canonical absolute paths to keep the surface narrow."""
+    if not canonical_path or not canonical_path.startswith(CANONICAL_STATE_ROOT_DEFAULT + "/"):
+        return False
+    if not SSH_RESOLVER.is_file():
+        return False
+    host_ref, _remote_root, reason = _canonical_queue_target()
+    if reason != "fetch" or not host_ref:
+        return False
+    fields_yaml = yaml.safe_dump(fields, sort_keys=False)
+    script = f'''
+set -euo pipefail
+source {shlex.quote(str(SSH_RESOLVER))}
+target={shlex.quote(host_ref)}
+src={shlex.quote(canonical_path)}
+resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
+user="$(ssh_resolve_user "$target" ubuntu)"
+identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
+ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" \
+    "python3 - \\"$src\\" <<'PYEOF'
+import sys, yaml, os
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        doc = yaml.safe_load(f) or {{}}
+except FileNotFoundError:
+    sys.exit(0)
+fields = yaml.safe_load(sys.stdin) or {{}}
+if isinstance(doc, dict) and isinstance(fields, dict):
+    doc.update(fields)
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        yaml.safe_dump(doc, f, sort_keys=False)
+    os.replace(tmp, path)
+PYEOF
+" <<'STDIN_FIELDS'
+{fields_yaml}
+STDIN_FIELDS
+'''
+    try:
+        proc = subprocess.run(["bash", "-lc", script], cwd=str(ROOT), capture_output=True, text=True, timeout=20, check=False)
+    except Exception:
+        return False
+    return proc.returncode == 0
+
+
 def _write_task_fields(path: Path, fields: dict[str, Any]) -> None:
     doc = _task_doc(path)
     if not doc:
+        # Non-authority host: envelope is on canonical pve; route the merge
+        # via SSH so D452 still sees bridge_proof / terminal fields on the
+        # canonical envelope. Same canonical-vs-local class as queue/prompt.
+        _write_task_fields_via_ssh(str(path), fields)
         return
     doc.update(fields)
     tmp = path.with_suffix(".yaml.tmp")
