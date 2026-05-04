@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import sqlite3
 from datetime import datetime, timezone
@@ -373,19 +374,18 @@ def gap_count(conn: sqlite3.Connection) -> int:
 
 def next_gap_id(conn: sqlite3.Connection) -> str:
     """Return the next sequential GAP-OP-XXXX id."""
-    row = conn.execute(
-        "SELECT gap_id FROM gaps ORDER BY gap_id DESC LIMIT 1"
-    ).fetchone()
-    if row is None:
-        return "GAP-OP-0001"
-    last = row["gap_id"]
-    # Extract numeric suffix
-    parts = last.rsplit("-", 1)
-    if len(parts) == 2 and parts[1].isdigit():
-        next_num = int(parts[1]) + 1
-    else:
-        next_num = gap_count(conn) + 1
-    return f"GAP-OP-{next_num}"
+    max_num = 0
+    for row in conn.execute("SELECT gap_id FROM gaps"):
+        text = str(row["gap_id"] or "").strip()
+        match = re.fullmatch(r"GAP-OP-(\d+)", text)
+        if match:
+            num = int(match.group(1))
+            # Historical manually-shaped IDs like GAP-OP-20260429 are dates,
+            # not sequence values. Do not let them hijack auto allocation.
+            if 20_000_000 <= num <= 20_999_999:
+                continue
+            max_num = max(max_num, num)
+    return f"GAP-OP-{max_num + 1:04d}"
 
 
 def upsert_gap(conn: sqlite3.Connection, gap: dict[str, Any]) -> None:
