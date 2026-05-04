@@ -41,6 +41,7 @@ NAME="" OBJECTIVE="" PRIORITY="medium" HORIZON="now" READINESS="runnable" EXEC_M
 SOURCE_REF="" HUMAN_INTENT_ID="" MATERIALIZATION_STATUS="" MATERIALIZATION_REF=""
 FORCE=0
 JSON_OUTPUT=0
+DRY_RUN=0
 declare -a PHASES=()
 declare -a SUCCESS_CRITERIA=()
 declare -a DOD_ITEMS=()
@@ -63,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --dod)       DOD_ITEMS+=("${2:?--dod requires a value}"); shift 2 ;;
     --force)     FORCE=1; shift ;;
     --json)      JSON_OUTPUT=1; shift ;;
+    --dry-run)   DRY_RUN=1; shift ;;
     --self-check)
       # Exercise every sed_inplace call shape against a tmp file. Catches
       # BSD/GNU sed divergence (PACKET-599 root cause) without needing a
@@ -113,11 +115,13 @@ driven_by_intents:\\
       echo "       [--source-ref REF] [--human-intent-id HI-ID]"
       echo "       [--materialization-status STATUS] [--materialization-ref REF]"
       echo "       [--phase \"Step 1:desc\"]... [--success \"criterion\"]... [--dod \"item\"]..."
-      echo "       [--force] [--json]"
+      echo "       [--force] [--json] [--dry-run]"
       echo ""
       echo "Creates a new loop scope file from template with optional scaffold sections."
       echo "Blocks if an active loop with overlapping scope exists (use --force to override)."
       echo "Use --json for machine-consumable output."
+      echo "Use --dry-run to run all preflight (name validation + collision check) and emit"
+      echo "  the would-be loop_id without writing scope file or SQLite row."
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -265,6 +269,23 @@ fi
 
 # Derive scope from name (lowercase, first word)
 SCOPE="$(echo "$NORM_NAME" | tr '[:upper:]' '[:lower:]' | cut -d'-' -f1)"
+
+# Dry-run short-circuit: all preflight (name validation, WIP cap, scope-file
+# uniqueness, archive collision, owner-overlap keyword check) has run above.
+# Emit the would-be loop_id without writing the scope file or SQLite row.
+# This lets callers probe whether a name is novel without silently creating a
+# spurious loop on miss.
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+    printf '{"loop_id":"%s","scope_file":"%s","birth_parity":"dry-run","would_create":true}\n' \
+      "$LOOP_ID" "$SCOPE_FILE"
+  else
+    echo "DRY-RUN: $LOOP_ID"
+    echo "Would create: $SCOPE_FILE"
+    echo "(no scope file written, no SQLite row created)"
+  fi
+  exit 0
+fi
 
 # Ensure scopes directory exists
 mkdir -p "$SCOPES_DIR"

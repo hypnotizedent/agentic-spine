@@ -1246,6 +1246,44 @@ _route_to_db_authority_if_needed() {
         return 1
     fi
 
+    # FR-20260504T012320Z-ce9cbf: For caps that accept both --body-source PATH
+    # (local file path) and --body-inline (stdin), the PATH is consumer-side
+    # context — the routed cap on the authority host cannot read it. Detect
+    # the (--body-source, PATH) pair on the consumer side, read PATH locally,
+    # rewrite args to --body-inline, and pipe content over the SSH stdin.
+    # Currently scoped to controller_prompt.create — the only cap with this
+    # pairing.
+    local body_stdin_file=""
+    if [[ "$cap_name" == "controller_prompt.create" ]]; then
+        local rewritten_args=()
+        local i=0
+        local n=${#cap_args[@]}
+        while (( i < n )); do
+            local a="${cap_args[$i]}"
+            if [[ "$a" == "--body-source" && $((i + 1)) -lt $n ]]; then
+                local body_path="${cap_args[$((i + 1))]}"
+                if [[ -f "$body_path" && -r "$body_path" ]]; then
+                    # Local file readable on consumer — rewrite to stdin pipe.
+                    body_stdin_file="$body_path"
+                    rewritten_args+=("--body-inline")
+                    i=$((i + 2))
+                    continue
+                else
+                    # Local file does not exist — fail fast on consumer with a
+                    # clear pointer rather than emitting a confusing pve-side
+                    # "body source file not found" after routing.
+                    echo "cap.sh: --body-source path not found on consumer host: $body_path" >&2
+                    echo "  → controller_prompt.create runs on the routed authority host." >&2
+                    echo "  → Provide a path readable on this host, or pipe via --body-inline." >&2
+                    return 2
+                fi
+            fi
+            rewritten_args+=("$a")
+            i=$((i + 1))
+        done
+        cap_args=("${rewritten_args[@]}")
+    fi
+
     local quoted_args=""
     local arg
     for arg in "${cap_args[@]}"; do
@@ -1336,12 +1374,24 @@ _route_to_db_authority_if_needed() {
         route_label="${route_labels[$idx]}"
         attempted_routes+=("${route_label}:${route_addr}")
         set +e
-        if [[ -n "$key_path" && "$key_path" != "null" ]]; then
-            ssh -i "$key_path" -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
-                "${user}@${route_addr}" "${remote_cmd}"
+        if [[ -n "$body_stdin_file" ]]; then
+            # Pipe the consumer-resolved body file as SSH stdin. The remote
+            # cap reads it via --body-inline (sys.stdin.read()).
+            if [[ -n "$key_path" && "$key_path" != "null" ]]; then
+                ssh -i "$key_path" -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
+                    "${user}@${route_addr}" "${remote_cmd}" < "$body_stdin_file"
+            else
+                ssh -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
+                    "${user}@${route_addr}" "${remote_cmd}" < "$body_stdin_file"
+            fi
         else
-            ssh -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
-                "${user}@${route_addr}" "${remote_cmd}"
+            if [[ -n "$key_path" && "$key_path" != "null" ]]; then
+                ssh -i "$key_path" -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
+                    "${user}@${route_addr}" "${remote_cmd}"
+            else
+                ssh -o BatchMode=yes -o ConnectTimeout="${connect_timeout:-10}" \
+                    "${user}@${route_addr}" "${remote_cmd}"
+            fi
         fi
         routed_rc=$?
         set -e

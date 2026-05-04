@@ -3,13 +3,41 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 
-MODE="summary"
-if [[ "${1:-}" == "--json" ]]; then
-  MODE="json"
-fi
+usage() {
+  cat <<EOF
+Usage: loops-status [--json | --list-ids [--status STATUS]]
 
-if [[ "$MODE" == "json" ]]; then
-  python3 - "$ROOT" <<'PY'
+Modes:
+  (default)        Human-readable aggregate summary (counts by status/severity/owner).
+  --json           Compact JSON aggregate ({capability, status, open_loops}).
+  --list-ids       JSON array of loop rows ({loop_id, status, owner, severity, scope_file}).
+                   Defaults to live loops (active/draft/open/planned/blocked).
+                   Use --status open|active|planned|closed|all to filter.
+
+This cap is read-only and routes to the loops authority host (shared_authority.db).
+EOF
+}
+
+MODE="summary"
+STATUS_FILTER="live"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --json)      MODE="json"; shift ;;
+    --list-ids)  MODE="list-ids"; shift ;;
+    --status)    STATUS_FILTER="${2:?--status requires a value}"; shift 2 ;;
+    -h|--help)   usage; exit 0 ;;
+    *) echo "loops-status: unknown arg: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$MODE" in
+  summary)
+    exec "$ROOT/bin/ops" loops summary
+    ;;
+  json)
+    python3 - "$ROOT" <<'PY'
 import json
 import subprocess
 import sys
@@ -36,7 +64,99 @@ payload = {
 print(json.dumps(payload, indent=2))
 sys.exit(0 if proc.returncode == 0 else proc.returncode)
 PY
-  exit $?
-fi
+    exit $?
+    ;;
+  list-ids)
+    python3 - "$ROOT" "$STATUS_FILTER" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
 
-exec "$ROOT/bin/ops" loops summary
+root = Path(sys.argv[1])
+status_filter = sys.argv[2].strip().lower()
+
+lib_path = root / "ops" / "plugins" / "core" / "lifecycle" / "lib"
+sys.path.insert(0, str(lib_path))
+
+# Status filter buckets — mirror ops/commands/loops.sh semantics.
+LIVE_STATUSES = {"active", "draft", "open", "planned", "blocked"}
+OPEN_STATUSES = {"active", "draft", "open"}
+CLOSED_STATUSES = {"closed", "completed", "deferred", "superseded", "abandoned", "landed"}
+
+if status_filter in ("live", ""):
+    keep = LIVE_STATUSES
+elif status_filter == "open":
+    keep = OPEN_STATUSES
+elif status_filter == "closed":
+    keep = CLOSED_STATUSES
+elif status_filter == "all":
+    keep = LIVE_STATUSES | CLOSED_STATUSES
+elif status_filter in LIVE_STATUSES | CLOSED_STATUSES:
+    keep = {status_filter}
+else:
+    print(
+        f"loops-status --list-ids: unknown --status value '{status_filter}'. "
+        "Expected one of: live, open, closed, all, "
+        "active, draft, planned, blocked, closed, completed, deferred, "
+        "superseded, abandoned, landed.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+try:
+    import loops_sql_authority as lsa  # type: ignore
+    db_path, _ = lsa.resolve_paths(root)
+    conn = lsa.connect(db_path)
+    lsa.ensure_schema(conn)
+    rows = lsa.list_loops(conn)
+    conn.close()
+except Exception as exc:  # noqa: BLE001
+    if type(exc).__name__ == "DbAuthorityRoutingRequired":
+        print(
+            "loops.status --list-ids: db_authority routing required. "
+            "Invoke via 'bin/ops cap run loops.status -- --list-ids' so the "
+            "read routes to the authority host.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print(f"loops.status --list-ids: SQLite read failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+state_root = os.environ.get("SPINE_STATE", "")
+scopes_dir = Path(state_root) / "loop-scopes" if state_root else None
+archive_dir = Path(state_root) / "archive" / "closed-loop-scopes" if state_root else None
+
+
+def scope_file_for(loop_id: str) -> str:
+    for d in (scopes_dir, archive_dir):
+        if d is None:
+            continue
+        candidate = d / f"{loop_id}.scope.md"
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
+out = []
+for row in rows:
+    loop_id = str(row.get("loop_id") or "").strip()
+    if not loop_id:
+        continue
+    status = str(row.get("status") or "").strip().lower()
+    if status not in keep:
+        continue
+    out.append({
+        "loop_id": loop_id,
+        "status": status,
+        "owner": str(row.get("owner") or "unassigned").strip() or "unassigned",
+        "severity": str(row.get("priority") or "-").strip() or "-",
+        "scope_file": scope_file_for(loop_id),
+    })
+
+out.sort(key=lambda r: r["loop_id"])
+print(json.dumps(out, indent=2))
+PY
+    exit $?
+    ;;
+esac
