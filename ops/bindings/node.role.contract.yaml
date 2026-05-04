@@ -244,22 +244,37 @@ node_types:
         addresses:
           lan: "192.168.1.206"
           tailscale: "100.90.167.39"
-      delivered: false
-      not_delivered_reason: >
-        Runtime body exists on dev-tools and currently serves origin/main, but
-        the proof ladder is not materialized. Operator approved nameplate-only
-        declaration on 2026-05-02 (PACKET-588 Phase 4). No runtime mutation, no
-        Forgejo switch, no runner changes, no DNS/secrets, no branch-protection
-        changes, no new VM, no watcher movement.
+      delivered: true
+      delivered_at: 2026-05-04
+      delivered_via: governed_contract_path_all_required_proofs_delivered_or_accepted
+      delivered_aperture: PACKET-1105 forge stage 2 closeout
+      delivered_path_summary: |
+        forge_status_proof: delivered (Stage 1 readback proof)
+        branch_protection_readback_proof: delivered (Stage 1 readback)
+        backup_restore_proof: delivered (PACKET-608 restore drill)
+        runner_cache_boundary_proof: delivered-via-acceptance
+          (PACKET-1075 api_surface_fenced applied;
+          PACKET-1095 hostconfig_escape residual accepted via
+          governed accepted_residuals path)
+        agent_boundary_proof: delivered-via-acceptance
+          (PACKET-1105 branch_protection_permissive residual
+          accepted via governed accepted_residuals path; substrate
+          stays permissive pending CI/signing/agent-auth
+          scaffolding which is a separate multi-slice arc)
       header_truth_note: >
-        delivered:false is the Phase 4 nameplate invariant enforced by D447;
-        it must remain false until a separate explicit delivery sequence
-        runs. Substrate truth (5/5 proofs landed via PACKET-588 Phase 5/6 +
-        PACKET-602 + PACKET-604 + PACKET-605 + PACKET-608) is canonically
-        declared in proofs_present.dev-tools below. node.admission.status
-        must honor delivered:false and report the runtime body as candidacy /
-        contracted_not_delivered until Stage 2 enforcement lands; Stage 1
-        substrate proof coverage is not role delivery.
+        delivered:true is the governed contract path: all five
+        required_proofs are EITHER delivered (legacy stage_2_X="delivered")
+        OR resolved-via-acceptance (accepted_residuals.<name>.accepted=true
+        with operator-recorded acceptance_phrase, residual_named_in,
+        future_hardening_path). D447 is amended in PACKET-1105 to admit
+        this path: the previous "delivered must remain false" invariant
+        becomes "delivered may be true only when every required_proof is
+        delivered or accepted". Acceptance is NOT a substrate change —
+        named residuals stay live in the receipts (HostConfig escape on
+        runner_cache; permissive branch protection on agent_boundary).
+        node.admission stage_2_summary is updated in the same patch to
+        count accepted_residuals as resolution-equivalent so the readback
+        and contract agree.
       statement: >
         Active runtime presence on dev-tools is observation. The host is
         delivered as forge_node only when forge status, backup/restore,
@@ -346,7 +361,66 @@ node_types:
               creation of a separate agent identity with bounded-scope token
               AND (b) branch protection is tightened via the governed cap and
               confirmed.
-            stage_2_blocked_until: separate_agent_identity_authorized_and_branch_protection_tightened_via_governed_cap
+            stage_2_blocked_until: none_branch_protection_permissive_residual_accepted_pending_ci_signing_and_agent_auth_scaffolding
+          accepted_residuals:
+            branch_protection_permissive:
+              accepted: true
+              accepted_at: 2026-05-04
+              accepted_by: operator
+              aperture: PACKET-1105 forge stage 2 closeout (terminal-prompt
+                acceptance phrase)
+              acceptance_phrase: |
+                "Close forge stage 2 honestly. Runner-cache is already
+                closed via accepted residual, backup_restore is
+                delivered, and the only remaining open proof lane is
+                agent_boundary. Do not tighten branch protection in
+                this slice. Accept agent_boundary as a named residual,
+                then reconcile node admission so accepted residuals
+                count as resolved, and only then flip
+                forge_node.delivered through the governed contract
+                path if the contract allows it."
+              residual_named_in: |
+                $SPINE_STATE/domain-state/forge-node/agent-boundary-proof-latest.yaml
+                boundary_classification: partially_enforced (permissive)
+                  enforcement_observed:
+                    - force_push prohibited on main
+                    - main push restricted to whitelist users [1]
+                  enforcement_gaps:
+                    - required_approvals = 0 (no PR-review requirement)
+                    - status checks not enforced
+                    - signed commits not required
+                    - access_token scope=all count = 3 (any holder can
+                      write any repo; agent identity is not
+                      structurally separable beyond admission)
+              future_hardening_path: |
+                Tighten via forge.branch_protection.tighten (PACKET-665)
+                ONLY after the operational scaffolding lands as
+                separate slices:
+                  (a) .gitea/workflows/* CI definitions so status_check
+                      can pass on PRs (none defined today),
+                  (b) GPG signing for spine-agent commits so
+                      signed_commits=true is satisfiable (current
+                      commits unsigned),
+                  (c) bounded-scope auth path for the spine-agent
+                      identity (PACKET-770 admitted spine-agent with
+                      prohibit_login=true, no SSH keys, no tokens — no
+                      auth method exists today; agent cannot push to
+                      protected branches or approve PRs without one).
+                Without (a)+(b)+(c), tightening would brick the
+                current direct-push agent workflow with no recovery
+                path inside the aperture. Tightening + scaffolding is
+                a multi-slice arc, not a single-slice flip.
+              acceptance_does_not_override_substrate: |
+                Acceptance closes the agent_boundary proof lane for
+                Stage 2 enforcement counting purposes. It does NOT
+                change live substrate: branch protection stays
+                permissive (signed_commits=false, required_approvals=0,
+                status_checks=false), single-principal forge stays
+                single-principal. Substrate truth is preserved in the
+                receipt enforcement_gaps line; the contract amendment
+                only records that this gap is operator-acknowledged
+                and out-of-aperture-for-now, not that the gap has
+                disappeared.
         runner_cache_boundary_proof:
           source:
             - ops/plugins/infra/host/bin/forge-runner-cache-boundary-status

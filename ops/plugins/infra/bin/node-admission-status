@@ -884,19 +884,50 @@ def _forge_node_stage_2_summary() -> dict[str, Any]:
     readbacks teach the same Stage 2 vocabulary. PACKET-619 vocabulary
     alignment: admission per-host line surfaces Stage 2 partial progress
     when forge_node candidacy is contracted_not_delivered.
+
+    PACKET-1105 extension: accepted_residuals at the proof level (peer of
+    staged_delivery) count as resolution-equivalent to delivered for
+    summary purposes. The substrate gap is preserved in the receipt
+    enforcement_gaps line — acceptance is a contract-level
+    acknowledgment that the gap is operator-recorded and out-of-aperture-
+    for-now, NOT a claim that the gap has disappeared. Reuses the
+    existing pattern introduced for runner_cache (PACKET-1095). The
+    summary distinguishes delivered (substrate-resolved) from accepted
+    (operator-acknowledged residual) so consumers can see which flavor
+    of resolution applies to each proof.
+
+    Single-stage proofs (no staged_delivery block) are reported in a
+    separate bucket so the Stage 2 numbers stay honest — they are
+    auto-resolved by virtue of Stage 1 proof_ref presence (validated
+    elsewhere in D447) and are NOT counted as Stage 2 not_declared,
+    which was the prior categorization bug.
     """
     node_role = load_yaml(NODE_ROLE_CONTRACT)
     forge_node = ((node_role.get("node_types") or {}).get("forge_node") or {})
     required = (forge_node.get("promotion_standard") or {}).get("required_proofs") or {}
-    declared = delivered = future = not_declared = 0
+    declared = delivered = accepted = future = not_declared = 0
+    single_stage = 0
     delivered_items: list[str] = []
+    accepted_items: list[str] = []
     future_items: list[str] = []
+    single_stage_items: list[str] = []
     for name, body in required.items():
         if not isinstance(body, dict):
             continue
         staged = body.get("staged_delivery")
+        accepted_residuals = body.get("accepted_residuals") or {}
+        any_accepted = isinstance(accepted_residuals, dict) and any(
+            isinstance(v, dict) and v.get("accepted") is True
+            for v in accepted_residuals.values()
+        )
         if not isinstance(staged, dict):
-            not_declared += 1
+            if any_accepted:
+                declared += 1
+                accepted += 1
+                accepted_items.append(name)
+            else:
+                single_stage += 1
+                single_stage_items.append(name)
             continue
         primary_status = None
         for key, value in staged.items():
@@ -907,7 +938,12 @@ def _forge_node_stage_2_summary() -> dict[str, Any]:
             primary_status = str(value) if value is not None else None
             break
         if primary_status is None:
-            not_declared += 1
+            if any_accepted:
+                declared += 1
+                accepted += 1
+                accepted_items.append(name)
+            else:
+                not_declared += 1
             continue
         declared += 1
         if primary_status == "delivered":
@@ -916,13 +952,22 @@ def _forge_node_stage_2_summary() -> dict[str, Any]:
         elif primary_status == "future":
             future += 1
             future_items.append(name)
+        elif any_accepted:
+            accepted += 1
+            accepted_items.append(name)
     return {
         "declared": declared,
         "delivered": delivered,
+        "accepted": accepted,
         "future": future,
         "not_declared": not_declared,
+        "single_stage": single_stage,
         "delivered_items": delivered_items,
+        "accepted_items": accepted_items,
         "future_items": future_items,
+        "single_stage_items": single_stage_items,
+        "resolved": delivered + accepted + single_stage,
+        "resolved_items": delivered_items + accepted_items + single_stage_items,
     }
 
 

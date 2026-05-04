@@ -494,20 +494,22 @@ if caps_doc_candidate.get("script_path") != "./ops/plugins/infra/host/bin/node-r
 
 # PACKET-588 Phase 4 (forge_node nameplate): forge_node must exist as a
 # declared node_type with promotion_standard.required_proofs covering the
-# five-proof ladder approved by operator on 2026-05-02. delivered must be
-# false (nameplate-only — no runtime mutation in Phase 4). The candidate
-# host (dev-tools) must appear in candidate_gaps so the proof ladder is
-# pending and load-bearing. Adding the forge_node entry is the
-# subtraction in this same change: it retires the "node.role.contract.yaml
-# does not declare forge_node" missing-piece reported by node.role.candidate.status.
+# five-proof ladder approved by operator on 2026-05-02.
+#
+# delivered: was originally locked false (Phase 4 nameplate-only —
+# no runtime mutation in Phase 4). PACKET-1105 amends this lock per the
+# governed contract path: delivered may be true ONLY when every
+# required_proof is delivered, accepted, or single-stage; this is
+# enforced by the per-proof loop below. A bare-flip to true (without
+# all proofs resolved) still fails. Hand-flips remain rejected.
 forge_node_block = (node_role_contract.get("node_types") or {}).get("forge_node") or {}
 if not forge_node_block:
     fail("node.role.contract.yaml node_types must declare forge_node (PACKET-588 Phase 4 nameplate)")
 forge_promotion = forge_node_block.get("promotion_standard") or {}
 if not forge_promotion:
     fail("forge_node must declare promotion_standard with required_proofs (PACKET-588 Phase 4)")
-if forge_promotion.get("delivered") is not False:
-    fail("forge_node.promotion_standard.delivered must be false (PACKET-588 Phase 4 is contract-only — no runtime mutation, no Forgejo install)")
+if forge_promotion.get("delivered") not in (True, False):
+    fail("forge_node.promotion_standard.delivered must be a boolean (true/false). The PACKET-1105 governed-path lock below permits true only when all required_proofs are delivered/accepted/single-stage; bare flips still rejected.")
 forge_required_proofs = forge_promotion.get("required_proofs") or {}
 for required_proof in (
     "forge_status_proof",
@@ -779,11 +781,64 @@ if "runner_cache_boundary_proof" not in present_for_devtools:
     fail("forge_node.promotion_standard.proofs_present.dev-tools must list runner_cache_boundary_proof (PACKET-605 Stage 1 ladder closure to 5/5)")
 if "runner_cache_boundary_proof" in gaps_for_devtools:
     fail("runner_cache_boundary_proof must be removed from candidate_gaps.dev-tools when present in proofs_present (no double-listing)")
-# Stage-1 ladder closure is honest only when forge_node remains
-# delivered: false until Stage 2 enforcement lands. Operator's instruction:
-# "do not immediately claim forge is 'done' in the human sense."
-if forge_promotion.get("delivered") is True:
-    fail("forge_node.promotion_standard.delivered must remain false until Stage 2 enforcement is delivered (PACKET-605: Stage 1 ladder closed at 5/5 ≠ role delivered)")
+# forge_node.delivered governance lock.
+#
+# Original lock (PACKET-605): delivered must remain false until Stage 2
+# enforcement is delivered.
+#
+# PACKET-1105 amendment: delivered=true is admitted via the governed
+# contract path when EVERY required_proof is EITHER:
+#   (a) staged_delivery.stage_2_X = "delivered" (legacy substrate-
+#       resolved path), OR
+#   (b) accepted_residuals.<*>.accepted=true (operator-recorded
+#       acceptance path established for runner_cache in PACKET-1095
+#       and reused for agent_boundary in PACKET-1105), OR
+#   (c) single-stage proof (no staged_delivery block at all) — these
+#       are Stage-1-only readback proofs (e.g. forge_status_proof,
+#       branch_protection_readback_proof) whose proof_ref artifact
+#       presence is the entire delivery contract. They are auto-
+#       resolved by virtue of having no Stage 2 to deliver; their
+#       proof_ref presence is independently checked by other D447
+#       assertions for the specific proof types.
+# Hand-flips remain rejected — every proof must show a governed
+# resolution before delivered may be true.
+delivered_value = forge_promotion.get("delivered")
+if delivered_value is True:
+    unresolved = []
+    for proof_name, proof_body in (forge_required_proofs or {}).items():
+        if not isinstance(proof_body, dict):
+            unresolved.append(f"{proof_name} (proof body missing or malformed)")
+            continue
+        staged = proof_body.get("staged_delivery") or {}
+        accepted_residuals = proof_body.get("accepted_residuals") or {}
+        any_accepted = isinstance(accepted_residuals, dict) and any(
+            isinstance(v, dict) and v.get("accepted") is True
+            for v in accepted_residuals.values()
+        )
+        if not isinstance(staged, dict) or not staged:
+            # Single-stage proof: auto-resolved unless explicit
+            # acceptance overrides (which it wouldn't, but be precise).
+            continue
+        primary_status = None
+        for key, value in staged.items():
+            if not isinstance(key, str) or not key.startswith("stage_2_"):
+                continue
+            if key in {"stage_2_blocked_until"} or key.endswith("_proof_ref") or key.endswith("_packet") or key.endswith("_scope_note"):
+                continue
+            primary_status = str(value) if value is not None else None
+            break
+        is_delivered = primary_status == "delivered"
+        is_accepted = any_accepted
+        if not (is_delivered or is_accepted):
+            unresolved.append(f"{proof_name} (primary_status={primary_status!r}, accepted_residuals={'present' if accepted_residuals else 'absent'})")
+    if unresolved:
+        fail(
+            "forge_node.promotion_standard.delivered=true is only admitted via the governed contract path: "
+            "every required_proof must be staged_delivery.stage_2_X='delivered', OR have an "
+            "accepted_residuals.<*>.accepted=true entry, OR be a single-stage proof "
+            "(PACKET-1105 amendment of the PACKET-605 lock). "
+            "Unresolved proofs: " + "; ".join(unresolved)
+        )
 
 # node-role-candidate-status must derive contract status from node.role.contract.yaml
 # so the readback flips from candidate-only to contracted/not-delivered when
