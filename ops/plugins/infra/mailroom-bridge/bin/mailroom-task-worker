@@ -11,7 +11,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -207,57 +209,147 @@ def _terminal_file(task_id: str, state: str) -> Path:
     return TASK_ROOT / state / f"{task_id}.yaml"
 
 
-def _write_task_fields_via_ssh(canonical_path: str, fields: dict[str, Any]) -> bool:
-    """SSH-fetch the canonical task envelope, merge fields, write back via SSH.
+REMOTE_MERGE_SCRIPT = "/opt/agentic-spine/ops/plugins/infra/mailroom-bridge/lib/canonical-envelope-merge.py"
+WRITEBACK_LOG_PATH = (
+    Path(os.environ.get("SPINE_LOGS") or (Path(STATE_ROOT) / "logs"))
+    if STATE_ROOT
+    else Path()
+) / "mailroom-task-worker-writeback.log"
 
-    Used when the worker host is not the canonical authority host (so the
-    envelope file does not exist locally) but the worker still needs to land
-    bridge_proof or terminal-state fields on the canonical envelope per
-    D452 verify gate. Reuses the ssh-resolve helper pattern. Refuses
-    non-canonical absolute paths to keep the surface narrow."""
+
+def _ssh_endpoint(host_ref: str) -> tuple[str, str, str] | None:
+    """Resolve (user, resolved_host, identity_opts_str) using ssh-resolve.sh.
+    Returns None on failure. Single-purpose helper so the writeback path
+    has no shell-script construction."""
+    if not host_ref or not SSH_RESOLVER.is_file():
+        return None
+    script = (
+        f"source {shlex.quote(str(SSH_RESOLVER))}\n"
+        f"target={shlex.quote(host_ref)}\n"
+        'resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk \'{print $1}\')"\n'
+        'user="$(ssh_resolve_user "$target" ubuntu)"\n'
+        'identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"\n'
+        'printf "%s\\t%s\\t%s\\n" "$user" "$resolved" "$identity_opts"\n'
+    )
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", script], cwd=str(ROOT), capture_output=True, text=True, timeout=8, check=False
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    parts = proc.stdout.strip().split("\t")
+    if len(parts) < 3:
+        return None
+    user, resolved_host, identity_opts = parts[0], parts[1], parts[2]
+    if not resolved_host:
+        return None
+    return user, resolved_host, identity_opts
+
+
+def _writeback_log(message: str) -> None:
+    """Append a single timestamped line to the worker writeback log so
+    silent failures stop being silent. Best-effort; never raises."""
+    try:
+        WRITEBACK_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with WRITEBACK_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(f"[{_now()}] {message}\n")
+    except OSError:
+        pass
+
+
+def _write_task_fields_via_ssh(canonical_path: str, fields: dict[str, Any]) -> bool:
+    """Boring transfer + atomic remote merge (PACKET-880 replacement).
+
+    Replaces the prior nested-heredoc-over-SSH writer that PACKET-820/830
+    proved silently fails from the long-running standing-worker subprocess.
+    Path: write fields YAML to a local tempfile -> scp to a unique remote
+    temp path under /tmp -> ssh+invoke the named remote merge script with
+    two file path args -> capture stderr, log on failure, cleanup.
+
+    Refuses non-canonical absolute paths to keep the surface narrow.
+    """
     if not canonical_path or not canonical_path.startswith(CANONICAL_STATE_ROOT_DEFAULT + "/"):
-        return False
-    if not SSH_RESOLVER.is_file():
         return False
     host_ref, _remote_root, reason = _canonical_queue_target()
     if reason != "fetch" or not host_ref:
         return False
-    fields_yaml = yaml.safe_dump(fields, sort_keys=False)
-    script = f'''
-set -euo pipefail
-source {shlex.quote(str(SSH_RESOLVER))}
-target={shlex.quote(host_ref)}
-src={shlex.quote(canonical_path)}
-resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
-user="$(ssh_resolve_user "$target" ubuntu)"
-identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
-ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" \
-    "python3 - \\"$src\\" <<'PYEOF'
-import sys, yaml, os
-path = sys.argv[1]
-try:
-    with open(path) as f:
-        doc = yaml.safe_load(f) or {{}}
-except FileNotFoundError:
-    sys.exit(0)
-fields = yaml.safe_load(sys.stdin) or {{}}
-if isinstance(doc, dict) and isinstance(fields, dict):
-    doc.update(fields)
-    tmp = path + '.tmp'
-    with open(tmp, 'w') as f:
-        yaml.safe_dump(doc, f, sort_keys=False)
-    os.replace(tmp, path)
-PYEOF
-" <<'STDIN_FIELDS'
-{fields_yaml}
-STDIN_FIELDS
-'''
-    try:
-        proc = subprocess.run(["bash", "-lc", script], cwd=str(ROOT), capture_output=True, text=True, timeout=20, check=False)
-    except Exception:
+    endpoint = _ssh_endpoint(host_ref)
+    if endpoint is None:
+        _writeback_log(f"endpoint resolve failed host_ref={host_ref} canonical={canonical_path}")
         return False
-    return proc.returncode == 0
+    user, resolved_host, identity_opts = endpoint
+
+    fields_yaml = yaml.safe_dump(fields, sort_keys=False)
+    local_tmp = None
+    remote_tmp = f"/tmp/spine-bridge-proof-{uuid.uuid4().hex}.yaml"
+    ssh_base = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=8",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+    ]
+    if identity_opts:
+        ssh_base.extend(shlex.split(identity_opts))
+    target_spec = f"{user}@{resolved_host}"
+
+    try:
+        # 1. write fields YAML locally
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", prefix="spine-bridge-proof-", delete=False, encoding="utf-8",
+        ) as fh:
+            fh.write(fields_yaml)
+            local_tmp = fh.name
+
+        # 2. scp local tempfile to remote tempdir
+        scp_cmd = [
+            "scp",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=8",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+        ]
+        if identity_opts:
+            scp_cmd.extend(shlex.split(identity_opts))
+        scp_cmd.extend([local_tmp, f"{target_spec}:{remote_tmp}"])
+        scp_proc = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=15, check=False)
+        if scp_proc.returncode != 0:
+            _writeback_log(
+                f"scp failed canonical={canonical_path} rc={scp_proc.returncode} "
+                f"stderr={(scp_proc.stderr or '').strip()[:240]}"
+            )
+            return False
+
+        # 3. ssh + invoke named remote merge script
+        merge_cmd = ssh_base + [
+            target_spec,
+            "python3", REMOTE_MERGE_SCRIPT, canonical_path, remote_tmp,
+        ]
+        merge_proc = subprocess.run(merge_cmd, capture_output=True, text=True, timeout=15, check=False)
+        if merge_proc.returncode != 0:
+            _writeback_log(
+                f"merge failed canonical={canonical_path} rc={merge_proc.returncode} "
+                f"stderr={(merge_proc.stderr or '').strip()[:240]}"
+            )
+            return False
+        return True
+    except Exception as exc:
+        _writeback_log(f"writeback exception canonical={canonical_path} exc={exc!r}")
+        return False
+    finally:
+        # 4. cleanup local + remote temp files (best effort)
+        if local_tmp:
+            try:
+                os.unlink(local_tmp)
+            except OSError:
+                pass
+        try:
+            cleanup_cmd = ssh_base + [target_spec, "rm", "-f", remote_tmp]
+            subprocess.run(cleanup_cmd, capture_output=True, text=True, timeout=8, check=False)
+        except Exception:
+            pass
 
 
 def _local_to_canonical_state_path(local_path: str) -> str:
