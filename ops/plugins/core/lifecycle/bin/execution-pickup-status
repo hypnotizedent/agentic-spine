@@ -34,6 +34,7 @@ SSH_RESOLVER = ROOT / "ops" / "lib" / "ssh-resolve.sh"
 STALE_SECONDS = int(os.environ.get("EXECUTION_PICKUP_STALE_SECONDS") or "300")
 CANONICAL_TASK_ROOT_DEFAULT = "/md1400/spine/state/agent-tasks"
 LOCAL_CANONICAL_FETCH_DISABLE = os.environ.get("EXECUTION_PICKUP_DISABLE_CANONICAL_FETCH", "").strip() == "1"
+CANONICAL_PLANE_ACCESS_BINDING = "ops/bindings/node.role.contract.yaml#canonical_plane_access.by_role"
 
 
 ACTIVE_DELEGATION_STATES = {"delegated", "picked_up", "executing", "running"}
@@ -421,6 +422,7 @@ def collect_wave_dispatches(rows: list[dict[str, Any]]) -> None:
                 heartbeat_at=dispatch.get("heartbeat_at"),
                 result=dispatch.get("result"),
                 run_key=dispatch.get("run_key"),
+                task_source="local",
             )
 
 
@@ -448,6 +450,7 @@ def collect_delegations(rows: list[dict[str, Any]]) -> None:
             heartbeat_at=heartbeat,
             heartbeat_age_seconds=heartbeat_age,
             task=str(doc.get("summary") or doc.get("objective") or "")[:180],
+            task_source="local",
         )
 
 
@@ -508,6 +511,26 @@ def _local_hostname() -> str:
         return subprocess.check_output(["hostname"], text=True, timeout=2).strip()
     except Exception:
         return ""
+
+
+def canonical_plane_access_role() -> str:
+    """Derive the canonical_plane_access role of the host running this cap.
+
+    Reads the same db_authority signal `_canonical_fetch_target` reads:
+    - 'authority_local' reason → storage_evidence_node (this host owns canonical)
+    - hostname matches ai-consolidation pattern → execution_host
+    - everything else → operator_console
+
+    Three roles are sufficient for the surfaces that consume this readback;
+    watcher / forge / translator / verification roles are not pickup consumers.
+    """
+    _target, reason = _canonical_fetch_target()
+    if reason == "authority_local":
+        return "storage_evidence_node"
+    host = _local_hostname().lower()
+    if host.startswith("ai-cons") or "ai-consolidation" in host:
+        return "execution_host"
+    return "operator_console"
 
 
 def _canonical_fetch_target() -> tuple[dict[str, str], str]:
@@ -813,9 +836,13 @@ def collect() -> dict[str, Any]:
     summary = summarize(rows)
     summary["canonical_task_source"] = canonical_status
     summary["canonical_task_rows"] = canonical_rows
+    role = canonical_plane_access_role()
     return {
         "capability": "execution.pickup.status",
         "generated_at": now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "canonical_plane_access_role": role,
+        "plane_access_source": f"{CANONICAL_PLANE_ACCESS_BINDING}.{role}",
+        "canonical_queue_source": canonical_status,
         "summary": summary,
         "worker": worker_status(),
         "requests": rows,
@@ -847,6 +874,12 @@ def render_human(data: dict[str, Any]) -> None:
     summary = data["summary"]
     worker = data["worker"]
     print("execution.pickup.status")
+    print()
+    role = data.get("canonical_plane_access_role") or "unknown"
+    source = data.get("plane_access_source") or ""
+    print(f"  plane access role: {role}")
+    if source:
+        print(f"  plane access source: {source}")
     print()
     print(f"  requests:          {summary['requests_total']} active")
     print(f"  not claimed:       {summary['not_claimed']}")
