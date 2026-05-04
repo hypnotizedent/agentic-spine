@@ -27,8 +27,11 @@ doctrine/runtime contradiction, migration residue, and unresolved control-plane
 truth.
 
 Subtraction aperture discipline:
-- Every first-class L1/L2 improvement must subtract the old surface it replaces.
-  Construction is not completion.
+- Every first-class L1/L2 improvement, and every doctrine or rule change that
+  names a live specimen of the disease it labels, must subtract the old surface
+  or named specimen it replaces in the same slice. Construction is not
+  completion. Naming a carrier and leaving it in place is labeling without
+  enforcement and recreates the disease the rule was supposed to retire.
 - The spine core defines canonical protocol shape, custody, heartbeat/readback,
   result/failure, receipt, role truth, and retirement gates. It must not absorb
   L3 domain bodies, app-specific logic, or old shard behavior as new
