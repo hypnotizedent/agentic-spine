@@ -21,6 +21,7 @@ PATHS = {
     "home_device": ROOT / "ops/bindings/home.device.registry.yaml",
     "unifi_home": ROOT / "ops/bindings/network.unifi.home.clients.observed.yaml",
     "unifi_shop": ROOT / "ops/bindings/network.unifi.shop.clients.observed.yaml",
+    "site_profile": ROOT / "ops/bindings/site.profile.contract.yaml",
 }
 
 
@@ -28,6 +29,47 @@ def load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     return data if isinstance(data, dict) else {}
+
+
+# PACKET-1115: load site.profile.contract.yaml and emit a top-level
+# site_profiles block plus per-row profile_ref. Profiles are NOT embedded
+# per-row; profile_ref is a foreign-key string into site_profiles.
+def load_site_profiles() -> dict[str, dict[str, Any]]:
+    """Return mapping of site_id -> profile dict from site.profile.contract.yaml.
+
+    Returns an empty dict if the contract is missing — D448 enforces presence,
+    so consumers downstream do not need to defend against this case in normal
+    operation; the empty dict keeps the cap tolerant during the contract's
+    own creation slice.
+    """
+    path = PATHS["site_profile"]
+    if not path.exists():
+        return {}
+    doc = load_yaml(path)
+    profiles: dict[str, dict[str, Any]] = {}
+    for entry in (doc.get("sites") or []):
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get("site_id")
+        if isinstance(sid, str) and sid:
+            profiles[sid] = entry
+    return profiles
+
+
+def resolve_profile_ref(row_site: str, profiles: dict[str, dict[str, Any]]) -> str:
+    """Map a presence row's site label to a profile_ref foreign-key.
+
+    Returns the contract's site_id when one matches; falls back to the
+    sentinel "unknown" only when no profile matches AND the contract carries
+    an "unknown" sentinel row. D448 (assertion l) enforces that profile_ref
+    "unknown" appears ONLY when row.site == "unknown".
+    """
+    site = (row_site or "").strip()
+    if site in profiles:
+        return site
+    if "unknown" in profiles:
+        return "unknown"
+    return ""
 
 
 def run_node_admission() -> dict[str, Any]:
@@ -369,6 +411,13 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
             )
         )
 
+    # PACKET-1115: enrich each row with profile_ref (foreign-key into the
+    # top-level site_profiles block emitted by main()). Profiles are NOT
+    # embedded per-row.
+    profiles = load_site_profiles()
+    for row in rows:
+        row["profile_ref"] = resolve_profile_ref(row.get("site", ""), profiles)
+
     return rows
 
 
@@ -389,12 +438,17 @@ def main() -> None:
     args = parser.parse_args()
 
     rows = build_rows(args.site)
+    # PACKET-1115: emit top-level site_profiles block sourced from
+    # site.profile.contract.yaml. Profiles live ONCE here; per-row
+    # profile_ref is the foreign-key into this mapping.
+    site_profiles = load_site_profiles()
     payload = {
         "canonical_authority": "site.presence.status",
         "capability": "site.presence.status",
         "status": "ok",
         "generated_at": datetime.now(UTC).isoformat(),
         "rows": rows,
+        "site_profiles": site_profiles,
         "summary": summarize(rows),
         "subtracted_peer_authority": [
             "ops/bindings/network.unifi.home.clients.observed.yaml",
@@ -408,10 +462,28 @@ def main() -> None:
     print("site.presence.status")
     print(f"rows: {len(rows)}")
     print(f"summary: {json.dumps(payload['summary'], sort_keys=True)}")
+    # PACKET-1115: human readback teaches Site Profiles before per-row presence.
+    print("")
+    print("Site Profiles:")
+    if site_profiles:
+        for sid in sorted(site_profiles.keys()):
+            prof = site_profiles[sid]
+            unverified = prof.get("unverified_fields") or []
+            unv_note = f" unverified={','.join(unverified)}" if unverified else ""
+            print(
+                f"  {sid:10} role={prof.get('site_role')} "
+                f"network={prof.get('network_profile')} power={prof.get('power_profile')} "
+                f"priority={prof.get('operational_priority')} "
+                f"origin={prof.get('topology_origin')}{unv_note}"
+            )
+    else:
+        print("  (site.profile.contract.yaml absent — profiles not loaded)")
+    print("")
     for row in rows:
         print(
             f"- {row['presence_id']} {row['presence_state']} "
-            f"{row['subject']['subject_kind']} {row['identity'].get('ip') or ''}"
+            f"{row['subject']['subject_kind']} {row['identity'].get('ip') or ''} "
+            f"profile_ref={row.get('profile_ref','')}"
         )
 
 

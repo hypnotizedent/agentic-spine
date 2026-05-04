@@ -1,0 +1,132 @@
+status: authoritative
+owner: "@ronny"
+last_verified: "2026-05-04"
+scope: hardware-intelligence-site-profile-ssot
+subordinate_to: ops/bindings/root.authority.contract.yaml
+
+# Site Profile Contract (PACKET-1115)
+#
+# First-class Hardware Intelligence family primitive: per-site HI profile
+# (role, network class, power class, operational priority, physical
+# constraints). Read by site.presence.status and proven by D448.
+#
+# Boundary discipline:
+#   - This contract owns HI PROFILE truth only.
+#   - It does NOT own topology truth (lan_cidr, tailscale_anchor,
+#     proxmox_alias, host_refs, vmid_range, compose_targets).
+#     Topology truth lives in ops/bindings/topology.sites.yaml.
+#   - site_id is a foreign key into topology.sites[].id, OR into the
+#     extension_set declared below for non-topology contexts.
+#
+# Anti-fragmentation rules:
+#   - The unverified value is allowed ONLY where intentionally declared
+#     via the row's unverified_fields list. D448 enforces this two-direction
+#     (fields in unverified_fields must equal "unverified"; fields not in
+#     unverified_fields must NOT equal "unverified").
+#   - extension_set below is machine-readable and authoritative for which
+#     non-topology site IDs may appear in sites:. D448 reads this list
+#     directly from this contract; the gate carries no hardcoded list.
+#
+# Consumer contract: site.presence.status emits top-level site_profiles
+# block (mapping site_id -> profile) plus per-row profile_ref foreign-key.
+# Profiles are NOT embedded per-row.
+
+references:
+  topology_authority: ops/bindings/topology.sites.yaml
+  # Observed-only network evidence (NOT classification authority).
+  # Each pointer names where an unclassified observation is recorded; the
+  # observation does not promote into the HI network_profile enum until
+  # operator assertion. This block exists so D448 / consumers / future
+  # slices can locate observations without re-discovering them, while
+  # network_profile remains "unverified" in sites: rows below.
+  observed_network_evidence:
+    home: ops/bindings/home.unifi.network.inventory.yaml#devices[id=udr-home].uplink
+
+# Machine-readable extension set: site IDs allowed in sites: that are NOT
+# in topology.sites[].id. Each entry must declare topology_origin and
+# topology_origin_reason. D448 reads this list from the contract.
+extension_set:
+  - site_id: mobile
+    topology_origin: not_topology
+    topology_origin_reason: operator_console_roaming_context
+  - site_id: portable
+    topology_origin: not_topology
+    topology_origin_reason: portable_media_context
+  - site_id: unknown
+    topology_origin: sentinel
+    topology_origin_reason: unresolved_site_fallback
+
+# Per-site HI profile rows. Required fields:
+#   site_id, site_role, network_profile, power_profile,
+#   operational_priority, topology_origin, unverified_fields.
+# topology_origin_reason is required when topology_origin != "topology.sites".
+sites:
+  - site_id: home
+    site_role: unverified
+    network_profile: unverified
+    power_profile: unverified
+    operational_priority: unverified
+    topology_origin: topology.sites
+    topology_origin_reason: ""
+    physical_constraints: []
+    unverified_fields: [site_role, network_profile, power_profile, operational_priority]
+    notes: |
+      Home site. Topology in topology.sites.yaml#home. UniFi inventory
+      observes uplink at home.unifi.network.inventory.yaml#devices[id=udr-home].uplink
+      as "ISP modem (Xfinity CGM4981COM)" — observation only; does not
+      classify into the HI network_profile enum, so the field remains
+      unverified pending operator assertion.
+
+  - site_id: shop
+    site_role: unverified
+    network_profile: unverified
+    power_profile: unverified
+    operational_priority: unverified
+    topology_origin: topology.sites
+    topology_origin_reason: ""
+    physical_constraints: []
+    unverified_fields: [site_role, network_profile, power_profile, operational_priority]
+    notes: |
+      Shop site. Topology in topology.sites.yaml#shop. No canonical shop
+      UniFi network inventory (equivalent to home.unifi.network.inventory.yaml)
+      exists today; all HI profile fields unverified pending follow-on
+      slice or operator assertion.
+
+  - site_id: mobile
+    site_role: mobile
+    network_profile: tailscale_only
+    power_profile: light
+    operational_priority: standard
+    topology_origin: not_topology
+    topology_origin_reason: operator_console_roaming_context
+    physical_constraints: [silent_only, small_form_factor_preferred]
+    unverified_fields: []
+    notes: |
+      Operator-console roaming context. Values from operator-authored
+      OI-2fe8 grammar (Site Hardware Intelligence v1 spec).
+
+  - site_id: portable
+    site_role: portable_media
+    network_profile: none
+    power_profile: none
+    operational_priority: low_touch
+    topology_origin: not_topology
+    topology_origin_reason: portable_media_context
+    physical_constraints: [physical_attachment_required]
+    unverified_fields: []
+    notes: |
+      Portable storage / bootstrap media context. site_role=portable_media
+      is canonical from BPA-016 / PACKET-985 subject_class enum.
+
+  - site_id: unknown
+    site_role: sentinel
+    network_profile: none
+    power_profile: none
+    operational_priority: low_touch
+    topology_origin: sentinel
+    topology_origin_reason: unresolved_site_fallback
+    physical_constraints: []
+    unverified_fields: []
+    notes: |
+      Sentinel row. ONLY valid for row.site == unknown in consumers.
+      D448 fails any non-unknown row falling back to profile_ref: unknown.
