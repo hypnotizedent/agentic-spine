@@ -1,0 +1,375 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# verify-engine-smoke-local — thin_vanilla profile sibling of verify-engine
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# PACKET-1165: smallest reusable thin_vanilla CI verify cap. Authored after
+# the L2 CI gate substrate profile split landed in PACKET-1155 (declared at
+# ops/bindings/cross-repo.authority.yaml ci_gate_substrate_profiles
+# .thin_vanilla) named the missing primitive (a.1.ii in PACKET-1145 fix 2's
+# accepted_residuals.branch_protection_permissive.future_hardening_path).
+# mint-modules became the first thin_vanilla consumer in the same wave.
+#
+# Scope: local-only checks that operate on the checked-out workspace and
+# do NOT depend on:
+#   - $SPINE_STATE/shared_authority.db (the canonical SQLite)
+#   - SSH access to pve / dev-tools / any estate host
+#   - /md1400 NFS mount
+#   - Tailscale attachment to spine internals
+#   - Infisical credentials
+#   - cap.sh routing to a remote db_authority
+# Capability declaration carries `routing.db_authority: skip` so cap.sh
+# does NOT try to route this cap to pve. Designed to run unmodified on a
+# vanilla Gitea Actions runner (ubuntu-latest), inside the spine-verify
+# CI workflow that PACKET-1145 surfaced as currently bricked-on-vanilla.
+#
+# Checks (subset of verify-engine, only the local-no-routing ones):
+#   E1  bin/ops entrypoint smoke (--help + cap list)
+#   E4  capabilities registry parseable
+#   E5  no dead hot-path entry references
+#   E6  no dead file references in governed scripts
+#   E7  no dead canonical path references in hot contracts
+#   E8  MANIFEST parity (script existence + capability advertisements)
+#   E13 cap.sh no silent widen-by-fallback to worker on missing
+#       SPINE_RUNTIME_ROLE
+#
+# Explicitly OMITTED (would need db_authority access or routed dispatch):
+#   E2  ops status --json — routes for status detail
+#   E3  SQLite shared authority — needs canonical SQLite at $SPINE_STATE
+#   E12 execution identity parity — invokes session_posture.sh against state
+#   E14 researcher→worker bridge continuity — needs db
+#   E15 status open-loop count anchored to SQLite authority — needs db
+#   E16 public entry grammar lock — content-anchored to spine docs that
+#       may not be present on a stripped vanilla runner clone (kept in
+#       heavy_estate verify.engine.run)
+#
+# Reusability: this cap is spine-specific in its check content (it
+# inspects spine's MANIFEST, capabilities.yaml, contracts), but L3
+# product repos can use this script as a TEMPLATE — author their own
+# `verify.<repo>.smoke.local` cap that follows the same pattern:
+#   - declare routing.db_authority: skip
+#   - operate only on workspace-local files
+#   - skip all checks that would need shared_authority_db or estate access
+#   - exit 0 on PASS, exit 1 on FAIL, JSON output via --json
+# Per ops/bindings/cross-repo.authority.yaml ci_gate_substrate_profile_rules
+# rule 4: thin_vanilla MUST NOT consume caps with state_authority=
+# shared_authority_db.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+_VESL_COMPUTED="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+ROOT="$_VESL_COMPUTED"
+
+# Sanity: required workspace files exist. Without these, the cap is
+# inappropriate for this checkout.
+if [[ ! -f "$ROOT/bin/ops" ]]; then
+    echo "FATAL: $ROOT/bin/ops not found — cap requires a checked-out spine repo workspace" >&2
+    exit 1
+fi
+if [[ ! -f "$ROOT/ops/capabilities.yaml" ]]; then
+    echo "FATAL: $ROOT/ops/capabilities.yaml not found — cap requires a checked-out spine repo workspace" >&2
+    exit 1
+fi
+
+json_mode=0
+self_check=0
+if [[ "${1:-}" == "--" ]]; then shift; fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json) json_mode=1 ;;
+        --self-check) self_check=1 ;;
+        -h|--help)
+            sed -n '2,60p' "$0"
+            echo "Usage: verify-engine-smoke-local [--json] [--self-check]"
+            exit 0
+            ;;
+        *) ;;
+    esac
+    shift
+done
+
+if [[ "$self_check" -eq 1 ]]; then
+    echo "verify-engine-smoke-local self-check PASS"
+    exit 0
+fi
+
+PASS=0
+FAIL=0
+TOTAL=0
+FAILING_IDS=()
+
+check() {
+    local id="$1" name="$2"
+    shift 2
+    TOTAL=$((TOTAL + 1))
+    local output rc
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+        PASS=$((PASS + 1))
+        [[ "$json_mode" -eq 1 ]] || echo "  PASS  $id  $name"
+    else
+        FAIL=$((FAIL + 1))
+        FAILING_IDS+=("$id")
+        if [[ "$json_mode" -eq 0 ]]; then
+            echo "  FAIL  $id  $name"
+            echo "        ${output:0:200}"
+        fi
+    fi
+}
+
+[[ "$json_mode" -eq 1 ]] || echo "=== ENGINE SMOKE (thin_vanilla, local-only) ==="
+[[ "$json_mode" -eq 1 ]] || echo "Scope: workspace-local checks; no shared_authority_db, no routed dispatch, no estate substrate."
+
+# E1: bin/ops entrypoint smoke. --help + cap list both read workspace-local
+# files only (capabilities.yaml). Does NOT route to db_authority.
+check E1 "bin/ops entrypoint smoke" bash -c "
+    '$ROOT/bin/ops' --help >/dev/null 2>&1 \
+        && '$ROOT/bin/ops' cap list >/dev/null 2>&1
+"
+
+# E4: capabilities registry parseable and non-empty. Pure file read.
+check E4 "capability registry parseable" bash -c "
+    cap_file='$ROOT/ops/capabilities.yaml'
+    [[ -f \"\$cap_file\" ]] || exit 1
+    if command -v yq >/dev/null 2>&1; then
+        yq e '.capabilities | length' \"\$cap_file\" 2>/dev/null | grep -qE '^[1-9]'
+    else
+        python3 -c \"
+import sys, yaml
+with open('\$cap_file') as f:
+    d = yaml.safe_load(f)
+caps = (d or {}).get('capabilities') or {}
+sys.exit(0 if (isinstance(caps, dict) and len(caps) >= 1) or (isinstance(caps, list) and len(caps) >= 1) else 1)
+\"
+    fi
+"
+
+# E5: no dead hot-path entry references. Filesystem-local check.
+check E5 "no dead entry references on hot path" bash -c "
+    dead_refs=0
+    for f in \
+        '$ROOT/ops/bindings/entry.surface.contract.yaml' \
+        '$ROOT/ops/bindings/session.admission.contract.yaml' \
+        '$ROOT/ops/plugins/core/session/bin/terminal-launch-exec' \
+        '$ROOT/ops/bindings/terminal.worker.catalog.yaml' \
+        '$ROOT/ops/bindings/terminal.launcher.view.yaml'; do
+        [[ -f \"\$f\" ]] && dead_refs=\$((dead_refs + 1))
+    done
+    [[ \$dead_refs -eq 0 ]]
+"
+
+# E6: no dead file references in governed scripts. Filesystem-local check.
+# Same scan as verify-engine E6.
+check E6 "no dead file references in governed scripts" bash -c '
+    dead=0
+    scan_dirs=(
+        "'"$ROOT"'/ops/commands"
+        "'"$ROOT"'/ops/plugins/core/verify/bin"
+        "'"$ROOT"'/ops/plugins/core/authority/bin"
+        "'"$ROOT"'/ops/plugins/core/lifecycle/bin"
+        "'"$ROOT"'/ops/plugins/core/orchestration/bin"
+        "'"$ROOT"'/ops/plugins/core/session/bin"
+        "'"$ROOT"'/ops/plugins/core/bin"
+        "'"$ROOT"'/ops/plugins/core/alerting/bin"
+        "'"$ROOT"'/ops/plugins/core/alerting/lib"
+        "'"$ROOT"'/ops/plugins/infra/host/bin"
+    )
+    for dir in "${scan_dirs[@]}"; do
+        [[ -d "$dir" ]] || continue
+        while IFS= read -r script; do
+            [[ -f "$script" ]] || continue
+            while IFS= read -r line; do
+                ref=""
+                trimmed="${line#"${line%%[![:space:]]*}"}"
+                [[ "$trimmed" == \#* ]] && continue
+                if [[ "$line" =~ (source|python3|bash)[[:space:]]+[\"\$]*\{?(ROOT|CONTROL_ROOT|SPINE_REPO|_VE_COMPUTED|_VEH_COMPUTED|_VESL_COMPUTED)\}?/([^\"[:space:]\$]+) ]]; then
+                    ref="${BASH_REMATCH[3]}"
+                fi
+                [[ -n "$ref" ]] || continue
+                full="'"$ROOT"'/$ref"
+                if [[ ! -f "$full" && ! -d "$full" ]]; then
+                    echo "DEAD: $(basename "$script") -> $ref"
+                    dead=$((dead + 1))
+                fi
+            done < "$script"
+        done < <(find "$dir" -maxdepth 1 -type f \( -name "*.sh" -o -name "*.py" -o ! -name "*.*" \) 2>/dev/null)
+    done
+    if [[ $dead -gt 0 ]]; then
+        echo "$dead dead file reference(s) found"
+        exit 1
+    fi
+'
+
+# E7: no dead canonical path references in hot contracts. YAML + filesystem.
+check E7 "no dead canonical path references in hot contracts" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+import yaml
+
+root = Path(sys.argv[1])
+STRICT_SUFFIXES = (".yaml", ".yml", ".sh", ".py", ".json", ".md")
+
+checks = [
+    {
+        "contract": root / "ops/bindings/runtime.bootstrap.contract.yaml",
+        "paths": [
+            ("authority.canonical_boot_surface", ["authority", "canonical_boot_surface"], False),
+            ("bootstrap_preconditions.required_contracts[]", ["bootstrap_preconditions", "required_contracts"], False),
+        ],
+    },
+    {
+        "contract": root / "ops/bindings/terminal.worker.projection.contract.yaml",
+        "paths": [
+            ("policy.authority_binding", ["policy", "authority_binding"], False),
+            ("governed_surfaces[].wrapper", ["governed_surfaces", "wrapper"], False),
+            ("governed_surfaces[].tracked_output", ["governed_surfaces", "tracked_output"], False),
+            ("generator.path", ["generator", "path"], False),
+        ],
+    },
+]
+
+def iter_values(node, path):
+    if not path:
+        yield node
+        return
+    head, *tail = path
+    if isinstance(node, list):
+        for item in node:
+            yield from iter_values(item, path)
+        return
+    if not isinstance(node, dict) or head not in node:
+        return
+    yield from iter_values(node[head], tail)
+
+missing = []
+for entry in checks:
+    contract = entry["contract"]
+    if not contract.is_file():
+        continue
+    data = yaml.safe_load(contract.read_text(encoding="utf-8")) or {}
+    for label, path, suffix_only in entry["paths"]:
+        for raw in iter_values(data, path):
+            if not isinstance(raw, str):
+                continue
+            rel = raw.strip()
+            if not rel or rel.startswith("$") or rel.startswith("/") or "://" in rel:
+                continue
+            if suffix_only and not rel.lower().endswith(STRICT_SUFFIXES):
+                continue
+            target = root / rel
+            if not target.exists():
+                missing.append(f"{contract.relative_to(root)}::{label} -> {rel}")
+
+if missing:
+    print("\n".join(missing))
+    raise SystemExit(1)
+PY
+'
+
+# E8: every MANIFEST script entry must resolve on disk. Capability parity
+# enforcement (live registry vs MANIFEST).
+check E8 "MANIFEST script parity + plugin capability parity" bash -c '
+    python3 - "'"$ROOT"'" <<'"'"'PY'"'"'
+from pathlib import Path
+import sys
+import yaml
+
+root = Path(sys.argv[1])
+manifest_path = root / "ops/plugins/MANIFEST.yaml"
+if not manifest_path.is_file():
+    print(f"MANIFEST.yaml not found at {manifest_path}")
+    raise SystemExit(1)
+data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+
+cap_registry_path = root / "ops/capabilities.yaml"
+known_caps = set()
+if cap_registry_path.is_file():
+    reg = yaml.safe_load(cap_registry_path.read_text(encoding="utf-8")) or {}
+    caps = reg.get("capabilities") or {}
+    if isinstance(caps, dict):
+        for name in caps:
+            cn = str(name).strip()
+            if cn:
+                known_caps.add(cn)
+
+missing_scripts = []
+missing_caps = []
+for plugin in data.get("plugins") or []:
+    if not isinstance(plugin, dict):
+        continue
+    plugin_name = str(plugin.get("name") or "").strip()
+    plugin_path = str(plugin.get("path") or "").strip()
+    base = root / plugin_path
+    for rel in plugin.get("scripts") or []:
+        script_rel = str(rel or "").strip()
+        if not script_rel:
+            continue
+        candidate = base / script_rel
+        if not candidate.exists():
+            missing_scripts.append(str(candidate.relative_to(root)))
+    for cap_name in plugin.get("capabilities") or []:
+        cn = str(cap_name or "").strip()
+        if not cn:
+            continue
+        if cn not in known_caps:
+            missing_caps.append(f"{plugin_name}::{cn}")
+
+errs = []
+if missing_scripts:
+    errs.append("MISSING SCRIPTS:\n" + "\n".join(missing_scripts))
+if missing_caps:
+    errs.append("UNRESOLVED CAPABILITIES:\n" + "\n".join(missing_caps))
+if errs:
+    print("\n\n".join(errs))
+    raise SystemExit(1)
+PY
+'
+
+# E13: cap.sh no silent widen-by-fallback to worker on missing
+# SPINE_RUNTIME_ROLE. Source-level grep — no execution, no routing.
+# (Disease class retired in PACKET-588; this guards against regression.)
+check E13 "cap.sh no silent widen-by-fallback to worker" python3 -c "
+import sys
+from pathlib import Path
+cap_sh = Path('$ROOT') / 'ops' / 'cap.sh'
+if not cap_sh.is_file():
+    sys.exit(0)
+src = cap_sh.read_text(encoding='utf-8')
+# Pattern: SPINE_RUNTIME_ROLE assignment that defaults to 'worker' silently.
+# Pre-PACKET-588 disease was 'SPINE_RUNTIME_ROLE=\${SPINE_RUNTIME_ROLE:-worker}'
+# or similar parameter expansion that widened authority on missing var.
+import re
+patt = re.compile(r'SPINE_RUNTIME_ROLE[^\n]*:-\s*worker\b')
+if patt.search(src):
+    print('cap.sh contains a silent fallback to SPINE_RUNTIME_ROLE=worker — verify-engine E13 disease class regression')
+    sys.exit(1)
+sys.exit(0)
+"
+
+# Summary
+[[ "$json_mode" -eq 1 ]] || echo ""
+[[ "$json_mode" -eq 1 ]] || echo "  Results: $PASS pass, $FAIL fail (of $TOTAL checks)"
+
+if [[ "$json_mode" -eq 1 ]]; then
+    failing_csv=""
+    if [[ "${#FAILING_IDS[@]}" -gt 0 ]]; then
+        failing_csv="$(IFS=,; echo "${FAILING_IDS[*]}")"
+    fi
+    cat <<EOF
+{
+  "profile": "thin_vanilla",
+  "scope": "workspace_local_only",
+  "total": $TOTAL,
+  "pass": $PASS,
+  "fail": $FAIL,
+  "failing_ids": "$failing_csv"
+}
+EOF
+fi
+
+exit $((FAIL > 0 ? 1 : 0))
