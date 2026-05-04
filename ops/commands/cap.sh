@@ -350,6 +350,7 @@ ensure_runtime_dirs() {
 list_caps() {
     local show_all=0
     local include_retired=0
+    local include_compat=0
     local json_mode=0
     local requested_execution_class=""
 
@@ -361,6 +362,10 @@ list_caps() {
                 ;;
             --include-retired)
                 include_retired=1
+                shift
+                ;;
+            --include-compat)
+                include_compat=1
                 shift
                 ;;
             --execution-class)
@@ -384,7 +389,7 @@ list_caps() {
 
     local execution_class="${requested_execution_class:-$(current_execution_class)}"
 
-    python3 - "$CAP_FILE" "$ROLE_POLICY_CONTRACT" "$execution_class" "$show_all" "$include_retired" "$json_mode" <<'PY'
+    python3 - "$CAP_FILE" "$ROLE_POLICY_CONTRACT" "$execution_class" "$show_all" "$include_retired" "$json_mode" "$include_compat" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -397,6 +402,7 @@ execution_class = sys.argv[3] or "researcher"
 show_all = sys.argv[4] == "1"
 include_retired = sys.argv[5] == "1"
 json_mode = sys.argv[6] == "1"
+include_compat = len(sys.argv) > 7 and sys.argv[7] == "1"
 
 reg = yaml.safe_load(cap_file.read_text(encoding="utf-8")) or {}
 caps = reg.get("capabilities") or {}
@@ -411,6 +417,7 @@ allowlist = set(allowlist_by_role.get(execution_class) or [])
 rows = []
 hidden_blocked = 0
 hidden_retired = 0
+hidden_compat = 0
 live_total = 0
 retired_total = 0
 
@@ -421,6 +428,8 @@ for name in sorted(caps):
     lifecycle = str(payload.get("lifecycle") or "ready").strip() or "ready"
     safety = str(payload.get("safety") or "").strip()
     desc = str(payload.get("description") or "").strip()
+    public_grammar = str(payload.get("public_grammar") or "").strip().lower()
+    compat_alias_of = str(payload.get("compatibility_alias_of") or "").strip()
     retired = lifecycle.lower() == "retired"
     if retired:
         retired_total += 1
@@ -441,6 +450,9 @@ for name in sorted(caps):
     if retired and not include_retired:
         hidden_retired += 1
         continue
+    if public_grammar == "hidden" and not include_compat:
+        hidden_compat += 1
+        continue
     if not show_all and not legal:
         hidden_blocked += 1
         continue
@@ -455,6 +467,8 @@ for name in sorted(caps):
             "legal_for_execution_class": legal,
             "allowlisted_mutation": allowlisted_mutation,
             "visibility_reason": visibility_reason,
+            "public_grammar": public_grammar or None,
+            "compatibility_alias_of": compat_alias_of or None,
         }
     )
 
@@ -476,6 +490,7 @@ if json_mode:
                     "retired_total": retired_total,
                     "hidden_blocked": hidden_blocked,
                     "hidden_retired": hidden_retired,
+                    "hidden_compat": hidden_compat,
                 },
                 "capabilities": rows,
             },
@@ -499,11 +514,12 @@ print(f"Execution Class: {execution_class}")
 print(f"View:            {view}")
 print(f"Shown:           {len(rows)}")
 print(f"Live Registry:   {live_total}")
-if hidden_blocked or hidden_retired or retired_total:
+if hidden_blocked or hidden_retired or hidden_compat or retired_total:
     print(
         "Hidden:          "
         f"{hidden_blocked} blocked by execution class, "
-        f"{hidden_retired} retired"
+        f"{hidden_retired} retired, "
+        f"{hidden_compat} compatibility (public_grammar: hidden)"
     )
 print("")
 
@@ -515,12 +531,14 @@ for row in rows:
         label += " allowlisted"
     elif show_all and not row["legal_for_execution_class"]:
         label += f" blocked:{execution_class}"
+    if row.get("compatibility_alias_of"):
+        label += f" compat->{row['compatibility_alias_of']}"
     print(f"  {row['name']:<25} [{label}] {row['description']}")
 
 print("")
 print("Run: ops cap run <name> [args...]")
-if not show_all or not include_retired:
-    print("Full registry: ops cap list --all --include-retired")
+if not show_all or not include_retired or not include_compat:
+    print("Full registry: ops cap list --all --include-retired --include-compat")
 PY
 }
 

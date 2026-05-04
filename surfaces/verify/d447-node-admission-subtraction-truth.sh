@@ -386,6 +386,46 @@ if "canonical_update_capability: infra.host.code.deploy.update" in placement_tex
     fail("runtime.checkout.placement.yaml must not name infra.host.code.deploy.update as canonical (PACKET-1105 canonical rename)")
 if "canonical_drift_readback_capability: infra.host.code.drift.status" in placement_text:
     fail("runtime.checkout.placement.yaml must not name infra.host.code.drift.status as canonical (PACKET-1105 canonical rename)")
+
+# PACKET-1125 canonical operator-discovery filter — bin/ops cap list must
+# honor public_grammar: hidden so PACKET-1105 compat wrappers stop appearing
+# as peer grammar. Default hides; --include-compat surfaces them with
+# compat->canonical labeling. Extension of D447 only — NO new D-gate.
+ops_bin = root / "bin/ops"
+if ops_bin.is_file():
+    try:
+        default_proc = subprocess.run(
+            [str(ops_bin), "cap", "list"],
+            capture_output=True, text=True, timeout=20, check=False, cwd=str(root),
+        )
+        compat_proc = subprocess.run(
+            [str(ops_bin), "cap", "list", "--include-compat"],
+            capture_output=True, text=True, timeout=20, check=False, cwd=str(root),
+        )
+    except Exception as exc:
+        fail(f"bin/ops cap list invocation failed: {exc} (PACKET-1125)")
+    default_out = default_proc.stdout or ""
+    compat_out = compat_proc.stdout or ""
+    # Cap-line entries render as "  <name> [<label>] <description>"; the same
+    # cap names also appear inside canonical cap *descriptions* as historical
+    # rename attribution. The filter test must match cap-line entries only,
+    # not in-description prose. Match the leading two-space + name + space.
+    def _cap_line_present(text: str, name: str) -> bool:
+        return f"  {name} [" in text
+    for compat_name in ("infra.host.code.drift.status", "infra.host.code.deploy.update"):
+        if _cap_line_present(default_out, compat_name):
+            fail(f"bin/ops cap list (default) must NOT render {compat_name} as a cap-line entry — public_grammar: hidden filter not honored (PACKET-1125)")
+        if not _cap_line_present(compat_out, compat_name):
+            fail(f"bin/ops cap list --include-compat must render {compat_name} as a cap-line entry (PACKET-1125)")
+    for compat_name, canonical_name in (
+        ("infra.host.code.drift.status", "runtime.checkout.drift.status"),
+        ("infra.host.code.deploy.update", "runtime.checkout.deploy.update"),
+    ):
+        expected_label = f"compat->{canonical_name}"
+        if expected_label not in compat_out:
+            fail(f"bin/ops cap list --include-compat must label {compat_name} with {expected_label} (PACKET-1125)")
+    if "Hidden:" in default_out and "compatibility (public_grammar: hidden)" not in default_out:
+        fail("bin/ops cap list default Hidden: line must name 'compatibility (public_grammar: hidden)' count (PACKET-1125)")
 status_sh_text = (root / "ops/commands/status.sh").read_text(encoding="utf-8")
 if "infra/host/bin/host-code-drift-status" not in status_sh_text:
     fail("ops/commands/status.sh brief output must integrate host-code-drift-status (PACKET-589 ops status --brief deliverable)")
