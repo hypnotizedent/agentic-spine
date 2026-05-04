@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# forge-runner-reregister - L2 host-orchestration cap (PACKET-1015) for
+# rotating the gitea-runner registration token and forcing fresh
+# registration. Closes PACKET-800 gap 1 (owner-global runner): operator
+# generates a new registration token in Gitea web UI (at the scope they
+# want — per-repo vs per-owner — operator decision implicit in
+# generation point), pipes the token to this cap via stdin, and the cap
+# updates /opt/stacks/gitea/.env, deletes /data/.runner inside the
+# gitea-runner container, restarts the container via docker compose,
+# and verifies fresh registration.
+#
+# Default DRY-RUN. --apply --reason both required to mutate. --apply
+# briefly stops the gitea-runner container; CI is unavailable for that
+# window — operator drives apply timing.
+#
+# Stop lines (enforced in script):
+# - Token comes from stdin only — no --token, --token-file, etc.
+# - Token VALUE never appears in stdout, stderr, or receipt body — only
+#   sha256 fingerprints of OLD and NEW values are recorded.
+# - Mutation restricted to gitea-runner service: .env GITEA_RUNNER_TOKEN
+#   key, /data/.runner inside the gitea-runner container, single-service
+#   restart. gitea + gitea-postgres untouched.
+# - No image rebuild; no /var/run/docker.sock mount changes.
+# - No additional .env keys touched (only GITEA_RUNNER_TOKEN).
+#
+# Usage:
+#   printf '%s' '<new-registration-token>' | forge-runner-reregister --apply --reason '<text>'
+#   forge-runner-reregister --dry-run
+#
+# Exit codes:
+#   0   re-registered successfully
+#   1   API/SSH/compose error
+#   2   bad usage / missing dependency / dry-run skipped (no --apply)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+
+stop(){ echo "STOP ($1): $2" >&2; exit "$1"; }
+
+command -v ssh >/dev/null 2>&1 || stop 2 "missing dependency: ssh"
+command -v shasum >/dev/null 2>&1 || stop 2 "missing dependency: shasum"
+command -v python3 >/dev/null 2>&1 || stop 2 "missing dependency: python3"
+
+APPLY=0
+REASON=""
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply) APPLY=1; shift ;;
+    --reason) REASON="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --token|--token-file|--token=*)
+      stop 2 "$1 is forbidden by design; pipe token via stdin instead"
+      ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    *) stop 2 "unknown arg: $1" ;;
+  esac
+done
+
+if [[ "$APPLY" -eq 1 && -z "$REASON" ]]; then
+  stop 2 "--apply requires --reason '<text>'"
+fi
+if [[ "$APPLY" -eq 1 && "$DRY_RUN" -eq 1 ]]; then
+  stop 2 "--apply and --dry-run are mutually exclusive"
+fi
+
+# Resolve forge runtime body via ssh.targets.yaml
+SSH_TARGETS="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+[[ -f "$SSH_TARGETS" ]] || stop 2 "ssh.targets.yaml not found"
+SSH_HOST="$(yq -r '.ssh.targets[] | select(.id == "dev-tools") | (.tailscale_ip // .host)' "$SSH_TARGETS")"
+SSH_USER="$(yq -r '.ssh.targets[] | select(.id == "dev-tools") | .user' "$SSH_TARGETS")"
+[[ -n "$SSH_HOST" && "$SSH_HOST" != "null" ]] || stop 2 "could not resolve dev-tools host"
+[[ -n "$SSH_USER" && "$SSH_USER" != "null" ]] || SSH_USER="ubuntu"
+
+ENV_PATH="/opt/stacks/gitea/.env"
+COMPOSE_DIR="/opt/stacks/gitea"
+RUNNER_SERVICE="gitea-runner"
+RUNNER_STATE_FILE="/data/.runner"
+
+ssh_remote(){
+  ssh -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    "${SSH_USER}@${SSH_HOST}" "$1"
+}
+
+# Probe current GITEA_RUNNER_TOKEN sha256 (no value exposure)
+set +e
+CURRENT_TOKEN_SHA="$(ssh_remote "grep '^GITEA_RUNNER_TOKEN=' ${ENV_PATH} | head -1 | sed 's/^GITEA_RUNNER_TOKEN=//' | shasum -a 256 | awk '{print \$1}'")"
+PROBE_RC=$?
+set -e
+[[ "$PROBE_RC" -eq 0 && -n "$CURRENT_TOKEN_SHA" ]] || stop 1 "could not read GITEA_RUNNER_TOKEN sha from ${ENV_PATH}"
+
+# Probe current /data/.runner state (size + sha; tokens NOT read)
+set +e
+CURRENT_RUNNER_FILE_INFO="$(ssh_remote "docker exec ${RUNNER_SERVICE} sh -c 'wc -c < ${RUNNER_STATE_FILE} 2>/dev/null || echo 0'" 2>&1 || echo 0)"
+set -e
+RUNNER_FILE_BYTES="${CURRENT_RUNNER_FILE_INFO:-0}"
+
+# Read new token from stdin in apply mode
+NEW_TOKEN=""
+NEW_TOKEN_SHA="absent"
+if [[ "$APPLY" -eq 1 ]]; then
+  if [[ -t 0 ]]; then
+    stop 2 "--apply requires new registration token via stdin (printf '%s' '<token>' | ...). TTY stdin refused."
+  fi
+  NEW_TOKEN="$(cat)"
+  NEW_TOKEN="${NEW_TOKEN%$'\n'}"
+  [[ -n "$NEW_TOKEN" ]] || stop 2 "stdin token is empty"
+  NEW_TOKEN_SHA="$(printf '%s' "$NEW_TOKEN" | shasum -a 256 | awk '{print $1}')"
+fi
+
+# Plan
+NEEDS_TOKEN_ROTATION="false"
+if [[ "$APPLY" -eq 1 && "$NEW_TOKEN_SHA" != "$CURRENT_TOKEN_SHA" ]]; then
+  NEEDS_TOKEN_ROTATION="true"
+fi
+
+OUTCOME=""
+if [[ "$APPLY" -eq 1 ]]; then
+  if [[ "$NEEDS_TOKEN_ROTATION" == "false" ]]; then
+    OUTCOME="idempotent_no_op_token_unchanged"
+  else
+    OUTCOME="reregistered"
+  fi
+else
+  OUTCOME="would_reregister"
+fi
+
+# Receipt
+RECEIPT_DIR="${SPINE_STATE}/domain-state/forge-node"
+mkdir -p "$RECEIPT_DIR"
+RECEIPT_PATH="${RECEIPT_DIR}/runner-reregister-latest.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+write_receipt() {
+  local mode="$1"
+  python3 - "$RECEIPT_PATH" "$mode" "$CURRENT_TOKEN_SHA" "$NEW_TOKEN_SHA" \
+    "$RUNNER_FILE_BYTES" "$OUTCOME" "$GENERATED_AT" "$REASON" \
+    "$SSH_HOST" "$SSH_USER" "$ENV_PATH" <<'PYEOF'
+import sys, yaml
+(out, mode, current_sha, new_sha, runner_bytes, outcome, generated_at,
+ reason, host, user, env_path) = sys.argv[1:]
+data = {
+  "proof_class": "runner_reregister_proof",
+  "capability": "forge.runner.reregister",
+  "generated_at": generated_at,
+  "mode": mode,
+  "reason": reason or None,
+  "outcome": outcome,
+  "target": {
+    "host": host,
+    "user": user,
+    "env_path": env_path,
+    "service": "gitea-runner",
+    "runner_state_file": "/data/.runner",
+  },
+  "before": {
+    "gitea_runner_token_sha256": current_sha,
+    "runner_state_file_bytes": int(runner_bytes) if runner_bytes.isdigit() else None,
+  },
+  "after_plan": {
+    "gitea_runner_token_sha256": new_sha,
+    "runner_state_file_bytes": "fresh_registration_pending",
+  },
+  "scope_note": (
+    "L2 host-orchestration primitive (PACKET-1015) for rotating the "
+    "gitea-runner registration token and forcing fresh registration. "
+    "Closes PACKET-800 gap 1 (owner-global runner). Operator generates "
+    "the new token in Gitea web UI; this cap takes the token via stdin, "
+    "rotates .env GITEA_RUNNER_TOKEN, deletes /data/.runner, restarts "
+    "the runner. The new token's scope (per-repo vs per-owner-global) "
+    "is implicit in the operator's generation point in Gitea."
+  ),
+  "stop_lines_respected": [
+    "no --token / --token-file flags (stdin only)",
+    "no token value in stdout/stderr",
+    "no token value in receipt body (sha256 fingerprints only)",
+    "mutation restricted to gitea-runner service + GITEA_RUNNER_TOKEN env key",
+    "no image rebuild; no docker.sock mount changes",
+    "single-service restart (gitea + gitea-postgres untouched)",
+    "default dry-run; --apply --reason required",
+  ],
+}
+with open(out, "w", encoding="utf-8") as fh:
+    yaml.safe_dump(data, fh, sort_keys=False)
+PYEOF
+}
+
+print_render() {
+  local mode="$1"
+  echo "forge.runner.reregister"
+  echo "host: ${SSH_USER}@${SSH_HOST}"
+  echo "env_path: $ENV_PATH"
+  echo "service: $RUNNER_SERVICE"
+  echo "mode: $mode"
+  if [[ -n "$REASON" ]]; then echo "reason: $REASON"; fi
+  echo "before:"
+  echo "  gitea_runner_token_sha256: $CURRENT_TOKEN_SHA"
+  echo "  runner_state_file_bytes: $RUNNER_FILE_BYTES"
+  if [[ "$APPLY" -eq 1 ]]; then
+    echo "after_plan:"
+    echo "  gitea_runner_token_sha256: $NEW_TOKEN_SHA"
+    echo "  runner_state_file: will be deleted; runner re-registers on container restart"
+  fi
+  echo "outcome: $OUTCOME"
+  echo "receipt: $RECEIPT_PATH"
+}
+
+# Dry-run path
+if [[ "$APPLY" -eq 0 || "$DRY_RUN" -eq 1 ]]; then
+  print_render "dry_run"
+  echo "(dry run; no .env mutation, no /data/.runner deletion, no runner restart)"
+  if [[ "$APPLY" -eq 0 ]]; then
+    echo "(default-safe: pipe new registration token via stdin and pass --apply --reason '<text>' to mutate; --apply briefly stops the runner during restart — operator drives timing)"
+    exit 2
+  fi
+  exit 0
+fi
+
+# Apply path: idempotent fast path
+if [[ "$OUTCOME" == "idempotent_no_op_token_unchanged" ]]; then
+  write_receipt "applied"
+  print_render "applied"
+  unset NEW_TOKEN
+  exit 0
+fi
+
+# Step 1: update .env with new token (atomic via temp file + rename)
+ENV_PATCH_SCRIPT='
+import sys, os
+env_path, new_token = sys.argv[1], sys.argv[2]
+lines = []
+with open(env_path) as f:
+    for l in f:
+        if l.startswith("GITEA_RUNNER_TOKEN="):
+            lines.append(f"GITEA_RUNNER_TOKEN={new_token}\n")
+        else:
+            lines.append(l)
+tmp = env_path + ".tmp"
+with open(tmp, "w") as f:
+    f.writelines(lines)
+os.chmod(tmp, 0o600)
+os.rename(tmp, env_path)
+'
+if ! ssh_remote "python3 -c $(printf %q "$ENV_PATCH_SCRIPT") ${ENV_PATH} $(printf %q "$NEW_TOKEN")"; then
+  unset NEW_TOKEN
+  stop 1 "failed to patch ${ENV_PATH}"
+fi
+
+# Step 2: delete /data/.runner inside container so run.sh re-registers on next start
+if ! ssh_remote "docker exec ${RUNNER_SERVICE} rm -f ${RUNNER_STATE_FILE}"; then
+  unset NEW_TOKEN
+  stop 1 "failed to delete ${RUNNER_STATE_FILE} in runner container"
+fi
+
+# Step 3: restart runner via docker compose
+if ! ssh_remote "cd ${COMPOSE_DIR} && sudo -n docker compose up -d gitea-runner"; then
+  unset NEW_TOKEN
+  stop 1 "docker compose up failed (sudo -n required)"
+fi
+
+# Step 4: verify - sleep then check /data/.runner exists with fresh content
+sleep 8
+NEW_RUNNER_BYTES="$(ssh_remote "docker exec ${RUNNER_SERVICE} sh -c 'wc -c < ${RUNNER_STATE_FILE} 2>/dev/null || echo 0'" 2>&1 || echo 0)"
+if [[ "${NEW_RUNNER_BYTES:-0}" -lt 100 ]]; then
+  unset NEW_TOKEN
+  stop 1 "post-restart ${RUNNER_STATE_FILE} is too small (${NEW_RUNNER_BYTES} bytes); runner may have failed to register"
+fi
+
+write_receipt "applied"
+print_render "applied"
+unset NEW_TOKEN
+exit 0

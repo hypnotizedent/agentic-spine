@@ -1378,6 +1378,50 @@ capabilities:
     domain: infra
     plane: fabric
     layer: L2_shared_infrastructure
+  forge.runner.reregister:
+    description: |
+      L2 host-orchestration cap (PACKET-1015) for rotating the
+      gitea-runner registration token and forcing fresh registration.
+      Closes PACKET-800 gap 1 (owner-global runner registration). The
+      operator generates a new registration token in Gitea web UI at
+      the scope they want (per-repo or per-owner-global is implicit in
+      the generation point), pipes the token to this cap via stdin, and
+      the cap rotates GITEA_RUNNER_TOKEN in /opt/stacks/gitea/.env,
+      deletes /data/.runner inside the gitea-runner container, then
+      restarts the container via `sudo -n docker compose up -d
+      gitea-runner` so run.sh re-registers fresh on first boot.
+      Default behavior is DRY-RUN. --apply --reason both required to
+      mutate. --apply briefly stops the gitea-runner container during
+      restart; CI is unavailable for that window — operator drives
+      timing. Stdin-only token (no --token, --token-file, etc); token
+      VALUE never appears in stdout/stderr/receipt — only sha256
+      fingerprints of OLD and NEW values are recorded. Mutation
+      restricted to gitea-runner service + GITEA_RUNNER_TOKEN env key
+      only; gitea + gitea-postgres untouched. No image rebuild; no
+      /var/run/docker.sock mount changes. Receipt at
+      $SPINE_STATE/domain-state/forge-node/runner-reregister-latest.yaml.
+      Args: [--apply --reason '<text>'] [--dry-run]. Token piped via stdin.
+    tags:
+      - infra
+      - forge
+      - host-orchestration
+      - mutating
+      - runner-registration
+    command: ./ops/plugins/infra/host/bin/forge-runner-reregister
+    script_path: ./ops/plugins/infra/host/bin/forge-runner-reregister
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    routing:
+      db_authority: skip
+    outputs:
+      - stdout
+      - $SPINE_STATE/domain-state/forge-node/runner-reregister-latest.yaml
+    domain: infra
+    plane: fabric
+    layer: L2_shared_infrastructure
   forge.runner.config_set:
     description: |
       Smallest L2 host-orchestration primitive (PACKET-965). Toggles
