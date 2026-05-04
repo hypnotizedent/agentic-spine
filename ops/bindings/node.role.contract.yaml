@@ -385,42 +385,72 @@ node_types:
                   enforcement_observed:
                     - force_push prohibited on main
                     - main push restricted to whitelist users [1]
+                    - status checks enforced (require spine-verify
+                      context; PACKET-1135 narrowed residual)
                   enforcement_gaps:
                     - required_approvals = 0 (no PR-review requirement)
-                    - status checks not enforced
                     - signed commits not required
                     - access_token scope=all count = 3 (any holder can
                       write any repo; agent identity is not
                       structurally separable beyond admission)
+              residual_history:
+                - "2026-05-04 PACKET-1105 acceptance recorded 4 enforcement_gaps (required_approvals + status_checks + signed_commits + scope=all tokens)."
+                - "2026-05-04 PACKET-1135 narrowed residual: status_check landed on Gitea side (enable_status_check=true, status_check_contexts={spine-verify}) and the spine-verify workflow file lands on origin/main in this same slice; the 'status checks not enforced' gap is retired from the named residual list. 3 enforcement gaps remain (required_approvals + signed_commits + agent-auth scaffolding)."
               future_hardening_path: |
                 Tighten via forge.branch_protection.tighten (PACKET-665)
-                ONLY after the operational scaffolding lands as
-                separate slices:
-                  (a) .gitea/workflows/* CI definitions so status_check
-                      can pass on PRs (none defined today),
-                  (b) GPG signing for spine-agent commits so
-                      signed_commits=true is satisfiable (current
-                      commits unsigned),
-                  (c) bounded-scope auth path for the spine-agent
-                      identity (PACKET-770 admitted spine-agent with
-                      prohibit_login=true, no SSH keys, no tokens — no
-                      auth method exists today; agent cannot push to
-                      protected branches or approve PRs without one).
-                Without (a)+(b)+(c), tightening would brick the
-                current direct-push agent workflow with no recovery
-                path inside the aperture. Tightening + scaffolding is
-                a multi-slice arc, not a single-slice flip.
+                ONLY after the missing primitives land as separate
+                slices:
+                  (a) [LANDED 2026-05-04 PACKET-1135]
+                      .gitea/workflows/spine-verify.yml on origin/main
+                      so the status_check context defined in branch
+                      protection actually has a workflow file producing
+                      it. Pre-1135 the workflow existed only in local
+                      working dir; post-1135 it is on origin/main.
+                  (b) [MISSING] GPG signing path for spine-agent
+                      commits so signed_commits=true is satisfiable.
+                      Substrate audit: no signing config in .git/config;
+                      no GPG references in AGENTS.md; no .asc keys in
+                      repo. Building this requires: GPG keypair for
+                      spine-agent, public key bound on the spine-agent
+                      Gitea user, git config commit.gpgsign=true with
+                      signing key tied to spine-agent. Operator's own
+                      signing key would also need to be bound for
+                      operator-direct commits to satisfy
+                      require_signed_commits.
+                  (c) [MISSING] bounded-scope auth path for spine-agent
+                      so it can act as a separate principal in approval
+                      flow. Substrate audit: spine-agent has 0 SSH keys,
+                      prohibit_login=true, is_admin=false (Gitea API
+                      /users/spine-agent/keys returned []; PACKET-770
+                      admitted identity but did not attach auth method).
+                      Building this requires: a bounded-scope access
+                      token OR a deploy-key tied to spine-agent's user
+                      record. With (c) in place, an agent PR by
+                      operator's identity can be approved by
+                      spine-agent (or vice versa) and
+                      required_approvals=1 stops being a brick.
+                With (b)+(c) landed and verified, tighten can apply
+                required_approvals=1 and require_signed_commits=true
+                without bricking direct-push or PR flow. Tightening
+                without (b) violates "no fake signed commits without
+                a real signing path"; tightening without (c) violates
+                "no tightening approvals if it bricks the direct-push
+                agent workflow without replacement".
               acceptance_does_not_override_substrate: |
                 Acceptance closes the agent_boundary proof lane for
                 Stage 2 enforcement counting purposes. It does NOT
-                change live substrate: branch protection stays
-                permissive (signed_commits=false, required_approvals=0,
-                status_checks=false), single-principal forge stays
-                single-principal. Substrate truth is preserved in the
-                receipt enforcement_gaps line; the contract amendment
-                only records that this gap is operator-acknowledged
-                and out-of-aperture-for-now, not that the gap has
-                disappeared.
+                change live substrate. Live substrate (post-1135):
+                status_check IS enforced (require spine-verify);
+                required_approvals=0 and signed_commits=false remain.
+                Substrate truth is preserved in the receipt
+                enforcement_gaps line; the contract amendment only
+                records what gaps are operator-acknowledged and
+                out-of-aperture-for-now, not that the gaps have
+                disappeared. Per the brief stop line "no claim of
+                golden unless residuals are removed, not just renamed":
+                this slice MOVES the residual (status_check landed) but
+                does NOT claim golden. Two enforcement axes remain
+                open + agent-auth scaffolding remains missing.
         runner_cache_boundary_proof:
           source:
             - ops/plugins/infra/host/bin/forge-runner-cache-boundary-status
