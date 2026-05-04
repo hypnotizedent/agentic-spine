@@ -31,23 +31,28 @@ repos:
   agentic-spine:
     path: "~/code/agentic-spine"
     repo_class: "L1_control_plane"
+    ci_gate_substrate_profile: "heavy_estate"
     role: "Governance authority — kernel protocol, canonical L1/L2 contracts, readbacks, verify, loop/packet/receipt state"
   workbench:
     path: "~/code/workbench"
     repo_class: "L2_shared_operational_rails"
+    ci_gate_substrate_profile: "heavy_estate"
     role: "Shared operational rails, reusable adapters, generators, validators, dotfiles, and runtime materializations. Not a default home for L3/product bodies."
   mint-modules:
     path: "~/code/mint-modules"
     repo_class: "product_home"
+    ci_gate_substrate_profile: "thin_vanilla"
     role: "Canonical Mint product/module home — owns Mint product code, schema, API specs, Dockerfiles, runtime contracts, and product-local operational scripts. Spine keeps thin registry/readback pointers only."
   ronny-products:
     path: "~/code/ronny-products"
     repo_class: "legacy_decomposed_product_scaffold"
+    ci_gate_substrate_profile: "thin_vanilla"
     role: "Historical standalone-product scaffold repo. Decomposed 2026-05-02 into ~/code/projects/<id>; no new product or project authority may be added here."
 
 placement_classes:
   L1_control_plane:
     canonical_home: "agentic-spine"
+    ci_gate_substrate_profile: "heavy_estate"
     allowed_contents:
       - "kernel protocol and current aperture"
       - "canonical L1/L2 contracts"
@@ -60,6 +65,7 @@ placement_classes:
       - "hand-maintained factual projections"
   L2_shared_operational_rails:
     canonical_home: "workbench"
+    ci_gate_substrate_profile: "heavy_estate"
     allowed_contents:
       - "shared reusable agent rails"
       - "cross-workload adapters and generators"
@@ -71,6 +77,7 @@ placement_classes:
       - "new governance bindings"
   L3_project_body:
     canonical_home: "~/code/projects/<project>"
+    ci_gate_substrate_profile: "thin_vanilla"
     current_status: "canonical plain placement home for unstable L3/domain/project bodies, including decomposed ronny-products children"
     allowed_contents:
       - "unstable domain/project implementation bodies"
@@ -82,6 +89,7 @@ placement_classes:
     canonical_homes:
       - "mint-modules"
       - "~/code/products/<product>"
+    ci_gate_substrate_profile: "thin_vanilla"
     current_status: "mint-modules owns Mint product bodies; ~/code/products/<product> is the stable product home. ronny-products is legacy/decomposed evidence, not a product home."
     allowed_contents:
       - "stable product code"
@@ -90,6 +98,90 @@ placement_classes:
     forbidden_contents:
       - "spine kernel/governance authority"
       - "shared L2 rails unless extracted as reusable workbench tooling"
+
+# ─────────────────────────────────────────────────────────────
+# CI Gate Substrate Profiles (PACKET-1155 first-class L2 split)
+# ─────────────────────────────────────────────────────────────
+#
+# Established 2026-05-04 in response to the PACKET-1145 forge CI
+# lesson: spine-verify (the estate-truth gate for the spine repo)
+# fundamentally requires pve-backed substrate (SSH key for pve,
+# /md1400 NFS mount, Tailscale attachment, canonical SQLite at
+# $SPINE_STATE) and cannot run honestly on a vanilla ubuntu-latest
+# Gitea Actions runner. Without a first-class repo→profile split,
+# future L3 product repos would inherit the same substrate
+# requirement and hit the same brick.
+#
+# This block declares two profiles. Each repo (and each
+# placement_class above) names which profile it uses. Future CI
+# workflow authors consult this taxonomy when designing branch-
+# protection status_check_contexts and the workflows behind them.
+#
+# Stop lines (per the operator brief that established this block):
+#   - No universal CI gate that forces every repo onto spine
+#     substrate.
+#   - No weakening of spine truth to accommodate product repos.
+#   - No new control plane.
+
+ci_gate_substrate_profiles:
+  heavy_estate:
+    name: "heavy_estate"
+    short: "spine-class repos; substrate-aware runner required"
+    declared_for:
+      - "L1_control_plane"
+      - "L2_shared_operational_rails"
+    substrate_requirements:
+      - "ssh_key_for_storage_evidence_node_pve"
+      - "known_hosts_entry_for_pve"
+      - "tailscale_attachment_or_lan_first_routing_to_pve"
+      - "nfs_mount_for_md1400_or_equivalent_canonical_sqlite_access"
+      - "infisical_credentials_resolvable_from_runner"
+    permitted_caps:
+      - "verify.engine.run (state_authority=shared_authority_db; routes to pve)"
+      - "spine.verify (probes live estate; routed dispatch)"
+      - "any cap declaring state_authority=shared_authority_db"
+    runner_class_required:
+      - "substrate-aware runner image — NOT YET BUILT (see PACKET-1145 fix 2 future_hardening_path a.1.i)"
+      - "OR self-hosted runner co-located with pve substrate"
+    consumer_status:
+      - "agentic-spine: BRICKED — current spine-verify gate references this profile but the runner image does not exist yet (vanilla ubuntu-latest cannot satisfy substrate); direct-push by whitelist user works, PR-merge is blocked by failing gate"
+      - "workbench: NOT CURRENTLY CONSUMED — no CI gate authored yet"
+  thin_vanilla:
+    name: "thin_vanilla"
+    short: "product/L3 repos; vanilla ubuntu-latest runner sufficient"
+    declared_for:
+      - "L3_project_body"
+      - "product_home"
+      - "legacy_decomposed_product_scaffold"
+    substrate_requirements:
+      - "workspace_local_only (GITHUB_WORKSPACE)"
+      - "internet_routable_git_clone (e.g. https://git.ronny.works with workflow GITHUB_TOKEN)"
+      - "apt_installable_toolchain (python3, jq, curl, ca-certificates as needed)"
+    forbidden_substrate:
+      - "ssh_keys_to_estate_hosts"
+      - "md1400_nfs_mount_or_any_spine_state_mount"
+      - "tailscale_attachment_for_network_reachability_to_spine_internals"
+      - "infisical_credentials"
+      - "shared_authority_db_routing"
+    permitted_caps:
+      - "thin verify caps that declare routing.db_authority:skip and operate on workspace-local artifacts only"
+      - "repo-local lint/build/test caps"
+      - "verify.engine.smoke.local — NOT YET BUILT (deferred per PACKET-1145 fix 2 future_hardening_path a.1.ii until first L3 consumer emerges to anchor the cap's scope; building speculatively without a consumer would violate feedback_canonical-over-expansion)"
+    runner_class_required:
+      - "vanilla ubuntu-latest (gitea/runner-images:ubuntu-latest)"
+      - "OR any runner that does NOT require estate-substrate access"
+    consumer_status:
+      - "mint-modules: NO CI gate authored yet"
+      - "ronny-products: legacy/decomposed; not a CI consumer"
+      - "projects/<project>: per-project decision when each project authors its own CI"
+
+ci_gate_substrate_profile_rules:
+  - "Every repo declared in `repos:` must carry a ci_gate_substrate_profile field."
+  - "Every placement_class must carry a default ci_gate_substrate_profile that new repos in that class inherit."
+  - "A repo may declare a ci_gate_substrate_profile that differs from its placement_class default ONLY when the difference is justified in the repo's own role/notes block."
+  - "thin_vanilla profile MUST NOT consume caps with state_authority=shared_authority_db; cap.sh routing rules enforce this at the dispatch layer."
+  - "heavy_estate profile MUST run on a substrate-aware runner; until that runner image lands, gates referencing heavy_estate caps are bricked-on-vanilla and must NOT be tightened to required_approvals>=1 (would brick direct-push without replacement)."
+  - "L3 product repos that copy the spine-verify workflow shape inherit the heavy_estate substrate requirement and will brick on vanilla runners; product repo authors must consult this profile block before authoring their own CI gates."
 
 # ─────────────────────────────────────────────────────────────
 # Authority Map
