@@ -350,6 +350,7 @@ node_types:
         runner_cache_boundary_proof:
           source:
             - ops/plugins/infra/host/bin/forge-runner-cache-boundary-status
+            - ops/plugins/infra/host/bin/forge-runner-docker-sock-fence
             - ops/bindings/node.role.contract.yaml
           requirement: |
             Two-stage proof. Stage 1 (read-only enumeration + cache-scope
@@ -360,8 +361,13 @@ node_types:
             directory layout enumerated (file/dir names + sizes only — no
             content reads) for /root/.cache/act and /root/.cache/actcache;
             volume mounts inspected (docker.sock visibility is load-bearing);
+            docker-socket-proxy fence state probed (PACKET-1075 — proxy
+            container presence + runner DOCKER_HOST env + classification of
+            unfenced / api_surface_fenced / partial_or_broken / no_docker_path);
             action_run history counted. Cache scope classified as
-            isolated_per_job / shared_per_runner / unbounded with named gaps.
+            isolated_per_job / shared_per_runner / unbounded with named gaps;
+            boundary character separately classified as structural /
+            api_surface_fenced / shared_persistent.
             Stage 2 (mutating clean-room job demonstration, FUTURE): two
             synthetic jobs are spawned and proven to leak no artifact between
             them; runner caches and ephemeral runner state are demonstrated
@@ -412,27 +418,49 @@ node_types:
               into the runner image, so a malicious or buggy CI job can talk
               directly to the host Docker daemon and read/write any
               container, mount any host path, and inspect or kill sibling
-              services on dev-tools VM 206). Smallest governed mutation path
-              is a docker-socket-proxy sidecar pattern (e.g.
-              tecnativa/docker-socket-proxy added to /opt/stacks/gitea/
-              docker-compose.yml; gitea-runner volume rebound to use
-              DOCKER_HOST=tcp://docker-socket-proxy:2375 instead of the
-              docker.sock bind; restart-only via single-service
-              `docker compose up -d gitea-runner`). The sibling-container
-              job-spawning topology stays — the fence is at API surface, not
-              at topology — so this is NOT an architectural redesign. The
-              prerequisite that BLOCKS landing this fence cap today is
-              runner-API-surface research: act_runner's actual Docker API
-              call set across job lifecycle (create/exec/wait/logs/rm/build/
-              pull) must be empirically observed before a precise proxy
-              allowlist policy can be authored. A permissive proxy that
-              allows everything is theatrics, not enforcement, and would
-              violate the no-fake-progress stop line. Stage 2 advances when
-              either: (a) docker_sock_fence_proxy_primitive lands as a
-              governed L2 host-orchestration cap with researched allowlist
-              and is applied, OR (b) operator explicitly accepts the
-              remaining docker.sock residual.
-            stage_2_blocked_until: docker_sock_fence_proxy_primitive_or_explicit_acceptance
+              services on dev-tools VM 206).
+
+              PACKET-1075 (2026-05-04) built forge.runner.docker_sock_fence
+              as the smallest governed mutation path: a tecnativa/docker-
+              socket-proxy:0.3.0 sidecar with a source-traced Docker API
+              allowlist (gitea/act@v0.261.7 pkg/container/* call-site
+              enumeration; act_runner v0.2.13 envcheck/daemon/runner.go).
+              REQUIRED endpoints exposed: PING VERSION INFO CONTAINERS
+              IMAGES NETWORKS VOLUMES EXEC POST ALLOW_START. DENIED:
+              AUTH COMMIT CONFIGS DISTRIBUTION EVENTS NODES PLUGINS SECRETS
+              SERVICES SESSION SWARM SYSTEM TASKS BUILD ALLOW_STOP
+              ALLOW_RESTARTS (BUILD flippable via --enable-build for
+              Dockerfile-based actions). Cap mutates only the gitea-runner
+              service (drop docker.sock bind, set DOCKER_HOST, add
+              depends_on) and adds the docker-socket-proxy service to
+              /opt/stacks/gitea/docker-compose.yml; sibling-container
+              job-spawning topology stays.
+
+              The fence reduces API method count exposed to act_runner from
+              the full Docker API to the source-evidenced act_runner-only
+              subset. It is NOT a payload firewall. HostConfig escape
+              remains: a malicious job can send ContainerCreate with
+              Privileged: true, Binds: ['/:/host'], CapAdd, Pid: host, etc.
+              and break out — proxy is per-endpoint, not per-payload.
+              Sibling-container blast radius (DELETE/EXEC against any
+              container by id), image-pull from any reachable registry, and
+              CopyFromContainer reads of any container filesystem also
+              remain by allowlist design.
+
+              Stage 2 advances along this trajectory:
+                - unfenced (current substrate, cap not applied):
+                  stage_2_blocked_until = docker_sock_fence_apply_or_
+                  explicit_acceptance
+                - api_surface_fenced (post-cap-apply):
+                  stage_2_blocked_until = host_config_escape_residual_
+                  acceptance_or_further_hardening
+              forge_node.delivered remains false in both states until
+              operator either explicitly accepts the residual or pursues
+              further hardening (payload-inspecting proxy, gVisor/Kata
+              runtime isolation, userns-remapping with no privileged
+              ContainerCreate paths — architectural slices outside this
+              cap's aperture).
+            stage_2_blocked_until: docker_sock_fence_apply_or_host_config_escape_residual_acceptance_or_further_hardening
         branch_protection_readback_proof:
           source:
             - ops/plugins/infra/host/bin/forge-branch-protection-status

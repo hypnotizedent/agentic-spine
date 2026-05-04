@@ -56,11 +56,13 @@ RECEIPT_LATEST = RECEIPT_DIR / "runner-cache-boundary-proof-latest.yaml"
 
 DEFAULT_GITEA_RUNNER_CONTAINER = "gitea-runner"
 DEFAULT_POSTGRES_CONTAINER = "gitea-postgres"
+DEFAULT_DOCKER_SOCK_PROXY_CONTAINER = "docker-socket-proxy"
 DEFAULT_SSH_CONNECT_TIMEOUT = "8"
 RUNNER_DATA_DIR = "/data"
 RUNNER_REG_FILE = "/data/.runner"
 RUNNER_CACHE_ACT = "/root/.cache/act"
 RUNNER_CACHE_ACTCACHE = "/root/.cache/actcache"
+RUNNER_DOCKER_HOST_FENCED_TARGET = "tcp://docker-socket-proxy:2375"
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -293,6 +295,61 @@ def probe_volume_mounts(user: str, host: str) -> dict[str, Any]:
     }
 
 
+def probe_docker_sock_fence(user: str, host: str) -> dict[str, Any]:
+    """Detect docker-socket-proxy fence state (PACKET-1075).
+
+    Three observable knobs:
+      - presence of docker-socket-proxy container (via docker inspect)
+      - the runner's DOCKER_HOST env var (via docker inspect on runner)
+      - whether the runner still has /var/run/docker.sock bind-mounted
+        (handled by probe_volume_mounts; cross-checked here)
+
+    Classification:
+      unfenced              — runner has docker.sock, no proxy
+      api_surface_fenced    — runner has DOCKER_HOST=tcp://docker-socket-proxy:2375,
+                              no docker.sock bind, proxy container running
+      partial_or_broken     — both paths active (proxy + sock) or DOCKER_HOST
+                              points elsewhere
+      fenced_with_residual  — synonym for api_surface_fenced (kept for receipt
+                              clarity — the residual is HostConfig escape)
+    """
+    rc_env, out_env, err_env = remote_run(
+        user, host,
+        f"docker inspect {DEFAULT_GITEA_RUNNER_CONTAINER} "
+        "--format '{{range .Config.Env}}{{println .}}{{end}}' 2>&1",
+    )
+    runner_docker_host: str | None = None
+    if rc_env == 0:
+        for line in out_env.splitlines():
+            if line.startswith("DOCKER_HOST="):
+                runner_docker_host = line.split("=", 1)[1].strip()
+                break
+    rc_proxy, out_proxy, err_proxy = remote_run(
+        user, host,
+        f"docker inspect {DEFAULT_DOCKER_SOCK_PROXY_CONTAINER} "
+        "--format '{{.State.Status}}|{{.Config.Image}}' 2>&1",
+    )
+    proxy_present = (rc_proxy == 0 and "Error" not in out_proxy)
+    proxy_running = False
+    proxy_image: str | None = None
+    if proxy_present:
+        parts = out_proxy.strip().split("|", 1)
+        if len(parts) == 2:
+            proxy_running = parts[0].strip() == "running"
+            proxy_image = parts[1].strip()
+    return {
+        "rc_runner_env": rc_env,
+        "rc_proxy": rc_proxy,
+        "stderr_runner_env": err_env,
+        "stderr_proxy": err_proxy,
+        "runner_docker_host_env": runner_docker_host,
+        "proxy_container_present": proxy_present,
+        "proxy_container_running": proxy_running,
+        "proxy_image": proxy_image,
+        "expected_fenced_target": RUNNER_DOCKER_HOST_FENCED_TARGET,
+    }
+
+
 def probe_action_run_history(user: str, host: str) -> dict[str, Any]:
     rc1, out1, _ = psql_select(user, host, "SELECT count(*) FROM action_run")
     total = -1
@@ -332,6 +389,7 @@ def classify_cache_scope(
     cache_act: dict[str, Any],
     cache_actcache: dict[str, Any],
     mounts: dict[str, Any],
+    fence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classify based on observations.
 
@@ -339,6 +397,14 @@ def classify_cache_scope(
     shared_per_runner: cache persists on runner filesystem across jobs
         (current state — act_runner with content-addressed hash dirs)
     unbounded: cache is shared with host OR with other unrelated workloads
+
+    Boundary character:
+      structural                       — cache wipe + sock unfenced
+      api_surface_fenced               — cache wipe + docker-socket-proxy
+                                         in front of host docker.sock
+                                         (PACKET-1075). HostConfig escape
+                                         residual remains.
+      shared_persistent_with_fresh_job_containers — old leaky shape
     """
     enforcement: list[str] = []
     gaps: list[str] = []
@@ -368,14 +434,62 @@ def classify_cache_scope(
             f"actcache server bolt.db present ({cache_actcache.get('total_bytes')} bytes) — "
             "shared cache server state across all jobs"
         )
-    if mounts.get("docker_sock_mounted"):
+
+    sock_mounted = bool(mounts.get("docker_sock_mounted"))
+    fence = fence or {}
+    proxy_running = bool(fence.get("proxy_container_running"))
+    runner_docker_host = (fence.get("runner_docker_host_env") or "")
+    runner_uses_proxy = (
+        runner_docker_host == fence.get("expected_fenced_target", RUNNER_DOCKER_HOST_FENCED_TARGET)
+    )
+
+    if sock_mounted and proxy_running:
+        gaps.append(
+            "broken/midway: docker.sock bind AND docker-socket-proxy both present — "
+            "fence is half-applied; runner can still reach host docker daemon directly"
+        )
+        sock_classification = "partial_or_broken"
+    elif sock_mounted:
         enforcement.append(
             "docker.sock mounted — jobs spawn fresh sibling containers (job-level filesystem fresh per job)"
         )
         gaps.append(
             "docker.sock mounted — runner can read/write any container on the host; "
-            "Stage 2 demo would need to fence runner docker access if cache leak is actually exploitable"
+            "no API allowlist; Stage 2 demo would need to fence runner docker access"
         )
+        sock_classification = "unfenced"
+    elif proxy_running and runner_uses_proxy:
+        enforcement.append(
+            "api_surface_fenced (PACKET-1075): runner DOCKER_HOST="
+            f"{runner_docker_host}; docker-socket-proxy with researched allowlist "
+            "(PING VERSION INFO CONTAINERS IMAGES NETWORKS VOLUMES EXEC POST "
+            "ALLOW_START exposed; AUTH COMMIT DISTRIBUTION SWARM PLUGINS SECRETS "
+            "SESSION SYSTEM TASKS NODES SERVICES CONFIGS EVENTS BUILD denied)"
+        )
+        gaps.append(
+            "HostConfig escape (named residual; not closed by API allowlist): "
+            "ContainerCreate accepts the full HostConfig JSON — Privileged: true, "
+            "Binds: ['/:/host'], CapAdd, Pid: host, etc. The proxy is per-endpoint, "
+            "not a payload firewall. Closing this requires payload-inspecting proxy "
+            "OR gVisor/Kata runtime OR userns-remapping with no privileged ContainerCreate. "
+            "Sibling-container blast radius (delete/exec on any container) and "
+            "image-pull from any reachable registry also remain by allowlist design."
+        )
+        sock_classification = "api_surface_fenced"
+    elif proxy_running and not runner_uses_proxy:
+        gaps.append(
+            "broken/midway: docker-socket-proxy present but runner DOCKER_HOST="
+            f"{runner_docker_host or '<unset>'} (expected {fence.get('expected_fenced_target')}); "
+            "fence is half-applied or misconfigured"
+        )
+        sock_classification = "partial_or_broken"
+    else:
+        gaps.append(
+            "no docker.sock bind on runner AND no docker-socket-proxy — runner cannot "
+            "reach a docker daemon at all; this is unexpected for act_runner"
+        )
+        sock_classification = "no_docker_path"
+
     is_isolated = (
         cache_act.get("entry_count", 0) == 0
         and cache_actcache.get("entry_count", 0) == 0
@@ -384,14 +498,18 @@ def classify_cache_scope(
         status = "isolated_per_job"
     else:
         status = "shared_per_runner"
+    if status == "isolated_per_job" and sock_classification == "api_surface_fenced":
+        boundary_character = "api_surface_fenced"
+    elif status == "isolated_per_job":
+        boundary_character = "structural"
+    else:
+        boundary_character = "shared_persistent_with_fresh_job_containers"
     return {
         "status": status,
         "enforcement_observed": enforcement,
         "enforcement_gaps": gaps,
-        "current_boundary_character": (
-            "structural" if status == "isolated_per_job"
-            else "shared_persistent_with_fresh_job_containers"
-        ),
+        "current_boundary_character": boundary_character,
+        "docker_sock_classification": sock_classification,
     }
 
 
@@ -413,8 +531,9 @@ def build_proof() -> dict[str, Any]:
     cache_act = probe_cache_layout(user, host, RUNNER_CACHE_ACT)
     cache_actcache = probe_cache_layout(user, host, RUNNER_CACHE_ACTCACHE)
     mounts = probe_volume_mounts(user, host)
+    fence = probe_docker_sock_fence(user, host)
     history = probe_action_run_history(user, host)
-    classification = classify_cache_scope(runner_meta, cache_act, cache_actcache, mounts)
+    classification = classify_cache_scope(runner_meta, cache_act, cache_actcache, mounts, fence)
     proof: dict[str, Any] = {
         "proof_class": "runner_cache_boundary_proof",
         "stage": 1,
@@ -454,11 +573,13 @@ def build_proof() -> dict[str, Any]:
         "cache_act_dir": cache_act,
         "cache_actcache_dir": cache_actcache,
         "volume_mounts": mounts,
+        "docker_sock_fence": fence,
         "action_run_history": history,
         "cache_scope_classification": classification,
         "proof_summary": {
             "cache_scope_status": classification.get("status"),
             "current_boundary_character": classification.get("current_boundary_character"),
+            "docker_sock_classification": classification.get("docker_sock_classification"),
             "runner_count": runner_meta.get("count"),
             "runner_scopes": [r.get("scope") for r in runner_meta.get("rows") or []],
             "act_cache_entry_count": cache_act.get("entry_count"),
@@ -466,12 +587,18 @@ def build_proof() -> dict[str, Any]:
             "actcache_entry_count": cache_actcache.get("entry_count"),
             "actcache_total_bytes": cache_actcache.get("total_bytes"),
             "docker_sock_mounted": mounts.get("docker_sock_mounted"),
+            "docker_sock_proxy_running": fence.get("proxy_container_running"),
+            "runner_docker_host_env": fence.get("runner_docker_host_env"),
             "action_run_total": history.get("total_count"),
             "drift_observed": classification.get("status") != "isolated_per_job",
             "stage_2_blocked_until": (
                 "clean_room_job_demonstration_runs_two_synthetic_jobs_with_no_observed_leak"
                 if classification.get("status") != "isolated_per_job"
-                else None
+                else (
+                    "host_config_escape_residual_acceptance_or_further_hardening"
+                    if classification.get("docker_sock_classification") == "api_surface_fenced"
+                    else "docker_sock_fence_proxy_primitive_or_explicit_acceptance"
+                )
             ),
         },
     }
@@ -504,6 +631,12 @@ def render_human(proof: dict[str, Any]) -> str:
     lines.append(f"cache /root/.cache/actcache: {cacc.get('entry_count')} entries, {cacc.get('total_bytes')} bytes")
     mm = proof.get("volume_mounts") or {}
     lines.append(f"volume mounts: {mm.get('count')} (docker_sock_mounted: {mm.get('docker_sock_mounted')})")
+    fence = proof.get("docker_sock_fence") or {}
+    lines.append(
+        f"docker.sock fence: proxy_running={fence.get('proxy_container_running')} "
+        f"runner_DOCKER_HOST={fence.get('runner_docker_host_env') or '<unset>'} "
+        f"classification={(proof.get('cache_scope_classification') or {}).get('docker_sock_classification')}"
+    )
     history = proof.get("action_run_history") or {}
     lines.append(f"action_run history: total = {history.get('total_count')}")
     lines.append("")

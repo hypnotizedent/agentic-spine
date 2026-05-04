@@ -1,0 +1,614 @@
+#!/usr/bin/env bash
+# forge-runner-docker-sock-fence - L2 host-orchestration cap (PACKET-1075)
+# for fencing the gitea-runner /var/run/docker.sock bind-mount via a
+# tecnativa/docker-socket-proxy sidecar with an empirically researched
+# Docker API allowlist.
+#
+# Closes the API-method-count surface of PACKET-800 gap 4 (docker.sock).
+# DOES NOT close the HostConfig payload-escape residual (see receipt).
+#
+# Substrate change applied:
+#   1. Adds docker-socket-proxy service to /opt/stacks/gitea/docker-compose.yml
+#      using image tecnativa/docker-socket-proxy:0.3.0 with allowlist env vars
+#      derived from gitea/act@v0.261.7 source-traced Docker SDK call sites:
+#        REQUIRED:  PING=1 VERSION=1 INFO=1 CONTAINERS=1 IMAGES=1 NETWORKS=1
+#                   VOLUMES=1 EXEC=1 POST=1 ALLOW_START=1
+#        DENIED:    AUTH COMMIT CONFIGS DISTRIBUTION EVENTS NODES PLUGINS
+#                   SECRETS SERVICES SESSION SWARM SYSTEM TASKS BUILD
+#                   ALLOW_STOP ALLOW_RESTARTS
+#      Proxy mounts /var/run/docker.sock read-only; only the proxy talks
+#      to the host daemon.
+#   2. Removes the /var/run/docker.sock bind-mount from gitea-runner.
+#   3. Adds DOCKER_HOST=tcp://docker-socket-proxy:2375 to gitea-runner
+#      env so act_runner talks to the proxy, not the host socket.
+#   4. Adds depends_on: docker-socket-proxy on gitea-runner.
+#   5. Restart-only via `docker compose up -d` (recreates affected services).
+#
+# What this fence DOES:
+#   - Removes from the runner: AUTH (registry token leak), COMMIT (image
+#     creation), DISTRIBUTION (image push), system enumeration (INFO/SYSTEM/
+#     EVENTS for non-required uses), swarm-mode (NODES/SERVICES/TASKS/
+#     SECRETS/CONFIGS/SWARM), plugin/session escape, image build (default).
+#   - Reduces attack surface from the full Docker API to the source-evidenced
+#     act_runner subset.
+#
+# What this fence DOES NOT do (named residual — operator-aware):
+#   - HostConfig escape: ContainerCreate accepts the full HostConfig JSON
+#     (Privileged: true; Binds: ['/:/host']; CapAdd; Pid: host; etc).
+#     The proxy is a per-endpoint allowlist, not a payload firewall.
+#     Container escape remains a single API call away. Closing this residual
+#     requires either a payload-inspecting proxy (none widely deployed for
+#     this use case), gVisor/Kata runtime isolation, OR running act_runner
+#     under userns-remapping with no privileged ContainerCreate paths —
+#     architectural slices outside this cap's aperture.
+#   - Sibling-container blast radius: CONTAINERS=1 + POST=1 lets a job
+#     DELETE/EXEC into any container by name on dev-tools VM 206 (not just
+#     job-spawned children).
+#   - Image-pull from any registry the host daemon can reach.
+#   - CopyFromContainer reads of any container filesystem.
+#
+# Source provenance for allowlist:
+#   - act_runner v0.2.13: gitea.com/gitea/act_runner (envcheck/docker.go:25
+#     Ping; daemon.go:105 DOCKER_HOST honor; runner.go:223
+#     ContainerDaemonSocket plumb)
+#   - act library: gitea.com/gitea/act@v0.261.7 (pkg/container/docker_run.go,
+#     docker_pull.go, docker_images.go, docker_build.go, docker_network.go,
+#     docker_volume.go all enumerated)
+#   - tecnativa/docker-socket-proxy:0.3.0 README env-var contract
+#
+# Default behavior is DRY-RUN. --apply --reason both required to mutate.
+# --apply briefly recreates the gitea-runner container (CI is unavailable
+# during the recreate window). Operator drives --apply with their own timing.
+#
+# Stop lines (enforced in script):
+# - Never reads tokens (env vars, /data/.runner contents)
+# - Modifications restricted to gitea-runner service + add docker-socket-proxy
+#   service in /opt/stacks/gitea/docker-compose.yml; other services not touched
+# - No image rebuild for runner; tecnativa proxy image pulled fresh by compose
+# - No /data/.runner manipulation; no runner re-registration
+# - No host firewall changes; no Tailscale ACL changes; no DNS changes
+# - No branch protection mutation; no Gitea API token use
+# - Default dry-run; --apply --reason required for mutation
+# - BUILD=0 in proxy allowlist by default; flip to 1 only with explicit
+#   --enable-build flag if a workflow uses Dockerfile-based actions
+#
+# Usage:
+#   forge-runner-docker-sock-fence [--enable-build] [--dry-run]
+#   forge-runner-docker-sock-fence [--enable-build] --apply --reason '<text>'
+#   forge-runner-docker-sock-fence --revert [--dry-run]
+#   forge-runner-docker-sock-fence --revert --apply --reason '<text>'
+#
+# Exit codes:
+#   0   applied successfully or already-in-target-state idempotent
+#   1   API/SSH/compose error
+#   2   bad usage / missing dependency / dry-run skipped (no --apply)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+
+stop(){ echo "STOP ($1): $2" >&2; exit "$1"; }
+
+command -v ssh >/dev/null 2>&1 || stop 2 "missing dependency: ssh"
+command -v python3 >/dev/null 2>&1 || stop 2 "missing dependency: python3"
+
+APPLY=0
+REASON=""
+DRY_RUN=0
+ENABLE_BUILD=0
+REVERT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply) APPLY=1; shift ;;
+    --reason) REASON="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --enable-build) ENABLE_BUILD=1; shift ;;
+    --revert) REVERT=1; shift ;;
+    -h|--help) sed -n '2,90p' "$0"; exit 0 ;;
+    *) stop 2 "unknown arg: $1" ;;
+  esac
+done
+
+if [[ "$APPLY" -eq 1 && -z "$REASON" ]]; then
+  stop 2 "--apply requires --reason '<text>'"
+fi
+if [[ "$APPLY" -eq 1 && "$DRY_RUN" -eq 1 ]]; then
+  stop 2 "--apply and --dry-run are mutually exclusive"
+fi
+
+# Resolve forge runtime body via ssh.targets.yaml
+NODE_ROLE_CONTRACT="$SPINE_ROOT/ops/bindings/node.role.contract.yaml"
+SSH_TARGETS="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+[[ -f "$NODE_ROLE_CONTRACT" ]] || stop 2 "node.role.contract.yaml not found at $NODE_ROLE_CONTRACT"
+[[ -f "$SSH_TARGETS" ]] || stop 2 "ssh.targets.yaml not found at $SSH_TARGETS"
+
+SSH_HOST="$(yq -r '.ssh.targets[] | select(.id == "dev-tools") | (.tailscale_ip // .host)' "$SSH_TARGETS")"
+SSH_USER="$(yq -r '.ssh.targets[] | select(.id == "dev-tools") | .user' "$SSH_TARGETS")"
+[[ -n "$SSH_HOST" && "$SSH_HOST" != "null" ]] || stop 2 "could not resolve dev-tools host from ssh.targets.yaml"
+[[ -n "$SSH_USER" && "$SSH_USER" != "null" ]] || SSH_USER="ubuntu"
+
+COMPOSE_PATH="/opt/stacks/gitea/docker-compose.yml"
+RUNNER_SERVICE="gitea-runner"
+PROXY_SERVICE="docker-socket-proxy"
+PROXY_IMAGE="tecnativa/docker-socket-proxy:0.3.0"
+
+ssh_remote(){
+  local cmd="$1"
+  ssh -n -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    "${SSH_USER}@${SSH_HOST}" "$cmd"
+}
+
+# Probe current compose state
+set +e
+COMPOSE_CONTENT="$(ssh_remote "sudo -n cat ${COMPOSE_PATH}" 2>/dev/null)"
+PROBE_RC=$?
+set -e
+[[ "$PROBE_RC" -eq 0 ]] || stop 1 "could not read ${COMPOSE_PATH} on ${SSH_HOST}"
+[[ -n "$COMPOSE_CONTENT" ]] || stop 1 "${COMPOSE_PATH} is empty on ${SSH_HOST}"
+
+# Inspect substrate via local YAML parse
+PROBE_JSON="$(python3 - <<PYEOF
+import sys, yaml, json
+data = yaml.safe_load("""${COMPOSE_CONTENT//\"/\\\"}""") or {}
+services = (data.get("services") or {})
+runner = services.get("${RUNNER_SERVICE}") or {}
+proxy = services.get("${PROXY_SERVICE}")
+runner_volumes = runner.get("volumes") or []
+runner_env = runner.get("environment")
+runner_depends = runner.get("depends_on")
+runner_socketed = any(
+    isinstance(v, str) and v.startswith("/var/run/docker.sock") for v in runner_volumes
+)
+def env_get(env, key):
+    if isinstance(env, list):
+        for e in env:
+            if isinstance(e, str) and e.startswith(key + "="):
+                return e.split("=", 1)[1]
+        return None
+    if isinstance(env, dict):
+        return env.get(key)
+    return None
+def depends_on(d, target):
+    if isinstance(d, list):
+        return target in d
+    if isinstance(d, dict):
+        return target in d
+    return False
+print(json.dumps({
+    "proxy_service_present": proxy is not None,
+    "runner_socketed": runner_socketed,
+    "runner_volumes": runner_volumes,
+    "runner_docker_host": env_get(runner_env, "DOCKER_HOST"),
+    "runner_depends_on_proxy": depends_on(runner_depends, "${PROXY_SERVICE}"),
+}))
+PYEOF
+)"
+
+PROXY_PRESENT="$(echo "$PROBE_JSON" | python3 -c 'import sys,json; print(str(json.load(sys.stdin)["proxy_service_present"]).lower())')"
+RUNNER_SOCKETED="$(echo "$PROBE_JSON" | python3 -c 'import sys,json; print(str(json.load(sys.stdin)["runner_socketed"]).lower())')"
+RUNNER_DOCKER_HOST="$(echo "$PROBE_JSON" | python3 -c 'import sys,json; v=json.load(sys.stdin)["runner_docker_host"]; print(v if v else "")')"
+RUNNER_DEPENDS_ON_PROXY="$(echo "$PROBE_JSON" | python3 -c 'import sys,json; print(str(json.load(sys.stdin)["runner_depends_on_proxy"]).lower())')"
+
+# Compute target plan
+TARGET_DOCKER_HOST="tcp://${PROXY_SERVICE}:2375"
+NEEDS_PROXY_ADD="false"
+NEEDS_RUNNER_PATCH="false"
+NEEDS_RESTART="false"
+
+if [[ "$REVERT" -eq 1 ]]; then
+  # Revert plan: remove proxy, restore runner socket bind, drop DOCKER_HOST,
+  # drop depends_on. End state == pre-PACKET-1075.
+  if [[ "$PROXY_PRESENT" == "true" ]]; then
+    NEEDS_PROXY_ADD="false"
+    NEEDS_RUNNER_PATCH="true"
+    NEEDS_RESTART="true"
+  fi
+  if [[ "$RUNNER_SOCKETED" == "false" ]]; then
+    NEEDS_RUNNER_PATCH="true"
+    NEEDS_RESTART="true"
+  fi
+  if [[ -n "$RUNNER_DOCKER_HOST" ]]; then
+    NEEDS_RUNNER_PATCH="true"
+    NEEDS_RESTART="true"
+  fi
+else
+  if [[ "$PROXY_PRESENT" != "true" ]]; then
+    NEEDS_PROXY_ADD="true"
+    NEEDS_RESTART="true"
+  fi
+  if [[ "$RUNNER_SOCKETED" == "true" ]]; then
+    NEEDS_RUNNER_PATCH="true"
+    NEEDS_RESTART="true"
+  fi
+  if [[ "$RUNNER_DOCKER_HOST" != "$TARGET_DOCKER_HOST" ]]; then
+    NEEDS_RUNNER_PATCH="true"
+    NEEDS_RESTART="true"
+  fi
+  if [[ "$RUNNER_DEPENDS_ON_PROXY" != "true" ]]; then
+    NEEDS_RUNNER_PATCH="true"
+    NEEDS_RESTART="true"
+  fi
+fi
+
+OUTCOME="idempotent_no_op"
+if [[ "$NEEDS_PROXY_ADD" == "true" || "$NEEDS_RUNNER_PATCH" == "true" ]]; then
+  OUTCOME=$([[ "$APPLY" -eq 1 ]] && echo "applied" || echo "would_apply")
+fi
+
+# Allowlist policy (per research)
+ALLOWLIST_REQUIRED="PING=1 VERSION=1 INFO=1 CONTAINERS=1 IMAGES=1 NETWORKS=1 VOLUMES=1 EXEC=1 POST=1 ALLOW_START=1"
+ALLOWLIST_DENIED="ALLOW_STOP=0 ALLOW_RESTARTS=0 EVENTS=0 AUTH=0 COMMIT=0 CONFIGS=0 DISTRIBUTION=0 NODES=0 PLUGINS=0 SECRETS=0 SERVICES=0 SESSION=0 SWARM=0 SYSTEM=0 TASKS=0"
+BUILD_VALUE=$([[ "$ENABLE_BUILD" -eq 1 ]] && echo "1" || echo "0")
+ALLOWLIST_OPTIONAL="BUILD=${BUILD_VALUE}"
+
+# Receipt
+RECEIPT_DIR="${SPINE_STATE}/domain-state/forge-node"
+mkdir -p "$RECEIPT_DIR"
+RECEIPT_PATH="${RECEIPT_DIR}/runner-docker-sock-fence-latest.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+write_receipt() {
+  local mode="$1"
+  python3 - "$RECEIPT_PATH" "$mode" "$REVERT" "$ENABLE_BUILD" \
+    "$PROXY_PRESENT" "$RUNNER_SOCKETED" "$RUNNER_DOCKER_HOST" \
+    "$RUNNER_DEPENDS_ON_PROXY" "$NEEDS_PROXY_ADD" "$NEEDS_RUNNER_PATCH" \
+    "$NEEDS_RESTART" "$OUTCOME" "$GENERATED_AT" "$REASON" "$SSH_HOST" \
+    "$SSH_USER" "$COMPOSE_PATH" "$BUILD_VALUE" <<'PYEOF'
+import sys, yaml
+(out, mode, revert, enable_build, proxy_present, runner_socketed,
+ runner_docker_host, runner_depends_on_proxy, needs_proxy_add,
+ needs_runner_patch, needs_restart, outcome, generated_at, reason,
+ host, user, compose_path, build_value) = sys.argv[1:]
+direction = "revert" if revert == "1" else "fence"
+data = {
+    "proof_class": "runner_docker_sock_fence_proof",
+    "capability": "forge.runner.docker_sock_fence",
+    "generated_at": generated_at,
+    "mode": mode,
+    "direction": direction,
+    "reason": reason or None,
+    "outcome": outcome,
+    "target": {
+        "host": host,
+        "user": user,
+        "compose_path": compose_path,
+        "runner_service": "gitea-runner",
+        "proxy_service": "docker-socket-proxy",
+        "proxy_image": "tecnativa/docker-socket-proxy:0.3.0",
+        "runner_docker_host_target": "tcp://docker-socket-proxy:2375",
+    },
+    "before": {
+        "proxy_service_present": proxy_present == "true",
+        "runner_socketed_to_host": runner_socketed == "true",
+        "runner_docker_host_env": runner_docker_host or None,
+        "runner_depends_on_proxy": runner_depends_on_proxy == "true",
+    },
+    "plan": {
+        "needs_proxy_service_add": needs_proxy_add == "true",
+        "needs_runner_service_patch": needs_runner_patch == "true",
+        "needs_compose_restart": needs_restart == "true",
+    },
+    "allowlist_policy": {
+        "required_exposed": [
+            "PING=1", "VERSION=1", "INFO=1",
+            "CONTAINERS=1", "IMAGES=1", "NETWORKS=1", "VOLUMES=1",
+            "EXEC=1",
+            "POST=1", "ALLOW_START=1",
+        ],
+        "denied_default": [
+            "ALLOW_STOP=0", "ALLOW_RESTARTS=0", "EVENTS=0",
+            "AUTH=0", "COMMIT=0", "CONFIGS=0", "DISTRIBUTION=0",
+            "NODES=0", "PLUGINS=0", "SECRETS=0", "SERVICES=0",
+            "SESSION=0", "SWARM=0", "SYSTEM=0", "TASKS=0",
+        ],
+        "optional": [f"BUILD={build_value} (--enable-build flag controls)"],
+        "provenance": [
+            "gitea.com/gitea/act_runner v0.2.13: envcheck/docker.go,"
+            " daemon.go DOCKER_HOST honor, runner.go ContainerDaemonSocket",
+            "gitea.com/gitea/act@v0.261.7: pkg/container/{docker_run,"
+            "docker_pull,docker_images,docker_build,docker_network,"
+            "docker_volume}.go full Docker SDK call-site enumeration",
+            "tecnativa/docker-socket-proxy:0.3.0 README env-var contract",
+        ],
+    },
+    "named_residuals_post_fence": [
+        "HostConfig escape: ContainerCreate accepts full HostConfig"
+        " (Privileged: true; Binds: ['/:/host']; CapAdd; Pid: host).",
+        "Sibling-container blast radius: CONTAINERS=1 + POST=1 lets"
+        " a job DELETE/EXEC into any container by id on dev-tools VM"
+        " 206 (not just job-spawned children).",
+        "Image-pull from any registry the host daemon can reach"
+        " (IMAGES=1 + AUTH=0; registry-token leak is mitigated but"
+        " uncached pull is still possible).",
+        "CopyFromContainer reads of any container filesystem"
+        " (CONTAINERS=1).",
+    ],
+    "scope_note": (
+        "L2 host-orchestration cap (PACKET-1075) for fencing the"
+        " gitea-runner /var/run/docker.sock bind-mount via a"
+        " tecnativa/docker-socket-proxy sidecar. The fence reduces the"
+        " API method count exposed to act_runner from the full Docker"
+        " API to a source-traced act_runner-only subset."
+        " Sibling-container topology stays. The fence is at API"
+        " surface only — NOT a payload firewall — so HostConfig"
+        " escape (Privileged container with host bind) remains a"
+        " single ContainerCreate call away. Closing the HostConfig"
+        " residual requires either (a) a payload-inspecting proxy,"
+        " (b) gVisor/Kata runtime isolation, or (c) running"
+        " act_runner under userns-remapping with no privileged"
+        " ContainerCreate paths — architectural slices outside this"
+        " cap. Stage 2 advances to 'api_surface_fenced' on apply;"
+        " forge_node.delivered remains false until operator either"
+        " accepts the residual or pursues further hardening."
+    ),
+    "stop_lines_respected": [
+        "no token reads (env vars, /data/.runner)",
+        "modifications restricted to gitea-runner service edit"
+        " + docker-socket-proxy service add in /opt/stacks/gitea/"
+        "docker-compose.yml",
+        "no image rebuild for runner; tecnativa proxy image pulled"
+        " by compose",
+        "no /data/.runner manipulation; no runner re-registration",
+        "no host firewall changes; no Tailscale ACL changes; no DNS",
+        "no branch protection mutation; no Gitea API token use",
+        "default dry-run; --apply --reason required",
+        "BUILD=0 in proxy allowlist by default",
+    ],
+}
+with open(out, "w", encoding="utf-8") as fh:
+    yaml.safe_dump(data, fh, sort_keys=False)
+PYEOF
+}
+
+print_render() {
+  local mode="$1"
+  echo "forge.runner.docker_sock_fence"
+  echo "host: ${SSH_USER}@${SSH_HOST}"
+  echo "compose_path: $COMPOSE_PATH"
+  echo "direction: $([[ "$REVERT" -eq 1 ]] && echo 'revert' || echo 'fence')"
+  echo "mode: $mode"
+  if [[ -n "$REASON" ]]; then echo "reason: $REASON"; fi
+  echo "before:"
+  echo "  proxy_service_present: $PROXY_PRESENT"
+  echo "  runner_socketed_to_host: $RUNNER_SOCKETED"
+  echo "  runner_docker_host_env: ${RUNNER_DOCKER_HOST:-<unset>}"
+  echo "  runner_depends_on_proxy: $RUNNER_DEPENDS_ON_PROXY"
+  echo "plan:"
+  echo "  needs_proxy_service_add: $NEEDS_PROXY_ADD"
+  echo "  needs_runner_service_patch: $NEEDS_RUNNER_PATCH"
+  echo "  needs_compose_restart: $NEEDS_RESTART"
+  echo "allowlist (required exposed):"
+  echo "  $ALLOWLIST_REQUIRED"
+  echo "allowlist (denied default):"
+  echo "  $ALLOWLIST_DENIED"
+  echo "allowlist (optional):"
+  echo "  $ALLOWLIST_OPTIONAL"
+  echo "named residuals post-fence:"
+  echo "  - HostConfig escape (Privileged container with host bind)"
+  echo "  - Sibling-container blast radius (delete/exec on any container)"
+  echo "  - Image-pull from any reachable registry"
+  echo "  - CopyFromContainer reads of any container filesystem"
+  echo "outcome: $OUTCOME"
+  echo "receipt: $RECEIPT_PATH"
+}
+
+# Dry-run path
+if [[ "$APPLY" -eq 0 || "$DRY_RUN" -eq 1 ]]; then
+  print_render "dry_run"
+  echo "(dry run; no SSH writes, no docker-compose mutation, no service restart)"
+  if [[ "$APPLY" -eq 0 ]]; then
+    echo "(default-safe: pass --apply --reason '<text>' to mutate; --apply briefly recreates the gitea-runner container during compose up — operator drives timing)"
+    exit 2
+  fi
+  exit 0
+fi
+
+# Apply path: idempotent no-op fast path
+if [[ "$OUTCOME" == "idempotent_no_op" ]]; then
+  write_receipt "applied"
+  print_render "applied"
+  exit 0
+fi
+
+# Apply path: do the work.
+# Compose patch script: idempotent edit of docker-compose.yml.
+#  - Adds/removes docker-socket-proxy service
+#  - Edits gitea-runner volumes/env/depends_on
+#  - Restores ubuntu:ubuntu ownership after sudo write (parent dir is root-
+#    owned; atomic temp+rename)
+PATCH_SCRIPT='
+import os, sys, tempfile, yaml
+path = sys.argv[1]
+direction = sys.argv[2]
+build_value = sys.argv[3]
+with open(path) as f:
+    data = yaml.safe_load(f) or {}
+services = data.setdefault("services", {})
+runner = services.get("gitea-runner")
+if not runner:
+    print("STOP: gitea-runner service not found", file=sys.stderr); sys.exit(1)
+
+PROXY = "docker-socket-proxy"
+PROXY_HOST_TARGET = f"tcp://{PROXY}:2375"
+
+def env_set(svc, key, val):
+    env = svc.get("environment")
+    new_entry = f"{key}={val}"
+    if isinstance(env, list):
+        env = [e for e in env if not (isinstance(e, str) and e.startswith(key + "="))]
+        env.append(new_entry)
+        svc["environment"] = env
+    elif isinstance(env, dict):
+        env[key] = val
+        svc["environment"] = env
+    else:
+        svc["environment"] = [new_entry]
+
+def env_unset(svc, key):
+    env = svc.get("environment")
+    if isinstance(env, list):
+        svc["environment"] = [e for e in env if not (isinstance(e, str) and e.startswith(key + "="))]
+    elif isinstance(env, dict):
+        env.pop(key, None)
+        svc["environment"] = env
+
+def depends_add(svc, target):
+    d = svc.get("depends_on")
+    if isinstance(d, list):
+        if target not in d: d.append(target)
+        svc["depends_on"] = d
+    elif isinstance(d, dict):
+        if target not in d: d[target] = {"condition": "service_started"}
+        svc["depends_on"] = d
+    else:
+        svc["depends_on"] = [target]
+
+def depends_remove(svc, target):
+    d = svc.get("depends_on")
+    if isinstance(d, list):
+        d = [x for x in d if x != target]
+        if d: svc["depends_on"] = d
+        else: svc.pop("depends_on", None)
+    elif isinstance(d, dict):
+        d.pop(target, None)
+        if d: svc["depends_on"] = d
+        else: svc.pop("depends_on", None)
+
+def remove_socket_volume(svc):
+    vols = svc.get("volumes") or []
+    new_vols = [v for v in vols if not (isinstance(v, str) and v.startswith("/var/run/docker.sock"))]
+    if new_vols != vols:
+        svc["volumes"] = new_vols
+
+def add_socket_volume(svc):
+    vols = svc.get("volumes") or []
+    if not any(isinstance(v, str) and v.startswith("/var/run/docker.sock") for v in vols):
+        vols.insert(0, "/var/run/docker.sock:/var/run/docker.sock")
+        svc["volumes"] = vols
+
+if direction == "fence":
+    proxy_env = [
+        "PING=1", "VERSION=1", "INFO=1",
+        "CONTAINERS=1", "IMAGES=1", "NETWORKS=1", "VOLUMES=1",
+        "EXEC=1",
+        "POST=1", "ALLOW_START=1",
+        f"BUILD={build_value}",
+        "ALLOW_STOP=0", "ALLOW_RESTARTS=0", "EVENTS=0",
+        "AUTH=0", "COMMIT=0", "CONFIGS=0", "DISTRIBUTION=0",
+        "NODES=0", "PLUGINS=0", "SECRETS=0", "SERVICES=0",
+        "SESSION=0", "SWARM=0", "SYSTEM=0", "TASKS=0",
+    ]
+    services[PROXY] = {
+        "image": "tecnativa/docker-socket-proxy:0.3.0",
+        "container_name": PROXY,
+        "restart": "unless-stopped",
+        "environment": proxy_env,
+        "volumes": ["/var/run/docker.sock:/var/run/docker.sock:ro"],
+        "labels": [
+            "com.ronny.stack=gitea",
+            "com.ronny.service=docker-socket-proxy",
+            "com.ronny.env=production",
+        ],
+    }
+    remove_socket_volume(runner)
+    env_set(runner, "DOCKER_HOST", PROXY_HOST_TARGET)
+    depends_add(runner, PROXY)
+elif direction == "revert":
+    services.pop(PROXY, None)
+    add_socket_volume(runner)
+    env_unset(runner, "DOCKER_HOST")
+    depends_remove(runner, PROXY)
+else:
+    print("STOP: unknown direction", file=sys.stderr); sys.exit(1)
+
+# Atomic temp+rename so partial writes never leave a corrupt compose
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".compose.tmp.")
+try:
+    with os.fdopen(fd, "w") as f:
+        yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+# Restore ubuntu:ubuntu ownership (parent dir is root:root)
+import pwd, grp
+try:
+    uid = pwd.getpwnam("ubuntu").pw_uid
+    gid = grp.getgrnam("ubuntu").gr_gid
+    os.chown(path, uid, gid)
+except Exception:
+    pass
+'
+
+DIRECTION=$([[ "$REVERT" -eq 1 ]] && echo "revert" || echo "fence")
+
+if [[ "$NEEDS_PROXY_ADD" == "true" || "$NEEDS_RUNNER_PATCH" == "true" ]]; then
+  if ! ssh_remote "sudo -n python3 -c $(printf %q "$PATCH_SCRIPT") ${COMPOSE_PATH} ${DIRECTION} ${BUILD_VALUE}"; then
+    stop 1 "failed to patch ${COMPOSE_PATH} (sudo -n required; ubuntu needs NOPASSWD sudo)"
+  fi
+fi
+
+# Compose recreate. Single-pass `up -d` recreates affected services
+# (gitea-runner because spec changed; docker-socket-proxy because new).
+# gitea + gitea-postgres untouched (no spec change).
+if [[ "$NEEDS_RESTART" == "true" ]]; then
+  if ! ssh_remote "cd /opt/stacks/gitea && sudo -n docker compose up -d"; then
+    stop 1 "docker compose up failed (sudo -n required)"
+  fi
+fi
+
+# Verify post-apply state
+sleep 6
+
+NEW_PROBE_JSON_RAW="$(ssh_remote "sudo -n cat ${COMPOSE_PATH}")"
+NEW_PROBE_JSON="$(python3 - <<PYEOF
+import sys, yaml, json
+data = yaml.safe_load("""${NEW_PROBE_JSON_RAW//\"/\\\"}""") or {}
+services = data.get("services") or {}
+runner = services.get("${RUNNER_SERVICE}") or {}
+proxy = services.get("${PROXY_SERVICE}")
+runner_volumes = runner.get("volumes") or []
+runner_env = runner.get("environment")
+def env_get(env, key):
+    if isinstance(env, list):
+        for e in env:
+            if isinstance(e, str) and e.startswith(key + "="):
+                return e.split("=", 1)[1]
+        return None
+    if isinstance(env, dict):
+        return env.get(key)
+    return None
+runner_socketed = any(isinstance(v, str) and v.startswith("/var/run/docker.sock") for v in runner_volumes)
+print(json.dumps({
+    "proxy_service_present": proxy is not None,
+    "runner_socketed": runner_socketed,
+    "runner_docker_host": env_get(runner_env, "DOCKER_HOST"),
+}))
+PYEOF
+)"
+
+NEW_PROXY_PRESENT="$(echo "$NEW_PROBE_JSON" | python3 -c 'import sys,json; print(str(json.load(sys.stdin)["proxy_service_present"]).lower())')"
+NEW_RUNNER_SOCKETED="$(echo "$NEW_PROBE_JSON" | python3 -c 'import sys,json; print(str(json.load(sys.stdin)["runner_socketed"]).lower())')"
+NEW_RUNNER_DOCKER_HOST="$(echo "$NEW_PROBE_JSON" | python3 -c 'import sys,json; v=json.load(sys.stdin)["runner_docker_host"]; print(v if v else "")')"
+
+if [[ "$REVERT" -eq 1 ]]; then
+  [[ "$NEW_PROXY_PRESENT" == "false" ]] || stop 1 "post-revert: proxy service still present in compose"
+  [[ "$NEW_RUNNER_SOCKETED" == "true" ]] || stop 1 "post-revert: runner not socketed back to host"
+  [[ -z "$NEW_RUNNER_DOCKER_HOST" ]] || stop 1 "post-revert: runner DOCKER_HOST env still set ($NEW_RUNNER_DOCKER_HOST)"
+else
+  [[ "$NEW_PROXY_PRESENT" == "true" ]] || stop 1 "post-apply: proxy service not present in compose"
+  [[ "$NEW_RUNNER_SOCKETED" == "false" ]] || stop 1 "post-apply: runner still socketed to host docker.sock"
+  [[ "$NEW_RUNNER_DOCKER_HOST" == "$TARGET_DOCKER_HOST" ]] || stop 1 "post-apply: runner DOCKER_HOST=$NEW_RUNNER_DOCKER_HOST, expected $TARGET_DOCKER_HOST"
+fi
+
+# Update probe state for receipt rendering
+PROXY_PRESENT="$NEW_PROXY_PRESENT"
+RUNNER_SOCKETED="$NEW_RUNNER_SOCKETED"
+RUNNER_DOCKER_HOST="$NEW_RUNNER_DOCKER_HOST"
+
+write_receipt "applied"
+print_render "applied"
+exit 0

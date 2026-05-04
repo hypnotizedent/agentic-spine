@@ -704,9 +704,17 @@ if not os.access(str(forge_rc_script), os.X_OK):
 forge_rc_text = forge_rc_script.read_text(encoding="utf-8")
 if "forge.runner_cache_boundary.status" not in forge_rc_text or "runner_cache_boundary_proof" not in forge_rc_text:
     fail("forge-runner-cache-boundary-status must self-identify as forge.runner_cache_boundary.status capability and emit runner_cache_boundary_proof Stage 1 receipts")
-for required_term in ("probe_runner_registration_metadata", "probe_runner_data_dir", "probe_cache_layout", "probe_volume_mounts", "classify_cache_scope"):
+for required_term in ("probe_runner_registration_metadata", "probe_runner_data_dir", "probe_cache_layout", "probe_volume_mounts", "probe_docker_sock_fence", "classify_cache_scope"):
     if required_term not in forge_rc_text:
-        fail(f"forge-runner-cache-boundary-status must implement {required_term} (Stage 1 read-only probe set)")
+        fail(f"forge-runner-cache-boundary-status must implement {required_term} (Stage 1 read-only probe set; PACKET-1075 added probe_docker_sock_fence)")
+# PACKET-1075 lock: classify_cache_scope must surface the api_surface_fenced
+# vocabulary so a future drift cannot silently retire the docker-socket-proxy
+# detection path without test failure. Encoded as a substring assertion on
+# the cap source — the same surface that emits the receipt.
+if "api_surface_fenced" not in forge_rc_text:
+    fail("forge-runner-cache-boundary-status must classify the docker-socket-proxy fence pattern as 'api_surface_fenced' (PACKET-1075 — locks classification vocabulary so the readback's distinction between unfenced/fenced/partial cannot silently regress)")
+if "HostConfig escape" not in forge_rc_text:
+    fail("forge-runner-cache-boundary-status must name the HostConfig escape residual when classification is api_surface_fenced (PACKET-1075 — locks the honest residual call-out so a future receipt cannot silently claim 'all gaps closed' after fence)")
 # Token-redaction discipline locks: the cap MUST NOT read /data/.runner
 # contents (file contains a registration token) and MUST NOT read
 # token_hash/token_salt fields from action_runner.

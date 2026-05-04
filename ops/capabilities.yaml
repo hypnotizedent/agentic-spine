@@ -1465,6 +1465,63 @@ capabilities:
     domain: infra
     plane: fabric
     layer: L2_shared_infrastructure
+  forge.runner.docker_sock_fence:
+    description: |
+      L2 host-orchestration cap (PACKET-1075) for fencing the
+      gitea-runner /var/run/docker.sock bind-mount via a
+      tecnativa/docker-socket-proxy:0.3.0 sidecar with a source-traced
+      Docker API allowlist. Adds the proxy service to /opt/stacks/gitea/
+      docker-compose.yml, removes the docker.sock bind from gitea-runner,
+      sets DOCKER_HOST=tcp://docker-socket-proxy:2375 on the runner, and
+      runs `sudo -n docker compose up -d` to recreate affected services.
+      Closes the API-method-count surface of PACKET-800 gap 4 (docker.sock).
+      DOES NOT close the HostConfig payload-escape residual (Privileged
+      container with host bind via ContainerCreate) — proxy is a
+      per-endpoint allowlist, not a payload firewall. Named residuals
+      surfaced in receipt; further hardening (gVisor/Kata, userns
+      remapping, payload-inspecting proxy) is out of aperture.
+      Default DRY-RUN. --apply --reason both required for mutation.
+      --apply briefly recreates the gitea-runner container during compose
+      up; CI is unavailable for that window — operator drives timing.
+      Allowlist (REQUIRED, source-traced from gitea/act@v0.261.7):
+      PING=1 VERSION=1 INFO=1 CONTAINERS=1 IMAGES=1 NETWORKS=1 VOLUMES=1
+      EXEC=1 POST=1 ALLOW_START=1.
+      Allowlist (DENIED): AUTH COMMIT CONFIGS DISTRIBUTION EVENTS NODES
+      PLUGINS SECRETS SERVICES SESSION SWARM SYSTEM TASKS ALLOW_STOP
+      ALLOW_RESTARTS BUILD (BUILD flippable via --enable-build for
+      Dockerfile-based actions).
+      Stop lines: never reads tokens; modifications restricted to
+      gitea-runner service edit + docker-socket-proxy service add in
+      compose; no image rebuild for runner; no /data/.runner
+      manipulation; no runner re-registration; no host firewall/Tailscale/
+      DNS changes; no branch protection mutation; no Gitea API token use;
+      default dry-run.
+      Receipt at $SPINE_STATE/domain-state/forge-node/runner-docker-sock-fence-latest.yaml
+      with before/after plan, allowlist policy, source provenance,
+      named residuals — NO secret values.
+      Args: [--enable-build] [--apply --reason '<text>'] [--dry-run] [--revert].
+    tags:
+      - infra
+      - forge
+      - host-orchestration
+      - mutating
+      - runner-fence
+      - docker-sock
+    command: ./ops/plugins/infra/host/bin/forge-runner-docker-sock-fence
+    script_path: ./ops/plugins/infra/host/bin/forge-runner-docker-sock-fence
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    routing:
+      db_authority: skip
+    outputs:
+      - stdout
+      - $SPINE_STATE/domain-state/forge-node/runner-docker-sock-fence-latest.yaml
+    domain: infra
+    plane: fabric
+    layer: L2_shared_infrastructure
   forge.runner_cache_boundary.status:
     description: Read-only Stage 1 of runner_cache_boundary_proof (PACKET-605 under PACKET-588 phased order; Stage 2 clean-room job demonstration is FUTURE). Probes the forge_node runner via SSH+docker-exec on the dev-tools VM (gitea-runner container) without API token use. Captures action_runner registration metadata (token_hash + token_salt EXPLICITLY excluded from query — never read), /data dir stat-only (file /data/.runner contains a registration token; contents are NEVER read), cache directory layout for /root/.cache/act and /root/.cache/actcache (file/dir names + sizes only), volume mounts on the runner container (docker.sock visibility is load-bearing), and action_run history count + last 5. Classifies cache scope as isolated_per_job / shared_per_runner / unbounded with named gaps. Writes a YAML receipt at $SPINE_STATE/domain-state/forge-node/runner-cache-boundary-proof-latest.yaml. NO Forgejo install, NO runner mutation, NO branch protection mutation, NO DNS/secrets/tokens/users/webhooks/repos/backups changed, NO read of /data/.runner contents, NO read of token_hash/token_salt/fingerprints, NO actual job execution. The receipt is the proof_ref consumed by node.role.contract.yaml forge_node.required_proofs.runner_cache_boundary_proof (Stage 1 deliverable).
     tags:
