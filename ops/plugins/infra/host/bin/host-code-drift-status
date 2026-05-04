@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""infra.host.code.drift.status — read-only host code drift readback.
+"""runtime.checkout.drift.status — read-only runtime checkout drift readback.
 
 Reports per-host from ops/bindings/runtime.checkout.placement.yaml:
 - checkout HEAD vs origin/main HEAD
 - dirty worktree state
 - reachability
-- update class for infra.host.code.deploy.update
+- update class for runtime.checkout.deploy.update
 
 NO mutation. NO automatic pull. NO rsync. NO host modification.
+
+PACKET-1105 promoted this canonical name from infra.host.code.drift.status;
+the old name remains as a compatibility wrapper that forwards to this same
+script.
 """
 from __future__ import annotations
 
@@ -118,7 +122,7 @@ def probe_host(host: dict[str, Any], origin_head: str) -> dict[str, Any]:
     if rc_h != 0:
         result["status"] = "unreachable"
         result["note"] = f"head probe failed: {err_h.strip()[:200] or out_h.strip()[:200] or 'unknown'}"
-        result["next_action"] = "restore reachability before infra.host.code.deploy.update"
+        result["next_action"] = "restore reachability before runtime.checkout.deploy.update"
         return result
 
     head_sha = out_h.strip()
@@ -130,11 +134,11 @@ def probe_host(host: dict[str, Any], origin_head: str) -> dict[str, Any]:
     if is_dirty is True:
         result["status"] = "dirty_blocked"
         result["note"] = "checkout has uncommitted local changes"
-        result["next_action"] = "clean or commit local changes before infra.host.code.deploy.update"
+        result["next_action"] = "clean or commit local changes before runtime.checkout.deploy.update"
     elif head_sha != origin_head:
         result["status"] = "behind_fixable"
         result["note"] = f"checkout HEAD {head_sha[:8]} != origin/main {origin_head[:8]}"
-        result["next_action"] = "run infra.host.code.deploy.update"
+        result["next_action"] = "run runtime.checkout.deploy.update"
     elif rc_d != 0:
         result["status"] = "attention"
         result["note"] = f"dirty probe failed: {err_d.strip()[:200] or 'unknown'}"
@@ -155,7 +159,7 @@ def resolve_origin_head() -> tuple[str | None, str | None]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="infra.host.code.drift.status")
+    parser = argparse.ArgumentParser(prog="runtime.checkout.drift.status")
     parser.add_argument("--json", action="store_true", help="emit JSON only (default: human-readable)")
     parser.add_argument("--self-check", action="store_true", help="emit self-check pass and exit")
     args = parser.parse_args()
@@ -163,16 +167,16 @@ def main() -> int:
     placement = load_placement()
     if args.self_check:
         policy = placement.get("policy") or {}
-        if policy.get("canonical_update_capability") != "infra.host.code.deploy.update":
-            print("runtime.checkout.placement.yaml missing infra.host.code.deploy.update policy", file=sys.stderr)
+        if policy.get("canonical_update_capability") != "runtime.checkout.deploy.update":
+            print("runtime.checkout.placement.yaml missing runtime.checkout.deploy.update policy", file=sys.stderr)
             return 1
-        print("infra.host.code.drift.status self-check PASS")
+        print("runtime.checkout.drift.status self-check PASS")
         return 0
 
     origin_head, err = resolve_origin_head()
     if origin_head is None:
         payload = {
-            "capability": "infra.host.code.drift.status",
+            "capability": "runtime.checkout.drift.status",
             "status": "fail",
             "error": err,
         }
@@ -198,19 +202,19 @@ def main() -> int:
         overall = "unknown"
 
     payload = {
-        "capability": "infra.host.code.drift.status",
+        "capability": "runtime.checkout.drift.status",
         "origin_main_head": origin_head,
         "overall_status": overall,
         "hosts": hosts_result,
         "placement_contract": "ops/bindings/runtime.checkout.placement.yaml",
-        "canonical_update_capability": "infra.host.code.deploy.update",
+        "canonical_update_capability": "runtime.checkout.deploy.update",
         "scope_note": "PACKET-616 read-only drift readback; placement contract is source of truth. No mutation, no automatic pull, no rsync.",
     }
 
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
-        print("infra.host.code.drift.status")
+        print("runtime.checkout.drift.status")
         print(f"origin/main: {origin_head}")
         print(f"overall:     {overall}")
         for h in hosts_result:

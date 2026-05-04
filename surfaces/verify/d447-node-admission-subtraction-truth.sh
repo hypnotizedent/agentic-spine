@@ -276,17 +276,19 @@ if unannotated:
 
 # PACKET-616: runtime checkout deployment is a first-class deploy artery.
 # Host placement lives in ops/bindings/runtime.checkout.placement.yaml, drift
-# readback consumes that contract, and infra.host.code.deploy.update is the
-# governed update cap. The old MacBook-to-pve rsync path is emergency/bootstrap
-# drilldown only, not canonical operator grammar.
+# readback consumes that contract, and runtime.checkout.deploy.update is the
+# governed update cap. PACKET-1105 promoted the canonical names from
+# infra.host.code.* to runtime.checkout.*; old names remain as compatibility
+# wrappers but are not taught as canonical operator grammar. The old
+# MacBook-to-pve rsync path is emergency/bootstrap drilldown only.
 host_drift_policy = root / "docs/governance/HOST_DRIFT_POLICY.md"
 if not host_drift_policy.is_file():
     fail("docs/governance/HOST_DRIFT_POLICY.md missing (PACKET-586 declared this as the canonical host-drift governance surface; /ctx skill references it)")
 drift_policy_text = host_drift_policy.read_text(encoding="utf-8")
 if "/opt/agentic-spine" not in drift_policy_text:
     fail("HOST_DRIFT_POLICY.md must name /opt/agentic-spine as pve's drift surface")
-if "infra.host.code.deploy.update" not in drift_policy_text:
-    fail("HOST_DRIFT_POLICY.md must name infra.host.code.deploy.update as the canonical runtime checkout update path")
+if "runtime.checkout.deploy.update" not in drift_policy_text:
+    fail("HOST_DRIFT_POLICY.md must name runtime.checkout.deploy.update as the canonical runtime checkout update path (PACKET-1105 canonical rename)")
 if "emergency/bootstrap drilldown" not in drift_policy_text:
     fail("HOST_DRIFT_POLICY.md must demote manual rsync/git sync to emergency/bootstrap drilldown only")
 
@@ -295,8 +297,8 @@ if not placement_contract.is_file():
     fail("ops/bindings/runtime.checkout.placement.yaml missing (PACKET-616 canonical runtime checkout placement)")
 placement_text = placement_contract.read_text(encoding="utf-8")
 for token in [
-    "canonical_update_capability: infra.host.code.deploy.update",
-    "canonical_drift_readback_capability: infra.host.code.drift.status",
+    "canonical_update_capability: runtime.checkout.deploy.update",
+    "canonical_drift_readback_capability: runtime.checkout.drift.status",
     "canonical_receipt_root: /md1400/spine/state/domain-state/host-code-deploy",
     "canonical_receipt_ssh_targets:",
     "macbook_to_pve_rsync_as_normal_sync",
@@ -311,28 +313,30 @@ for token in [
 # host via local-or-ssh git rev-parse; brief integration in status.sh emits
 # "Code drift: ok|attention". This extends D447 (no new D-gate) per the
 # add-one-retire-one rule and feedback_no-new-gate-without-subtraction.
+# PACKET-1105 canonical rename: cap names are runtime.checkout.{drift.status,
+# deploy.update}; old infra.host.code.* names are compatibility wrappers.
 drift_cap_script = root / "ops/plugins/infra/host/bin/host-code-drift-status"
 if not drift_cap_script.is_file():
     fail("ops/plugins/infra/host/bin/host-code-drift-status missing (PACKET-589 host code drift readback)")
 if not os.access(str(drift_cap_script), os.X_OK):
     fail("host-code-drift-status must be executable")
 drift_cap_text = drift_cap_script.read_text(encoding="utf-8")
-if "infra.host.code.drift.status" not in drift_cap_text:
-    fail("host-code-drift-status script must self-identify as infra.host.code.drift.status capability")
+if "runtime.checkout.drift.status" not in drift_cap_text:
+    fail("host-code-drift-status script must self-identify as runtime.checkout.drift.status capability (PACKET-1105 canonical rename)")
 if "runtime.checkout.placement.yaml" not in drift_cap_text:
     fail("host-code-drift-status must read runtime.checkout.placement.yaml instead of carrying a parallel HOSTS table")
-for token in ["dirty_blocked", "behind_fixable", "unmanaged_checkout", "infra.host.code.deploy.update"]:
+for token in ["dirty_blocked", "behind_fixable", "unmanaged_checkout", "runtime.checkout.deploy.update"]:
     if token not in drift_cap_text:
         fail(f"host-code-drift-status missing PACKET-616 classification token: {token}")
 # PACKET-588 Phase 1 stop lines (no automatic pull, no rsync, no host mutation)
 # are enforced at the cap-safety annotation layer (must be safety: read-only)
 # and through code review — substring checks on the script body would false-fire
 # on docstring text. Read-only safety + script_path checks below cover this.
-caps_doc_drift = (caps_map.get("infra.host.code.drift.status") or {})
+caps_doc_drift = (caps_map.get("runtime.checkout.drift.status") or {})
 if caps_doc_drift.get("safety") != "read-only":
-    fail("infra.host.code.drift.status must be safety: read-only in capabilities.yaml")
+    fail("runtime.checkout.drift.status must be safety: read-only in capabilities.yaml")
 if caps_doc_drift.get("script_path") != "./ops/plugins/infra/host/bin/host-code-drift-status":
-    fail("infra.host.code.drift.status script_path must point at ops/plugins/infra/host/bin/host-code-drift-status")
+    fail("runtime.checkout.drift.status script_path must point at ops/plugins/infra/host/bin/host-code-drift-status")
 deploy_cap_script = root / "ops/plugins/infra/host/bin/host-code-deploy-update"
 if not deploy_cap_script.is_file():
     fail("ops/plugins/infra/host/bin/host-code-deploy-update missing (PACKET-616 governed deploy artery)")
@@ -340,7 +344,7 @@ if not os.access(str(deploy_cap_script), os.X_OK):
     fail("host-code-deploy-update must be executable")
 deploy_cap_text = deploy_cap_script.read_text(encoding="utf-8")
 for token in [
-    "infra.host.code.deploy.update",
+    "runtime.checkout.deploy.update",
     "runtime.checkout.placement.yaml",
     "dirty_blocked",
     "ahead_or_diverged_blocked",
@@ -351,13 +355,37 @@ for token in [
 ]:
     if token not in deploy_cap_text:
         fail(f"host-code-deploy-update missing PACKET-616 token: {token}")
-caps_doc_deploy = (caps_map.get("infra.host.code.deploy.update") or {})
+caps_doc_deploy = (caps_map.get("runtime.checkout.deploy.update") or {})
 if caps_doc_deploy.get("safety") != "mutating":
-    fail("infra.host.code.deploy.update must be safety: mutating in capabilities.yaml")
+    fail("runtime.checkout.deploy.update must be safety: mutating in capabilities.yaml")
 if ((caps_doc_deploy.get("routing") or {}).get("db_authority")) != "skip":
-    fail("infra.host.code.deploy.update must declare routing.db_authority: skip because it mutates external runtime checkouts, not shared_authority.db")
+    fail("runtime.checkout.deploy.update must declare routing.db_authority: skip because it mutates external runtime checkouts, not shared_authority.db")
 if caps_doc_deploy.get("script_path") != "./ops/plugins/infra/host/bin/host-code-deploy-update":
-    fail("infra.host.code.deploy.update script_path must point at ops/plugins/infra/host/bin/host-code-deploy-update")
+    fail("runtime.checkout.deploy.update script_path must point at ops/plugins/infra/host/bin/host-code-deploy-update")
+
+# PACKET-1105 canonical rename lock — old names must remain as compatibility
+# wrappers with explicit demotion metadata; old names must NOT be taught as
+# canonical operator grammar. Extension of D447 only — NO new D-gate.
+for old_name, new_name in (
+    ("infra.host.code.drift.status", "runtime.checkout.drift.status"),
+    ("infra.host.code.deploy.update", "runtime.checkout.deploy.update"),
+):
+    compat_entry = (caps_map.get(old_name) or {})
+    if not compat_entry:
+        fail(f"{old_name} must remain in capabilities.yaml as a compatibility wrapper (PACKET-1105)")
+    if compat_entry.get("compatibility_alias_of") != new_name:
+        fail(f"{old_name} must declare compatibility_alias_of: {new_name} (PACKET-1105 canonical rename)")
+    if compat_entry.get("public_grammar") != "hidden":
+        fail(f"{old_name} must declare public_grammar: hidden (PACKET-1105 demotion)")
+    if not str(compat_entry.get("sunset_condition") or "").strip():
+        fail(f"{old_name} must declare a non-empty sunset_condition (PACKET-1105)")
+    if not str(compat_entry.get("description") or "").startswith("Compatibility wrapper"):
+        fail(f"{old_name} description must start with 'Compatibility wrapper' (PACKET-1105 demotion)")
+# Old names must NOT appear as canonical update/drift capability in placement
+if "canonical_update_capability: infra.host.code.deploy.update" in placement_text:
+    fail("runtime.checkout.placement.yaml must not name infra.host.code.deploy.update as canonical (PACKET-1105 canonical rename)")
+if "canonical_drift_readback_capability: infra.host.code.drift.status" in placement_text:
+    fail("runtime.checkout.placement.yaml must not name infra.host.code.drift.status as canonical (PACKET-1105 canonical rename)")
 status_sh_text = (root / "ops/commands/status.sh").read_text(encoding="utf-8")
 if "infra/host/bin/host-code-drift-status" not in status_sh_text:
     fail("ops/commands/status.sh brief output must integrate host-code-drift-status (PACKET-589 ops status --brief deliverable)")

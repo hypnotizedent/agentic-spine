@@ -1320,7 +1320,7 @@ capabilities:
     automation_only: true
     layer: L2_shared_infrastructure
   clerk.symptom.classify.and.file:
-    description: PACKET-592 Phase 1 friction clerk plus agent-entry bypass diagnostics. Reads ops status --brief, infra.host.code.drift.status, infra.host.authority.reachability.status, terminal heartbeats, and recent commit subjects; classifies each surfaced symptom into an 8-field record (symptom, source, affected authority, classification, owner/canonical home, severity, allowed autonomy, next action) with a stable dedupe key; files governed friction records via existing friction.ingest cap (dedupes against the existing queue; matched/new counts are run-specific, not hardcoded here). Default mode is dry-run JSON; --file invokes friction.ingest for each classified record. Read-only diagnosis + governed filing only — NO direct DB writes, NO host mutation, NO autonomous fix attempts. Stops "spine failed / coherence attention" and engine-lane bypass risk hiding inside generic verify output by turning each into a classified deduped record. NOTE — cross-host filing from non-authority hosts requires SPINE_ROLE_POLICY_OVERRIDE_* env propagation across cap.sh SSH dispatch (separately fixable). Today the cap files cleanly when invoked on pve directly or when the override env reaches the routed dispatch.
+    description: PACKET-592 Phase 1 friction clerk plus agent-entry bypass diagnostics. Reads ops status --brief, runtime.checkout.drift.status, infra.host.authority.reachability.status, terminal heartbeats, and recent commit subjects; classifies each surfaced symptom into an 8-field record (symptom, source, affected authority, classification, owner/canonical home, severity, allowed autonomy, next action) with a stable dedupe key; files governed friction records via existing friction.ingest cap (dedupes against the existing queue; matched/new counts are run-specific, not hardcoded here). Default mode is dry-run JSON; --file invokes friction.ingest for each classified record. Read-only diagnosis + governed filing only — NO direct DB writes, NO host mutation, NO autonomous fix attempts. Stops "spine failed / coherence attention" and engine-lane bypass risk hiding inside generic verify output by turning each into a classified deduped record. NOTE — cross-host filing from non-authority hosts requires SPINE_ROLE_POLICY_OVERRIDE_* env propagation across cap.sh SSH dispatch (separately fixable). Today the cap files cleanly when invoked on pve directly or when the override env reaches the routed dispatch.
     tags:
       - infra
       - clerk
@@ -1649,10 +1649,10 @@ capabilities:
     domain: infra
     plane: fabric
     layer: L2_shared_infrastructure
-  infra.host.code.drift.status:
-    description: Read-only host code drift readback. Reads ops/bindings/runtime.checkout.placement.yaml as the canonical placement contract and reports per-host checkout HEAD vs origin/main HEAD, dirty worktree state, reachability, and deploy-update next action. NO mutation, NO automatic pull, NO rsync. Use infra.host.code.deploy.update as the governed update path.
+  runtime.checkout.drift.status:
+    description: Read-only runtime checkout drift readback. Reads ops/bindings/runtime.checkout.placement.yaml as the canonical placement contract and reports per-host checkout HEAD vs origin/main HEAD, dirty worktree state, reachability, and deploy-update next action. NO mutation, NO automatic pull, NO rsync. Use runtime.checkout.deploy.update as the governed update path. PACKET-1105 promoted this name from infra.host.code.drift.status; the old name remains as a compatibility wrapper.
     tags:
-      - infra
+      - runtime-checkout
       - drift
       - deployment-hygiene
     command: ./ops/plugins/infra/host/bin/host-code-drift-status
@@ -1664,15 +1664,14 @@ capabilities:
     lifecycle: ready
     outputs:
       - stdout
-    domain: infra
+    domain: runtime
     plane: fabric
     layer: L2_shared_infrastructure
-  infra.host.code.deploy.update:
-    description: Governed runtime checkout deploy artery (PACKET-616). Reads ops/bindings/runtime.checkout.placement.yaml, updates managed agentic-spine runtime checkouts to origin/main with git fetch + git pull --ff-only, refuses dirty or non-fast-forward checkouts, skips unmanaged watcher surfaces, and writes before/after HEAD receipts. Subtracts operator-typed ssh/git-pull/rsync as normal deployment grammar; manual sync remains emergency drilldown only.
+  runtime.checkout.deploy.update:
+    description: Governed runtime checkout deploy artery (PACKET-616). Reads ops/bindings/runtime.checkout.placement.yaml, updates managed agentic-spine runtime checkouts to origin/main with git fetch + git pull --ff-only, refuses dirty or non-fast-forward checkouts, skips unmanaged watcher surfaces, and writes before/after HEAD receipts. Subtracts operator-typed ssh/git-pull/rsync as normal deployment grammar; manual sync remains emergency drilldown only. PACKET-1105 promoted this name from infra.host.code.deploy.update; the old name remains as a compatibility wrapper.
     tags:
-      - infra
-      - deployment-hygiene
       - runtime-checkout
+      - deployment-hygiene
       - subtraction
     command: ./ops/plugins/infra/host/bin/host-code-deploy-update
     script_path: ./ops/plugins/infra/host/bin/host-code-deploy-update
@@ -1686,7 +1685,50 @@ capabilities:
     outputs:
       - stdout
       - $SPINE_STATE/domain-state/host-code-deploy/runtime-checkout-deploy-latest.yaml
-    domain: infra
+    domain: runtime
+    plane: fabric
+    layer: L2_shared_infrastructure
+  infra.host.code.drift.status:
+    description: "Compatibility wrapper; canonical cap is runtime.checkout.drift.status (PACKET-1105 canonical rename). Forwards to the same script. Hidden from operator-taught grammar; will be removed when no governed references to infra.host.code.* remain."
+    compatibility_alias_of: runtime.checkout.drift.status
+    public_grammar: hidden
+    sunset_condition: no governed references to infra.host.code.* remain
+    tags:
+      - compatibility
+      - runtime-checkout
+    command: ./ops/plugins/infra/host/bin/host-code-drift-status
+    script_path: ./ops/plugins/infra/host/bin/host-code-drift-status
+    cwd: $SPINE_CODE
+    safety: read-only
+    approval: auto
+    arg_protocol: argparse
+    lifecycle: ready
+    outputs:
+      - stdout
+    domain: runtime
+    plane: fabric
+    layer: L2_shared_infrastructure
+  infra.host.code.deploy.update:
+    description: "Compatibility wrapper; canonical cap is runtime.checkout.deploy.update (PACKET-1105 canonical rename). Forwards to the same script. Hidden from operator-taught grammar; will be removed when no governed references to infra.host.code.* remain."
+    compatibility_alias_of: runtime.checkout.deploy.update
+    public_grammar: hidden
+    sunset_condition: no governed references to infra.host.code.* remain
+    tags:
+      - compatibility
+      - runtime-checkout
+    command: ./ops/plugins/infra/host/bin/host-code-deploy-update
+    script_path: ./ops/plugins/infra/host/bin/host-code-deploy-update
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: argparse
+    lifecycle: ready
+    routing:
+      db_authority: skip
+    outputs:
+      - stdout
+      - $SPINE_STATE/domain-state/host-code-deploy/runtime-checkout-deploy-latest.yaml
+    domain: runtime
     plane: fabric
     layer: L2_shared_infrastructure
   infra.hypervisor.identity:

@@ -2,7 +2,7 @@
 
 > Status: authoritative
 > Owner: @ronny
-> Last verified: 2026-05-03
+> Last verified: 2026-05-04
 > Surface: governance — defines how host-local code checkouts stay aligned with `origin/main` truth
 
 ## Purpose
@@ -20,11 +20,16 @@ placement contract is:
 
 The canonical readback is:
 
-`./bin/ops cap run infra.host.code.drift.status`
+`./bin/ops cap run runtime.checkout.drift.status`
 
 The canonical update path is:
 
-`./bin/ops cap run infra.host.code.deploy.update`
+`./bin/ops cap run runtime.checkout.deploy.update`
+
+The legacy names `infra.host.code.drift.status` and
+`infra.host.code.deploy.update` remain as compatibility wrappers that
+forward to the same scripts; they are hidden from operator-taught
+grammar pending sunset (PACKET-1105 canonical rename).
 
 ## The Single Rule
 
@@ -40,9 +45,9 @@ checkouts.
 
 | Host | Role | Code path | Canonical update mode | Drift gate |
 |---|---|---|---|---|
-| MacBook | operator_console | `/Users/ronnyworks/code/agentic-spine` | `infra.host.code.deploy.update` local `git pull --ff-only` | `infra.host.code.drift.status` |
-| ai-consolidation | execution_host | `/home/ubuntu/code/agentic-spine` | `infra.host.code.deploy.update` over SSH, `git pull --ff-only` | `infra.host.code.drift.status` |
-| pve | storage_evidence_node | `/opt/agentic-spine` | `infra.host.code.deploy.update` over SSH, `git pull --ff-only` using pve's read-only forge deploy key | `infra.host.code.drift.status` |
+| MacBook | operator_console | `/Users/ronnyworks/code/agentic-spine` | `runtime.checkout.deploy.update` local `git pull --ff-only` | `runtime.checkout.drift.status` |
+| ai-consolidation | execution_host | `/home/ubuntu/code/agentic-spine` | `runtime.checkout.deploy.update` over SSH, `git pull --ff-only` | `runtime.checkout.drift.status` |
+| pve | storage_evidence_node | `/opt/agentic-spine` | `runtime.checkout.deploy.update` over SSH, `git pull --ff-only` using pve's read-only forge deploy key | `runtime.checkout.drift.status` |
 | pve-r620 | watcher_node | no checkout | unmanaged witness surface | n/a |
 
 The table is explanatory. The machine-readable authority is
@@ -62,7 +67,7 @@ cap call, followed by drift readback.
 
 ## Governed Update Behavior
 
-`infra.host.code.deploy.update`:
+`runtime.checkout.deploy.update`:
 
 - reads `ops/bindings/runtime.checkout.placement.yaml`
 - refuses dirty checkouts
@@ -91,8 +96,8 @@ the shared authority DB. Its target is external runtime checkouts.
 - `ops/bindings/runtime.bootstrap.contract.yaml#db_authority.code_path` — pve routed-cap checkout path
 - `ops/bindings/root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical` — pve canonical roots
 - `surfaces/verify/d447-node-admission-subtraction-truth.sh` — static lock that the placement/readback/deploy surfaces exist
-- `infra.host.code.drift.status` — read-only drift readback
-- `infra.host.code.deploy.update` — governed runtime checkout update
+- `runtime.checkout.drift.status` — read-only drift readback (canonical; old name `infra.host.code.drift.status` is a hidden compatibility wrapper)
+- `runtime.checkout.deploy.update` — governed runtime checkout update (canonical; old name `infra.host.code.deploy.update` is a hidden compatibility wrapper)
 
 ## History
 
@@ -100,3 +105,8 @@ the shared authority DB. Its target is external runtime checkouts.
 - 2026-05-03: PACKET-616 subtracted rsync as canonical sync after pve received a
   read-only forge deploy key. Runtime checkout deployment is now a governed cap
   over a placement contract.
+- 2026-05-04: PACKET-1105 promoted `runtime.checkout.drift.status` and
+  `runtime.checkout.deploy.update` to canonical names; old
+  `infra.host.code.*` names remain as hidden compatibility wrappers
+  pending sunset (governance closure: AGENTS.md "Construction is not
+  completion" + NORTH_STAR.md "Names Must Equal Meaning").
