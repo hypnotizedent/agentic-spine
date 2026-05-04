@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+# forge-runner-config-set - Smallest L2 host-orchestration primitive
+# (PACKET-965). Toggles the gitea-runner act_runner cache.enabled config
+# on dev-tools by writing /data/config.yaml inside the runner container
+# and adding `command: ["daemon", "--config", "/data/config.yaml"]` to
+# the gitea-runner service in /opt/stacks/gitea/docker-compose.yml,
+# then running docker-compose down + up.
+#
+# Closes 1 of 4 named runner_cache gaps from PACKET-800 (actcache
+# bolt.db). The other 3 gaps (owner-global runner, persistent
+# /root/.cache/act, docker.sock mount) remain fenced and require
+# additional separate L2 build slices.
+#
+# Default behavior is DRY-RUN. --apply --reason both required to mutate.
+# --apply briefly restarts the gitea-runner container; CI is
+# unavailable during the restart window. Operator drives --apply with
+# their own timing.
+#
+# Stop lines (enforced in script):
+# - Never reads tokens (env vars, /data/.runner contents)
+# - Modifications restricted to gitea-runner service in
+#   /opt/stacks/gitea/docker-compose.yml; other services not touched
+# - No image rebuild; restart only
+# - No /data/.runner manipulation; no runner re-registration
+# - No /var/run/docker.sock mount changes
+# - Default dry-run; --apply --reason required for mutation
+#
+# Usage:
+#   forge-runner-config-set --enable-cache <true|false> [--dry-run]
+#   forge-runner-config-set --enable-cache false --apply --reason '<text>'
+#
+# Exit codes:
+#   0   applied successfully or already-in-target-state idempotent
+#   1   API/SSH/compose error
+#   2   bad usage / missing dependency / dry-run skipped (no --apply)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+
+stop(){ echo "STOP ($1): $2" >&2; exit "$1"; }
+
+command -v ssh >/dev/null 2>&1 || stop 2 "missing dependency: ssh"
+command -v python3 >/dev/null 2>&1 || stop 2 "missing dependency: python3"
+
+ENABLE_CACHE=""
+APPLY=0
+REASON=""
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enable-cache) ENABLE_CACHE="$2"; shift 2 ;;
+    --apply) APPLY=1; shift ;;
+    --reason) REASON="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+    *) stop 2 "unknown arg: $1" ;;
+  esac
+done
+
+[[ "$ENABLE_CACHE" == "true" || "$ENABLE_CACHE" == "false" ]] \
+  || stop 2 "--enable-cache must be 'true' or 'false'"
+if [[ "$APPLY" -eq 1 && -z "$REASON" ]]; then
+  stop 2 "--apply requires --reason '<text>'"
+fi
+if [[ "$APPLY" -eq 1 && "$DRY_RUN" -eq 1 ]]; then
+  stop 2 "--apply and --dry-run are mutually exclusive"
+fi
+
+# Resolve forge runtime body via ssh.targets.yaml
+NODE_ROLE_CONTRACT="$SPINE_ROOT/ops/bindings/node.role.contract.yaml"
+SSH_TARGETS="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+[[ -f "$NODE_ROLE_CONTRACT" ]] || stop 2 "node.role.contract.yaml not found at $NODE_ROLE_CONTRACT"
+[[ -f "$SSH_TARGETS" ]] || stop 2 "ssh.targets.yaml not found at $SSH_TARGETS"
+
+SSH_HOST="$(yq -r '.ssh.targets[] | select(.id == "dev-tools") | (.tailscale_ip // .host)' "$SSH_TARGETS")"
+SSH_USER="$(yq -r '.ssh.targets[] | select(.id == "dev-tools") | .user' "$SSH_TARGETS")"
+[[ -n "$SSH_HOST" && "$SSH_HOST" != "null" ]] || stop 2 "could not resolve dev-tools host from ssh.targets.yaml"
+[[ -n "$SSH_USER" && "$SSH_USER" != "null" ]] || SSH_USER="ubuntu"
+
+COMPOSE_PATH="/opt/stacks/gitea/docker-compose.yml"
+RUNNER_SERVICE="gitea-runner"
+CONFIG_PATH_IN_CONTAINER="/data/config.yaml"
+
+ssh_remote(){
+  local cmd="$1"
+  ssh -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    "${SSH_USER}@${SSH_HOST}" "$cmd"
+}
+
+# Probe current state — fetch compose content via ssh-cat, parse locally
+# (dev-tools doesn't have yq installed; python3 is on operator side).
+set +e
+COMPOSE_CONTENT="$(ssh_remote "cat ${COMPOSE_PATH}" 2>/dev/null)"
+PROBE_RC=$?
+set -e
+[[ "$PROBE_RC" -eq 0 ]] || stop 1 "could not read ${COMPOSE_PATH} on ${SSH_HOST}"
+[[ -n "$COMPOSE_CONTENT" ]] || stop 1 "${COMPOSE_PATH} is empty on ${SSH_HOST}"
+
+# Parse compose locally to determine current command field on gitea-runner
+HAS_COMMAND="$(python3 -c "
+import sys, yaml
+data = yaml.safe_load(sys.stdin)
+svc = (data.get('services') or {}).get('${RUNNER_SERVICE}', {})
+cmd = svc.get('command')
+if cmd is None:
+    print('null')
+elif isinstance(cmd, list):
+    print(' '.join(cmd))
+else:
+    print(str(cmd))
+" <<<"$COMPOSE_CONTENT")"
+
+set +e
+EXISTING_CONFIG_YAML="$(ssh_remote "docker exec ${RUNNER_SERVICE} cat ${CONFIG_PATH_IN_CONTAINER} 2>/dev/null" 2>&1 || true)"
+set -e
+
+# Determine current cache.enabled state
+# If config.yaml doesn't exist, default is cache.enabled=true (act_runner default)
+CURRENT_CACHE_ENABLED="true"
+if [[ -n "$EXISTING_CONFIG_YAML" && "$EXISTING_CONFIG_YAML" != "null" ]]; then
+  if echo "$EXISTING_CONFIG_YAML" | grep -qE '^[[:space:]]*enabled:[[:space:]]*false' ; then
+    CURRENT_CACHE_ENABLED="false"
+  fi
+fi
+
+# Determine current command override
+CURRENT_HAS_CMD_CONFIG="false"
+if [[ "$HAS_COMMAND" == *"--config"* ]]; then
+  CURRENT_HAS_CMD_CONFIG="true"
+fi
+
+# Plan
+TARGET_HAS_CMD_CONFIG="true"
+NEEDS_CONFIG_WRITE="false"
+NEEDS_COMPOSE_PATCH="false"
+NEEDS_RESTART="false"
+
+if [[ "$CURRENT_CACHE_ENABLED" != "$ENABLE_CACHE" ]]; then
+  NEEDS_CONFIG_WRITE="true"
+  NEEDS_RESTART="true"
+fi
+if [[ "$CURRENT_HAS_CMD_CONFIG" != "$TARGET_HAS_CMD_CONFIG" ]]; then
+  NEEDS_COMPOSE_PATCH="true"
+  NEEDS_RESTART="true"
+fi
+
+OUTCOME="idempotent_no_op"
+if [[ "$NEEDS_CONFIG_WRITE" == "true" || "$NEEDS_COMPOSE_PATCH" == "true" ]]; then
+  OUTCOME=$([[ "$APPLY" -eq 1 ]] && echo "applied" || echo "would_apply")
+fi
+
+# Receipt
+RECEIPT_DIR="${SPINE_STATE}/domain-state/forge-node"
+mkdir -p "$RECEIPT_DIR"
+RECEIPT_PATH="${RECEIPT_DIR}/runner-config-set-latest.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+write_receipt() {
+  local mode="$1"
+  python3 - "$RECEIPT_PATH" "$mode" "$ENABLE_CACHE" "$CURRENT_CACHE_ENABLED" \
+    "$CURRENT_HAS_CMD_CONFIG" "$NEEDS_CONFIG_WRITE" "$NEEDS_COMPOSE_PATCH" \
+    "$NEEDS_RESTART" "$OUTCOME" "$GENERATED_AT" "$REASON" \
+    "$SSH_HOST" "$SSH_USER" "$COMPOSE_PATH" <<'PYEOF'
+import sys, yaml
+(out, mode, enable_cache, current_cache, current_has_cmd, needs_config_write,
+ needs_compose_patch, needs_restart, outcome, generated_at, reason,
+ host, user, compose_path) = sys.argv[1:]
+data = {
+  "proof_class": "runner_config_set_proof",
+  "capability": "forge.runner.config_set",
+  "generated_at": generated_at,
+  "mode": mode,
+  "reason": reason or None,
+  "outcome": outcome,
+  "target": {
+    "host": host,
+    "user": user,
+    "compose_path": compose_path,
+    "service": "gitea-runner",
+    "container_config_path": "/data/config.yaml",
+  },
+  "before": {
+    "cache_enabled": current_cache,
+    "compose_command_has_config_flag": (current_has_cmd == "true"),
+  },
+  "after_plan": {
+    "cache_enabled": enable_cache,
+    "compose_command_has_config_flag": True,
+    "needs_config_write": (needs_config_write == "true"),
+    "needs_compose_patch": (needs_compose_patch == "true"),
+    "needs_runner_restart": (needs_restart == "true"),
+  },
+  "scope_note": (
+    "Smallest L2 host-orchestration primitive (PACKET-965). Toggles "
+    "act_runner cache.enabled by writing /data/config.yaml in the "
+    "runner container and adding 'command: [daemon, --config, "
+    "/data/config.yaml]' to the gitea-runner service in compose. "
+    "Closes 1 of 4 named runner_cache gaps from PACKET-800 (actcache "
+    "bolt.db). Other 3 gaps (owner-global runner, /root/.cache/act "
+    "persistence, docker.sock fence) remain fenced and require "
+    "separate L2 build slices."
+  ),
+  "stop_lines_respected": [
+    "no token reads (env vars, /data/.runner)",
+    "modifications restricted to gitea-runner service in compose",
+    "no image rebuild; restart only via docker-compose down+up",
+    "no /data/.runner manipulation; no runner re-registration",
+    "no /var/run/docker.sock mount changes",
+    "default dry-run; --apply --reason required",
+  ],
+}
+with open(out, "w", encoding="utf-8") as fh:
+    yaml.safe_dump(data, fh, sort_keys=False)
+PYEOF
+}
+
+print_render() {
+  local mode="$1"
+  echo "forge.runner.config_set"
+  echo "host: ${SSH_USER}@${SSH_HOST}"
+  echo "compose_path: $COMPOSE_PATH"
+  echo "service: $RUNNER_SERVICE"
+  echo "mode: $mode"
+  if [[ -n "$REASON" ]]; then echo "reason: $REASON"; fi
+  echo "before:"
+  echo "  cache_enabled: $CURRENT_CACHE_ENABLED"
+  echo "  compose_command_has_config_flag: $CURRENT_HAS_CMD_CONFIG"
+  echo "after_plan:"
+  echo "  cache_enabled: $ENABLE_CACHE"
+  echo "  compose_command_has_config_flag: $TARGET_HAS_CMD_CONFIG"
+  echo "  needs_config_write: $NEEDS_CONFIG_WRITE"
+  echo "  needs_compose_patch: $NEEDS_COMPOSE_PATCH"
+  echo "  needs_runner_restart: $NEEDS_RESTART"
+  echo "outcome: $OUTCOME"
+  echo "receipt: $RECEIPT_PATH"
+}
+
+# Dry-run path
+if [[ "$APPLY" -eq 0 || "$DRY_RUN" -eq 1 ]]; then
+  print_render "dry_run"
+  echo "(dry run; no SSH writes, no docker-compose mutation, no runner restart)"
+  if [[ "$APPLY" -eq 0 ]]; then
+    echo "(default-safe: pass --apply --reason '<text>' to mutate; --apply briefly stops the runner during down/up — operator drives timing)"
+    exit 2
+  fi
+  exit 0
+fi
+
+# Apply path: idempotent no-op fast path
+if [[ "$OUTCOME" == "idempotent_no_op" ]]; then
+  write_receipt "applied"
+  print_render "applied"
+  exit 0
+fi
+
+# Apply path: do the work.
+# Step 1: write /data/config.yaml in the runner container
+if [[ "$NEEDS_CONFIG_WRITE" == "true" ]]; then
+  CONFIG_YAML=$(printf 'cache:\n  enabled: %s\n' "$ENABLE_CACHE")
+  if ! ssh_remote "docker exec -i ${RUNNER_SERVICE} sh -c 'cat > ${CONFIG_PATH_IN_CONTAINER}' <<< $(printf %q "$CONFIG_YAML")"; then
+    stop 1 "failed to write ${CONFIG_PATH_IN_CONTAINER} in runner container"
+  fi
+fi
+
+# Step 2: patch docker-compose.yml to add command field on gitea-runner only
+if [[ "$NEEDS_COMPOSE_PATCH" == "true" ]]; then
+  PATCH_SCRIPT='
+import sys, yaml
+path = sys.argv[1]
+with open(path) as f: data = yaml.safe_load(f)
+svc = data.get("services", {}).get("gitea-runner")
+if not svc:
+    print("STOP: gitea-runner service not found", file=sys.stderr); sys.exit(1)
+svc["command"] = ["daemon", "--config", "/data/config.yaml"]
+with open(path, "w") as f:
+    yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False)
+'
+  if ! ssh_remote "python3 -c $(printf %q "$PATCH_SCRIPT") ${COMPOSE_PATH}"; then
+    stop 1 "failed to patch ${COMPOSE_PATH}"
+  fi
+fi
+
+# Step 3: restart runner via docker-compose
+if [[ "$NEEDS_RESTART" == "true" ]]; then
+  if ! ssh_remote "cd /opt/stacks/gitea && docker-compose up -d gitea-runner"; then
+    stop 1 "docker-compose up failed"
+  fi
+fi
+
+# Step 4: verify
+sleep 5
+NEW_CACHE_ENABLED="true"
+NEW_CONFIG_YAML="$(ssh_remote "docker exec ${RUNNER_SERVICE} cat ${CONFIG_PATH_IN_CONTAINER} 2>/dev/null" 2>&1 || true)"
+if [[ -n "$NEW_CONFIG_YAML" ]] && echo "$NEW_CONFIG_YAML" | grep -qE '^[[:space:]]*enabled:[[:space:]]*false' ; then
+  NEW_CACHE_ENABLED="false"
+fi
+
+if [[ "$NEW_CACHE_ENABLED" != "$ENABLE_CACHE" ]]; then
+  stop 1 "post-apply readback shows cache_enabled=$NEW_CACHE_ENABLED, expected $ENABLE_CACHE"
+fi
+
+CURRENT_CACHE_ENABLED="$NEW_CACHE_ENABLED"
+write_receipt "applied"
+print_render "applied"
+exit 0
