@@ -371,21 +371,44 @@ node_types:
           proof_ref: "$SPINE_STATE/domain-state/forge-node/runner-cache-boundary-proof-latest.yaml"
           staged_delivery:
             stage_1_enumeration: present_when_proof_ref_artifact_exists
-            stage_2_clean_room_demo: leaky_demonstrated
+            stage_2_clean_room_demo: isolated_per_job_partial_remaining_owner_global_and_docker_sock
             stage_2_clean_room_demo_proof_ref: "$SPINE_STATE/domain-state/forge-node/runner-cache-boundary-demo-latest.yaml"
             stage_2_clean_room_demo_packet: PACKET-660-FORGE-RUNNER-CACHE-STAGE-2-DEMO
             stage_2_clean_room_demo_scope_note: >
               Stage 2 phase 0 metadata-only demo (PACKET-660, 2026-05-03)
               proved boundary leaky: cache entries on /root/.cache/act and
-              /root/.cache/actcache have mtimes older than the most recent
-              action_run start, and the cache directory is mounted into every
-              runner job's filesystem, therefore any subsequent job reads
-              pre-existing cache state. No clean room. forge_node
-              delivered:false stays — Stage 2 leaky_demonstrated is contract
-              truth, not a delivery advancement. Phase 1 (mutating disposable
-              test jobs) is FUTURE; would not change the leaky outcome
-              without a runner-config change (separate slice).
-            stage_2_blocked_until: runner_cache_isolation_remediation_or_explicit_acceptance_of_shared_cache_boundary
+              /root/.cache/actcache had mtimes older than the most recent
+              action_run start and the cache directory was mounted into every
+              runner job's filesystem, therefore any subsequent job read
+              pre-existing cache state. No clean room.
+
+              PACKET-965 (2026-05-04, commits 0bb7ca90 + e875b372 + b11c858c +
+              784e3810) built and applied forge.runner.config_set: the smallest
+              L2 host-orchestration cap in spine. --apply set
+              CONFIG_FILE=/data/config.yaml on the gitea-runner service in
+              /opt/stacks/gitea/docker-compose.yml and recreated the container;
+              act_runner now runs as `act_runner daemon --config /data/
+              config.yaml` and reads cache.enabled=false, so the actcache
+              server no longer starts (/root/.cache/actcache directory removed)
+              and the persistent layer cache /root/.cache/act was cleared by
+              container recreate. forge.runner_cache_boundary.status now
+              classifies isolated_per_job (structural). Two of four PACKET-800
+              gaps are closed: gap 2 (persistent /root/.cache/act) and gap 3
+              (actcache bolt.db).
+
+              Two named residuals remain and require separate L2 build slices,
+              so this stage is partial-isolation, not delivered: gap 1
+              (owner-global runner registration — runner is registered with
+              per_owner_global scope so any repo owned by the owner can use it;
+              fixing requires re-registration with per_repo scope, token
+              rotation, and container restart) and gap 4 (docker.sock mount
+              fence — runner has /var/run/docker.sock mounted so it can
+              read/write any container on the host; fixing requires
+              architectural redesign of job spawning model away from the
+              sibling-container pattern). forge_node delivered:false stays
+              while either residual is unaddressed; Stage 2 is honest
+              partial-isolation, not a full clean-room demonstration.
+            stage_2_blocked_until: owner_global_runner_re_registration_and_docker_sock_fence_or_explicit_acceptance_of_remaining_residuals
         branch_protection_readback_proof:
           source:
             - ops/plugins/infra/host/bin/forge-branch-protection-status
