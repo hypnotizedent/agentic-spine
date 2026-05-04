@@ -743,6 +743,16 @@ if "api_surface_fenced" not in forge_rc_text:
     fail("forge-runner-cache-boundary-status must classify the docker-socket-proxy fence pattern as 'api_surface_fenced' (PACKET-1075 — locks classification vocabulary so the readback's distinction between unfenced/fenced/partial cannot silently regress)")
 if "HostConfig escape" not in forge_rc_text:
     fail("forge-runner-cache-boundary-status must name the HostConfig escape residual when classification is api_surface_fenced (PACKET-1075 — locks the honest residual call-out so a future receipt cannot silently claim 'all gaps closed' after fence)")
+# PACKET-1095 lock: cap must surface accepted_residuals from the contract so
+# the operator-recorded HostConfig acceptance is visible in the readback.
+# Without these locks, future drift could silently strip the acceptance state
+# from rendered/JSON output and leave the open-gap line as the only signal
+# (which would re-create the same disease class as the boundary readback's
+# pre-PACKET-1085 false-positive on docker_sock_mounted).
+if "accepted_residuals" not in forge_rc_text:
+    fail("forge-runner-cache-boundary-status must read and surface accepted_residuals from the contract (PACKET-1095 — locks the acceptance-policy surface so a future readback cannot silently drop the operator-recorded acceptance state)")
+if "hostconfig_escape_accepted" not in forge_rc_text:
+    fail("forge-runner-cache-boundary-status proof_summary must include hostconfig_escape_accepted boolean (PACKET-1095 — locks the machine-readable policy-state field)")
 # Token-redaction discipline locks: the cap MUST NOT read /data/.runner
 # contents (file contains a registration token) and MUST NOT read
 # token_hash/token_salt fields from action_runner.

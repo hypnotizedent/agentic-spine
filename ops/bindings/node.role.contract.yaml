@@ -469,17 +469,65 @@ node_types:
               destination, and the latter no longer counts as host
               visibility.
 
-              Stage 2 trajectory (apply leg now COMPLETE):
+              Stage 2 trajectory (apply leg COMPLETE; HostConfig
+              residual ACCEPTED 2026-05-04 — see accepted_residuals
+              below):
                 - api_surface_fenced (current substrate post-apply):
-                  stage_2_blocked_until = host_config_escape_residual_
-                  acceptance_or_further_hardening
-              forge_node.delivered remains false until operator either
-              explicitly accepts the HostConfig residual OR pursues
-              further hardening (payload-inspecting proxy, gVisor/Kata
-              runtime isolation, userns-remapping with no privileged
-              ContainerCreate paths — architectural slices outside this
-              cap's aperture).
-            stage_2_blocked_until: host_config_escape_residual_acceptance_or_further_hardening
+                  stage_2_blocked_until = none (this lane resolved)
+              The runner_cache_boundary lane is closed for this
+              aperture: api surface is fenced via researched proxy
+              allowlist; HostConfig escape is operator-accepted with
+              the future-hardening path explicitly named (gVisor/
+              Kata, userns-remapping, payload-inspecting proxy) and
+              left as a separate L2 build slice with no live intent.
+
+              forge_node.promotion_standard.delivered REMAINS false
+              not because of this lane but because OTHER required
+              Stage 2 proofs are still open (agent_boundary_proof
+              Stage 2 — branch_protection_readback shows
+              signed_commits=false required_approvals=0
+              status_check=false; backup_restore_proof Stage 2
+              restore drill is FUTURE). Closing those is a separate
+              lane; honest delivered=false is maintained until they
+              also resolve (delivered or accepted).
+            stage_2_blocked_until: none_runner_cache_lane_resolved_other_proofs_block_overall_delivery
+          accepted_residuals:
+            hostconfig_escape:
+              accepted: true
+              accepted_at: 2026-05-04
+              accepted_by: operator
+              aperture: PACKET-1095 forge runner_cache_boundary
+                closeout (terminal-prompt acceptance phrase)
+              acceptance_phrase: |
+                "Close forge as an honest accepted residual. The
+                runner is repo-scoped, cache isolation is
+                isolated_per_job, docker.sock is fenced at the
+                API surface, leaked Gitea secrets have been
+                rotated, and spine.verify is clean. The only
+                remaining issue is the named HostConfig escape
+                residual."
+              residual_named_in: |
+                $SPINE_STATE/domain-state/forge-node/runner-cache-boundary-proof-latest.yaml
+                cache_scope_classification.enforcement_gaps[0]
+                (HostConfig escape; sibling-container blast
+                radius; image-pull from any reachable registry;
+                CopyFromContainer reads of any container
+                filesystem)
+              future_hardening_path: |
+                payload-inspecting proxy OR gVisor/Kata runtime
+                isolation OR userns-remapping with no privileged
+                ContainerCreate paths — architectural slices
+                outside this cap's aperture; defer unless concrete
+                intent emerges.
+              acceptance_does_not_promote_delivered: |
+                Acceptance closes the runner_cache_boundary lane
+                but does NOT flip forge_node.promotion_standard
+                .delivered to true on its own. Other required
+                Stage 2 proofs (agent_boundary, backup_restore)
+                are still open and must independently resolve
+                (delivered OR accepted) before
+                forge_node.delivered may flip via the governed
+                contract path.
         branch_protection_readback_proof:
           source:
             - ops/plugins/infra/host/bin/forge-branch-protection-status

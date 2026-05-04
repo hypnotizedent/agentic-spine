@@ -558,6 +558,16 @@ def build_proof() -> dict[str, Any]:
     fence = probe_docker_sock_fence(user, host)
     history = probe_action_run_history(user, host)
     classification = classify_cache_scope(runner_meta, cache_act, cache_actcache, mounts, fence)
+
+    # Read accepted_residuals from contract (PACKET-1095). The contract
+    # is the governed acceptance surface; the readback surfaces it so
+    # the gap text and the policy state are both visible without
+    # mutating the substrate-truth gap line.
+    contract = load_yaml(NODE_ROLE_CONTRACT)
+    fc = (((contract.get("node_types") or {}).get("forge_node") or {})
+          .get("promotion_standard") or {})
+    rcb_proof = (fc.get("required_proofs") or {}).get("runner_cache_boundary_proof") or {}
+    accepted_residuals = rcb_proof.get("accepted_residuals") or {}
     proof: dict[str, Any] = {
         "proof_class": "runner_cache_boundary_proof",
         "stage": 1,
@@ -600,6 +610,7 @@ def build_proof() -> dict[str, Any]:
         "docker_sock_fence": fence,
         "action_run_history": history,
         "cache_scope_classification": classification,
+        "accepted_residuals": accepted_residuals,
         "proof_summary": {
             "cache_scope_status": classification.get("status"),
             "current_boundary_character": classification.get("current_boundary_character"),
@@ -615,13 +626,23 @@ def build_proof() -> dict[str, Any]:
             "runner_docker_host_env": fence.get("runner_docker_host_env"),
             "action_run_total": history.get("total_count"),
             "drift_observed": classification.get("status") != "isolated_per_job",
+            "hostconfig_escape_accepted": bool(
+                ((accepted_residuals or {}).get("hostconfig_escape") or {}).get("accepted")
+            ),
             "stage_2_blocked_until": (
                 "clean_room_job_demonstration_runs_two_synthetic_jobs_with_no_observed_leak"
                 if classification.get("status") != "isolated_per_job"
                 else (
-                    "host_config_escape_residual_acceptance_or_further_hardening"
-                    if classification.get("docker_sock_classification") == "api_surface_fenced"
-                    else "docker_sock_fence_proxy_primitive_or_explicit_acceptance"
+                    "none_runner_cache_lane_resolved_other_proofs_block_overall_delivery"
+                    if (
+                        classification.get("docker_sock_classification") == "api_surface_fenced"
+                        and ((accepted_residuals or {}).get("hostconfig_escape") or {}).get("accepted")
+                    )
+                    else (
+                        "host_config_escape_residual_acceptance_or_further_hardening"
+                        if classification.get("docker_sock_classification") == "api_surface_fenced"
+                        else "docker_sock_fence_proxy_primitive_or_explicit_acceptance"
+                    )
                 )
             ),
         },
@@ -676,6 +697,14 @@ def render_human(proof: dict[str, Any]) -> str:
         lines.append("  enforcement gaps:")
         for g in gaps:
             lines.append(f"    - {g}")
+    accepted = (proof.get("accepted_residuals") or {}).get("hostconfig_escape") or {}
+    if accepted.get("accepted"):
+        lines.append(
+            f"  accepted residuals: hostconfig_escape "
+            f"(accepted_at={accepted.get('accepted_at')} "
+            f"by={accepted.get('accepted_by')}; "
+            f"future_hardening_path declared)"
+        )
     return "\n".join(lines)
 
 
