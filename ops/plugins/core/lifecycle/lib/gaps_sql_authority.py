@@ -337,6 +337,26 @@ def gap_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
+AUTONOMY_CANDIDATE_CLASSES = (
+    "not_autonomy_candidate",
+    "read_only_diagnosis_candidate",
+    "patch_artifact_candidate",
+    "patch_apply_sandbox_candidate",
+    "controller_review_required",
+)
+
+
+def validate_autonomy_candidate_class(value: str | None) -> tuple[bool, str]:
+    if value is None or value == "":
+        return True, ""
+    if value in AUTONOMY_CANDIDATE_CLASSES:
+        return True, ""
+    return False, (
+        f"invalid autonomy_candidate_class={value!r}; "
+        f"must be one of {', '.join(AUTONOMY_CANDIDATE_CLASSES)}"
+    )
+
+
 def gap_to_yaml_entry(gap: dict[str, Any]) -> dict[str, Any]:
     """Produce the YAML-projection dict for a single gap (stable key order)."""
     ordered_keys = [
@@ -344,6 +364,7 @@ def gap_to_yaml_entry(gap: dict[str, Any]) -> dict[str, Any]:
         "classification", "doc", "description", "severity", "status",
         "notes", "parent_loop", "owner", "fixed_in", "fixed_at",
         "closed_at", "regression_lock_id", "completion_level",
+        "autonomy_candidate_class",
     ]
     entry: dict[str, Any] = {}
     for k in ordered_keys:

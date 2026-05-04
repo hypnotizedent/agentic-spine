@@ -53,6 +53,7 @@ def main() -> int:
         "open": 0,
         "closed": 0,
         "projected_yaml": str(state_root() / "operational.gaps.yaml"),
+        "autonomy_candidates_open": {},
     }
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
@@ -62,6 +63,19 @@ def main() -> int:
         cur.execute("SELECT COUNT(*) FROM gaps WHERE LOWER(status) IN ('open','active','pending')")
         payload["open"] = int(cur.fetchone()[0] or 0)
         payload["closed"] = payload["total"] - payload["open"]
+        cur.execute(
+            "SELECT data_json FROM gaps WHERE LOWER(status) IN ('open','active','pending')"
+        )
+        candidate_counts: dict[str, int] = {}
+        for (data_json,) in cur.fetchall():
+            try:
+                data = json.loads(data_json or "{}")
+            except Exception:
+                data = {}
+            cls = data.get("autonomy_candidate_class") if isinstance(data, dict) else None
+            if cls:
+                candidate_counts[cls] = candidate_counts.get(cls, 0) + 1
+        payload["autonomy_candidates_open"] = candidate_counts
         conn.close()
     except Exception as exc:
         payload["status"] = "fail"
@@ -76,6 +90,13 @@ def main() -> int:
         print(f"open: {payload['open']}")
         print(f"closed: {payload['closed']}")
         print(f"projected_yaml: {payload['projected_yaml']}")
+        cc = payload.get("autonomy_candidates_open") or {}
+        if cc:
+            print("autonomy_candidates_open:")
+            for cls in sorted(cc):
+                print(f"  {cls}: {cc[cls]}")
+        else:
+            print("autonomy_candidates_open: none")
         if payload.get("error"):
             print(f"error: {payload['error']}")
     return 0 if payload["status"] == "ok" else 1

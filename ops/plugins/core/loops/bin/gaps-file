@@ -14,6 +14,15 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+AUTONOMY_CANDIDATE_CLASSES = (
+    "not_autonomy_candidate",
+    "read_only_diagnosis_candidate",
+    "patch_artifact_candidate",
+    "patch_apply_sandbox_candidate",
+    "controller_review_required",
+)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Governed gap filing wrapper")
     parser.add_argument("--id", default="auto")
@@ -23,6 +32,17 @@ def main() -> int:
     parser.add_argument("--parent-loop", default=os.environ.get("SPINE_LOOP_ID", ""))
     parser.add_argument("--owner", default="")
     parser.add_argument("--evidence", action="append", default=[])
+    parser.add_argument(
+        "--candidate-class",
+        default="",
+        choices=("",) + AUTONOMY_CANDIDATE_CLASSES,
+        help=(
+            "Optional autonomy_candidate_class declaring which mailroom safety "
+            "tier (if any) may pick up this gap. Worker proposes; controller "
+            "disposes. Field is advisory candidacy only; never grants closeout "
+            "authority."
+        ),
+    )
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[5]
@@ -46,6 +66,8 @@ def main() -> int:
         "evidence": args.evidence,
         "notes": [f"Filed via gaps.file at {utc_now()}"],
     }
+    if args.candidate_class:
+        payload["autonomy_candidate_class"] = args.candidate_class
     proc = subprocess.run(
         [sys.executable, str(bridge), "upsert", "--json", json.dumps(payload), "--actor", "gaps.file"],
         text=True,
