@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# gitea-agent-identity-ensure - Idempotent governed admission of a distinct
+# Gitea agent identity (user with prohibit_login=true) for forge_node
+# Stage 2.1 prerequisite. Smallest canonical primitive: a Gitea user
+# whose existence is the structural separation from operator's user.
+#
+# This is the second governed Gitea API mutation cap admitted by
+# platform.control.surfaces.yaml gitea.control.governed_api_caps. It is
+# narrow by design: GET-then-POST-if-absent for the user, hardcodes
+# prohibit_login=true after creation, never creates SSH keys, never
+# creates access tokens, never deletes anything, and never emits any
+# secret value (no password, no token, no key) in stdout or receipt.
+#
+# Token / SSH-key admission are explicitly out of scope. This slice
+# delivers a structurally distinct identity object that the
+# forge.agent_boundary.status classifier sees as user_count >= 2,
+# breaking the "weak_by_access_scarcity" classification. Future slices
+# admit bounded-scope tokens or SSH keys for this identity.
+#
+# Authority:    ops/bindings/platform.control.surfaces.yaml — gitea.control
+#               governed_api_caps lists this cap as a narrow exception.
+# API token:    GITEA_API_TOKEN via ops/plugins/providers/bin/infisical-agent.sh
+# Endpoints:    POST /api/v1/admin/users (create)
+#               PATCH /api/v1/admin/users/{username} (set prohibit_login)
+#               GET  /api/v1/users/{username} (idempotent probe)
+# Receipt:      $SPINE_STATE/domain-state/forge-node/agent-identity-proof-latest.yaml
+#
+# Default behavior: dry-run preview. --apply --reason required for mutation.
+#
+# Usage:
+#   gitea-agent-identity-ensure [--identity-name <name>] [--email <addr>]
+#                               [--full-name <text>] [--apply --reason <text>]
+#                               [--dry-run]
+#
+# Exit codes:
+#   0   identity present (created or already-existed)
+#   1   API error
+#   2   bad usage / missing dependency / dry-run skipped (no --apply)
+#   3   refuses to act (existing user with same name lacks prohibit_login
+#       and operator did not authorize remediation)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../../.." && pwd)}"
+SPINE_STATE="${SPINE_STATE:-$HOME/code/.runtime/spine/state}"
+
+# shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/platform-control-surface.sh
+source "$SPINE_ROOT/ops/lib/platform-control-surface.sh"
+
+stop(){ echo "STOP ($1): $2" >&2; exit "$1"; }
+
+command -v curl >/dev/null 2>&1 || stop 2 "missing dependency: curl"
+command -v jq >/dev/null 2>&1 || stop 2 "missing dependency: jq"
+command -v python3 >/dev/null 2>&1 || stop 2 "missing dependency: python3"
+
+IDENTITY_NAME="spine-agent"
+IDENTITY_EMAIL="spine-agent@spine.local"
+IDENTITY_FULL_NAME="Spine Agent"
+APPLY=0
+REASON=""
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --identity-name) IDENTITY_NAME="$2"; shift 2 ;;
+    --email) IDENTITY_EMAIL="$2"; shift 2 ;;
+    --full-name) IDENTITY_FULL_NAME="$2"; shift 2 ;;
+    --apply) APPLY=1; shift ;;
+    --reason) REASON="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help)
+      sed -n '2,40p' "$0"
+      exit 0
+      ;;
+    *) stop 2 "unknown arg: $1" ;;
+  esac
+done
+
+[[ "$IDENTITY_NAME" =~ ^[a-z][a-z0-9-]{1,38}[a-z0-9]$ ]] \
+  || stop 2 "--identity-name must match Gitea username rules (lowercase, 3-40 chars, [a-z0-9-])"
+[[ "$IDENTITY_EMAIL" =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] \
+  || stop 2 "--email must be a valid email address"
+
+if [[ "$APPLY" -eq 1 && -z "$REASON" ]]; then
+  stop 2 "--apply requires --reason '<text>'"
+fi
+if [[ "$APPLY" -eq 1 && "$DRY_RUN" -eq 1 ]]; then
+  stop 2 "--apply and --dry-run are mutually exclusive"
+fi
+
+# Resolve gitea endpoint
+resolved="$(control_surface_backend_resolved_url gitea 2 2>/dev/null || true)"
+GITEA_URL="$(awk '{print $1}' <<<"$resolved")"
+[[ -n "$GITEA_URL" ]] || GITEA_URL="$(control_surface_backend_url gitea)"
+[[ -n "$GITEA_URL" ]] || stop 2 "could not resolve Gitea backend URL"
+
+# Resolve API token
+INFISICAL_AGENT="${SPINE_ROOT}/ops/plugins/providers/bin/infisical-agent.sh"
+[[ -x "$INFISICAL_AGENT" ]] || stop 2 "infisical-agent.sh not executable at $INFISICAL_AGENT"
+GITEA_TOKEN="$("$INFISICAL_AGENT" get infrastructure prod GITEA_API_TOKEN 2>/dev/null || true)"
+[[ -n "$GITEA_TOKEN" ]] || stop 1 "GITEA_API_TOKEN not resolvable from Infisical (path=/spine/vm-infra/gitea)"
+
+AUTH="Authorization: token ${GITEA_TOKEN}"
+CONNECT_TIMEOUT=5
+MAX_TIME=15
+USERS_PATH="/api/v1/users/${IDENTITY_NAME}"
+ADMIN_USERS_CREATE_PATH="/api/v1/admin/users"
+ADMIN_USERS_EDIT_PATH="/api/v1/admin/users/${IDENTITY_NAME}"
+
+api_get_status_body() {
+  local path="$1"
+  curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+    -o /tmp/gitea-agent-identity-ensure.body.$$ \
+    -w "%{http_code}" \
+    -H "$AUTH" -H "Accept: application/json" \
+    "${GITEA_URL}${path}"
+}
+
+api_post_status_body() {
+  local path="$1"; local body="$2"
+  curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+    -o /tmp/gitea-agent-identity-ensure.body.$$ \
+    -w "%{http_code}" \
+    -X POST \
+    -H "$AUTH" -H "Accept: application/json" -H "Content-Type: application/json" \
+    -d "$body" \
+    "${GITEA_URL}${path}"
+}
+
+api_patch_status_body() {
+  local path="$1"; local body="$2"
+  curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+    -o /tmp/gitea-agent-identity-ensure.body.$$ \
+    -w "%{http_code}" \
+    -X PATCH \
+    -H "$AUTH" -H "Accept: application/json" -H "Content-Type: application/json" \
+    -d "$body" \
+    "${GITEA_URL}${path}"
+}
+
+cleanup_tmp() {
+  rm -f /tmp/gitea-agent-identity-ensure.body.$$
+}
+trap cleanup_tmp EXIT
+
+# Step 1: probe whether identity already exists
+status="$(api_get_status_body "$USERS_PATH")"
+EXISTING_USER_BODY=""
+EXISTING_USER_ID=""
+EXISTING_PROHIBIT_LOGIN=""
+if [[ "$status" == "200" ]]; then
+  EXISTING_USER_BODY="$(cat /tmp/gitea-agent-identity-ensure.body.$$)"
+  EXISTING_USER_ID="$(jq -r '.id // empty' <<<"$EXISTING_USER_BODY")"
+  EXISTING_PROHIBIT_LOGIN="$(jq -r '.prohibit_login // empty' <<<"$EXISTING_USER_BODY")"
+elif [[ "$status" != "404" ]]; then
+  stop 1 "GET ${USERS_PATH} returned ${status}: $(cat /tmp/gitea-agent-identity-ensure.body.$$ 2>/dev/null | head -c 200)"
+fi
+
+OUTCOME="unknown"
+PLAN_USER="none"
+
+if [[ -n "$EXISTING_USER_ID" ]]; then
+  OUTCOME="present"
+  if [[ "$EXISTING_PROHIBIT_LOGIN" != "true" ]]; then
+    PLAN_USER="patch_prohibit_login"
+  fi
+else
+  PLAN_USER="create_then_patch"
+fi
+
+# Receipt path
+RECEIPT_DIR="${SPINE_STATE}/domain-state/forge-node"
+RECEIPT_PATH="${RECEIPT_DIR}/agent-identity-proof-latest.yaml"
+mkdir -p "$RECEIPT_DIR"
+
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+write_receipt() {
+  local mode="$1"
+  local user_id="$2"
+  local prohibit_login="$3"
+  local outcome="$4"
+  python3 - "$RECEIPT_PATH" "$mode" "$user_id" "$prohibit_login" "$outcome" \
+          "$IDENTITY_NAME" "$IDENTITY_EMAIL" "$IDENTITY_FULL_NAME" \
+          "$GITEA_URL" "$GENERATED_AT" "$REASON" <<'PYEOF'
+import sys, yaml, os, datetime
+(out, mode, user_id, prohibit_login, outcome,
+ name, email, full_name, url, generated_at, reason) = sys.argv[1:]
+data = {
+  "proof_class": "agent_identity_proof",
+  "stage": 1,
+  "stage_label": "distinct_identity_admitted_no_auth_methods_attached",
+  "capability": "gitea.agent_identity.ensure",
+  "node_role": "forge_node",
+  "endpoint": url,
+  "generated_at": generated_at,
+  "mode": mode,
+  "reason": reason or None,
+  "outcome": outcome,
+  "identity": {
+    "name": name,
+    "email": email,
+    "full_name": full_name,
+    "user_id": int(user_id) if user_id and user_id != "0" else None,
+    "prohibit_login": (prohibit_login == "true"),
+    "auth_methods_attached": [],
+  },
+  "scope_note": (
+    "Identity-only slice: distinct Gitea user object whose existence "
+    "structurally separates from operator's user. Token/SSH key admission "
+    "is FUTURE and explicitly out of scope. No password, token, or key "
+    "value emitted by this cap or stored in this receipt."
+  ),
+  "stop_lines_respected": [
+    "no token created",
+    "no SSH key admitted",
+    "no deploy key admitted",
+    "no branch protection mutation",
+    "no runner config mutation",
+    "no secret value emitted in stdout",
+    "no secret value persisted in receipt",
+    "prohibit_login enforced for the new user",
+  ],
+}
+with open(out, "w", encoding="utf-8") as fh:
+    yaml.safe_dump(data, fh, sort_keys=False)
+PYEOF
+}
+
+print_render() {
+  local mode="$1"
+  echo "gitea.agent_identity.ensure"
+  echo "endpoint: ${GITEA_URL}${USERS_PATH}"
+  echo "identity: ${IDENTITY_NAME} (${IDENTITY_EMAIL})"
+  echo "full_name: ${IDENTITY_FULL_NAME}"
+  echo "mode: ${mode}"
+  if [[ -n "$REASON" ]]; then echo "reason: ${REASON}"; fi
+  echo "outcome: ${OUTCOME}"
+  echo "plan: ${PLAN_USER}"
+  if [[ -n "$EXISTING_USER_ID" ]]; then
+    echo "existing_user_id: ${EXISTING_USER_ID}"
+    echo "existing_prohibit_login: ${EXISTING_PROHIBIT_LOGIN}"
+  fi
+  echo "receipt: ${RECEIPT_PATH}"
+}
+
+# Dry run path: explicit --dry-run flag OR no --apply (default-safe).
+# Dry-run NEVER writes the canonical receipt (receipts capture actual state,
+# not preview shape). Existing receipt is preserved.
+if [[ "$APPLY" -eq 0 || "$DRY_RUN" -eq 1 ]]; then
+  if [[ -n "$EXISTING_USER_ID" && "$EXISTING_PROHIBIT_LOGIN" == "true" ]]; then
+    OUTCOME="already_present_idempotent"
+  elif [[ -n "$EXISTING_USER_ID" ]]; then
+    OUTCOME="would_patch_prohibit_login"
+  else
+    OUTCOME="would_create"
+  fi
+  print_render "dry_run"
+  echo "(dry run; no API mutation; canonical receipt not written)"
+  if [[ "$APPLY" -eq 0 ]]; then
+    echo "(default-safe: pass --apply --reason '<text>' to mutate)"
+    exit 2
+  fi
+  exit 0
+fi
+
+# Apply path: --apply --reason both required (validated above)
+if [[ -z "$EXISTING_USER_ID" ]]; then
+  # Step 2a: create user with random discarded password
+  RANDOM_PW="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  BODY="$(jq -nc \
+    --arg user "$IDENTITY_NAME" \
+    --arg email "$IDENTITY_EMAIL" \
+    --arg full "$IDENTITY_FULL_NAME" \
+    --arg pw "$RANDOM_PW" \
+    '{username:$user, email:$email, full_name:$full, password:$pw,
+      must_change_password:false, send_notify:false, source_id:0,
+      visibility:"limited", restricted:true}')"
+  status="$(api_post_status_body "$ADMIN_USERS_CREATE_PATH" "$BODY")"
+  RANDOM_PW=""  # discard
+  unset RANDOM_PW
+  if [[ "$status" != "201" ]]; then
+    stop 1 "POST ${ADMIN_USERS_CREATE_PATH} returned ${status}: $(cat /tmp/gitea-agent-identity-ensure.body.$$ 2>/dev/null | head -c 300)"
+  fi
+  CREATED_BODY="$(cat /tmp/gitea-agent-identity-ensure.body.$$)"
+  EXISTING_USER_ID="$(jq -r '.id // empty' <<<"$CREATED_BODY")"
+  [[ -n "$EXISTING_USER_ID" ]] || stop 1 "user creation succeeded but response had no id field"
+  OUTCOME="created"
+fi
+
+# Step 2b: PATCH to set prohibit_login=true
+PATCH_BODY="$(jq -nc \
+  --arg sourceid "0" \
+  --arg login "$IDENTITY_NAME" \
+  '{source_id:0, login_name:$login, prohibit_login:true}')"
+status="$(api_patch_status_body "$ADMIN_USERS_EDIT_PATH" "$PATCH_BODY")"
+if [[ "$status" != "200" ]]; then
+  stop 1 "PATCH ${ADMIN_USERS_EDIT_PATH} returned ${status}: $(cat /tmp/gitea-agent-identity-ensure.body.$$ 2>/dev/null | head -c 300)"
+fi
+PATCHED_BODY="$(cat /tmp/gitea-agent-identity-ensure.body.$$)"
+EXISTING_PROHIBIT_LOGIN="$(jq -r '.prohibit_login // empty' <<<"$PATCHED_BODY")"
+if [[ "$EXISTING_PROHIBIT_LOGIN" != "true" ]]; then
+  stop 1 "PATCH succeeded but prohibit_login is not true (got: $EXISTING_PROHIBIT_LOGIN)"
+fi
+
+if [[ "$OUTCOME" == "present" ]]; then
+  OUTCOME="present_prohibit_login_enforced"
+elif [[ "$OUTCOME" == "created" ]]; then
+  OUTCOME="created_prohibit_login_enforced"
+fi
+
+write_receipt "applied" "$EXISTING_USER_ID" "$EXISTING_PROHIBIT_LOGIN" "$OUTCOME"
+print_render "applied"
+exit 0

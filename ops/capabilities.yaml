@@ -802,7 +802,7 @@ capabilities:
     description: |
       Idempotent governed admission of a READ-ONLY SSH deploy key to a Gitea
       repository (GET-then-POST-if-absent; read_only:true is hardcoded).
-      The ONLY governed Gitea API mutation cap admitted by
+      One of the narrow governed Gitea API mutation caps admitted by
       platform.control.surfaces.yaml gitea.control.governed_api_caps. It
       refuses to admit or modify write-enabled keys, does not delete, and
       does not provide any other Gitea API mutation surface. Subtracts
@@ -825,6 +825,47 @@ capabilities:
       db_authority: skip
     outputs:
       - stdout
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    domain: infrastructure
+    plane: fabric
+    layer: L2_shared_infrastructure
+  gitea.agent_identity.ensure:
+    description: |
+      Idempotent governed admission of a distinct Gitea agent identity
+      (user with prohibit_login=true) for forge_node Stage 2.1
+      prerequisite. Smallest canonical primitive: a distinct user object
+      whose existence breaks the forge.agent_boundary.status
+      "weak_by_access_scarcity" classification (user_count >= 2). Default
+      behavior is dry-run; --apply --reason required for mutation.
+      Hardcodes prohibit_login=true after creation. Never creates SSH
+      keys, never creates access tokens, never deletes, never emits any
+      secret value (no password, no token, no key) in stdout or receipt.
+      Token / SSH-key admission for this identity are FUTURE slices.
+      One of the narrow governed Gitea API mutation caps admitted by
+      platform.control.surfaces.yaml gitea.control.governed_api_caps.
+      Receipt at $SPINE_STATE/domain-state/forge-node/agent-identity-proof-latest.yaml.
+      Args: [--identity-name <name>] [--email <addr>] [--full-name <text>] [--apply --reason <text>] [--dry-run].
+    tags:
+      - gitea
+      - agent-identity
+      - admission
+      - mutating
+      - forge
+    command: ./ops/plugins/infra/observability/bin/gitea-agent-identity-ensure
+    script_path: ./ops/plugins/infra/observability/bin/gitea-agent-identity-ensure
+    cwd: $SPINE_CODE
+    safety: mutating
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    routing:
+      db_authority: skip
+    outputs:
+      - stdout
+      - $SPINE_STATE/domain-state/forge-node/agent-identity-proof-latest.yaml
     touches_api: true
     requires:
       - secrets.binding

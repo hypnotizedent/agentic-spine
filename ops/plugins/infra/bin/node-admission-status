@@ -960,6 +960,8 @@ def forge_node_promotion_standard_for(node_id: str) -> dict[str, Any]:
     else:
         state = "incomplete"
 
+    agent_identity = _forge_node_agent_identity_observation(state_root)
+
     return {
         "role": "forge_node",
         "state": state,
@@ -969,7 +971,69 @@ def forge_node_promotion_standard_for(node_id: str) -> dict[str, Any]:
         "missing_proofs": on_disk_missing,
         "candidate_gaps": (standard.get("candidate_gaps") or {}).get(node_id, on_disk_missing),
         "stage_2_summary": _forge_node_stage_2_summary(),
+        "agent_identity_observation": agent_identity,
         "subtraction_note": "ssh.targets supplies access evidence only; Stage 1 proof coverage is not delivered forge_node while promotion_standard.delivered is false",
+    }
+
+
+def _forge_node_agent_identity_observation(state_root: Path) -> dict[str, Any]:
+    """Surface PACKET-770 agent_identity_proof receipt when present, as
+    observation only. Does NOT modify forge_node.required_proofs or
+    delivered:false invariant — read-model addition only. The receipt is
+    written by gitea.agent_identity.ensure under
+    $SPINE_STATE/domain-state/forge-node/agent-identity-proof-latest.yaml.
+    Surfacing this evidence lets node.admission.status report on the
+    forge_node Stage 2 prerequisite without contract semantics change.
+    """
+    receipt_path = state_root / "domain-state/forge-node/agent-identity-proof-latest.yaml"
+    if not receipt_path.is_file():
+        return {
+            "present": False,
+            "note": "no agent-identity-proof receipt on this host (run gitea.agent_identity.ensure --apply --reason '<text>' to admit)",
+            "expected_proof_ref": "$SPINE_STATE/domain-state/forge-node/agent-identity-proof-latest.yaml",
+        }
+    try:
+        body = yaml.safe_load(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {
+            "present": False,
+            "note": "agent-identity-proof receipt exists but is unreadable",
+            "receipt": str(receipt_path),
+        }
+    if not isinstance(body, dict):
+        return {
+            "present": False,
+            "note": "agent-identity-proof receipt is not a YAML mapping",
+            "receipt": str(receipt_path),
+        }
+    identity = body.get("identity") or {}
+    mode = body.get("mode")
+    user_id = identity.get("user_id")
+    admitted = (mode == "applied" and user_id is not None)
+    return {
+        "present": admitted,
+        "preview_only": (mode == "dry_run"),
+        "receipt": str(receipt_path),
+        "proof_class": body.get("proof_class"),
+        "stage": body.get("stage"),
+        "stage_label": body.get("stage_label"),
+        "mode": mode,
+        "outcome": body.get("outcome"),
+        "generated_at": body.get("generated_at"),
+        "identity_name": identity.get("name"),
+        "identity_user_id": user_id,
+        "prohibit_login": identity.get("prohibit_login"),
+        "auth_methods_attached": identity.get("auth_methods_attached") or [],
+        "scope_note": (
+            "Distinct Gitea user identity admitted and structurally separated from "
+            "operator's user. forge_node delivered:false stays — admission read "
+            "surfaces the prerequisite as observation; required_proofs invariant "
+            "(D447) is not changed by this surfacing."
+            if admitted else
+            "Receipt present but identity not yet admitted ("
+            f"mode={mode}, outcome={body.get('outcome')}). Re-run with --apply "
+            "--reason '<text>' to admit."
+        ),
     }
 
 
