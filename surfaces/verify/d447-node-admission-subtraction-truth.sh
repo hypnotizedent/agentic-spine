@@ -1080,7 +1080,7 @@ for phrase in [
     "Canonical readbacks:",
     "node.recovery.status",
     "appliance.health.status",
-    "Subordinate evidence (demoted; do not read as authority):",
+    "Admission evidence inputs (not admission / activation authority):",
     "ops/bindings/ssh.targets.yaml",
     "ops/bindings/operator.hardware.inventory.yaml",
     "ops/bindings/hardware.inventory.yaml",
@@ -1725,5 +1725,41 @@ retired_kind_line = _re.compile(r"^  kind:\s+\S+$", _re.MULTILINE)
 if retired_kind_line.search(human_out):
     fail("node.admission.status human readback still emits retired single 'kind:' per-row line (PACKET-985 subtraction target)")
 
-print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, machine specs stay inside admission, active role runtime truth is composed, candidate evidence cannot promote itself, canonical_plane_access is locked from contract through cap (PACKET-840 Stage 2 organ 5 / PACKET-1045), and per-row subject_class + access_class are first-class with object_kind preserved (PACKET-985)")
+# PACKET-1185: lock operator.hardware.inventory.yaml admission-side authority scope.
+# File keeps status:authoritative for its bounded inventory/identity/vocabulary scope;
+# explicit authority_scope.{owns,does_not_decide} block + superseded_for_node_admission_by
+# pointer make those bounds structural. D447 owns admission-boundary assertions only;
+# recovery-boundary assertions are owned by D454 (see PACKET-1185 / d454-node-recovery-control-truth.sh).
+op_hw_inventory_doc = yaml.safe_load((root / "ops/bindings/operator.hardware.inventory.yaml").read_text(encoding="utf-8")) or {}
+
+op_hw_authority_scope = op_hw_inventory_doc.get("authority_scope") or {}
+if not isinstance(op_hw_authority_scope, dict) or not op_hw_authority_scope:
+    fail("operator.hardware.inventory.yaml must declare authority_scope block (PACKET-1185)")
+
+OP_HW_REQUIRED_OWNS = {
+    "operator_owned_hardware_inventory_identity",
+    "operator_owned_hardware_eligibility_classification_vocabulary",
+    "operator_owned_hardware_role_candidacy_vocabulary",
+    "operator_owned_hardware_promotion_stage_vocabulary",
+}
+op_hw_owns = set(op_hw_authority_scope.get("owns") or [])
+missing_owns = OP_HW_REQUIRED_OWNS - op_hw_owns
+if missing_owns:
+    fail(f"operator.hardware.inventory.yaml authority_scope.owns missing inventory/identity/vocabulary entries: {sorted(missing_owns)} (PACKET-1185)")
+
+OP_HW_REQUIRED_DOES_NOT_DECIDE = {
+    "node_admission",
+    "node_activation",
+    "role_assignment",
+    "host_role_promotion",
+}
+op_hw_does_not_decide = set(op_hw_authority_scope.get("does_not_decide") or [])
+missing_dnd = OP_HW_REQUIRED_DOES_NOT_DECIDE - op_hw_does_not_decide
+if missing_dnd:
+    fail(f"operator.hardware.inventory.yaml authority_scope.does_not_decide missing admission-boundary entries: {sorted(missing_dnd)} (PACKET-1185)")
+
+if op_hw_inventory_doc.get("superseded_for_node_admission_by") != "node.admission.status":
+    fail("operator.hardware.inventory.yaml must declare superseded_for_node_admission_by=node.admission.status (PACKET-1185)")
+
+print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, machine specs stay inside admission, active role runtime truth is composed, candidate evidence cannot promote itself, canonical_plane_access is locked from contract through cap (PACKET-840 Stage 2 organ 5 / PACKET-1045), per-row subject_class + access_class are first-class with object_kind preserved (PACKET-985), and operator.hardware.inventory.yaml authority_scope admission boundary is locked (PACKET-1185)")
 PY

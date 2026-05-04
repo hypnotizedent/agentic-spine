@@ -149,5 +149,29 @@ mac_limits = {entry.get("id") for entry in ((mac.get("control_modes") or {}).get
 if "manual_power_required" not in mac_limits:
     fail("macbook-primary must surface manual power limit")
 
-print("D454 PASS: node recovery control is status-derived, first-class, honest about manual limits, and teaches the dominance edge in normal readback")
+# PACKET-1185: lock operator.hardware.inventory.yaml recovery-side authority scope.
+# File IS recovery_control evidence (D454 line 35 already enforces node.recovery.status
+# reads it); explicit authority_scope.owns includes operator_owned_hardware_recovery_control_evidence
+# and authority_scope.does_not_decide includes node_recovery_readback + recovery_action_authority.
+# superseded_for_recovery_by points at node.recovery.status as the readback. D454 owns these
+# recovery-boundary assertions; admission-boundary assertions are owned by D447.
+op_hw_doc = load_yaml(op_hw_path)
+op_hw_authority_scope = op_hw_doc.get("authority_scope") or {}
+if not isinstance(op_hw_authority_scope, dict) or not op_hw_authority_scope:
+    fail("operator.hardware.inventory.yaml must declare authority_scope block (PACKET-1185)")
+op_hw_owns = set(op_hw_authority_scope.get("owns") or [])
+op_hw_does_not_decide = set(op_hw_authority_scope.get("does_not_decide") or [])
+
+if "operator_owned_hardware_recovery_control_evidence" not in op_hw_owns:
+    fail("operator.hardware.inventory.yaml authority_scope.owns must include operator_owned_hardware_recovery_control_evidence (PACKET-1185; D454 already enforces recovery_control evidence at line 35)")
+
+OP_HW_REQUIRED_RECOVERY_DND = {"node_recovery_readback", "recovery_action_authority"}
+missing_recovery_dnd = OP_HW_REQUIRED_RECOVERY_DND - op_hw_does_not_decide
+if missing_recovery_dnd:
+    fail(f"operator.hardware.inventory.yaml authority_scope.does_not_decide missing recovery-boundary entries: {sorted(missing_recovery_dnd)} (PACKET-1185)")
+
+if op_hw_doc.get("superseded_for_recovery_by") != "node.recovery.status":
+    fail("operator.hardware.inventory.yaml must declare superseded_for_recovery_by=node.recovery.status (PACKET-1185)")
+
+print("D454 PASS: node recovery control is status-derived, first-class, honest about manual limits, teaches the dominance edge in normal readback, and operator.hardware.inventory.yaml authority_scope recovery boundary is locked (PACKET-1185)")
 PY
