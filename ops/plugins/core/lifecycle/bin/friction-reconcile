@@ -36,6 +36,12 @@ def _matches_loop(item: dict[str, Any], loop_id: str) -> bool:
     return loop_id in {str(source).strip() for source in sources}
 
 
+def _matches_capability(item: dict[str, Any], capability: str) -> bool:
+    if not capability:
+        return True
+    return str(item.get("capability") or "").strip() == capability
+
+
 def _first_loop_source(item: dict[str, Any]) -> str:
     sources = item.get("sources") if isinstance(item.get("sources"), list) else []
     for source in sources:
@@ -68,6 +74,7 @@ def reconcile(
     state_root: Path,
     gaps_yaml: Path,
     loop_id: str = "",
+    capability: str = "",
     auto_file: bool = False,
     limit: int = 0,
     actor: str = "friction.reconcile",
@@ -81,7 +88,7 @@ def reconcile(
             eligible = status in {"queued", "observed"}
         else:
             eligible = status == "queued"
-        if not eligible or not _matches_loop(item, loop_id):
+        if not eligible or not _matches_loop(item, loop_id) or not _matches_capability(item, capability):
             continue
         candidates.append(item)
         if limit and len(candidates) >= limit:
@@ -172,6 +179,7 @@ def reconcile(
         "authority": "sqlite",
         "mode": "auto_file" if auto_file else "observe",
         "loop_id": loop_id,
+        "capability_filter": capability,
         "candidate_count": len(candidates),
         "observed": observed,
         "filed": filed,
@@ -262,6 +270,7 @@ def self_check() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reconcile friction authority without auto-promoting by default.")
     parser.add_argument("--loop-id", default=os.environ.get("SPINE_LOOP_ID", ""))
+    parser.add_argument("--capability", default="", help="Only reconcile friction records for this capability.")
     parser.add_argument("--auto-file", action="store_true", help="Explicitly file eligible friction as gaps.")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--json", action="store_true", dest="json_output")
@@ -280,6 +289,7 @@ def main() -> int:
             state_root=state_root,
             gaps_yaml=gaps_yaml,
             loop_id=args.loop_id,
+            capability=args.capability,
             auto_file=args.auto_file,
             limit=max(0, args.limit),
             run_key=os.environ.get("SPINE_CAP_RUN_KEY", "").strip() or None,
@@ -294,6 +304,7 @@ def main() -> int:
         print("status: ok")
         print(f"mode: {result['mode']}")
         print(f"loop_id: {result['loop_id'] or '<all>'}")
+        print(f"capability: {result['capability_filter'] or '<all>'}")
         print(f"observed: {result['observed']}")
         print(f"filed: {result['filed']}")
     return 0
