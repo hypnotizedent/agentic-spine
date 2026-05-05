@@ -5,6 +5,19 @@ set -euo pipefail
 # Uses UNIFI_SHOP_API_KEY via X-API-KEY header (no cookie auth needed).
 # Proxied through PVE SSH (UDR6 is LAN-only).
 
+# PACKET-1371: private network branch producer. Direct operator invocation is
+# rejected — operators read network.presence.status. This cap is only legal in
+# an internal/scheduler producer context (SPINE_INTERNAL_PRODUCER=1).
+if [[ "${SPINE_INTERNAL_PRODUCER:-0}" != "1" ]]; then
+  cat >&2 <<'STOP'
+STOP (PACKET-1371): network.shop.dhcp.audit is a private network branch producer.
+  Operators read the Network branch via:
+      ./bin/ops cap run network.presence.status
+  Direct invocation requires SPINE_INTERNAL_PRODUCER=1 (scheduler/internal context).
+STOP
+  exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../../core/snapshot/lib/snapshot-surface-common.sh"
 
@@ -27,8 +40,8 @@ usage() {
 network-shop-dhcp-audit
 
 Usage:
-  ./bin/ops cap run network.shop.dhcp.audit
-  ./bin/ops cap run network.shop.dhcp.audit -- --apply
+  SPINE_INTERNAL_PRODUCER=1 ./bin/ops cap run network.shop.dhcp.audit
+  SPINE_INTERNAL_PRODUCER=1 ./bin/ops cap run network.shop.dhcp.audit -- --apply
 
 Flags:
   --apply               Write tracked projection binding.

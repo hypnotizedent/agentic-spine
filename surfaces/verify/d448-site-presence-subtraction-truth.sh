@@ -21,6 +21,7 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 
 python3 - "$ROOT" "$CAPS" "$SNAPSHOT" "$MASTER" "$SITE_PRESENCE" "$CATALOG" "$MANIFEST" <<'PY'
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -240,9 +241,14 @@ if existing_dead_wrappers:
     fail(f"dead unregistered Site Intelligence/network wrapper scripts still tracked: {existing_dead_wrappers} (PACKET-1275)")
 
 shop_ssot_text = allowed_current_texts["docs/governance/SHOP_SERVER_SSOT.md"]
-for phrase in ["site.presence.status", "node.admission.status", "network.shop.dhcp.audit"]:
+# PACKET-1371: shop SSOT now teaches network.presence.status instead of the
+# private network.shop.dhcp.audit producer (which is hidden + direct-call
+# rejected for operators).
+for phrase in ["site.presence.status", "node.admission.status", "network.presence.status"]:
     if phrase not in shop_ssot_text:
-        fail(f"SHOP_SERVER_SSOT.md verification must teach current first-class readback {phrase} (PACKET-1275)")
+        fail(f"SHOP_SERVER_SSOT.md verification must teach current first-class readback {phrase} (PACKET-1371)")
+if "network.shop.dhcp.audit" in shop_ssot_text:
+    fail("SHOP_SERVER_SSOT.md must not teach network.shop.dhcp.audit as a verification readback after PACKET-1371")
 
 # PACKET-1284: telemetry showed infra.shop.readmodel.generate had zero
 # canonical receipts. Do not keep teaching or registering it as a parallel
@@ -364,23 +370,45 @@ if all_payload.get("canonical_authority") != "site.presence.status":
 system = all_payload.get("first_class_system") or {}
 if system.get("name") != "first_class_site_intelligence":
     fail("site.presence.status payload must emit first_class_system.name=first_class_site_intelligence (PACKET-1301)")
-stages = {row.get("stage") for row in (system.get("lifecycle") or []) if isinstance(row, dict)}
+if "lifecycle" in system:
+    fail("site.presence.status default JSON must not expose first_class_system.lifecycle; use --expert for legacy provenance (PACKET-1371)")
+if "legacy_input_policy" in system:
+    fail("site.presence.status default JSON must not expose legacy_input_policy; use --expert for legacy provenance (PACKET-1371)")
+for entry in system.get("branch_model") or []:
+    if isinstance(entry, dict) and "private_machinery" in entry:
+        fail("site.presence.status default JSON branch_model must hide private_machinery (PACKET-1371)")
+if "folded_legacy_inputs" in all_payload:
+    fail("site.presence.status default JSON must not expose folded_legacy_inputs; use --expert for legacy provenance (PACKET-1371)")
+
+proc_expert = subprocess.run([str(site_presence), "--expert", "--json"], text=True, capture_output=True)
+if proc_expert.returncode != 0:
+    fail(f"site.presence.status --expert --json must succeed: {proc_expert.stderr.strip()[:200]}")
+expert_payload = json.loads(proc_expert.stdout)
+expert_system = expert_payload.get("first_class_system") or {}
+expert_branch_model = expert_system.get("branch_model") or []
+if not any(isinstance(entry, dict) and entry.get("private_machinery") for entry in expert_branch_model):
+    fail("site.presence.status --expert JSON must retain private_machinery provenance (PACKET-1371)")
+stages = {row.get("stage") for row in (expert_system.get("lifecycle") or []) if isinstance(row, dict)}
 for required_stage in ["site_profile", "topology", "presence", "node_admission", "bootstrap", "provisioning"]:
     if required_stage not in stages:
-        fail(f"site.presence.status first_class_system.lifecycle missing stage {required_stage!r} (PACKET-1301)")
-folded_inputs = all_payload.get("folded_legacy_inputs") or []
+        fail(f"site.presence.status --expert first_class_system.lifecycle missing stage {required_stage!r} (PACKET-1301)")
+folded_inputs = expert_payload.get("folded_legacy_inputs") or []
 folded_paths = {row.get("path") for row in folded_inputs if isinstance(row, dict)}
+# PACKET-1371: home.unifi.network.inventory.yaml deleted; the file/path is no
+# longer required in the folded_legacy_inputs provenance set. The remaining
+# six folded carriers stay until their own deletion/migration packet lands.
 for required_path in [
     "ops/bindings/home.device.registry.yaml",
     "ops/bindings/network.unifi.home.clients.observed.yaml",
     "ops/bindings/network.unifi.shop.clients.observed.yaml",
-    "ops/bindings/home.unifi.network.inventory.yaml",
     "ops/bindings/shop.device.registry.yaml",
     "ops/bindings/home.storage.map.yaml",
     "ops/bindings/shop.storage.map.yaml",
 ]:
     if required_path not in folded_paths:
-        fail(f"site.presence.status folded_legacy_inputs missing {required_path} (PACKET-1301)")
+        fail(f"site.presence.status --expert folded_legacy_inputs missing {required_path} (PACKET-1301)")
+if "ops/bindings/home.unifi.network.inventory.yaml" in folded_paths:
+    fail("site.presence.status folded_legacy_inputs must not list deleted home.unifi.network.inventory.yaml (PACKET-1371)")
 for item in folded_inputs:
     if isinstance(item, dict) and item.get("standalone_operator_surface") is not False:
         fail(f"folded legacy input must not remain standalone operator surface: {item} (PACKET-1301)")
@@ -670,8 +698,17 @@ if sentinel_misuse:
 proc_h = subprocess.run([str(site_presence)], text=True, capture_output=True)
 if proc_h.returncode != 0:
     fail(f"site.presence.status (human readback) must succeed (PACKET-1115)")
+proc_h_expert = subprocess.run([str(site_presence), "--expert"], text=True, capture_output=True)
+if proc_h_expert.returncode != 0:
+    fail(f"site.presence.status --expert (human readback) must succeed (PACKET-1371)")
 if "Site Profiles:" not in proc_h.stdout:
     fail("site.presence.status human readback must teach 'Site Profiles:' section (PACKET-1115)")
+if "First-Class Site Intelligence Lifecycle:" in proc_h.stdout:
+    fail("site.presence.status default human readback must hide lifecycle provenance; use --expert (PACKET-1371)")
+if "Folded legacy inputs (implementation detail, not operator first-read):" in proc_h.stdout:
+    fail("site.presence.status default human readback must hide folded legacy input listing; use --expert (PACKET-1371)")
+if "private machinery (not operator drilldowns):" in proc_h.stdout:
+    fail("site.presence.status default human readback must hide private machinery names; use --expert (PACKET-1371)")
 
 # PACKET-1145: lock both authority carriers for home.unifi.network.inventory.yaml.
 # (t) Leaf carrier — file folded from authoritative/compatibility projection
@@ -712,14 +749,22 @@ if home_auth_path.exists():
 # PACKET-1215/PACKET-1308: lock Site Intelligence canonical-authority +
 # evidence-boundary teaching.
 # (v) JSON must not retain the legacy subtracted_peer_authority compatibility
-#     key; folded_legacy_inputs is the canonical subtraction readback.
-# (w) Human readback must teach the first-class lifecycle (Site Intelligence is
-#     authority; topology stays separate; legacy inputs are folded).
+#     key; folded_legacy_inputs moved behind --expert in PACKET-1371.
+# (w) Default human readback must teach only the closed branch/drilldown set;
+#     expert readback keeps lifecycle and folded-input provenance for surgery.
 
 if "subtracted_peer_authority" in all_payload:
-    fail("site.presence.status JSON must not emit legacy subtracted_peer_authority; use folded_legacy_inputs (PACKET-1308)")
+    fail("site.presence.status JSON must not emit legacy subtracted_peer_authority; use --expert folded_legacy_inputs (PACKET-1308/PACKET-1371)")
 
-required_teaching_phrases = [
+default_teaching_phrases = [
+    "Site Intelligence Branches (one family, five branches):",
+    "Drilldown levers (only):",
+]
+for phrase in default_teaching_phrases:
+    if phrase not in proc_h.stdout:
+        fail(f"site.presence.status default human readback must teach {phrase!r} (PACKET-1371)")
+
+expert_teaching_phrases = [
     "First-Class Site Intelligence Lifecycle:",
     "node_admission",
     "bootstrap",
@@ -732,9 +777,9 @@ required_teaching_phrases = [
     "ops/bindings/site.profile.contract.yaml",
     "ops/bindings/topology.sites.yaml",
 ]
-for phrase in required_teaching_phrases:
-    if phrase not in proc_h.stdout:
-        fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
+for phrase in expert_teaching_phrases:
+    if phrase not in proc_h_expert.stdout:
+        fail(f"site.presence.status --expert human readback must teach {phrase!r} (PACKET-1215/PACKET-1371)")
 
 # PACKET-1329: minimal-lever model lock. site.presence.status must emit a
 # closed set of authorized drilldown levers (branch_authority + bounded
@@ -801,9 +846,9 @@ for producer in forbidden_levers:
         if in_levers and producer in line:
             fail(f"site.presence.status human readback Drilldown levers section must not name private producer {producer!r} (PACKET-1341)")
 
-# PACKET-1341: network.presence.status JSON must be valid, declare
-# branch_role=network_branch_readback, refuse admission/promotion authority,
-# and name all four private producers.
+# PACKET-1341/1371: network.presence.status JSON must be valid, declare
+# branch_role=network_branch_readback, and refuse admission/promotion
+# authority. Private producer/source provenance is --expert only.
 network_presence_script = root / "ops/plugins/infra/network/bin/network-presence-status"
 if not network_presence_script.exists():
     fail("missing ops/plugins/infra/network/bin/network-presence-status (PACKET-1341)")
@@ -827,10 +872,23 @@ if missing_dnd:
     fail(f"network.presence.status boundary.does_not_decide missing {sorted(missing_dnd)} (PACKET-1341)")
 if nb_boundary.get("admission_authority") != "node.admission.status":
     fail("network.presence.status must defer admission_authority to node.admission.status (PACKET-1341)")
-producers_emitted = {p.get("capability") for p in (network_payload.get("private_producers") or []) if isinstance(p, dict)}
+# PACKET-1371: default network.presence.status payload must NOT enumerate
+# private producer cap names; provenance lives behind --expert.
+if "private_producers" in network_payload:
+    fail("network.presence.status default JSON must not expose private_producers; use --expert (PACKET-1371)")
+for site_block in (network_payload.get("sites") or {}).values():
+    if isinstance(site_block, dict) and "source_refs" in site_block:
+        fail("network.presence.status default JSON must not expose source_refs; use --expert (PACKET-1371)")
+network_proc_expert = subprocess.run(
+    [str(network_presence_script), "--json", "--expert"], text=True, capture_output=True
+)
+if network_proc_expert.returncode != 0:
+    fail(f"network.presence.status --expert --json must succeed: {network_proc_expert.stderr.strip()[:200]}")
+network_payload_expert = json.loads(network_proc_expert.stdout)
+producers_emitted = {p.get("capability") for p in (network_payload_expert.get("private_producers") or []) if isinstance(p, dict)}
 missing_producers = forbidden_levers - producers_emitted
 if missing_producers:
-    fail(f"network.presence.status private_producers must enumerate all four bounded producers; missing {sorted(missing_producers)} (PACKET-1341)")
+    fail(f"network.presence.status --expert private_producers must enumerate all four bounded producers; missing {sorted(missing_producers)} (PACKET-1341)")
 network_sites = network_payload.get("sites") or {}
 for required_site in ("home", "shop"):
     if required_site not in network_sites:
@@ -858,6 +916,25 @@ for producer_cap_name in forbidden_levers:
         fail(f"{producer_cap_name} description must teach 'Private network branch producer' under network.presence.status (PACKET-1341)")
     if "operator-facing Site Intelligence drilldown lever" not in desc:
         fail(f"{producer_cap_name} description must explicitly reject operator-facing Site Intelligence drilldown lever framing (PACKET-1341)")
+    if cap_doc.get("visibility") != "internal":
+        fail(f"{producer_cap_name} must declare visibility=internal (PACKET-1371)")
+    if cap_doc.get("public_grammar") != "hidden":
+        fail(f"{producer_cap_name} must declare public_grammar=hidden (PACKET-1371)")
+    script_rel = str(cap_doc.get("script_path") or "").removeprefix("./")
+    producer_script = root / script_rel
+    if not producer_script.exists():
+        fail(f"{producer_cap_name} script_path missing on disk: {script_rel} (PACKET-1371)")
+    producer_text = producer_script.read_text(encoding="utf-8")
+    if "SPINE_INTERNAL_PRODUCER" not in producer_text or "network.presence.status" not in producer_text:
+        fail(f"{producer_cap_name} script must gate direct calls on SPINE_INTERNAL_PRODUCER and point operators at network.presence.status (PACKET-1371)")
+    env = dict(os.environ)
+    env.pop("SPINE_INTERNAL_PRODUCER", None)
+    direct_proc = subprocess.run([str(producer_script)], text=True, capture_output=True, env=env)
+    if direct_proc.returncode != 2:
+        fail(f"{producer_cap_name} direct script invocation must stop with exit 2, got {direct_proc.returncode} (PACKET-1371)")
+    direct_output = f"{direct_proc.stdout}\n{direct_proc.stderr}"
+    if "private network branch producer" not in direct_output or "network.presence.status" not in direct_output:
+        fail(f"{producer_cap_name} direct stop output must identify private producer boundary and network.presence.status replacement (PACKET-1371)")
 
 # PACKET-1342: hardware.inventory.status JSON must be valid, declare
 # branch_role=hardware_branch_readback, refuse admission/promotion/lifecycle

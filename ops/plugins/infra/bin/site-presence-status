@@ -48,13 +48,9 @@ FOLDED_LEGACY_INPUTS = [
         "standalone_operator_surface": False,
         "subtraction_state": "folded_observation_input",
     },
-    {
-        "path": "ops/bindings/home.unifi.network.inventory.yaml",
-        "folded_role": "home_network_equipment_snapshot",
-        "folded_into": "site.profile.contract.yaml + site.presence.status",
-        "standalone_operator_surface": False,
-        "subtraction_state": "folded_legacy_projection",
-    },
+    # PACKET-1371: home.unifi.network.inventory.yaml deleted. Operator-asserted
+    # upstream uplink moved into site.profile.contract notes; UDR-observable
+    # network state lives under network.presence.status (Network branch).
     {
         "path": "ops/bindings/shop.device.registry.yaml",
         "folded_role": "shop_l3_function_and_dhcp_intent",
@@ -938,6 +934,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Canonical site presence readback")
     parser.add_argument("--site", help="Limit to a site id")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
+    # PACKET-1371: --expert exposes legacy provenance (folded_legacy_inputs,
+    # lifecycle stages, per-branch private_machinery names). Default
+    # operator readback rejects those names from the public surface.
+    parser.add_argument(
+        "--expert",
+        action="store_true",
+        help="Include legacy provenance (folded inputs, lifecycle, private machinery) — gated under PACKET-1371",
+    )
     args = parser.parse_args()
 
     rows = build_rows(args.site)
@@ -945,6 +949,27 @@ def main() -> None:
     # site.profile.contract.yaml. Profiles live ONCE here; per-row
     # profile_ref is the foreign-key into this mapping.
     site_profiles = load_site_profiles()
+    # PACKET-1371: BRANCH_MODEL includes private_machinery for expert
+    # consumers; default branch_model strips that field from each entry so
+    # producer cap names stay out of operator-facing payload.
+    branch_model_public = [
+        {k: v for k, v in entry.items() if k != "private_machinery"}
+        for entry in BRANCH_MODEL
+    ]
+    first_class_system = {
+        "name": "first_class_site_intelligence",
+        "public_readback": "site.presence.status",
+        "admission_readback": "node.admission.status",
+        "operator_first_read": "site.presence.status",
+        "drilldown_levers_policy": "closed_set",
+        "family": "site_intelligence",
+        "branch_count": 5,
+        "branch_model": BRANCH_MODEL if args.expert else branch_model_public,
+        "producer_policy": "private_or_folded_implementation_detail_not_branch_peer",
+    }
+    if args.expert:
+        first_class_system["lifecycle"] = FIRST_CLASS_LIFECYCLE
+        first_class_system["legacy_input_policy"] = "folded_source_inputs_not_operator_surfaces"
     payload = {
         "canonical_authority": "site.presence.status",
         "capability": "site.presence.status",
@@ -955,25 +980,11 @@ def main() -> None:
         "summary": summarize(rows),
         "freshness_summary": summarize_freshness(rows),
         "profile_summary": summarize_profiles(site_profiles),
-        "first_class_system": {
-            "name": "first_class_site_intelligence",
-            "public_readback": "site.presence.status",
-            "admission_readback": "node.admission.status",
-            "lifecycle": FIRST_CLASS_LIFECYCLE,
-            "legacy_input_policy": "folded_source_inputs_not_operator_surfaces",
-            "operator_first_read": "site.presence.status",
-            "drilldown_levers_policy": "closed_set",
-            # PACKET-1343: Site Intelligence is one family with exactly five
-            # branches. The drilldown lever set IS the branch readback set;
-            # everything else is private machinery feeding a branch.
-            "family": "site_intelligence",
-            "branch_count": 5,
-            "branch_model": BRANCH_MODEL,
-            "producer_policy": "private_or_folded_implementation_detail_not_branch_peer",
-        },
+        "first_class_system": first_class_system,
         "drilldown_levers": DRILLDOWN_LEVERS,
-        "folded_legacy_inputs": FOLDED_LEGACY_INPUTS,
     }
+    if args.expert:
+        payload["folded_legacy_inputs"] = FOLDED_LEGACY_INPUTS
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
@@ -983,33 +994,36 @@ def main() -> None:
     print(f"freshness: {json.dumps(payload['freshness_summary'], sort_keys=True)}")
     print(f"profile_gaps: {json.dumps(payload['profile_summary'], sort_keys=True)}")
     print("")
-    print("First-Class Site Intelligence Lifecycle:")
-    for stage in FIRST_CLASS_LIFECYCLE:
-        caps = stage.get("transition_caps") or []
-        suffix = f" caps={','.join(caps)}" if caps else ""
-        print(f"  {stage['stage']:<14} {stage['authority']}{suffix}")
-        print(f"    boundary: {stage['boundary']}")
-    print("")
-    # PACKET-1343: teach the Site Intelligence family + five branches model
-    # before the lever list so a fresh agent reads "one family, five branches"
-    # before they read individual cap names.
+    if args.expert:
+        print("First-Class Site Intelligence Lifecycle:")
+        for stage in FIRST_CLASS_LIFECYCLE:
+            caps = stage.get("transition_caps") or []
+            suffix = f" caps={','.join(caps)}" if caps else ""
+            print(f"  {stage['stage']:<14} {stage['authority']}{suffix}")
+            print(f"    boundary: {stage['boundary']}")
+        print("")
+    # PACKET-1343/1371: teach the Site Intelligence family + five branches.
+    # Default mode strips per-branch private_machinery names; --expert keeps
+    # them for provenance debugging.
     print("Site Intelligence Branches (one family, five branches):")
     for branch in BRANCH_MODEL:
         print(
             f"  {branch['operator_label']:<16} -> {branch['readback']:<32} "
             f"row.field={branch['summary_field']}"
         )
-        machinery = branch.get("private_machinery") or []
-        if machinery:
-            print(f"    private machinery (not operator drilldowns): {', '.join(machinery)}")
+        if args.expert:
+            machinery = branch.get("private_machinery") or []
+            if machinery:
+                print(f"    private machinery (not operator drilldowns): {', '.join(machinery)}")
     print("")
     print("Drilldown levers (only):")
     for lever in DRILLDOWN_LEVERS:
         print(f"  {lever['lever']:<40} [{lever['kind']}] {lever['scope']}")
     print("")
-    print("Folded legacy inputs (implementation detail, not operator first-read):")
-    for item in FOLDED_LEGACY_INPUTS:
-        print(f"  {item['path']} -> {item['folded_into']} [{item['subtraction_state']}]")
+    if args.expert:
+        print("Folded legacy inputs (implementation detail, not operator first-read):")
+        for item in FOLDED_LEGACY_INPUTS:
+            print(f"  {item['path']} -> {item['folded_into']} [{item['subtraction_state']}]")
     # PACKET-1115: human readback teaches Site Profiles before per-row presence.
     print("")
     print("Site Profiles:")

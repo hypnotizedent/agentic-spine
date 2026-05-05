@@ -2,7 +2,7 @@
 status: authoritative
 owner: "@ronny"
 last_verified: 2026-05-05
-verification_method: first-class site presence, node admission, and shop DHCP readback
+verification_method: first-class site presence, node admission, and network branch readback
 scope: shop-control-plane-summary
 ---
 
@@ -49,7 +49,7 @@ standalone registry. `shop.device.registry.yaml` is folded L3 input consumed by
 ```bash
 ./bin/ops cap run site.presence.status
 ./bin/ops cap run node.admission.status
-./bin/ops cap run network.shop.dhcp.audit
+./bin/ops cap run network.presence.status
 ./bin/ops cap run spine.ripple.check -- switch-shop
 ./bin/ops cap run spine.ripple.check -- communications-stack
 ```

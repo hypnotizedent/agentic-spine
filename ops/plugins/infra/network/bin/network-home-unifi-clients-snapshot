@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# PACKET-1371: private network branch producer. Direct operator invocation is
+# rejected — operators read network.presence.status. This cap is only legal in
+# an internal/scheduler producer context (SPINE_INTERNAL_PRODUCER=1).
+if [[ "${SPINE_INTERNAL_PRODUCER:-0}" != "1" ]]; then
+  cat >&2 <<'STOP'
+STOP (PACKET-1371): network.home.unifi.clients.snapshot is a private network branch producer.
+  Operators read the Network branch via:
+      ./bin/ops cap run network.presence.status
+  Direct invocation requires SPINE_INTERNAL_PRODUCER=1 (scheduler/internal context).
+STOP
+  exit 2
+fi
+
 # network.home.unifi.clients.snapshot — refresh home UniFi folded observed-client input
 # Read-only by default: write runtime snapshot freshness only; tracked binding
 # promotion remains explicit via --apply. The generated surface is folded observation input;
@@ -29,8 +42,8 @@ usage() {
 network-home-unifi-clients-snapshot
 
 Usage:
-  ./bin/ops cap run network.home.unifi.clients.snapshot
-  ./bin/ops cap run network.home.unifi.clients.snapshot -- --apply
+  SPINE_INTERNAL_PRODUCER=1 ./bin/ops cap run network.home.unifi.clients.snapshot
+  SPINE_INTERNAL_PRODUCER=1 ./bin/ops cap run network.home.unifi.clients.snapshot -- --apply
 
 Flags:
   --apply               Write tracked observed binding.
@@ -87,7 +100,7 @@ NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TODAY_UTC="$(date -u +%Y-%m-%d)"
 STAGED_OUTPUT="$TMPDIR_WORK/network.unifi.home.clients.observed.yaml"
 yq eval \
-  ".status = \"$FOLDED_ROLE\" | .generated_at = \"$NOW_UTC\" | .updated_at = \"$TODAY_UTC\" | .last_verified = \"$TODAY_UTC\" | .canonical_site_presence = \"$SITE_PRESENCE_AUTHORITY\" | .folded_into_first_class_system = \"$SITE_PRESENCE_AUTHORITY\" | .standalone_operator_surface = false | .authority_boundary.folded_role = \"$FOLDED_ROLE\" | .authority_boundary.does_not_decide = [\"current_site_presence\", \"site_profile_authority\", \"node_admission\", \"role_assignment\"] | .producer_metadata.producer_kind = \"cap_generated\" | .producer_metadata.producer_capability = \"network.home.unifi.clients.snapshot\" | .producer_metadata.producer_script = \"ops/plugins/infra/network/bin/network-home-unifi-clients-snapshot\" | .producer_metadata.regenerate_command = \"./bin/ops cap run network.home.unifi.clients.snapshot -- --apply\" | .producer_metadata.consumer_path = \"site.presence.status\"" \
+  ".status = \"$FOLDED_ROLE\" | .generated_at = \"$NOW_UTC\" | .updated_at = \"$TODAY_UTC\" | .last_verified = \"$TODAY_UTC\" | .canonical_site_presence = \"$SITE_PRESENCE_AUTHORITY\" | .folded_into_first_class_system = \"$SITE_PRESENCE_AUTHORITY\" | .standalone_operator_surface = false | .authority_boundary.folded_role = \"$FOLDED_ROLE\" | .authority_boundary.does_not_decide = [\"current_site_presence\", \"site_profile_authority\", \"node_admission\", \"role_assignment\"] | .producer_metadata.producer_kind = \"cap_generated\" | .producer_metadata.producer_capability = \"network.home.unifi.clients.snapshot\" | .producer_metadata.producer_script = \"ops/plugins/infra/network/bin/network-home-unifi-clients-snapshot\" | .producer_metadata.regenerate_command = \"SPINE_INTERNAL_PRODUCER=1 ./bin/ops cap run network.home.unifi.clients.snapshot -- --apply\" | .producer_metadata.consumer_path = \"site.presence.status\"" \
   "$OBSERVED_BINDING" > "$STAGED_OUTPUT"
 
 cp "$STAGED_OUTPUT" "$OUTPUT_PATH"
