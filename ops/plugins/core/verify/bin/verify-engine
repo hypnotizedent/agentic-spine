@@ -25,6 +25,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+ORIGINAL_ARGS=("$@")
 _VE_COMPUTED="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 ROOT="$_VE_COMPUTED"
 RUNTIME_PATHS_LIB="$ROOT/ops/lib/runtime-paths.sh"
@@ -46,6 +47,65 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+AUTHORITY_DB="$SPINE_STATE/shared_authority.db"
+
+reroute_or_explain_missing_authority_db() {
+    local db_path="$1"
+    [[ -f "$db_path" ]] && return 0
+
+    local routed_command="./bin/ops cap run verify.engine.run"
+    local routed_command_with_args="$routed_command"
+    local local_only_command="./bin/ops cap run verify.engine.smoke.local"
+
+    if ((${#ORIGINAL_ARGS[@]} > 0)); then
+        routed_command_with_args="$routed_command -- ${ORIGINAL_ARGS[*]}"
+    fi
+
+    if [[ "$json_mode" -eq 1 ]]; then
+        python3 - "$db_path" "$routed_command_with_args" "$local_only_command -- --json" <<'PY'
+import json
+import sys
+
+db_path, routed_command, local_only_command = sys.argv[1:4]
+print(json.dumps({
+    "capability": "verify.engine.run",
+    "status": "reroute_required",
+    "reason": "canonical shared_authority.db is not present in this checkout's local SPINE_STATE; heavy engine verify must run through the routed cap after pve became storage_evidence_node",
+    "missing_db_path": db_path,
+    "next_command": routed_command,
+    "local_only_alternative": local_only_command,
+    "total": 0,
+    "pass": 0,
+    "fail": 1,
+    "warn": 0,
+    "failing_ids": ["E3", "E15"],
+    "warning_ids": [],
+}, sort_keys=True))
+PY
+        exit 1
+    fi
+
+    if [[ "${VERIFY_ENGINE_REROUTE_ATTEMPTED:-0}" == "1" ]]; then
+        echo "verify-engine: canonical shared_authority.db still missing after routed attempt: $db_path" >&2
+        echo "next: $routed_command" >&2
+        echo "local-only workspace check: $local_only_command" >&2
+        exit 1
+    fi
+
+    if [[ -x "$ROOT/bin/ops" ]]; then
+        echo "verify-engine: local shared_authority.db missing at $db_path" >&2
+        echo "verify-engine: re-entering canonical routed cap: $routed_command" >&2
+        exec env VERIFY_ENGINE_REROUTE_ATTEMPTED=1 "$ROOT/bin/ops" cap run verify.engine.run -- "${ORIGINAL_ARGS[@]}"
+    fi
+
+    echo "verify-engine: canonical shared_authority.db missing at $db_path" >&2
+    echo "next: $routed_command" >&2
+    echo "local-only workspace check: $local_only_command" >&2
+    exit 1
+}
+
+reroute_or_explain_missing_authority_db "$AUTHORITY_DB"
 
 PASS=0
 FAIL=0
@@ -116,7 +176,6 @@ check E2 "ops status --json" bash -c "
 "
 
 # E3: SQLite shared authority readable + active-state counts resolve
-AUTHORITY_DB="$SPINE_STATE/shared_authority.db"
 check E3 "SQLite shared authority readable" bash -c '
     python3 - "'"$AUTHORITY_DB"'" <<'"'"'PY'"'"'
 import sqlite3

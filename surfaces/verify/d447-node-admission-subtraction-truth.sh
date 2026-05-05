@@ -284,6 +284,40 @@ for cap_name in sorted(D3C_DB_BACKED_CAPS):
 if unannotated:
     fail("D.3c missing state_authority: shared_authority_db on " + ", ".join(unannotated))
 
+# PACKET-1326: heavy engine verify must not present consumer-local
+# shared_authority.db misses as the agent-facing packet-worktree path after
+# storage authority moved to pve. Direct non-JSON script use re-enters the
+# existing verify.engine.run cap once; JSON use emits one structured next
+# command. This extends D447 because the behavior is a node/storage authority
+# locality truth, not a new gate family.
+verify_engine_path = root / "ops/plugins/core/verify/bin/verify-engine"
+if not verify_engine_path.is_file():
+    fail("verify-engine missing")
+verify_engine_text = verify_engine_path.read_text(encoding="utf-8")
+for marker in [
+    "VERIFY_ENGINE_REROUTE_ATTEMPTED",
+    "reroute_or_explain_missing_authority_db",
+    "local shared_authority.db missing",
+    "canonical routed cap",
+    "verify.engine.run",
+    "verify.engine.smoke.local",
+    '"status": "reroute_required"',
+]:
+    if marker not in verify_engine_text:
+        fail(f"verify-engine must make packet-worktree pve authority verify path boring: missing {marker!r} (PACKET-1326)")
+
+verify_run_path = root / "ops/plugins/core/verify/bin/verify-run"
+if not verify_run_path.is_file():
+    fail("verify-run missing")
+verify_run_text = verify_run_path.read_text(encoding="utf-8")
+for marker in [
+    "next_command: ($result.next_command // null)",
+    "local_only_alternative: ($result.local_only_alternative // null)",
+    "missing_db_path: ($result.missing_db_path // null)",
+]:
+    if marker not in verify_run_text:
+        fail(f"verify-run JSON wrapper must preserve verify-engine reroute guidance: missing {marker!r} (PACKET-1326)")
+
 WORKTREE_LOCAL_RUNTIME_MUTATORS = {
     "worktree.lease.heartbeat",
     "worktree.lifecycle.cleanup",
