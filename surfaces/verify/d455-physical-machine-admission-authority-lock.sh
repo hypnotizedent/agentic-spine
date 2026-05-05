@@ -81,9 +81,34 @@ for phrase in ["authoritative for shop function projection only", "not physical-
     if phrase not in shop_text:
         fail(f"shop.device.registry.yaml header must demote shop registry to L3 projection evidence: missing {phrase!r}")
 
-core_ids = (((topology.get("core_mode") or {}).get("core_gate_ids")) or [])
-if "D455" not in core_ids:
-    fail("D455 must be part of spine core verify topology")
+shop_authority_scope = shop.get("authority_scope") or {}
+shop_owns = set(shop_authority_scope.get("owns") or [])
+shop_does_not_decide = set(shop_authority_scope.get("does_not_decide") or [])
+required_owns = {"l3_shop_function_projection", "shop_device_categorization_vocabulary"}
+missing_owns = required_owns - shop_owns
+if missing_owns:
+    fail(f"shop.device.registry.yaml authority_scope.owns must include: {sorted(missing_owns)}")
+required_does_not_decide = {
+    "physical_machine_identity",
+    "node_admission",
+    "node_activation",
+    "role_assignment",
+    "node_placement",
+    "node_recovery_readback",
+    "recovery_action_authority",
+}
+missing_does_not_decide = required_does_not_decide - shop_does_not_decide
+if missing_does_not_decide:
+    fail(f"shop.device.registry.yaml authority_scope.does_not_decide must include: {sorted(missing_does_not_decide)}")
+if shop.get("superseded_for_node_admission_by") != "node.admission.status":
+    fail("shop.device.registry.yaml must declare superseded_for_node_admission_by: node.admission.status")
+if shop.get("superseded_for_recovery_by") != "node.recovery.status":
+    fail("shop.device.registry.yaml must declare superseded_for_recovery_by: node.recovery.status")
+
+core_mode = topology.get("core_mode") or {}
+readback_ids = core_mode.get("core_readback_suites") or []
+if "D455" not in readback_ids:
+    fail("D455 must be part of spine core readback topology")
 
 ssh_targets = ((ssh.get("ssh") or {}).get("targets") or [])
 shop_devices = shop.get("devices") or []

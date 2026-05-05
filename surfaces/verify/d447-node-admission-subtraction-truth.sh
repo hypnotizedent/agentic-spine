@@ -1793,5 +1793,39 @@ if missing_dnd:
 if op_hw_inventory_doc.get("superseded_for_node_admission_by") != "node.admission.status":
     fail("operator.hardware.inventory.yaml must declare superseded_for_node_admission_by=node.admission.status (PACKET-1185)")
 
-print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, machine specs stay inside admission, active role runtime truth is composed, candidate evidence cannot promote itself, canonical_plane_access is locked from contract through cap (PACKET-840 Stage 2 organ 5 / PACKET-1045), per-row subject_class + access_class are first-class with object_kind preserved (PACKET-985), and operator.hardware.inventory.yaml authority_scope admission boundary is locked (PACKET-1185)")
+# Wave 2 (Site Intelligence debt subtraction): lock shop.device.registry.yaml
+# admission-side authority scope. File keeps status:authoritative for its bounded
+# L3 shop function/projection scope; explicit authority_scope block + supersession
+# pointer make those bounds structural. D447 owns admission-side; D455 owns
+# physical-machine-authority-side.
+shop_registry_doc = yaml.safe_load((root / "ops/bindings/shop.device.registry.yaml").read_text(encoding="utf-8")) or {}
+shop_authority_scope = shop_registry_doc.get("authority_scope") or {}
+if not isinstance(shop_authority_scope, dict) or not shop_authority_scope:
+    fail("shop.device.registry.yaml must declare authority_scope block (Wave 2)")
+
+SHOP_REGISTRY_REQUIRED_OWNS = {
+    "l3_shop_function_projection",
+    "shop_device_categorization_vocabulary",
+}
+shop_owns = set(shop_authority_scope.get("owns") or [])
+missing_shop_owns = SHOP_REGISTRY_REQUIRED_OWNS - shop_owns
+if missing_shop_owns:
+    fail(f"shop.device.registry.yaml authority_scope.owns missing L3-projection entries: {sorted(missing_shop_owns)} (Wave 2)")
+
+SHOP_REGISTRY_REQUIRED_DOES_NOT_DECIDE = {
+    "physical_machine_identity",
+    "node_admission",
+    "node_activation",
+    "role_assignment",
+    "node_placement",
+}
+shop_dnd = set(shop_authority_scope.get("does_not_decide") or [])
+missing_shop_dnd = SHOP_REGISTRY_REQUIRED_DOES_NOT_DECIDE - shop_dnd
+if missing_shop_dnd:
+    fail(f"shop.device.registry.yaml authority_scope.does_not_decide missing admission-boundary entries: {sorted(missing_shop_dnd)} (Wave 2)")
+
+if shop_registry_doc.get("superseded_for_node_admission_by") != "node.admission.status":
+    fail("shop.device.registry.yaml must declare superseded_for_node_admission_by=node.admission.status (Wave 2)")
+
+print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, machine specs stay inside admission, active role runtime truth is composed, candidate evidence cannot promote itself, canonical_plane_access is locked from contract through cap (PACKET-840 Stage 2 organ 5 / PACKET-1045), per-row subject_class + access_class are first-class with object_kind preserved (PACKET-985), operator.hardware.inventory.yaml authority_scope admission boundary is locked (PACKET-1185), and shop.device.registry.yaml authority_scope admission boundary is locked (Wave 2 PACKET-1265)")
 PY
