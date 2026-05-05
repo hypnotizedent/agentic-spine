@@ -86,11 +86,43 @@ for marker in \
   "self_hosting_proof_command" \
   "self_hosting_proof_required" \
   "closeout/readback plumbing" \
+  "cleanup_integration_worktree_for_lifecycle_report" \
+  "removed transient integration runner before lifecycle report" \
+  "transient integration runner cleanup" \
   "missing lane branch" \
   "coordinator.lane.publish" \
   "coordinator.target.publish"; do
   grep -qF -- "$marker" "$CLOSEOUT_SCRIPT" || fail "closeout script missing required chain marker: $marker"
 done
+
+python3 - "$CLOSEOUT_SCRIPT" <<'PY'
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+
+def fail(msg: str) -> None:
+    print(f"D331 FAIL: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+cleanup_idx = text.find("cleanup_integration_worktree_for_lifecycle_report")
+report_idx = text.find('run_cap "worktree_report" worktree.lifecycle.report -- --json')
+cleanup_step_idx = text.find('run_cap "worktree_cleanup" worktree.lifecycle.cleanup -- --mode "$CLEANUP_MODE" --json')
+if cleanup_idx < 0:
+    fail("closeout script missing transient integration runner cleanup function")
+if report_idx < 0:
+    fail("closeout script missing worktree lifecycle report step")
+if cleanup_step_idx < 0:
+    fail("closeout script missing worktree lifecycle cleanup step")
+
+call_idx = text.find("cleanup_integration_worktree_for_lifecycle_report", cleanup_idx + 1)
+if call_idx < 0:
+    fail("closeout script defines but does not call transient integration runner cleanup")
+if call_idx > report_idx:
+    fail("closeout script runs worktree.lifecycle.report before removing its transient integration runner")
+if call_idx > cleanup_step_idx:
+    fail("closeout script runs worktree.lifecycle.cleanup before removing its transient integration runner")
+PY
 
 for marker in \
   "worktree add --detach" \

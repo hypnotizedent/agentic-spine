@@ -255,6 +255,25 @@ cleanup_integration_worktree() {
 }
 trap 'cleanup_integration_worktree; cleanup_branch_restore' EXIT INT TERM
 
+cleanup_integration_worktree_for_lifecycle_report() {
+  [[ -n "$integration_worktree" ]] || return 0
+  local cleaned_worktree="$integration_worktree"
+
+  cleanup_integration_worktree
+  integration_worktree=""
+
+  if [[ -n "$target_branch_worktree" ]]; then
+    POST_INTEGRATION_ROOT="$target_branch_worktree"
+  else
+    POST_INTEGRATION_ROOT="$ROOT"
+  fi
+  POST_INTEGRATION_OPS="$POST_INTEGRATION_ROOT/bin/ops"
+  [[ -x "$POST_INTEGRATION_OPS" ]] \
+    || fail "post-integration ops missing after transient integration runner cleanup: $POST_INTEGRATION_OPS"
+
+  echo "coordinator.lane.closeout: removed transient integration runner before lifecycle report: $cleaned_worktree" >&2
+}
+
 if [[ -n "$remote_target_head_before" ]]; then
   target_start_ref="$remote_target_ref"
   target_start_head="$remote_target_head_before"
@@ -303,6 +322,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   run_cap "gaps_status" gaps.status --json
   run_cap "proposals_status" proposals.status --json
   run_cap "friction_queue_status" friction.queue.status --json
+  cleanup_integration_worktree_for_lifecycle_report
   if [[ "$CLEANUP_MODE" == "report-only" ]]; then
     run_cap "worktree_report" worktree.lifecycle.report -- --json
   else
