@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import subprocess
@@ -19,6 +20,8 @@ NODE_ROLE_CONTRACT = ROOT / "ops/bindings/node.role.contract.yaml"
 
 
 _CANONICAL_PLANE_ACCESS_CACHE: dict[str, Any] | None = None
+_YAML_CACHE: dict[Path, dict[str, Any]] = {}
+_SPINE_STATE_CACHE: Path | None = None
 
 
 def canonical_plane_access_block() -> dict[str, Any]:
@@ -133,12 +136,19 @@ def run_lines(args: list[str]) -> list[str]:
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
+    path = Path(path)
+    cached = _YAML_CACHE.get(path)
+    if cached is not None:
+        return cached
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except FileNotFoundError:
+        _YAML_CACHE[path] = {}
         return {}
     if not isinstance(data, dict):
+        _YAML_CACHE[path] = {}
         return {}
+    _YAML_CACHE[path] = data
     return data
 
 
@@ -297,9 +307,13 @@ def _resolve_spine_state() -> Path:
     The fallback is preserved for backward compatibility on primary checkouts
     where SPINE_STATE is unset and runtime-paths.sh sourcing fails.
     """
+    global _SPINE_STATE_CACHE
+    if _SPINE_STATE_CACHE is not None:
+        return _SPINE_STATE_CACHE
     env_state = os.environ.get("SPINE_STATE")
     if env_state:
-        return Path(env_state)
+        _SPINE_STATE_CACHE = Path(env_state)
+        return _SPINE_STATE_CACHE
     runtime_paths_sh = ROOT / "ops" / "lib" / "runtime-paths.sh"
     if runtime_paths_sh.exists():
         proc = subprocess.run(
@@ -310,8 +324,10 @@ def _resolve_spine_state() -> Path:
         )
         out = proc.stdout.strip()
         if proc.returncode == 0 and out:
-            return Path(out)
-    return ROOT.parent / ".runtime" / "spine" / "state"
+            _SPINE_STATE_CACHE = Path(out)
+            return _SPINE_STATE_CACHE
+    _SPINE_STATE_CACHE = ROOT.parent / ".runtime" / "spine" / "state"
+    return _SPINE_STATE_CACHE
 
 
 def latest_execution_pickup_recovery_drill() -> dict[str, Any]:
@@ -1892,11 +1908,41 @@ def recovery_for(node_id: str) -> dict[str, Any]:
     return run_json([str(NODE_RECOVERY_STATUS), "--node", node_id, "--json"])
 
 
+def recovery_worker_count(total: int) -> int:
+    raw = os.environ.get("NODE_ADMISSION_RECOVERY_WORKERS", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 8
+    else:
+        value = 8
+    return max(1, min(value, max(1, total)))
+
+
+def recoveries_for_ids(ids: list[str]) -> list[dict[str, Any]]:
+    if len(ids) <= 1:
+        return [recovery_for(item) for item in ids]
+
+    rows: list[dict[str, Any] | None] = [None] * len(ids)
+    with ThreadPoolExecutor(max_workers=recovery_worker_count(len(ids))) as pool:
+        future_map = {
+            pool.submit(recovery_for, node_id): (idx, node_id)
+            for idx, node_id in enumerate(ids)
+        }
+        for future in as_completed(future_map):
+            idx, node_id = future_map[future]
+            try:
+                rows[idx] = future.result()
+            except BaseException as exc:
+                fail(f"node recovery readback failed for {node_id}: {exc}")
+    return [row for row in rows if isinstance(row, dict)]
+
+
 def build_rows(node_id: str | None, machine_spec: bool = False, golden_path: bool = False) -> list[dict[str, Any]]:
     ids = [node_id] if node_id else all_node_ids()
     rows: list[dict[str, Any]] = []
-    for item in ids:
-        recovery = recovery_for(item)
+    for recovery in recoveries_for_ids(ids):
         if golden_path:
             rows.append(golden_path_row_from_recovery(recovery))
         elif machine_spec:
