@@ -43,6 +43,58 @@ fail() {
 
 [[ -x "$OPS" ]] || fail "missing ops entrypoint: $OPS"
 
+branch_worktree_path() {
+  local branch="$1"
+  python3 - "$ROOT" "$branch" <<'PY'
+import subprocess
+import sys
+
+repo = sys.argv[1]
+branch = sys.argv[2]
+proc = subprocess.run(
+    ["git", "-C", repo, "worktree", "list", "--porcelain"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    raise SystemExit(0)
+current = ""
+for raw in proc.stdout.splitlines():
+    line = raw.strip()
+    if not line:
+        continue
+    if line.startswith("worktree "):
+        current = line.split(" ", 1)[1].strip()
+        continue
+    if line == f"branch refs/heads/{branch}":
+        print(current)
+        break
+PY
+}
+
+worktree_is_clean() {
+  local path="$1"
+  [[ -n "$path" ]] || return 0
+  [[ -z "$(git -C "$path" status --porcelain 2>/dev/null)" ]]
+}
+
+sync_target_branch_checkout() {
+  local target_wt="$1"
+  local target_branch="$2"
+  local target_head="$3"
+
+  if [[ -n "$target_wt" ]]; then
+    worktree_is_clean "$target_wt" || fail "target branch worktree is dirty; refusing target sync after closeout push: $target_wt"
+    git -C "$target_wt" merge --ff-only "$target_head" >/dev/null 2>&1 \
+      || fail "failed to fast-forward target worktree after closeout push: $target_wt"
+    echo "fast_forwarded_worktree"
+  else
+    git -C "$ROOT" update-ref "refs/heads/$target_branch" "$target_head" >/dev/null 2>&1 \
+      || fail "failed to fast-forward local target branch ref after closeout push: $target_branch"
+    echo "fast_forwarded_ref"
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
@@ -167,6 +219,11 @@ integration_status="already_integrated"
 target_head_after="$target_head_before"
 did_push=0
 integration_worktree=""
+integration_strategy="already_integrated"
+target_start_ref="$TARGET_BRANCH"
+target_start_head="$target_head_before"
+target_branch_worktree="$(branch_worktree_path "$TARGET_BRANCH")"
+target_sync_status="not_needed"
 
 cleanup_integration_worktree() {
   [[ -n "$integration_worktree" ]] || return 0
@@ -179,16 +236,28 @@ if git -C "$ROOT" merge-base --is-ancestor "$lane_head" "$target_head_before" >/
   integration_status="already_integrated"
 elif [[ "$DRY_RUN" -eq 1 ]]; then
   integration_status="planned"
+  integration_strategy="detached_runner"
 else
   integration_status="integrated"
+  integration_strategy="detached_runner"
+  if [[ -n "$target_branch_worktree" ]]; then
+    worktree_is_clean "$target_branch_worktree" \
+      || fail "target branch worktree is dirty before closeout; clean or shelve before integrating: $target_branch_worktree"
+  fi
+  if [[ -n "$remote_target_head_before" ]]; then
+    target_start_ref="$remote_target_ref"
+    target_start_head="$remote_target_head_before"
+  fi
   integration_worktree="$(mktemp -d "${TMPDIR:-/tmp}/spine-closeout-${TARGET_BRANCH//\//-}.XXXXXX")"
-  git -C "$ROOT" worktree add --force "$integration_worktree" "$TARGET_BRANCH" >/dev/null 2>&1 || fail "failed to open integration worktree for $TARGET_BRANCH"
+  git -C "$ROOT" worktree add --detach "$integration_worktree" "$target_start_ref" >/dev/null 2>&1 \
+    || fail "failed to open detached integration runner for $target_start_ref"
   git -C "$integration_worktree" merge --ff-only "$LANE_BRANCH" >/dev/null 2>&1 || fail "ff-only integration failed ($LANE_BRANCH -> $TARGET_BRANCH)"
-  target_head_after="$(git -C "$integration_worktree" rev-parse "$TARGET_BRANCH")"
+  target_head_after="$(git -C "$integration_worktree" rev-parse HEAD)"
   if [[ "$NO_PUSH" -eq 0 ]]; then
-    git -C "$integration_worktree" push "$REMOTE" "$TARGET_BRANCH" >/dev/null 2>&1 || fail "push failed: $REMOTE/$TARGET_BRANCH"
+    git -C "$integration_worktree" push "$REMOTE" "HEAD:refs/heads/${TARGET_BRANCH}" >/dev/null 2>&1 || fail "push failed: $REMOTE/$TARGET_BRANCH"
     did_push=1
   fi
+  target_sync_status="$(sync_target_branch_checkout "$target_branch_worktree" "$TARGET_BRANCH" "$target_head_after")"
   POST_INTEGRATION_ROOT="$integration_worktree"
   POST_INTEGRATION_OPS="$integration_worktree/bin/ops"
 fi
@@ -219,7 +288,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
       --arg lane_head "$lane_head" \
       --arg remote_lane_head "${remote_lane_head:-}" \
       --arg target_head_before "$target_head_before" \
+      --arg target_start_ref "$target_start_ref" \
+      --arg target_start_head "$target_start_head" \
       --arg integration_status "$integration_status" \
+      --arg integration_strategy "$integration_strategy" \
+      --arg target_branch_worktree "${target_branch_worktree:-}" \
       --arg cleanup_mode "$CLEANUP_MODE" \
       '{
         capability: $capability,
@@ -231,7 +304,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
         lane_head: $lane_head,
         remote_lane_head: (if $remote_lane_head == "" then null else $remote_lane_head end),
         target_head_before: $target_head_before,
+        target_start_ref: $target_start_ref,
+        target_start_head: $target_start_head,
         integration_status: $integration_status,
+        integration_strategy: $integration_strategy,
+        target_branch_worktree: (if $target_branch_worktree == "" then null else $target_branch_worktree end),
         cleanup_mode: $cleanup_mode
       }'
   else
@@ -245,7 +322,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "remote_lane_head: ${remote_lane_head:-missing}"
     echo "target_head_before: $target_head_before"
     echo "remote_target_head_before: ${remote_target_head_before:-missing}"
+    echo "target_start_ref: $target_start_ref"
+    echo "target_start_head: $target_start_head"
     echo "integration_status: $integration_status"
+    echo "integration_strategy: $integration_strategy"
+    echo "target_branch_worktree: ${target_branch_worktree:-none}"
     echo "cleanup_mode: $CLEANUP_MODE"
   fi
   exit 0
@@ -279,7 +360,12 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg remote_lane_head "${remote_lane_head:-}" \
     --arg target_head_before "$target_head_before" \
     --arg target_head_after "$target_head_after" \
+    --arg target_start_ref "$target_start_ref" \
+    --arg target_start_head "$target_start_head" \
     --arg integration_status "$integration_status" \
+    --arg integration_strategy "$integration_strategy" \
+    --arg target_branch_worktree "${target_branch_worktree:-}" \
+    --arg target_sync_status "$target_sync_status" \
     --arg cleanup_mode "$CLEANUP_MODE" \
     --argjson pushed "$did_push" \
     --argjson lane_branch_pushed "$lane_branch_pushed" \
@@ -296,7 +382,12 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       remote_lane_head: (if $remote_lane_head == "" then null else $remote_lane_head end),
       target_head_before: $target_head_before,
       target_head_after: $target_head_after,
+      target_start_ref: $target_start_ref,
+      target_start_head: $target_start_head,
       integration_status: $integration_status,
+      integration_strategy: $integration_strategy,
+      target_branch_worktree: (if $target_branch_worktree == "" then null else $target_branch_worktree end),
+      target_sync_status: $target_sync_status,
       cleanup_mode: $cleanup_mode,
       pushed: ($pushed == 1),
       lane_branch_pushed: ($lane_branch_pushed == 1),
@@ -314,7 +405,12 @@ else
   echo "remote_lane_head: ${remote_lane_head:-missing}"
   echo "target_head_before: $target_head_before"
   echo "target_head_after: $target_head_after"
+  echo "target_start_ref: $target_start_ref"
+  echo "target_start_head: $target_start_head"
   echo "integration_status: $integration_status"
+  echo "integration_strategy: $integration_strategy"
+  echo "target_branch_worktree: ${target_branch_worktree:-none}"
+  echo "target_sync_status: $target_sync_status"
   echo "cleanup_mode: $CLEANUP_MODE"
   echo "lane_branch_pushed: $lane_branch_pushed"
   echo "pushed: $did_push"

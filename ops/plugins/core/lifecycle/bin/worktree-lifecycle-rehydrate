@@ -11,6 +11,32 @@ BRANCH=""
 LANE=""
 OWNER="${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}}}"
 FORCE=0
+SELF_CHECK=0
+
+lane_policy_hint() {
+  printf '%s\n' "explicit lane id (WAVE-... or PACKET-...)"
+}
+
+lane_policy_accepts() {
+  local lane="${1:-}"
+  [[ "$lane" =~ ^WAVE-[A-Z0-9._-]+$ || "$lane" =~ ^PACKET-[A-Za-z0-9._-]+$ ]]
+}
+
+derive_lane_from_branch() {
+  local branch="${1:-}"
+  local lane=""
+  if [[ "$branch" == codex/* ]]; then
+    lane="${branch#codex/}"
+  elif [[ "$branch" == orchestration/* ]]; then
+    lane="${branch#orchestration/}"
+  elif [[ "$branch" == *PACKET-* ]]; then
+    lane="PACKET-${branch#*PACKET-}"
+    lane="$(printf '%s' "$lane" | sed -E 's/-20[0-9]{6}$//')"
+  else
+    lane="${branch//\//-}"
+  fi
+  printf '%s\n' "$lane"
+}
 
 resolve_enforced_prefix() {
   local repo_path="${1:-$ROOT}"
@@ -23,10 +49,12 @@ path_policy_block() {
   allowed_prefix="$(resolve_enforced_prefix "$REPO_PATH")"
   cat >&2 <<EOF
 WORKTREE PATH POLICY BLOCK: $detail
-Allowed worktree path: ${allowed_prefix}<WAVE_ID>
+Allowed worktree path: ${allowed_prefix}<LANE_ID>
+Allowed lane ids: WAVE-... or PACKET-...
 Remediation:
   ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo /Users/ronnyworks/code/agentic-spine
   ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo /Users/ronnyworks/code/agentic-spine
+  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch runtime/<PACKET-ID>-<slug>-YYYYMMDD --lane <PACKET-ID>-<slug> --repo /Users/ronnyworks/code/agentic-spine
 EOF
   exit 1
 }
@@ -40,6 +68,7 @@ Usage:
 
 Behavior:
   - Recreates missing canonical worktree path under the governed worktree root for an existing branch.
+  - Accepts explicit WAVE-* lanes and packet-shaped PACKET-* lanes.
   - Writes/refreshes lane lease metadata.
 USAGE
 }
@@ -52,10 +81,40 @@ while [[ $# -gt 0 ]]; do
     --repo) REPO_PATH="${2:-}"; shift 2 ;;
     --owner) OWNER="${2:-}"; shift 2 ;;
     --force) FORCE=1; shift ;;
+    --self-check) SELF_CHECK=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+if [[ "$SELF_CHECK" -eq 1 ]]; then
+  for accepted in \
+    "WAVE-WORKFLOW-PAIN-SUBTRACTION-20260505" \
+    "PACKET-1298-WORKFLOW-PAIN-SUBTRACTION" \
+    "PACKET-1297-routine-telemetry-subtraction"
+  do
+    lane_policy_accepts "$accepted" || {
+      echo "worktree.lifecycle.rehydrate self-check FAIL: rejected valid lane $accepted" >&2
+      exit 1
+    }
+  done
+  for rejected in \
+    "TASK-1298-WORKFLOW-PAIN-SUBTRACTION" \
+    "packet-1298-workflow-pain-subtraction" \
+    "WAVE-workflow-pain-subtraction"
+  do
+    if lane_policy_accepts "$rejected"; then
+      echo "worktree.lifecycle.rehydrate self-check FAIL: accepted invalid lane $rejected" >&2
+      exit 1
+    fi
+  done
+  [[ "$(derive_lane_from_branch "runtime/PACKET-1297-routine-telemetry-subtraction-20260505")" == "PACKET-1297-routine-telemetry-subtraction" ]] || {
+    echo "worktree.lifecycle.rehydrate self-check FAIL: packet branch derivation changed" >&2
+    exit 1
+  }
+  echo "worktree.lifecycle.rehydrate self-check PASS ($(lane_policy_hint))"
+  exit 0
+fi
 
 if [[ -z "$BRANCH" ]]; then
   echo "--branch is required" >&2
@@ -78,19 +137,13 @@ if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
 fi
 
 if [[ -z "$LANE" ]]; then
-  if [[ "$BRANCH" == codex/* ]]; then
-    LANE="${BRANCH#codex/}"
-  elif [[ "$BRANCH" == orchestration/* ]]; then
-    LANE="${BRANCH#orchestration/}"
-  else
-    LANE="${BRANCH//\//-}"
-  fi
+  LANE="$(derive_lane_from_branch "$BRANCH")"
 fi
 
 if [[ "${LANE^^}" == WAVE-* ]]; then
   LANE="${LANE^^}"
 fi
-[[ "$LANE" =~ ^WAVE-[A-Z0-9._-]+$ ]] || path_policy_block "lane '$LANE' must be an explicit WAVE_ID (WAVE-...)"
+lane_policy_accepts "$LANE" || path_policy_block "lane '$LANE' must be an $(lane_policy_hint)"
 
 REPO_NAME="$(basename "$REPO_ROOT")"
 TARGET_WT="$CANONICAL_ROOT/$REPO_NAME/$LANE"

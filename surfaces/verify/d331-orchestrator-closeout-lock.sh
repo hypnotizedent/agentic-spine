@@ -12,6 +12,7 @@ ORCH_DIR="$SPINE_STATE/orchestration"
 CAPS="$ROOT/ops/capabilities.yaml"
 MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 CLOSEOUT_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-closeout"
+REHYDRATE_SCRIPT="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-rehydrate"
 CLOSEOUT_CAP="coordinator.lane.closeout"
 WAVE_RESIDUE_CAP="wave.residue"
 FRICTION_RECONCILE_CAP="friction.reconcile"
@@ -30,6 +31,7 @@ fail() {
 [[ -f "$CAPS" ]] || fail "missing capabilities registry: $CAPS"
 [[ -f "$MANIFEST" ]] || fail "missing plugin manifest: $MANIFEST"
 [[ -x "$CLOSEOUT_SCRIPT" ]] || fail "missing closeout script: $CLOSEOUT_SCRIPT"
+[[ -x "$REHYDRATE_SCRIPT" ]] || fail "missing rehydrate script: $REHYDRATE_SCRIPT"
 [[ -f "$WAVE_CMD" ]] || fail "missing wave command: $WAVE_CMD"
 [[ -x "$WAVE_CLOSE_BIN" ]] || fail "missing wave close script: $WAVE_CLOSE_BIN"
 [[ -x "$FRICTION_RECONCILE_BIN" ]] || fail "missing friction reconcile surface: $FRICTION_RECONCILE_BIN"
@@ -70,6 +72,29 @@ for marker in \
   "missing lane branch" \
   "git -C <lane-worktree> push -u"; do
   grep -qF -- "$marker" "$CLOSEOUT_SCRIPT" || fail "closeout script missing required chain marker: $marker"
+done
+
+for marker in \
+  "worktree add --detach" \
+  "HEAD:refs/heads/" \
+  "sync_target_branch_checkout" \
+  "integration_strategy" \
+  "target_sync_status" \
+  "target_branch_worktree"; do
+  grep -qF -- "$marker" "$CLOSEOUT_SCRIPT" || fail "closeout script missing detached integration marker: $marker"
+done
+
+if grep -qF 'worktree add --force "$integration_worktree" "$TARGET_BRANCH"' "$CLOSEOUT_SCRIPT"; then
+  fail "closeout script still duplicate-checks out the target branch during integration"
+fi
+
+"$REHYDRATE_SCRIPT" --self-check >/dev/null || fail "worktree.lifecycle.rehydrate self-check failed"
+for marker in \
+  "explicit lane id (WAVE-... or PACKET-...)" \
+  "PACKET-[A-Za-z0-9._-]+" \
+  "derive_lane_from_branch" \
+  "packet branch derivation"; do
+  grep -qF -- "$marker" "$REHYDRATE_SCRIPT" || fail "rehydrate script missing packet-lane marker: $marker"
 done
 
 # Wave hard gates required for outage prevention.
