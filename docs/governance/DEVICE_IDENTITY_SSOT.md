@@ -89,7 +89,7 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 | Service endpoints | `ops/bindings/probe.registry.yaml` | Service-level health, ports, URLs |
 | Stack registry | `docs/governance/STACK_REGISTRY.yaml` | Stack-to-host inventory |
 | Minilab read model | `./bin/ops cap run infra.minilab.readmodel.generate` | Home site generated summary |
-| Shop read model | `./bin/ops cap run infra.shop.readmodel.generate` | Shop site generated summary |
+| Shop/site presence | `./bin/ops cap run site.presence.status` + `./bin/ops cap run node.admission.status` | First-class shop/site presence and node admission readbacks |
 | Device identity read model | `./bin/ops cap run device.identity.readmodel.generate` | Estate-wide generated summary |
 
 ---

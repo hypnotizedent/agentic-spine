@@ -23,16 +23,10 @@ This is the spine-facing summary for the shop rack and shop-managed endpoints.
 | Monitoring | `ops/bindings/probe.registry.yaml` + `ops/bindings/services.health.yaml` |
 | Tombstones | `ops/bindings/vm.lifecycle.yaml` (status: decommissioned) |
 
-## Generated Read Model
+## First-Class Readbacks
 
-The factual endpoint/VM/hardware tables that were formerly maintained here are now
-generated from the structured bindings above:
-
-```bash
-./bin/ops cap run infra.shop.readmodel.generate
-```
-
-Output: `$SPINE_STATE/domain-state/infra.shop.readmodel.md` (runtime only, not committed)
+The old shop summary read model has been retired. Current shop/site truth is read
+through the canonical surfaces listed below, not a generated shop adapter.
 
 ## Generated Projections
 

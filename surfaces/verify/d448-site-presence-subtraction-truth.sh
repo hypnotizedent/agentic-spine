@@ -239,6 +239,26 @@ for phrase in ["site.presence.status", "node.admission.status", "network.shop.dh
     if phrase not in shop_ssot_text:
         fail(f"SHOP_SERVER_SSOT.md verification must teach current first-class readback {phrase} (PACKET-1275)")
 
+# PACKET-1284: telemetry showed infra.shop.readmodel.generate had zero
+# canonical receipts. Do not keep teaching or registering it as a parallel
+# shop/site readmodel now that first-class Site Intelligence readbacks are the
+# operator-facing truth.
+shop_readmodel_retired_name = "infra.shop.readmodel.generate"
+if shop_readmodel_retired_name in dhcp_caps:
+    fail("infra.shop.readmodel.generate must not remain live in ops/capabilities.yaml (PACKET-1284)")
+shop_readmodel_script = root / "ops/plugins/infra/bin/infra-shop-readmodel-generate"
+if shop_readmodel_script.exists():
+    fail("infra-shop-readmodel-generate script must remain subtracted (PACKET-1284)")
+shop_readmodel_texts = {
+    "ops/capabilities.yaml": caps_path.read_text(encoding="utf-8"),
+    "ops/plugins/MANIFEST.yaml": manifest_path.read_text(encoding="utf-8"),
+    "docs/governance/SHOP_SERVER_SSOT.md": shop_ssot_text,
+    "docs/governance/DEVICE_IDENTITY_SSOT.md": (root / "docs/governance/DEVICE_IDENTITY_SSOT.md").read_text(encoding="utf-8"),
+}
+for rel, text in shop_readmodel_texts.items():
+    if shop_readmodel_retired_name in text or "infra-shop-readmodel-generate" in text:
+        fail(f"{rel} still teaches retired shop readmodel generator (PACKET-1284)")
+
 dhcp_script_expectations = [
     (
         "ops/plugins/infra/network/bin/network-home-dhcp-audit",
@@ -572,5 +592,5 @@ for phrase in required_teaching_phrases:
     if phrase not in proc_h.stdout:
         fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
 
-print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215), home.device.registry.yaml authority_scope is bounded to compatibility evidence (PACKET-1270), DHCP audit/status registry reads are bounded to DHCP intent evidence under site.presence.status presence authority (PACKET-1272), UniFi snapshot caps are bounded to observed-client compatibility projection evidence (PACKET-1274), and telemetry-proven dead network cap families/wrappers are subtracted from current Site Intelligence surfaces (PACKET-1275)")
+print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215), home.device.registry.yaml authority_scope is bounded to compatibility evidence (PACKET-1270), DHCP audit/status registry reads are bounded to DHCP intent evidence under site.presence.status presence authority (PACKET-1272), UniFi snapshot caps are bounded to observed-client compatibility projection evidence (PACKET-1274), telemetry-proven dead network cap families/wrappers are subtracted from current Site Intelligence surfaces (PACKET-1275), and the zero-receipt shop readmodel generator stays retired under first-class Site Intelligence readbacks (PACKET-1284)")
 PY
