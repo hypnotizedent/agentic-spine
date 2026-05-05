@@ -51,6 +51,8 @@ def parse_worktree_list(repo: Path) -> list[dict[str, Any]]:
             row[key] = value or True
     if row:
         rows.append(row)
+    for idx, item in enumerate(rows):
+        item["is_primary"] = idx == 0
     return rows
 
 
@@ -195,10 +197,18 @@ def main() -> int:
     main_ref = os.environ.get("SPINE_WORKTREE_LIFECYCLE_MAIN_REF", "main")
 
     repo_name = common_repo_name(repo)
+    worktree_entries = parse_worktree_list(repo)
+    primary_entry = next((wt for wt in worktree_entries if wt.get("is_primary")), None)
+    primary_path = (
+        Path(str(primary_entry.get("path") or "")).resolve()
+        if primary_entry
+        else repo
+    )
+
     rows: list[dict[str, Any]] = []
-    for wt in parse_worktree_list(repo):
+    for wt in worktree_entries:
         path = Path(str(wt.get("path") or "")).resolve()
-        if not path.exists() or path == repo:
+        if not path.exists() or wt.get("is_primary"):
             continue
         branch_ref = wt.get("branch_ref")
         branch = wt.get("branch")
@@ -221,11 +231,11 @@ def main() -> int:
             }
         )
 
-    root_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-    root_dirty = is_dirty(repo)
+    root_branch = git(primary_path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    root_dirty = is_dirty(primary_path)
     root_checkout = {
         "checked": True,
-        "path": str(repo),
+        "path": str(primary_path),
         "branch": root_branch,
         "main_branch": main_ref,
         "normalizable": (root_branch != main_ref and not root_dirty),

@@ -126,6 +126,49 @@ def _run_git(cmd: list[str], cwd: str) -> tuple[int, str]:
         return 1, ""
 
 
+def _load_worktree_lease(path: Path) -> dict[str, Any]:
+    """Read the governed worktree lease marker, if present."""
+    lease_path = path / ".spine-lane-lease.yaml"
+    if not lease_path.is_file():
+        return {"present": False, "active": False}
+
+    lease: dict[str, Any] = {
+        "present": True,
+        "active": False,
+        "path": str(lease_path),
+    }
+    try:
+        raw = lease_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return lease
+
+    for line in raw.splitlines():
+        if ":" not in line or line.lstrip().startswith("#"):
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key in {"status", "owner", "loop_or_wave_id", "heartbeat_at", "ttl_hours"}:
+            lease[key] = value
+
+    status = str(lease.get("status") or "").strip().lower()
+    active = status == "active"
+    heartbeat = str(lease.get("heartbeat_at") or "").strip()
+    ttl_raw = str(lease.get("ttl_hours") or "0").strip()
+    try:
+        ttl_hours = float(ttl_raw)
+        if heartbeat and ttl_hours > 0:
+            hb = datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
+            age_hours = (datetime.now(timezone.utc) - hb).total_seconds() / 3600
+            lease["age_hours"] = round(age_hours, 3)
+            if age_hours > ttl_hours:
+                active = False
+    except Exception:
+        pass
+    lease["active"] = bool(active)
+    return lease
+
+
 def _parse_frontmatter(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -526,6 +569,7 @@ def _worktree_to_item(wt: dict[str, str], repo_root: str, *, is_first: bool) -> 
         "is_primary": is_primary,
         "unique_commits": unique_count,
         "detached": wt.get("detached") == "true",
+        "lease": _load_worktree_lease(Path(path)),
     }
 
 
@@ -766,9 +810,21 @@ def _classify_worktree(
     branch = item.get("branch", "")
     unique = item.get("unique_commits", 0)
     path = item.get("identity", "")
+    lease = item.get("lease") if isinstance(item.get("lease"), dict) else {}
+    lease_active = bool(lease.get("active"))
+    lease_owner = str(lease.get("owner") or "").strip()
+    lease_identity = str(lease.get("loop_or_wave_id") or "").strip()
 
     # Is this worktree the one we're currently operating in?
     if current_worktree and os.path.normpath(path) == os.path.normpath(current_worktree):
+        if lease_active:
+            return {
+                "computed_state": "open",
+                "is_live": True,
+                "confidence": "definitive",
+                "evidence": f"current terminal worktree has active lease {lease_identity or '<unbound>'}",
+                "rule": "P3+lease",
+            }
         if unique > 0:
             return {
                 "computed_state": "open",
@@ -790,6 +846,20 @@ def _classify_worktree(
         branch in ho.get("summary", "") or path in ho.get("summary", "")
         for ho in handoffs
     )
+
+    if lease_active:
+        evidence = "active worktree lease"
+        if lease_identity:
+            evidence += f" bound to {lease_identity}"
+        if lease_owner:
+            evidence += f" owned by {lease_owner}"
+        return {
+            "computed_state": "owned_elsewhere",
+            "is_live": True,
+            "confidence": "definitive",
+            "evidence": evidence,
+            "rule": "P3+lease",
+        }
 
     if unique > 0:
         if has_handoff_ref:

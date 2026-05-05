@@ -305,6 +305,36 @@ if bad_worktree_locality:
         + ", ".join(bad_worktree_locality)
     )
 
+lease_script = root / "ops/plugins/core/lifecycle/bin/worktree-lease-heartbeat"
+if not lease_script.is_file():
+    fail("worktree lease heartbeat script missing")
+lease_text = lease_script.read_text(encoding="utf-8")
+for marker in [
+    "--release",
+    "--status",
+    "--worktree",
+    "unknown arg:",
+    "MODE=\"release\"",
+    'kv["status"] = "released"',
+    "cannot release missing lease",
+]:
+    if marker not in lease_text:
+        fail(f"worktree.lease.heartbeat must provide non-surgical release/status/target semantics: missing {marker!r}")
+if "*) shift ;;" in lease_text:
+    fail("worktree.lease.heartbeat must fail unknown args instead of silently mutating the current checkout")
+
+worktree_reconcile = root / "ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
+if not worktree_reconcile.is_file():
+    fail("worktree lifecycle reconcile script missing")
+worktree_reconcile_text = worktree_reconcile.read_text(encoding="utf-8")
+for marker in [
+    'item["is_primary"] = idx == 0',
+    'primary_entry = next((wt for wt in worktree_entries if wt.get("is_primary")), None)',
+    'if not path.exists() or wt.get("is_primary"):',
+]:
+    if marker not in worktree_reconcile_text:
+        fail(f"worktree lifecycle reconcile must classify Git's primary checkout independently of invocation worktree: missing {marker!r}")
+
 # PACKET-616: runtime checkout deployment is a first-class deploy artery.
 # Host placement lives in ops/bindings/runtime.checkout.placement.yaml, drift
 # readback consumes that contract, and runtime.checkout.deploy.update is the

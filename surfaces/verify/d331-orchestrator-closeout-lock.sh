@@ -63,8 +63,13 @@ for marker in \
   "POST_INTEGRATION_ROOT" \
   "friction.reconcile -- --loop-id" \
   "spine.verify" \
-  "worktree.lifecycle.cleanup -- --mode"; do
-  grep -qF "$marker" "$CLOSEOUT_SCRIPT" || fail "closeout script missing required chain marker: $marker"
+  "worktree.lifecycle.cleanup -- --mode" \
+  "--no-lane-push" \
+  "ls-remote --heads" \
+  "lane_branch_pushed" \
+  "missing lane branch" \
+  "git -C <lane-worktree> push -u"; do
+  grep -qF -- "$marker" "$CLOSEOUT_SCRIPT" || fail "closeout script missing required chain marker: $marker"
 done
 
 # Wave hard gates required for outage prevention.
@@ -74,7 +79,7 @@ for marker in \
   "\"push\", \"--dry-run\", remote" \
   "control_lane_override" \
   "force-close denied while dispatches are pending without stub evidence"; do
-  grep -qF "$marker" "$WAVE_CMD" || fail "wave.sh missing required control marker: $marker"
+  grep -qF -- "$marker" "$WAVE_CMD" || fail "wave.sh missing required control marker: $marker"
 done
 
 # Wave close must keep lane context present until packet/loop reconcile finishes.

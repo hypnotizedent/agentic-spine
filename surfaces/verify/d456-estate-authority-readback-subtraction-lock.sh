@@ -197,6 +197,14 @@ if ids_payload.get("skipped_retired") != 3 or ids_payload.get("blocking_fail_ids
 ops_verify_text = ops_verify_path.read_text(encoding="utf-8")
 if "verify.drift_gates.certify" in ops_verify_text:
     fail("ops verify preflight must not teach unregistered verify.drift_gates.certify capability")
+for phrase in [
+    "--foundation|--foundational",
+    "Foundational verify: verify.engine.run + spine.verify",
+    "cap run verify.engine.run",
+    "cap run spine.verify",
+]:
+    if phrase not in ops_verify_text:
+        fail(f"ops verify must keep one-command foundational wrapper routed through canonical caps: missing {phrase!r}")
 
 core_ids = (((topology.get("core_mode") or {}).get("core_gate_ids")) or [])
 if any(str(gid).startswith("G") for gid in core_ids):

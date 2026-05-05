@@ -11,6 +11,7 @@ usage() {
 Usage: ops verify [OPTION]  # compatibility / expert wrapper
 
 First-class verify:
+  ops verify --foundation        Runs the two foundational readback caps below
   ops cap run verify.engine.run    Foundational engine smoke
   ops cap run spine.verify         Foundational spine/control-plane truth
 
@@ -298,6 +299,23 @@ STOP
 
 # ---------- all checks ----------
 
+_verify_foundation() {
+  local rc=0
+
+  echo "SPINE_ROOT=$SPINE_ROOT"
+  echo "VERIFY_MODE=foundation"
+  echo
+  echo "Foundational verify: verify.engine.run + spine.verify"
+
+  _section "FOUNDATION: verify.engine.run"
+  "$SPINE_ROOT/bin/ops" cap run verify.engine.run || rc=1
+
+  _section "FOUNDATION: spine.verify"
+  "$SPINE_ROOT/bin/ops" cap run spine.verify || rc=1
+
+  return "$rc"
+}
+
 _verify_all() {
   local rc=0
 
@@ -357,6 +375,9 @@ case "${1:-}" in
     echo
     echo "Spine verify: coherence front-door authority"
     exec "$VERIFY_RUN" spine
+    ;;
+  --foundation|--foundational)
+    _verify_foundation
     ;;
   --infra)
     echo "SPINE_ROOT=$SPINE_ROOT"

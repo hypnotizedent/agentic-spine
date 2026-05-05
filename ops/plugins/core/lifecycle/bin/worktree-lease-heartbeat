@@ -1,25 +1,148 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-source "$ROOT/ops/lib/spine-paths.sh"
+CONTROL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+source "$CONTROL_ROOT/ops/lib/spine-paths.sh"
 spine_paths_init
-CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
 
 LEASE_FILENAME=".spine-lane-lease.yaml"
 LEASE_TTL_HOURS="24"
 OWNER="${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}}}"
 IDENTITY="${OPS_WORKTREE_IDENTITY:-}"
+MODE="heartbeat"
+TARGET_ROOT=""
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+worktree.lease.heartbeat
+
+Usage:
+  worktree-lease-heartbeat [--worktree <path>] [--identity <id>] [--owner <id>] [--json]
+  worktree-lease-heartbeat --release [--worktree <path>] [--json]
+  worktree-lease-heartbeat --status [--worktree <path>] [--json]
+
+Refresh, release, or read the lease marker for one governed worktree. The
+default target is the current checkout. Use --worktree when releasing a crashed
+lane from a controller terminal.
+USAGE
+}
+
+fail() {
+  echo "worktree.lease.heartbeat FAIL: $*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --worktree)
+      TARGET_ROOT="${2:-}"
+      [[ -n "$TARGET_ROOT" ]] || fail "--worktree requires <path>"
+      shift 2
+      ;;
+    --identity)
+      IDENTITY="${2:-}"
+      [[ -n "$IDENTITY" ]] || fail "--identity requires <id>"
+      shift 2
+      ;;
+    --owner)
+      OWNER="${2:-}"
+      [[ -n "$OWNER" ]] || fail "--owner requires <id>"
+      shift 2
+      ;;
+    --release)
+      MODE="release"
+      shift
+      ;;
+    --status)
+      MODE="status"
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown arg: $1"
+      ;;
+  esac
+done
 
 if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
   LEASE_FILENAME="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$CONTRACT" 2>/dev/null || echo "$LEASE_FILENAME")"
   LEASE_TTL_HOURS="$(yq e -r '.policy.lease_ttl_hours_default // 24' "$CONTRACT" 2>/dev/null || echo "$LEASE_TTL_HOURS")"
 fi
 
-REPO_ROOT="$(spine_git_common_root "$ROOT")"
-BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+if [[ -z "$TARGET_ROOT" ]]; then
+  TARGET_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+fi
+TARGET_ROOT="$(cd "$TARGET_ROOT" && pwd)"
+
+git -C "$TARGET_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || fail "not a git worktree: $TARGET_ROOT"
+
+REPO_ROOT="$(spine_git_common_root "$TARGET_ROOT")"
+BRANCH="$(git -C "$TARGET_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-LEASE_PATH="$ROOT/$LEASE_FILENAME"
+LEASE_PATH="$TARGET_ROOT/$LEASE_FILENAME"
+
+emit_json() {
+  local status="$1"
+  local action="$2"
+  python3 - "$status" "$action" "$LEASE_PATH" "$TARGET_ROOT" "$BRANCH" <<'PY'
+import json
+import sys
+print(json.dumps({
+    "status": sys.argv[1],
+    "action": sys.argv[2],
+    "lease_path": sys.argv[3],
+    "worktree": sys.argv[4],
+    "branch": sys.argv[5],
+}))
+PY
+}
+
+if [[ "$MODE" == "status" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    if [[ -f "$LEASE_PATH" ]]; then
+      python3 - "$LEASE_PATH" "$TARGET_ROOT" "$BRANCH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+lease_path = Path(sys.argv[1])
+raw = lease_path.read_text(encoding="utf-8", errors="ignore")
+kv = {"present": True, "path": str(lease_path), "worktree": sys.argv[2], "branch": sys.argv[3]}
+for line in raw.splitlines():
+    if ":" not in line or line.lstrip().startswith("#"):
+        continue
+    key, value = line.split(":", 1)
+    kv[key.strip()] = value.strip().strip("'\"")
+print(json.dumps(kv, indent=2))
+PY
+    else
+      emit_json "missing" "status"
+    fi
+  else
+    if [[ -f "$LEASE_PATH" ]]; then
+      echo "worktree.lease.heartbeat status: $LEASE_PATH"
+      sed -n '1,80p' "$LEASE_PATH"
+    else
+      echo "worktree.lease.heartbeat status: missing lease: $LEASE_PATH"
+    fi
+  fi
+  exit 0
+fi
+
+if [[ "$MODE" == "release" && ! -f "$LEASE_PATH" ]]; then
+  fail "cannot release missing lease: $LEASE_PATH"
+fi
 
 if [[ ! -f "$LEASE_PATH" ]]; then
   LOOP_OR_WAVE="$IDENTITY"
@@ -42,12 +165,16 @@ ttl_hours: $LEASE_TTL_HOURS
 ---
 LEASENEW
   mv "$TMP_LEASE" "$LEASE_PATH"
-  spine_ensure_git_exclude "$ROOT" "$LEASE_FILENAME"
-  echo "worktree.lease.heartbeat created lease: $LEASE_PATH"
+  spine_ensure_git_exclude "$TARGET_ROOT" "$LEASE_FILENAME"
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    emit_json "ok" "created"
+  else
+    echo "worktree.lease.heartbeat created lease: $LEASE_PATH"
+  fi
   exit 0
 fi
 
-python3 - "$LEASE_PATH" "$NOW" "$OWNER" "$BRANCH" "$REPO_ROOT" "$ROOT" "$LEASE_TTL_HOURS" "$IDENTITY" <<'PY'
+python3 - "$LEASE_PATH" "$NOW" "$OWNER" "$BRANCH" "$REPO_ROOT" "$TARGET_ROOT" "$LEASE_TTL_HOURS" "$IDENTITY" "$MODE" <<'PY'
 import sys
 import tempfile
 from pathlib import Path
@@ -60,6 +187,7 @@ repo = sys.argv[5]
 worktree = sys.argv[6]
 ttl = sys.argv[7]
 identity = sys.argv[8]
+mode = sys.argv[9]
 
 raw = lease_path.read_text(encoding="utf-8", errors="ignore")
 lines = [ln for ln in raw.splitlines() if ln.strip() and ln.strip() != "---"]
@@ -78,8 +206,14 @@ kv["repo"] = kv.get("repo", repo)
 kv["worktree"] = kv.get("worktree", worktree)
 kv["branch"] = branch
 kv["created_at"] = kv.get("created_at", now)
-kv["heartbeat_at"] = now
 kv["ttl_hours"] = kv.get("ttl_hours", ttl)
+if mode == "release":
+    kv["status"] = "released"
+    kv["closed_at"] = now
+else:
+    kv["status"] = "active"
+    kv["heartbeat_at"] = now
+    kv.pop("closed_at", None)
 
 ordered = [
     "version", "status", "owner", "loop_or_wave_id", "repo", "worktree",
@@ -113,6 +247,18 @@ finally:
         except FileNotFoundError:
             pass
 PY
-spine_ensure_git_exclude "$ROOT" "$LEASE_FILENAME"
+spine_ensure_git_exclude "$TARGET_ROOT" "$LEASE_FILENAME"
 
-echo "worktree.lease.heartbeat updated: $LEASE_PATH"
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  if [[ "$MODE" == "release" ]]; then
+    emit_json "ok" "released"
+  else
+    emit_json "ok" "updated"
+  fi
+else
+  if [[ "$MODE" == "release" ]]; then
+    echo "worktree.lease.heartbeat released: $LEASE_PATH"
+  else
+    echo "worktree.lease.heartbeat updated: $LEASE_PATH"
+  fi
+fi
