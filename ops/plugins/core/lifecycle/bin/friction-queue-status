@@ -6,9 +6,13 @@ Legacy: friction.queue.yaml is no longer read by this surface.
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
+import shlex
 import socket
 import sys
+import tempfile
 from pathlib import Path
 
 try:
@@ -26,6 +30,14 @@ CANONICAL_PLANE_ACCESS_BINDING = (
 )
 WORKER_CONTRACT_PATH = ROOT / "ops" / "bindings" / "mailroom.task.worker.contract.yaml"
 FRICTION_DRAIN_CAPS = ("friction.reconcile", "friction.dispose")
+VALID_DISPOSITIONS = ("resolved", "superseded", "duplicate", "invalid")
+MAILROOM_MANIFEST_CLASSES = (
+    "filed-gap-join-missing",
+    "filed-no-gap-id",
+    "explicit-ids",
+)
+DEFAULT_MANIFEST_LIMIT = 50
+MAX_MANIFEST_LIMIT = 200
 
 
 def _local_hostname() -> str:
@@ -272,11 +284,200 @@ def _worker_drain_summary() -> dict[str, object]:
     }
 
 
-def main() -> int:
-    db_path, _ = authority.resolve_paths(ROOT)
-    conn = authority.connect(db_path)
-    authority.ensure_schema(conn)
+def _unique_ordered(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
 
+
+def _query_friction_rows(conn, sql: str, limit: int) -> tuple[list[dict[str, object]], bool]:
+    capped = max(1, min(int(limit or DEFAULT_MANIFEST_LIMIT), MAX_MANIFEST_LIMIT))
+    rows = conn.execute(sql, (capped + 1,)).fetchall()
+    truncated = len(rows) > capped
+    return [authority.friction_from_row(r) for r in rows[:capped]], truncated
+
+
+def _manifest_rows(
+    conn,
+    *,
+    manifest_class: str,
+    explicit_ids: list[str],
+    limit: int,
+) -> tuple[list[dict[str, object]], bool, list[str]]:
+    errors: list[str] = []
+    if manifest_class == "filed-gap-join-missing":
+        return _query_friction_rows(
+            conn,
+            """
+            SELECT f.*
+            FROM friction f
+            LEFT JOIN gaps g ON g.gap_id = f.filed_gap_id
+            WHERE f.status = 'filed'
+              AND f.filed_gap_id IS NOT NULL
+              AND TRIM(f.filed_gap_id) != ''
+              AND g.gap_id IS NULL
+            ORDER BY f.first_seen_utc, f.friction_id
+            LIMIT ?
+            """,
+            limit,
+        ) + (errors,)
+    if manifest_class == "filed-no-gap-id":
+        return _query_friction_rows(
+            conn,
+            """
+            SELECT *
+            FROM friction
+            WHERE status = 'filed'
+              AND (filed_gap_id IS NULL OR TRIM(filed_gap_id) = '')
+            ORDER BY first_seen_utc, friction_id
+            LIMIT ?
+            """,
+            limit,
+        ) + (errors,)
+
+    ids = _unique_ordered(explicit_ids)
+    if not ids:
+        return [], False, ["explicit-ids requires at least one --manifest-friction-id"]
+    if len(ids) > MAX_MANIFEST_LIMIT:
+        return [], False, [f"explicit-ids is capped at {MAX_MANIFEST_LIMIT} ids"]
+
+    rows: list[dict[str, object]] = []
+    for friction_id in ids:
+        row = authority.get_friction(conn, friction_id)
+        if row is None:
+            errors.append(f"friction_id not found: {friction_id}")
+            continue
+        if str(row.get("status") or "") == "closed":
+            errors.append(f"friction_id already closed: {friction_id}")
+            continue
+        rows.append(row)
+    return rows, False, errors
+
+
+def _default_manifest_reason(manifest_class: str) -> str:
+    if manifest_class == "filed-gap-join-missing":
+        return (
+            "Close stale filed friction rows whose filed_gap_id no longer joins "
+            "canonical gaps. This disposes filing residue only and does not "
+            "assert the historical symptom was fixed."
+        )
+    return ""
+
+
+def _mailroom_drain_manifest(
+    conn,
+    *,
+    manifest_class: str,
+    disposition: str,
+    evidence_refs: list[str],
+    reason: str,
+    actor: str,
+    explicit_ids: list[str],
+    limit: int,
+    worker_drain: dict[str, object],
+) -> dict[str, object]:
+    rows, truncated, row_errors = _manifest_rows(
+        conn,
+        manifest_class=manifest_class,
+        explicit_ids=explicit_ids,
+        limit=limit,
+    )
+    friction_ids = [str(r.get("friction_id") or "") for r in rows]
+    evidence_refs = _unique_ordered(evidence_refs)
+    reason = str(reason or "").strip() or _default_manifest_reason(manifest_class)
+    block_reasons = list(row_errors)
+
+    cap_run_key = os.environ.get("SPINE_CAP_RUN_KEY", "").strip()
+    if manifest_class == "filed-gap-join-missing" and not evidence_refs and cap_run_key:
+        evidence_refs = [cap_run_key]
+
+    requires_operator_evidence = manifest_class in {"filed-no-gap-id", "explicit-ids"}
+    requires_operator_reason = manifest_class in {"filed-no-gap-id", "explicit-ids"}
+    if requires_operator_evidence and not evidence_refs:
+        block_reasons.append(
+            f"{manifest_class} requires explicit --manifest-evidence-ref"
+        )
+    if requires_operator_reason and not reason:
+        block_reasons.append(f"{manifest_class} requires explicit --manifest-reason")
+    if manifest_class == "filed-gap-join-missing" and rows and not evidence_refs:
+        block_reasons.append(
+            "filed-gap-join-missing needs a governed evidence ref; run through "
+            "bin/ops cap run or pass --manifest-evidence-ref"
+        )
+    if not worker_drain.get("worker_owned"):
+        block_reasons.append("friction.dispose is not currently worker-owned")
+
+    base: dict[str, object] = {
+        "class": manifest_class,
+        "status": "blocked" if block_reasons else ("ready" if rows else "empty"),
+        "route_target": "capability",
+        "route_capability": "friction.dispose",
+        "execution_lane_id": "friction-drain",
+        "worker_contract": str(WORKER_CONTRACT_PATH.relative_to(ROOT)),
+        "disposition": disposition,
+        "actor": actor,
+        "count": len(rows),
+        "truncated": truncated,
+        "friction_ids": friction_ids,
+        "evidence_refs": evidence_refs,
+        "reason": reason,
+        "block_reasons": block_reasons,
+        "boundary": (
+            "This is a mailroom task admission manifest only. It does not "
+            "execute, claim, or close friction until mailroom.task.enqueue "
+            "admits it and the mailroom worker runs friction.dispose."
+        ),
+    }
+
+    if block_reasons or not rows:
+        return base
+
+    route_args: list[str] = []
+    for friction_id in friction_ids:
+        route_args.extend(["--friction-id", friction_id])
+    route_args.extend(["--disposition", disposition])
+    for evidence_ref in evidence_refs:
+        route_args.extend(["--evidence-ref", evidence_ref])
+    route_args.extend(["--reason", reason, "--actor", actor, "--json"])
+
+    summary = f"friction drain {manifest_class}: {len(rows)} row(s)"
+    enqueue_args = [
+        "--summary",
+        summary,
+        "--route-target",
+        "capability",
+        "--route-capability",
+        "friction.dispose",
+        "--execution-lane-id",
+        "friction-drain",
+    ]
+    for arg in route_args:
+        enqueue_args.extend(["--route-arg", arg])
+    enqueue_args.append("--json")
+
+    base.update(
+        {
+            "summary": summary,
+            "route_args": route_args,
+            "enqueue_args": enqueue_args,
+            "enqueue_command": (
+                "./bin/ops cap run mailroom.task.enqueue -- "
+                + shlex.join(enqueue_args)
+            ),
+            "readback_after_enqueue": "execution.pickup.status",
+            "readback_after_worker": "friction.queue.status",
+        }
+    )
+    return base
+
+
+def _build_payload(conn, args: argparse.Namespace) -> dict[str, object]:
     stats = authority.friction_stats(conn)
     total = authority.friction_count(conn)
     by_disposition = _by_disposition(conn)
@@ -291,7 +492,7 @@ def main() -> int:
     )
 
     role = _plane_access_role()
-    payload = {
+    payload: dict[str, object] = {
         "capability": "friction.queue.status",
         "status": "ok",
         "authority": "sqlite",
@@ -299,7 +500,7 @@ def main() -> int:
         "plane_access_source": f"{CANONICAL_PLANE_ACCESS_BINDING}.{role}"
         if role != "external_consumer"
         else f"{CANONICAL_PLANE_ACCESS_BINDING} (reader_off_authority_external_consumer)",
-        "db_path": str(db_path),
+        "db_path": str(args.db_path),
         "total": total,
         "open": open_count,
         "by_status": status_counts,
@@ -310,12 +511,187 @@ def main() -> int:
         "worker_drain": worker_drain,
     }
 
-    conn.close()
+    if args.mailroom_drain_manifest:
+        payload["mailroom_drain_manifest"] = _mailroom_drain_manifest(
+            conn,
+            manifest_class=args.mailroom_drain_manifest,
+            disposition=args.manifest_disposition,
+            evidence_refs=args.manifest_evidence_refs or [],
+            reason=args.manifest_reason,
+            actor=args.manifest_actor,
+            explicit_ids=args.manifest_friction_ids or [],
+            limit=args.manifest_limit,
+            worker_drain=worker_drain,
+        )
 
-    use_json = len(sys.argv) > 1 and sys.argv[1] == "--json"
-    if use_json:
+    return payload
+
+
+def _self_check() -> int:
+    with tempfile.TemporaryDirectory(prefix="friction-queue-status-self-check-") as td:
+        db_path = Path(td) / "shared_authority.db"
+        db_path.touch()
+        conn = authority.connect(db_path)
+        try:
+            authority.ensure_schema(conn)
+            now = authority.utc_now_text()
+            authority.upsert_friction(
+                conn,
+                {
+                    "friction_id": "FR-SELF-MISSING-JOIN",
+                    "fingerprint": "self-missing-join",
+                    "capability": "friction.queue.status.self_check",
+                    "expected": "filed row points at canonical gap",
+                    "actual": "gap id no longer joins",
+                    "severity": "medium",
+                    "status": "filed",
+                    "filed_gap_id": "GAP-SELF-MISSING",
+                    "first_seen_utc": now,
+                    "last_seen_utc": now,
+                    "updated_at_utc": now,
+                    "created_at_utc": now,
+                },
+            )
+            authority.upsert_friction(
+                conn,
+                {
+                    "friction_id": "FR-SELF-NO-GAP",
+                    "fingerprint": "self-no-gap",
+                    "capability": "friction.queue.status.self_check",
+                    "expected": "filed row has gap id",
+                    "actual": "filed row lacks gap id",
+                    "severity": "medium",
+                    "status": "filed",
+                    "first_seen_utc": now,
+                    "last_seen_utc": now,
+                    "updated_at_utc": now,
+                    "created_at_utc": now,
+                },
+            )
+            conn.commit()
+
+            worker_drain = {
+                "worker_owned": True,
+            }
+            missing_join = _mailroom_drain_manifest(
+                conn,
+                manifest_class="filed-gap-join-missing",
+                disposition="superseded",
+                evidence_refs=["CAP-SELF-CHECK"],
+                reason="",
+                actor="friction.queue.status.self_check",
+                explicit_ids=[],
+                limit=10,
+                worker_drain=worker_drain,
+            )
+            if missing_join.get("status") != "ready" or missing_join.get("count") != 1:
+                print(
+                    f"friction.queue.status self-check FAIL: missing join manifest {missing_join!r}",
+                    file=sys.stderr,
+                )
+                return 1
+            if "enqueue_args" not in missing_join:
+                print("friction.queue.status self-check FAIL: manifest lacks enqueue_args", file=sys.stderr)
+                return 1
+
+            no_gap_blocked = _mailroom_drain_manifest(
+                conn,
+                manifest_class="filed-no-gap-id",
+                disposition="superseded",
+                evidence_refs=[],
+                reason="",
+                actor="friction.queue.status.self_check",
+                explicit_ids=[],
+                limit=10,
+                worker_drain=worker_drain,
+            )
+            if no_gap_blocked.get("status") != "blocked":
+                print("friction.queue.status self-check FAIL: no-gap manifest was not blocked", file=sys.stderr)
+                return 1
+        finally:
+            conn.close()
+
+    print("friction.queue.status self-check PASS")
+    return 0
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Read friction queue status from SQLite canonical authority."
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    parser.add_argument("--self-check", action="store_true", help="Run local self-check.")
+    parser.add_argument(
+        "--mailroom-drain-manifest",
+        choices=MAILROOM_MANIFEST_CLASSES,
+        help=(
+            "Emit an enqueue-ready mailroom.task manifest for a bounded "
+            "friction.dispose drain class. Read-only; does not enqueue."
+        ),
+    )
+    parser.add_argument(
+        "--manifest-disposition",
+        choices=VALID_DISPOSITIONS,
+        default="superseded",
+        help="Disposition to pass to friction.dispose in the generated manifest.",
+    )
+    parser.add_argument(
+        "--manifest-evidence-ref",
+        action="append",
+        dest="manifest_evidence_refs",
+        default=[],
+        help="Evidence ref to pass to friction.dispose. Repeatable.",
+    )
+    parser.add_argument(
+        "--manifest-reason",
+        default="",
+        help="Reason to pass to friction.dispose. Required for no-gap and explicit-id manifests.",
+    )
+    parser.add_argument(
+        "--manifest-actor",
+        default="mailroom.friction.drain",
+        help="Actor to pass to friction.dispose.",
+    )
+    parser.add_argument(
+        "--manifest-friction-id",
+        action="append",
+        dest="manifest_friction_ids",
+        default=[],
+        help="Friction ID for --mailroom-drain-manifest explicit-ids. Repeatable.",
+    )
+    parser.add_argument(
+        "--manifest-limit",
+        type=int,
+        default=DEFAULT_MANIFEST_LIMIT,
+        help=f"Maximum rows to include in generated manifest (max {MAX_MANIFEST_LIMIT}).",
+    )
+    args = parser.parse_args(argv)
+    args.db_path = None
+    return args
+
+
+def main() -> int:
+    args = _parse_args(sys.argv[1:])
+    if args.self_check:
+        return _self_check()
+
+    db_path, _ = authority.resolve_paths(ROOT)
+    args.db_path = db_path
+    conn = authority.connect(db_path)
+    try:
+        authority.ensure_schema(conn)
+        payload = _build_payload(conn, args)
+    finally:
+        conn.close()
+
+    if args.json:
         print(json.dumps(payload, indent=2))
     else:
+        status_counts = payload["by_status"]
+        by_disposition = payload["by_disposition"]
+        evidence_refs_classification = payload["evidence_refs_classification"]
+        drain_lifecycle = payload["drain_lifecycle"]
+        worker_drain = payload["worker_drain"]
         print("friction.queue.status")
         print("status: ok")
         print(f"authority: sqlite")
@@ -348,6 +724,18 @@ def main() -> int:
         print(f"  allowlisted_caps: {', '.join(worker_drain['allowlisted_caps']) or '(none)'}")
         print(f"  missing_caps: {', '.join(worker_drain['missing_caps']) or '(none)'}")
         print(f"  boundary: {worker_drain['boundary']}")
+        manifest = payload.get("mailroom_drain_manifest")
+        if isinstance(manifest, dict):
+            print("mailroom_drain_manifest:")
+            print(f"  class: {manifest['class']}")
+            print(f"  status: {manifest['status']}")
+            print(f"  count: {manifest['count']}")
+            if manifest.get("block_reasons"):
+                print("  block_reasons:")
+                for reason in manifest["block_reasons"]:
+                    print(f"    - {reason}")
+            if manifest.get("enqueue_command"):
+                print(f"  enqueue_command: {manifest['enqueue_command']}")
         print(f"db_path: {db_path}")
     return 0
 
