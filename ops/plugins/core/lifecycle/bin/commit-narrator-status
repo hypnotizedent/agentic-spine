@@ -871,15 +871,74 @@ def print_markdown(payload: dict[str, Any]) -> None:
     commits = payload.get("commits") or []
     print(f"## All commits ({len(commits)})")
     for row in commits:
-        print(
-            f"- `{row.get('short_sha')}` {row.get('direction_signal')} "
-            f"conf={row.get('confidence')} — {row.get('subject')}"
-        )
+        sha = row.get("short_sha")
+        subject = row.get("subject")
+        print(f"- `{sha}` — {subject}")
+
+        # touched: paths + shortstat size
         paths = row.get("paths") or []
         shown = ", ".join(paths[:5])
         suffix = f" (+{len(paths) - 5} more)" if len(paths) > 5 else ""
+        ss = row.get("shortstat") or {}
+        ins = ss.get("insertions", 0)
+        dele = ss.get("deletions", 0)
+        files_total = ss.get("files_changed", 0)
+        size = f"+{ins}/-{dele}, {files_total} file(s)" if files_total else "no shortstat"
         if paths:
-            print(f"  - paths: {shown}{suffix}")
+            print(f"  - touched: {shown}{suffix} ({size})")
+        else:
+            print(f"  - touched: ({size})")
+
+        # rule_layer surfacing (slice D output) — only when --evaluate-rules
+        # was on AND the engine produced an evaluated layer. JSON shape is
+        # untouched; this is presentation-only.
+        rl = row.get("rule_layer") if isinstance(row.get("rule_layer"), dict) else None
+        if rl and rl.get("status") == "evaluated":
+            verdict = rl.get("verdict") or "unknown_no_rule_applies"
+            confidence = rl.get("confidence") or "low"
+            print(f"  - verdict: `{verdict}` ({confidence} confidence)")
+            outcomes = rl.get("rule_outcomes") or []
+            matched = [o for o in outcomes if o.get("outcome") == "matched"]
+            unknown_outcomes = [o for o in outcomes if o.get("outcome") == "honest_unknown"]
+            if matched:
+                for o in matched:
+                    rid = o.get("rule_id") or "rule"
+                    sig = o.get("verdict_signal") or "none"
+                    reason = (o.get("reason") or "").strip()
+                    print(f"  - reasoning ({rid}, signal={sig}): {reason}")
+                    cits = o.get("citations") or []
+                    for c in cits[:2]:
+                        src = (c.get("source") or "").strip()
+                        anchor = (c.get("anchor") or "").strip().replace("\n", " ")
+                        if len(anchor) > 140:
+                            anchor = anchor[:140] + "…"
+                        if src or anchor:
+                            print(f"    - cite: `{src}` — {anchor}")
+            honest = rl.get("honest_unknown_reason")
+            if honest:
+                print(f"  - honest unknown: {honest}")
+            elif unknown_outcomes and not matched:
+                for o in unknown_outcomes[:2]:
+                    rid = o.get("rule_id") or "rule"
+                    reason = (o.get("reason") or "").strip()
+                    print(f"  - honest unknown ({rid}): {reason}")
+            # fact-layer signal as drilldown context
+            fact_sig = row.get("direction_signal") or ""
+            fact_conf = row.get("confidence") or ""
+            if fact_sig and fact_sig != verdict:
+                print(f"  - fact signal: `{fact_sig}` ({fact_conf})")
+        else:
+            # No rule_layer present — render the slice-D-pre shape so default
+            # narrator runs (no --evaluate-rules) still surface useful signal.
+            fact_sig = row.get("direction_signal") or ""
+            fact_conf = row.get("confidence") or ""
+            if fact_sig:
+                print(f"  - signal: `{fact_sig}` ({fact_conf})")
+            r = (row.get("reason") or "").strip()
+            if r:
+                print(f"  - reason: {r}")
+
+        # diff disclosure — unchanged from prior shape
         diff = row.get("diff_body") or {}
         if diff.get("status") and diff.get("status") != "skipped_disabled":
             disclosure = (
