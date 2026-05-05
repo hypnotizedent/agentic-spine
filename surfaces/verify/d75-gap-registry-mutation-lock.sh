@@ -1,126 +1,90 @@
 #!/usr/bin/env bash
-# TRIAGE: Use gaps.file/gaps.close capabilities only. No direct edits to operational.gaps.yaml.
-# D75: Gap registry mutation lock
-# Enforces SQLite-authority-only mutation evidence for operational.gaps.yaml.
-#
-# Checks:
-#   1. No uncommitted changes to the gap registry file.
-#   2. No direct repo-side writers remain outside the SQLite authority projector.
-#   3. SQLite authority parity matches the YAML projection.
-#   4. Recent commits touching the file (post-enforcement) carry the required
-#      trailer schema defined in shared-authority.mutation.contract.yaml.
-#
-# Limitation: governance evidence only, not cryptographic tamper-proofing.
-# A determined actor with direct git access can forge trailers.
-# D75 prevents accidental manual edits, not intentional circumvention.
+# TRIAGE: Use governed gap/friction lifecycle capabilities only. No repo-local
+# gap YAML authority.
+# D75: Gap runtime projection lock.
+# Enforces SQLite authority plus generated runtime projection parity, and keeps
+# the retired repo-local gap projections absent.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CONTRACT_FILE="$ROOT/ops/bindings/shared-authority.mutation.contract.yaml"
+SCHEMA_FILE="$ROOT/ops/bindings/gap.schema.yaml"
 GAPS_BRIDGE="$ROOT/ops/plugins/core/lifecycle/bin/gaps-authority-bridge"
+RUNTIME_PATHS="$ROOT/ops/lib/runtime-paths.sh"
 
 fail() {
   echo "D75 FAIL: $*" >&2
   exit 1
 }
 
-command -v yq >/dev/null 2>&1 || fail "yq required"
 command -v python3 >/dev/null 2>&1 || fail "python3 required"
 
-[[ -f "$CONTRACT_FILE" ]] || fail "shared-authority mutation contract missing: $CONTRACT_FILE"
+[[ -f "$SCHEMA_FILE" ]] || fail "gap schema contract missing: $SCHEMA_FILE"
 [[ -x "$GAPS_BRIDGE" ]] || fail "gaps authority bridge missing: $GAPS_BRIDGE"
 
-GAPS_FILE_REL="$(yq e -r '.gap_projection_enforcement.active_projection // ""' "$CONTRACT_FILE")"
-GAPS_FILE="$ROOT/$GAPS_FILE_REL"
-WINDOW="$(yq e -r '.gap_projection_enforcement.window // ""' "$CONTRACT_FILE")"
-ENFORCEMENT_SHA="$(yq e -r '.gap_projection_enforcement.enforcement_after_sha // ""' "$CONTRACT_FILE")"
-REQUIRED_TRAILERS=()
-while IFS= read -r trailer; do
-  [[ -n "$trailer" ]] && REQUIRED_TRAILERS+=("$trailer")
-done < <(yq e -r '.gap_projection_enforcement.required_trailers[] // ""' "$CONTRACT_FILE" 2>/dev/null || true)
-HISTORICAL_EXEMPTIONS_JSON="$(yq e -o=json '.gap_projection_enforcement.historical_exemptions // []' "$CONTRACT_FILE" 2>/dev/null || printf '[]')"
-
-[[ -n "$GAPS_FILE_REL" ]] || fail "gap projection path missing in contract"
-[[ -n "$WINDOW" ]] || fail "gap projection window missing in contract"
-[[ -n "$ENFORCEMENT_SHA" ]] || fail "gap projection enforcement SHA missing in contract"
-[[ "${#REQUIRED_TRAILERS[@]}" -gt 0 ]] || fail "required D75 trailers missing in contract"
-[[ -f "$GAPS_FILE" ]] || fail "gap registry not found: $GAPS_FILE"
-
-HISTORICAL_EXEMPTIONS_RAW="$(
-  EXPECTED_PATH="$GAPS_FILE_REL" \
-    python3 -c '
+schema_payload="$(
+  python3 - "$SCHEMA_FILE" <<'PY'
 import json
-import os
-import re
 import sys
+from pathlib import Path
 
-expected_path = os.environ["EXPECTED_PATH"]
+import yaml
 
-try:
-    data = json.load(sys.stdin)
-except json.JSONDecodeError as exc:
-    raise SystemExit(f"historical_exemptions must be valid JSON: {exc}")
+path = Path(sys.argv[1])
+payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+if not isinstance(payload, dict):
+    raise SystemExit("gap schema must be a mapping")
+if payload.get("status") != "authoritative":
+    raise SystemExit("gap schema must be authoritative")
 
-if not isinstance(data, list):
-    raise SystemExit("historical_exemptions must be a list")
+projection = payload.get("projection_authority")
+if not isinstance(projection, dict):
+    raise SystemExit("projection_authority block missing")
 
-seen = set()
-for idx, item in enumerate(data):
-    if not isinstance(item, dict):
-        raise SystemExit(f"historical_exemptions[{idx}] must be a map")
-
-    commit = str(item.get("commit", "")).strip()
-    as_of = str(item.get("as_of", "")).strip()
-    rationale = str(item.get("rationale", "")).strip()
-    path = str(item.get("path", "")).strip()
-
-    if not re.fullmatch(r"[0-9a-f]{40}", commit):
-        raise SystemExit(
-            f"historical_exemptions[{idx}].commit must be a full 40-char SHA"
-        )
-    if path != expected_path:
-        raise SystemExit(
-            f"historical_exemptions[{idx}].path must equal {expected_path}"
-        )
-    if not as_of:
-        raise SystemExit(f"historical_exemptions[{idx}].as_of is required")
-    if not rationale:
-        raise SystemExit(f"historical_exemptions[{idx}].rationale is required")
-    if commit in seen:
-        raise SystemExit(f"historical_exemptions duplicate commit: {commit}")
-
-    seen.add(commit)
-    print(commit)
-' <<< "$HISTORICAL_EXEMPTIONS_JSON"
-)" || fail "invalid historical_exemptions block in $CONTRACT_FILE"
-
-HISTORICAL_EXEMPTIONS=()
-while IFS= read -r sha; do
-  [[ -n "$sha" ]] && HISTORICAL_EXEMPTIONS+=("$sha")
-done <<< "$HISTORICAL_EXEMPTIONS_RAW"
-
-is_historical_exempt_commit() {
-  local sha="${1:-}"
-  local exempt
-  for exempt in "${HISTORICAL_EXEMPTIONS[@]}"; do
-    [[ "$sha" == "$exempt" ]] && return 0
-  done
-  return 1
+expected = {
+    "source_authority": "shared_authority.db",
+    "source_table": "gaps",
+    "active_projection": "$SPINE_STATE/projections/operational-gaps.runtime.yaml",
+    "archive_projection": "$SPINE_STATE/archive/operational.gaps.archive.yaml",
 }
+for key, value in expected.items():
+    if projection.get(key) != value:
+        raise SystemExit(f"projection_authority.{key} must be {value}")
 
-# ── Check 1: No uncommitted changes to gap registry ──
-if ! git -C "$ROOT" diff --quiet -- "$GAPS_FILE_REL" 2>/dev/null; then
-  fail "uncommitted changes in $GAPS_FILE_REL (unstaged)"
-fi
-if ! git -C "$ROOT" diff --cached --quiet -- "$GAPS_FILE_REL" 2>/dev/null; then
-  fail "uncommitted changes in $GAPS_FILE_REL (staged)"
-fi
+retired = projection.get("retired_repo_projections")
+if not isinstance(retired, list) or not retired:
+    raise SystemExit("projection_authority.retired_repo_projections must be a non-empty list")
 
-# ── Check 2: Direct writers must be retired outside the authority projector ──
+required_retired = {
+    "ops/bindings/operational.gaps.yaml",
+    "ops/archive/operational.gaps.archive.yaml",
+}
+if set(str(item) for item in retired) != required_retired:
+    raise SystemExit("projection_authority.retired_repo_projections must name the retired active/archive repo projections")
+
+mutation_caps = set(str(item) for item in projection.get("governed_mutation_capabilities") or [])
+if "gaps.file" not in mutation_caps or "friction.reconcile" not in mutation_caps:
+    raise SystemExit("projection_authority.governed_mutation_capabilities must include gaps.file and friction.reconcile")
+
+print(json.dumps({"retired_repo_projections": sorted(required_retired)}))
+PY
+)" || fail "invalid projection_authority in $SCHEMA_FILE"
+
+# Retired repo-local projections must not remain tracked or materialized.
+while IFS= read -r retired_path; do
+  [[ -n "$retired_path" ]] || continue
+  if git -C "$ROOT" ls-files --error-unmatch "$retired_path" >/dev/null 2>&1; then
+    fail "retired gap projection is still tracked: $retired_path"
+  fi
+  if [[ -e "$ROOT/$retired_path" ]]; then
+    fail "retired gap projection exists in worktree: $retired_path"
+  fi
+done < <(python3 -c 'import json,sys; [print(p) for p in json.loads(sys.stdin.read())["retired_repo_projections"]]' <<< "$schema_payload")
+
+# Direct writers must stay inside the SQLite authority projector.
 direct_writer_hits="$(
   rg -n \
-    "gaps_yaml\\.write_text|gaps_file\\.write_text|GAPS_FILE.*write_text|operational\\.gaps\\.yaml.*write_text|yq e -i .*GAPS_FILE|yq e -i .*operational\\.gaps\\.yaml" \
+    "gaps_yaml\\.write_text|gaps_file\\.write_text|operational\\.gaps\\.yaml.*write_text|operational-gaps\\.runtime\\.yaml.*write_text|projections/operational-gaps\\.runtime\\.yaml.*write_text|yq e -i .*operational\\.gaps\\.yaml|yq e -i .*operational-gaps\\.runtime\\.yaml" \
     "$ROOT/ops/plugins/core" \
     -g '!**/tests/**' \
     -g '!**/node_modules/**' 2>/dev/null || true
@@ -131,50 +95,36 @@ if [[ -n "${direct_writer_hits//$'\n'/}" ]]; then
 $direct_writer_hits"
 fi
 
-# ── Check 3: SQLite authority parity must match the YAML projection ──
+if [[ -z "${SPINE_STATE:-}" && -f "$RUNTIME_PATHS" ]]; then
+  # shellcheck source=/dev/null
+  source "$RUNTIME_PATHS"
+  spine_runtime_resolve_paths >/dev/null 2>&1 || true
+fi
+
+[[ -n "${SPINE_STATE:-}" ]] || fail "SPINE_STATE unresolved"
+[[ -f "$SPINE_STATE/shared_authority.db" ]] || fail "shared authority DB missing: $SPINE_STATE/shared_authority.db"
+[[ -f "$SPINE_STATE/projections/operational-gaps.runtime.yaml" ]] || fail "runtime gap projection missing: $SPINE_STATE/projections/operational-gaps.runtime.yaml"
+[[ -f "$SPINE_STATE/archive/operational.gaps.archive.yaml" ]] || fail "runtime gap archive projection missing: $SPINE_STATE/archive/operational.gaps.archive.yaml"
+
 parity_json="$(python3 "$GAPS_BRIDGE" parity)"
-parity_match="$(printf '%s' "$parity_json" | python3 -c 'import json,sys; print("true" if json.load(sys.stdin).get("match") else "false")' 2>/dev/null || echo false)"
-if [[ "$parity_match" != "true" ]]; then
-  fail "SQLite authority parity mismatch for $GAPS_FILE_REL"
-fi
+parity_summary="$(
+  printf '%s' "$parity_json" | python3 -c '
+import json
+import sys
 
-# ── Check 4: Recent commits must have required trailers ──
-# Get commits touching the file that are descendants of enforcement SHA.
-# If enforcement SHA is not an ancestor of HEAD, skip commit checks (fresh clone edge case).
-if ! git -C "$ROOT" merge-base --is-ancestor "$ENFORCEMENT_SHA" HEAD 2>/dev/null; then
-  echo "D75 PASS: gap registry mutation lock (enforcement SHA not in ancestry — skipped commit check)"
-  exit 0
-fi
+payload = json.load(sys.stdin)
+if not payload.get("match"):
+    raise SystemExit("mismatch")
+if int(payload.get("db_count") or 0) != int(payload.get("yaml_count") or 0):
+    raise SystemExit("count mismatch")
+print(
+    "db_count={db_count} yaml_count={yaml_count} archived={archived}".format(
+        db_count=payload.get("db_count"),
+        yaml_count=payload.get("yaml_count"),
+        archived=payload.get("archived_in_db", 0),
+    )
+)
+' 2>/dev/null
+)" || fail "SQLite authority parity mismatch for runtime gap projection: $parity_json"
 
-VIOLATIONS=()
-EXEMPTED_VIOLATIONS=0
-
-while IFS= read -r sha; do
-  [[ -z "$sha" ]] && continue
-
-  msg="$(git -C "$ROOT" log -1 --format="%B" "$sha")"
-
-  missing=()
-  for trailer in "${REQUIRED_TRAILERS[@]}"; do
-    [[ -n "$trailer" ]] || continue
-    if ! echo "$msg" | grep -q "^${trailer}:"; then
-      missing+=("$trailer")
-    fi
-  done
-
-  if [[ ${#missing[@]} -gt 0 ]]; then
-    if is_historical_exempt_commit "$sha"; then
-      EXEMPTED_VIOLATIONS=$((EXEMPTED_VIOLATIONS + 1))
-      continue
-    fi
-    short="$(git -C "$ROOT" log -1 --format="%h %s" "$sha")"
-    VIOLATIONS+=("$short (missing: ${missing[*]})")
-  fi
-done < <(git -C "$ROOT" log --max-count="$WINDOW" "${ENFORCEMENT_SHA}..HEAD" --format="%H" -- "$GAPS_FILE_REL" 2>/dev/null)
-
-if [[ ${#VIOLATIONS[@]} -gt 0 ]]; then
-  fail "commits touching $GAPS_FILE_REL lack required trailers:
-$(printf '  - %s\n' "${VIOLATIONS[@]}")"
-fi
-
-echo "D75 PASS: gap registry mutation lock (dirty=clean, writers=authority-only, parity=valid, trailers=valid, historical_exemptions=$EXEMPTED_VIOLATIONS)"
+echo "D75 PASS: gap runtime projection lock (retired_repo_projection=absent, writers=authority-only, parity=valid, $parity_summary)"

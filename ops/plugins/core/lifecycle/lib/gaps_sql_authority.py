@@ -4,12 +4,13 @@
 Follows the same pattern as plans_sql_authority.py:
   connect() → ensure_schema() → bootstrap_from_yaml() → upsert/close
 
-YAML projection is decoupled from the mutation path. Mutations write to
-SQLite only. The YAML projection is refreshed on demand via project_to_yaml().
+Runtime YAML projection is decoupled from the mutation path. Mutations write to
+SQLite only. The projection is refreshed on demand via project_to_yaml().
 
 Authority: SQLite (WAL mode, shared_authority.db) — sole source of gap truth
-Projection: runtime YAML snapshot (auto-projected by gaps-authority-bridge after
-every mutation). YAML is display-only, never read as authority input.
+Projection: runtime YAML snapshot under $SPINE_STATE/projections (auto-projected
+by gaps-authority-bridge after every mutation). YAML is display-only, never read
+as authority input.
 D75 verify gate enforces parity between SQLite and YAML projection.
 """
 
@@ -635,7 +636,7 @@ def _yaml_file_stats(gaps_yaml: Path) -> tuple[int, int]:
 
 
 def bootstrap_from_yaml(conn: sqlite3.Connection, gaps_yaml: Path) -> int:
-    """Import operational.gaps.yaml into SQLite if DB is empty or YAML changed.
+    """Import the runtime gap YAML projection into SQLite if DB is empty or YAML changed.
 
     Fast path: when the DB already has rows, compare the YAML file's size and
     mtime against the watermark before doing any YAML parsing.  This avoids
@@ -712,7 +713,7 @@ def bootstrap_from_yaml(conn: sqlite3.Connection, gaps_yaml: Path) -> int:
             event_type="bootstrap_import",
             from_status=None,
             to_status=str(row.get("status") or "open"),
-            reason="Imported from operational.gaps.yaml during SQLite authority bootstrap.",
+            reason="Imported from runtime gap projection during SQLite authority bootstrap.",
             actor="gaps.authority.bootstrap",
             payload={"source": str(gaps_yaml)},
         )
@@ -731,7 +732,6 @@ def bootstrap_from_yaml(conn: sqlite3.Connection, gaps_yaml: Path) -> int:
 
 ARCHIVED_STATUSES = frozenset({"fixed", "closed"})
 ACTIVE_STATUSES = frozenset({"open", "accepted"})
-DEFAULT_ARCHIVE_REL = "ops/archive/operational.gaps.archive.yaml"
 
 
 def project_to_yaml(
@@ -741,7 +741,7 @@ def project_to_yaml(
     archive_closed: bool = True,
     archive_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Write SQLite authority rows back to operational.gaps.yaml as a projection.
+    """Write SQLite authority rows back to the runtime YAML projection.
 
     When archive_closed=True (default):
       - Active gaps (open/accepted) are written to the main YAML.
@@ -795,7 +795,7 @@ def project_to_yaml(
             "description": (
                 "Archived gaps with status fixed or closed. "
                 "Read-only historical reference. "
-                "Do not mutate — use operational.gaps.yaml for active work."
+                "Do not mutate — use governed gap lifecycle capabilities for active work."
             ),
             "statuses_archived": sorted(ARCHIVED_STATUSES),
             "count": len(archive_entries),
