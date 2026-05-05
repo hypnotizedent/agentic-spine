@@ -102,15 +102,21 @@ fi
 remote_lane_head_ls="$(git -C "$ROOT" ls-remote --heads "$REMOTE" "$LANE_BRANCH" 2>/dev/null | awk '{print $1}' | head -1 || true)"
 if [[ "$lane_local_present" -eq 0 ]]; then
   if [[ -n "$remote_lane_head_ls" ]]; then
-    git -C "$ROOT" fetch "$REMOTE" "$LANE_BRANCH:$LANE_BRANCH" >/dev/null 2>&1 \
-      || fail "failed to fetch lane branch $REMOTE/$LANE_BRANCH into local branch $LANE_BRANCH"
-    lane_local_present=1
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+      git -C "$ROOT" fetch "$REMOTE" "$LANE_BRANCH:$LANE_BRANCH" >/dev/null 2>&1 \
+        || fail "failed to fetch lane branch $REMOTE/$LANE_BRANCH into local branch $LANE_BRANCH"
+      lane_local_present=1
+    fi
   else
     fail "missing lane branch '$LANE_BRANCH' locally and at $REMOTE. If the lane exists in a managed worktree, push it first: git -C <lane-worktree> push -u $REMOTE $LANE_BRANCH"
   fi
 fi
 
-lane_head="$(git -C "$ROOT" rev-parse "$LANE_BRANCH")"
+if [[ "$lane_local_present" -eq 1 ]]; then
+  lane_head="$(git -C "$ROOT" rev-parse "$LANE_BRANCH")"
+else
+  lane_head="$remote_lane_head_ls"
+fi
 target_head_before="$(git -C "$ROOT" rev-parse "$TARGET_BRANCH")"
 remote_lane_ref="refs/remotes/${REMOTE}/${LANE_BRANCH}"
 remote_target_ref="refs/remotes/${REMOTE}/${TARGET_BRANCH}"
