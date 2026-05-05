@@ -86,18 +86,14 @@ VALID_STATES = {"delegated", "picked_up", "executing", "landed", "needs_review",
 TERMINAL_STATES = {"landed", "needs_review", "cancelled"}
 INTERVENTION_TERMINAL_DISPOSITIONS = {"cancelled", "dismissed", "landed", "resolved", "superseded"}
 
-# PACKET-1344 known temporal-truth specimens: controller packets that closed
-# before the linked delegation reached a terminal state. These predate the
-# delegation_broker.markdown branch fix that writes terminal_at_utc on
-# delegation transition. They are accepted as historical residue so D433
-# fails only on NEW inversions; remove an entry once forward-reconciled.
-TEMPORAL_TRUTH_KNOWN_SPECIMENS = frozenset({
-    "DEL-20260503-215556",
-    "DEL-20260505-175320",
-    "DEL-20260505-190323",
-    "DEL-20260505-192146",
-    "DEL-20260505-202114",
-})
+# PACKET-1349 retired the historical temporal-truth baseline introduced by
+# PACKET-1344 by forward-reconciling each named delegation's linked packet
+# with terminal_at_utc through delegation.reconcile.temporal.truth. The
+# baseline is now empty: D433 is fully strict on temporal-truth inversions.
+# Add a delegation_id here only as an emergency escape hatch when an
+# inversion cannot be reconciled forward (rare); each entry is a known gap
+# tracked toward zero, not a default acceptance pool.
+TEMPORAL_TRUTH_KNOWN_SPECIMENS = frozenset()
 
 import datetime
 def _parse_utc(ts):
