@@ -446,7 +446,36 @@ def age_minutes_from(dt_value, now_utc):
 
 telemetry_now_utc = datetime.now(timezone.utc)
 terminal_observation_window_minutes = 24 * 60
-default_terminal_liveness_ttl_minutes = 45
+
+
+def _resolve_terminal_liveness_ttl_minutes() -> int:
+    """Per-terminal heartbeat liveness TTL (PACKET-1255 canon line 200 closure).
+
+    Source-of-truth precedence:
+      1. SPINE_TERMINAL_LIVENESS_TTL_MINUTES env (escape hatch)
+      2. terminal.role.contract.yaml#liveness.terminal_telemetry_staleness_threshold_minutes (canonical)
+      3. defensive 45 fallback (only if contract unreadable / field missing)
+    """
+    env_value = os.environ.get("SPINE_TERMINAL_LIVENESS_TTL_MINUTES", "").strip()
+    if env_value:
+        try:
+            return int(env_value)
+        except ValueError:
+            pass
+    try:
+        import yaml as _yaml_terminal_ttl  # type: ignore
+        contract_path = spine / "ops" / "bindings" / "terminal.role.contract.yaml"
+        contract = _yaml_terminal_ttl.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+        liveness = contract.get("liveness") or {}
+        contract_value = liveness.get("terminal_telemetry_staleness_threshold_minutes")
+        if isinstance(contract_value, int) and contract_value > 0:
+            return contract_value
+    except Exception:
+        pass
+    return 45
+
+
+default_terminal_liveness_ttl_minutes = _resolve_terminal_liveness_ttl_minutes()
 
 def collect_terminal_telemetry():
     liveness_by_terminal = {}

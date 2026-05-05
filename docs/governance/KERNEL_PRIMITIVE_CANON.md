@@ -197,7 +197,7 @@ Staleness classification:
 | Standing program proof_channel | cycle_state mtime / journal timestamp | `cycle_state` / `systemd_journal` / `runtime_telemetry` / `heartbeat` | `stale_threshold_seconds` in scheduler registry |
 | Worktree lease | `heartbeat_at` | `.spine-lane-lease.yaml` | `ttl_hours` in worktree lifecycle contract |
 | Mailroom task | `heartbeat_at` | running/*.yaml | `task_heartbeat_staleness_threshold_seconds` in `mailroom.task.worker.contract.yaml#kernel_realization.primitives.heartbeat` (PACKET-1225 closed the implicit-threshold gap; `EXECUTION_PICKUP_STALE_SECONDS` env remains as escape hatch) |
-| Terminal telemetry | attach timestamp | `shared_authority.db` terminal row | implicit (no declared threshold — subsystem gap) |
+| Terminal telemetry | attach timestamp | `shared_authority.db` terminal row | `terminal_telemetry_staleness_threshold_minutes` in `terminal.role.contract.yaml#liveness` (PACKET-1255 closed the implicit-threshold gap; `SPINE_TERMINAL_LIVENESS_TTL_MINUTES` env remains as escape hatch) |
 | Durable transfer job | `heartbeat_at_utc` / process or log progress timestamp | durable transfer proof_channel | `staleness_threshold_seconds` in dispatch envelope durable transfer contract |
 
 **What is canonical:** The heartbeat protocol (three required semantics above).

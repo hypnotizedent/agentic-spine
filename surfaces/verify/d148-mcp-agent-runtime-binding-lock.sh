@@ -171,6 +171,25 @@ for expected in ("DOMAIN-COMMS-01", "RUNTIME-IMMICH-01"):
     if expected not in role_ids:
         fail(f"terminal.role.contract missing runtime role '{expected}'")
 
+# PACKET-1255 terminal telemetry staleness lock — contract carries the
+# per-terminal liveness TTL and status.sh + terminal-loop-claim read from
+# it. Extension of D148 only — NO new D-gate. Closes
+# KERNEL_PRIMITIVE_CANON.md line 200 gap.
+liveness_block = terminal_contract.get("liveness") or {}
+ttl_value = liveness_block.get("terminal_telemetry_staleness_threshold_minutes")
+if not isinstance(ttl_value, int) or ttl_value <= 0:
+    fail("terminal.role.contract.yaml liveness.terminal_telemetry_staleness_threshold_minutes must be a positive integer (PACKET-1255 canon line 200 closure)")
+
+_root_p1255 = terminal_contract_path.resolve().parents[2]
+_status_text = (_root_p1255 / "ops/commands/status.sh").read_text(encoding="utf-8")
+for required_token in ("_resolve_terminal_liveness_ttl_minutes", "terminal_telemetry_staleness_threshold_minutes"):
+    if required_token not in _status_text:
+        fail(f"ops/commands/status.sh must read terminal liveness TTL from terminal.role.contract.yaml: missing {required_token} (PACKET-1255)")
+_loop_claim_text = (_root_p1255 / "ops/plugins/core/lifecycle/bin/terminal-loop-claim").read_text(encoding="utf-8")
+for required_token in ("_resolve_terminal_liveness_ttl_minutes", "terminal_telemetry_staleness_threshold_minutes"):
+    if required_token not in _loop_claim_text:
+        fail(f"ops/plugins/core/lifecycle/bin/terminal-loop-claim must read terminal liveness TTL from terminal.role.contract.yaml: missing {required_token} (PACKET-1255)")
+
 print(
     "D148 PASS: MCP runtime binding lock enforced "
     f"(claude_required={len(claude_required)}, opencode_required={len(opencode_required)}, "
