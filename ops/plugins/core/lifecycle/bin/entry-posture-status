@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""entry.posture.status - canonical entry/custody routing readback.
+
+This is the readback boundary between entry.compile truth and post-attach
+routing policy. It keeps post_attach_router as engine-internal pure logic while
+giving renderers one capability-shaped payload to consume.
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import UTC, datetime
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[5]
+WORKSPACE_ROOT = ROOT.parent
+RUNTIME_ROOT = Path(os.environ.get("SPINE_RUNTIME_ROOT") or WORKSPACE_ROOT / ".runtime" / "spine")
+STATE_ROOT = Path(os.environ.get("SPINE_STATE") or RUNTIME_ROOT / "state")
+ENTRY_COMPILE = ROOT / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "entry-compile"
+LIFECYCLE_LIB = ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"
+
+sys.path.insert(0, str(LIFECYCLE_LIB))
+
+from post_attach_router import compute_routing  # noqa: E402
+
+
+def _utcnow() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _run_entry_compile() -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    proc = subprocess.run(
+        [sys.executable, str(ENTRY_COMPILE)],
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    provenance: dict[str, Any] = {
+        "source": "entry.compile",
+        "execution": "direct_script_under_entry_posture_status",
+        "script_path": str(ENTRY_COMPILE.relative_to(ROOT)),
+        "returncode": proc.returncode,
+        "stdout_bytes": len(proc.stdout or ""),
+        "stderr_bytes": len(proc.stderr or ""),
+        "authority_note": (
+            "entry.posture.status is state_authority=shared_authority_db, so cap.sh "
+            "routes this direct entry-compile read to the canonical authority host"
+        ),
+    }
+    if proc.returncode != 0:
+        provenance["status"] = "failed"
+        provenance["stderr_tail"] = (proc.stderr or "")[-500:]
+        return None, provenance
+    try:
+        parsed = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        provenance["status"] = "unparseable"
+        provenance["error"] = str(exc)
+        return None, provenance
+    if not isinstance(parsed, dict):
+        provenance["status"] = "unexpected_shape"
+        return None, provenance
+    provenance["status"] = "ok"
+    provenance["compilation_state"] = str(parsed.get("compilation_state") or "")
+    return parsed, provenance
+
+
+def _selected_entry_fields(entry_compile: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(entry_compile, dict):
+        return {}
+    keys = (
+        "compilation_state",
+        "loop_id",
+        "loop_objective",
+        "loop_priority",
+        "loop_horizon",
+        "packet_id",
+        "context_sources",
+        "active_artifacts",
+        "stop_condition",
+        "mutation_ground",
+        "handoff_target",
+        "active_delegations",
+        "delegation_preferred",
+        "active_operational_tasks",
+        "operational_lane_preferred",
+        "loop_candidates",
+    )
+    return {key: entry_compile.get(key) for key in keys if key in entry_compile}
+
+
+def collect() -> dict[str, Any]:
+    entry_compile, provenance = _run_entry_compile()
+    routing = compute_routing(
+        runtime_root=str(RUNTIME_ROOT),
+        state_root=str(STATE_ROOT),
+        entry_compile=entry_compile,
+    )
+    selected_entry = _selected_entry_fields(entry_compile)
+    compile_state = str(selected_entry.get("compilation_state") or "")
+    readback_status = (
+        "ok"
+        if provenance.get("status") == "ok" and compile_state != "authority_unavailable"
+        else "degraded"
+    )
+    payload: dict[str, Any] = {
+        "capability": "entry.posture.status",
+        "status": readback_status,
+        "generated_at": _utcnow(),
+        "state_root": str(STATE_ROOT),
+        "runtime_root": str(RUNTIME_ROOT),
+        "entry_compile_provenance": provenance,
+        "entry_compile": selected_entry,
+        "subtraction": {
+            "canonical_readback": "entry.posture.status",
+            "engine_internal_function": "post_attach_router.compute_routing",
+            "retired_consumer_pattern": (
+                "operator-overview-payload SourceFileLoader import of "
+                "post_attach_router"
+            ),
+            "remaining_future_composers": [
+                "session.v3.attach router subprocess",
+                "spine-engine-joined-state local composer fields",
+            ],
+        },
+    }
+    payload.update(selected_entry)
+    payload.update(routing)
+    payload["recommended_action"] = str(payload.get("recommended_next_action") or "")
+    payload["container"] = str(payload.get("recommended_container") or "")
+    return payload
+
+
+def render_human(payload: dict[str, Any]) -> None:
+    print("entry.posture.status")
+    print(f"  status:     {payload.get('status', 'unknown')}")
+    print(f"  routing:    {payload.get('routing_state', 'unknown')}")
+    print(f"  container:  {payload.get('recommended_container', '')}")
+    print(f"  action:     {payload.get('recommended_next_action', '')}")
+    command = payload.get("recommended_command")
+    if command:
+        print(f"  command:    {command}")
+    print(f"  why:        {payload.get('why', '')}")
+    provenance = payload.get("entry_compile_provenance")
+    if isinstance(provenance, dict):
+        print(f"  entry:      {provenance.get('status', 'unknown')} ({provenance.get('compilation_state', '')})")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Canonical entry/custody routing readback.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    parser.add_argument("--self-check", action="store_true", help="Verify imports and exit")
+    args = parser.parse_args()
+
+    if args.self_check:
+        missing = [str(path) for path in (ENTRY_COMPILE, LIFECYCLE_LIB / "post_attach_router.py") if not path.exists()]
+        if missing:
+            print(json.dumps({"status": "fail", "missing": missing}, indent=2))
+            return 1
+        print("entry.posture.status self-check PASS")
+        return 0
+
+    payload = collect()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        render_human(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -94,6 +94,19 @@ def _run_json(cmd: list[str]) -> dict:
         return {"status": "fail", "stdout": out}
 
 
+def _extract_json_object(text: str) -> dict:
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(text or ""):
+        if char != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        return obj if isinstance(obj, dict) else {}
+    return {}
+
+
 def _read_scope_frontmatter(path: str | Path) -> dict:
     """Parse YAML frontmatter from a loop scope file."""
     try:
@@ -533,48 +546,25 @@ def _select_focus(loops: list[dict], router_primary_id: str = "") -> dict:
 
 def collect_current_posture() -> dict:
     """Derive what a fresh session attach would resolve to right now."""
-    try:
-        import sys as _sys
-        router_lib = REPO / "ops" / "plugins" / "core" / "lifecycle" / "lib"
-        router_path = router_lib / "post_attach_router.py"
-        if str(router_lib) not in _sys.path:
-            _sys.path.insert(0, str(router_lib))
-        import importlib.machinery
-        import importlib.util
-        loader = importlib.machinery.SourceFileLoader("post_attach_router", str(router_path))
-        spec = importlib.util.spec_from_loader("post_attach_router", loader)
-        mod = importlib.util.module_from_spec(spec)
-        loader.exec_module(mod)
-        # Use SPINE_RUNTIME_ROOT if set, else derive from SPINE_STATE.
-        # The canonical contract (runtime-paths.sh) puts state at
-        # $runtime_root/state, but SPINE_STATE can be overridden
-        # independently, so we strip a trailing /state component if
-        # present and fall back to the parent directory otherwise.
-        runtime_root = os.environ.get("SPINE_RUNTIME_ROOT", "").strip()
-        if not runtime_root:
-            state_path = Path(os.environ.get("SPINE_STATE", "").strip()) if os.environ.get("SPINE_STATE") else STATE_ROOT
-            if state_path.name == "state":
-                runtime_root = str(state_path.parent)
-            else:
-                # SPINE_STATE points somewhere non-standard; runtime_root
-                # is one level up (best-effort when contract diverges).
-                runtime_root = str(state_path.parent)
-        if not runtime_root:
-            return {"available": False}
-        result = mod.compute_routing(
-            runtime_root=runtime_root,
-            state_root=str(STATE_ROOT),
-        )
-        return {
-            "available": True,
-            "routing_state": str(result.get("routing_state", "")),
-            "recommended_action": str(result.get("recommended_next_action", "")),
-            "recommended_command": str(result.get("recommended_command") or ""),
-            "container": str(result.get("recommended_container", "")),
-            "why": str(result.get("why", "")),
-        }
-    except Exception:
+    out, ok = _run([
+        str(REPO / "bin" / "ops"),
+        "cap",
+        "run",
+        "entry.posture.status",
+        "--",
+        "--json",
+    ])
+    result = _extract_json_object(out)
+    if not ok or not result:
         return {"available": False}
+    return {
+        "available": True,
+        "routing_state": str(result.get("routing_state", "")),
+        "recommended_action": str(result.get("recommended_next_action", "")),
+        "recommended_command": str(result.get("recommended_command") or ""),
+        "container": str(result.get("recommended_container", "")),
+        "why": str(result.get("why", "")),
+    }
 
 
 def collect_aperture_summary() -> dict:
