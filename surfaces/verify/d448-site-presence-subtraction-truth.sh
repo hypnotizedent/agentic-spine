@@ -924,6 +924,74 @@ if hardware_inventory_cap.get("safety") != "read-only":
 if hardware_inventory_cap.get("script_path") != "./ops/plugins/infra/bin/hardware-inventory-status":
     fail("hardware.inventory.status script_path must point at hardware-inventory-status (PACKET-1342)")
 
+# PACKET-1343: Site Intelligence is one family with exactly five branches.
+# first_class_system.branch_model must teach the family + closed branch set;
+# every row must carry the five branch_state scalars; the human readback
+# must teach the family + branches as one shape rather than a producer list.
+fcs = all_payload.get("first_class_system") or {}
+if fcs.get("family") != "site_intelligence":
+    fail("site.presence.status first_class_system.family must be 'site_intelligence' (PACKET-1343)")
+if fcs.get("branch_count") != 5:
+    fail(f"site.presence.status first_class_system.branch_count must be 5, got {fcs.get('branch_count')!r} (PACKET-1343)")
+if fcs.get("producer_policy") != "private_or_folded_implementation_detail_not_branch_peer":
+    fail("site.presence.status first_class_system.producer_policy must teach private/folded implementation detail framing (PACKET-1343)")
+branch_model = fcs.get("branch_model")
+if not isinstance(branch_model, list) or len(branch_model) != 5:
+    fail(f"site.presence.status first_class_system.branch_model must be a 5-entry list, got {branch_model!r} (PACKET-1343)")
+expected_branches = {
+    "network": ("Network", "network.presence.status", "network_state"),
+    "hardware": ("Hardware", "hardware.inventory.status", "hardware_state"),
+    "node_lifecycle": ("Node lifecycle", "node.admission.status", "node_lifecycle_state"),
+    "storage": ("Storage", "payload.custody.status", "storage_state"),
+    "backup": ("Backup", "backup.estate.readback.status", "backup_state"),
+}
+emitted_branches: dict[str, dict[str, Any]] = {}
+for entry in branch_model:
+    if not isinstance(entry, dict):
+        fail("site.presence.status first_class_system.branch_model entries must be mappings (PACKET-1343)")
+    name = entry.get("branch")
+    if not isinstance(name, str) or not name:
+        fail("branch_model entry missing 'branch' name (PACKET-1343)")
+    emitted_branches[name] = entry
+missing_branches = set(expected_branches) - set(emitted_branches)
+if missing_branches:
+    fail(f"branch_model missing branches {sorted(missing_branches)} (PACKET-1343)")
+extra_branches = set(emitted_branches) - set(expected_branches)
+if extra_branches:
+    fail(f"branch_model must remain the closed five-branch set; unexpected entries {sorted(extra_branches)} (PACKET-1343)")
+for name, (label, readback, summary_field) in expected_branches.items():
+    entry = emitted_branches[name]
+    if entry.get("operator_label") != label:
+        fail(f"branch_model[{name!r}].operator_label must be {label!r}, got {entry.get('operator_label')!r} (PACKET-1343)")
+    if entry.get("readback") != readback:
+        fail(f"branch_model[{name!r}].readback must be {readback!r}, got {entry.get('readback')!r} (PACKET-1343)")
+    if entry.get("summary_field") != summary_field:
+        fail(f"branch_model[{name!r}].summary_field must be {summary_field!r}, got {entry.get('summary_field')!r} (PACKET-1343)")
+
+# Per-row five-branch summary scalars must be present and non-empty.
+required_branch_fields = {
+    "network_state",
+    "hardware_state",
+    "node_lifecycle_state",
+    "storage_state",
+    "backup_state",
+}
+for row in all_rows_for_convergence:
+    missing_branch_scalars = sorted(required_branch_fields - set(row.keys()))
+    if missing_branch_scalars:
+        fail(f"{row.get('presence_id')}: site.presence.status row missing branch summary scalars {missing_branch_scalars} (PACKET-1343)")
+    for field in required_branch_fields:
+        value = row.get(field)
+        if not isinstance(value, str) or not value:
+            fail(f"{row.get('presence_id')}: site.presence.status row {field} must be a non-empty string (PACKET-1343)")
+
+# Human readback must teach the family + branches header before lever list.
+if "Site Intelligence Branches (one family, five branches):" not in proc_h.stdout:
+    fail("site.presence.status human readback must teach 'Site Intelligence Branches (one family, five branches):' (PACKET-1343)")
+for label in ("Network", "Hardware", "Node lifecycle", "Storage", "Backup"):
+    if label not in proc_h.stdout:
+        fail(f"site.presence.status human readback must teach branch label {label!r} (PACKET-1343)")
+
 # PACKET-1317: lock coverage reconciliation behavior in place.
 # (x) freshness_summary must always emit canonical state keys (fresh, stale,
 #     policy_missing, declared_only) — disappearing keys after a refresh
@@ -1063,13 +1131,14 @@ print(
     "keys; shop unregistered clients are classified into bounded folded-input "
     "buckets; every folded input declares producer_metadata naming either "
     "the cap that generates it or the exact operator-assertion blocker plus "
-    "the next governed packet hint; network.presence.status is the single "
-    "Network branch readback fusing all four private UniFi/DHCP producers "
-    "behind it, and the four producer caps no longer appear as operator "
-    "drilldown levers; hardware.inventory.status is the single Hardware "
-    "branch readback fusing node.admission.status hardware fields with "
-    "hardware.inventory.yaml + operator.hardware.inventory.yaml, refuses "
-    "admission/promotion/lifecycle authority, and names host.operator-hardware.* "
-    "caps as transition mutation tools rather than Hardware read authority."
+    "the next governed packet hint; Site Intelligence is one family with "
+    "exactly five branches — Network (network.presence.status), Hardware "
+    "(hardware.inventory.status), Node lifecycle (node.admission.status), "
+    "Storage (payload.custody.status), Backup (backup.estate.readback.status) "
+    "— each row carries a network_state, hardware_state, node_lifecycle_state, "
+    "storage_state, and backup_state summary scalar; producers, audits, "
+    "snapshots, generators, and transition caps are private/folded "
+    "implementation detail beneath the branches, never operator drilldown "
+    "peers."
 )
 PY
