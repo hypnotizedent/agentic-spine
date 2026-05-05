@@ -14,6 +14,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[4]
 NODE_ADMISSION = ROOT / "ops/plugins/infra/bin/node-admission-status"
+PAYLOAD_CUSTODY = ROOT / "ops/plugins/infra/bin/payload-custody-status"
+BACKUP_ESTATE = ROOT / "ops/plugins/core/bin/backup-estate-readback-status"
 
 PATHS = {
     "topology_sites": ROOT / "ops/bindings/topology.sites.yaml",
@@ -60,6 +62,20 @@ FOLDED_LEGACY_INPUTS = [
         "standalone_operator_surface": False,
         "subtraction_state": "folded_l3_source_input",
     },
+    {
+        "path": "ops/bindings/home.storage.map.yaml",
+        "folded_role": "home_storage_projection_input",
+        "folded_into": "payload.custody.status + site.presence.status",
+        "standalone_operator_surface": False,
+        "subtraction_state": "folded_storage_input",
+    },
+    {
+        "path": "ops/bindings/shop.storage.map.yaml",
+        "folded_role": "shop_storage_projection_input",
+        "folded_into": "payload.custody.status + site.presence.status",
+        "standalone_operator_surface": False,
+        "subtraction_state": "folded_storage_input",
+    },
 ]
 
 FIRST_CLASS_LIFECYCLE = [
@@ -76,7 +92,7 @@ FIRST_CLASS_LIFECYCLE = [
     {
         "stage": "presence",
         "authority": "site.presence.status",
-        "boundary": "Folds declared and observed inputs into current site presence rows.",
+        "boundary": "Folds declared and observed inputs into current site presence rows, including network visibility proof.",
     },
     {
         "stage": "node_admission",
@@ -91,7 +107,7 @@ FIRST_CLASS_LIFECYCLE = [
             "host.operator-hardware.post-boot.normalize",
             "host.operator-hardware.firstboot.claim",
         ],
-        "boundary": "Bootstrap emits first-touch claims and admission inputs; it does not assign runtime roles.",
+        "boundary": "site.presence.status reports per-row bootstrap_state read from node.admission.status; host.operator-hardware.* mutate this state but never serve as Site Intelligence read authority.",
     },
     {
         "stage": "provisioning",
@@ -161,6 +177,20 @@ def run_node_admission() -> dict[str, Any]:
     return json.loads(proc.stdout)
 
 
+def run_payload_custody() -> dict[str, Any]:
+    proc = subprocess.run([str(PAYLOAD_CUSTODY), "--json"], text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise SystemExit(proc.stderr.strip() or proc.stdout.strip() or "payload.custody.status failed")
+    return json.loads(proc.stdout)
+
+
+def run_backup_estate() -> dict[str, Any]:
+    proc = subprocess.run([str(BACKUP_ESTATE), "--json"], text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise SystemExit(proc.stderr.strip() or proc.stdout.strip() or "backup.estate.readback.status failed")
+    return json.loads(proc.stdout)
+
+
 def norm(value: Any) -> str:
     return str(value or "").strip().lower()
 
@@ -192,6 +222,36 @@ def key_set(*values: Any) -> set[str]:
         elif norm(value):
             keys.add(norm(value))
     return keys
+
+
+def item_keys(item: dict[str, Any] | None) -> set[str]:
+    if not isinstance(item, dict):
+        return set()
+    identifiers = item.get("durable_identifiers") or {}
+    access = item.get("access_path") or {}
+    physical = item.get("physical_identity") or {}
+    return key_set(
+        item.get("id"),
+        item.get("node_id"),
+        item.get("name"),
+        item.get("hostname"),
+        item.get("host"),
+        item.get("ip"),
+        item.get("tailscale_ip"),
+        item.get("mac"),
+        identifiers.get("machine_id"),
+        identifiers.get("device_id"),
+        identifiers.get("appliance_id"),
+        identifiers.get("hostname"),
+        identifiers.get("ssh_target_id"),
+        identifiers.get("lan_ip"),
+        identifiers.get("tailscale_ip"),
+        physical.get("declared_hostname"),
+        physical.get("serial"),
+        access.get("host"),
+        access.get("lan_ip"),
+        access.get("tailscale_ip"),
+    )
 
 
 def ip_like(value: Any) -> str:
@@ -228,7 +288,7 @@ def subject_kind(admission: dict[str, Any] | None, declared: dict[str, Any] | No
             return f"{category}_device"
         return "declared_device"
     if observed:
-        return "observed_device"
+        return "unknown_observed"
     return "unknown"
 
 
@@ -256,17 +316,135 @@ def build_indexes(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def find_match(item: dict[str, Any], index: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
-    keys = key_set(
-        item.get("id"),
-        item.get("name"),
-        item.get("hostname"),
-        item.get("ip"),
-        item.get("tailscale_ip"),
-        item.get("mac"),
-    )
-    for key in keys:
+    for key in item_keys(item):
         if key in index:
             return index[key]
+    return None
+
+
+def load_ssh_targets() -> list[dict[str, Any]]:
+    doc = load_yaml(PATHS["ssh_targets"])
+    rows = ((doc.get("ssh") or {}).get("targets") or [])
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def build_ssh_index(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        for key in key_set(row.get("id"), row.get("host"), row.get("tailscale_ip"), row.get("aliases")):
+            index.setdefault(key, row)
+    return index
+
+
+def enum_token(value: Any, default: str = "unknown") -> str:
+    text = norm(value).replace("-", "_").replace(" ", "_")
+    text = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in text)
+    return text.strip("_") or default
+
+
+def identity_state(admission: dict[str, Any] | None, declared: dict[str, Any] | None, ssh_target: dict[str, Any] | None) -> str:
+    if admission:
+        state = str(admission.get("admission_state") or "")
+        if state == "admitted":
+            return "admitted"
+        if state == "excluded":
+            return "excluded"
+        return "candidate"
+    if ssh_target:
+        return "ssh_target"
+    if declared:
+        return "declared"
+    return "unknown"
+
+
+def hardware_class(admission: dict[str, Any] | None) -> str:
+    if not admission:
+        return "unknown"
+    physical = admission.get("physical_identity") or {}
+    return enum_token(admission.get("object_kind") or physical.get("object_kind"))
+
+
+def bootstrap_state(admission: dict[str, Any] | None) -> str:
+    if not admission:
+        return "unknown"
+    boot = admission.get("boot_identity") or {}
+    claim = str(boot.get("claim_state") or "")
+    lifecycle = str(admission.get("lifecycle_state") or "")
+    first_touch = str(admission.get("first_touch_state") or "")
+    if claim.startswith("admitted_stable") or lifecycle == "admitted_runtime_present":
+        return "bootstrapped"
+    if first_touch in {"FT-SSH", "FT-BMC", "appliance-readback"}:
+        return "first_touch_claimed"
+    if first_touch == "none":
+        return "unprovisioned"
+    return enum_token(first_touch)
+
+
+def network_visibility_proof(declared: dict[str, Any] | None, observed: dict[str, Any] | None, freshness: dict[str, Any]) -> str:
+    if observed:
+        return "unifi_snapshot_stale" if freshness.get("state") == "stale" else "udr_observed"
+    if declared:
+        return "declared_only"
+    return "none"
+
+
+def build_storage_index(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    index: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        surface_ref = row.get("surface_ref") or {}
+        keys = key_set(
+            row.get("owner_node_id"),
+            surface_ref.get("device"),
+            (str(row.get("presence_proof_ref") or "").split(":", 1)[1:] or [""])[0],
+        )
+        for key in keys:
+            index.setdefault(key, []).append(row)
+    return index
+
+
+def storage_score(row: dict[str, Any]) -> tuple[int, str]:
+    canonicality = str(row.get("canonicality") or "")
+    state = str(row.get("custody_state") or "")
+    canonicality_score = {
+        "canonical": 6,
+        "secondary": 5,
+        "mixed": 4,
+        "noncanonical": 3,
+        "unknown": 2,
+        "drained": 1,
+    }.get(canonicality, 0)
+    state_score = 2 if state == "canonical_live" else 1 if state in {"declared_secondary_copy", "controlled_stage"} else 0
+    return (canonicality_score + state_score, str(row.get("custody_id") or ""))
+
+
+def find_storage_match(
+    index: dict[str, list[dict[str, Any]]],
+    *items: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    matches: dict[str, dict[str, Any]] = {}
+    for item in items:
+        for key in item_keys(item):
+            for row in index.get(key, []):
+                matches[str(row.get("custody_id") or id(row))] = row
+    if not matches:
+        return None
+    return max(matches.values(), key=storage_score)
+
+
+def build_backup_index(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        keys = key_set(row.get("name"), row.get("backup_target"), row.get("vmid"))
+        for key in keys:
+            index.setdefault(key, row)
+    return index
+
+
+def find_backup_match(index: dict[str, dict[str, Any]], *items: dict[str, Any] | None) -> dict[str, Any] | None:
+    for item in items:
+        for key in item_keys(item):
+            if key in index:
+                return index[key]
     return None
 
 
@@ -276,6 +454,9 @@ def make_row(
     admission: dict[str, Any] | None,
     declared: dict[str, Any] | None,
     observed: dict[str, Any] | None,
+    ssh_target: dict[str, Any] | None,
+    storage_row: dict[str, Any] | None,
+    backup_row: dict[str, Any] | None,
     source_roles: list[dict[str, str]],
     freshness: dict[str, Any],
 ) -> dict[str, Any]:
@@ -304,7 +485,7 @@ def make_row(
         match_state = "declared_only"
     elif observed_present:
         presence_state = "observed_only"
-        match_state = "observed_only"
+        match_state = "observed_only_unknown_identity"
     else:
         presence_state = "unknown"
         match_state = "unknown"
@@ -360,6 +541,15 @@ def make_row(
             or admission_access.get("tailscale_ip")
             or admission_identifiers.get("tailscale_ip"),
         },
+        "network_visibility_proof": network_visibility_proof(declared, observed, freshness),
+        "identity_state": identity_state(admission, declared, ssh_target),
+        "hardware_class": hardware_class(admission),
+        "bootstrap_state": bootstrap_state(admission),
+        "storage_tier": (storage_row or {}).get("payload_class", "unknown"),
+        "storage_scaffold_class": (storage_row or {}).get("scaffold_class", "unknown"),
+        "storage_custody_state": (storage_row or {}).get("custody_state", "unknown"),
+        "storage_evidence_ref": (storage_row or {}).get("custody_id", ""),
+        "backup_posture": (backup_row or {}).get("status", "unknown"),
         "presence_state": presence_state,
         "match_state": match_state,
         "proof_channels": proof_channels,
@@ -388,8 +578,13 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
     unifi_home = load_yaml(PATHS["unifi_home"])
     unifi_shop = load_yaml(PATHS["unifi_shop"])
     node_admission = run_node_admission()
+    payload_custody = run_payload_custody()
+    backup_estate = run_backup_estate()
     admission_rows = [row for row in node_admission.get("rows", []) if isinstance(row, dict)]
     admission_index = build_indexes(admission_rows)
+    ssh_index = build_ssh_index(load_ssh_targets())
+    storage_index = build_storage_index([row for row in payload_custody.get("rows", []) if isinstance(row, dict)])
+    backup_index = build_backup_index([row for row in backup_estate.get("subjects", []) if isinstance(row, dict)])
 
     declared_rows = [row for row in home_device.get("devices", []) if isinstance(row, dict)]
     observed_sources = [
@@ -444,7 +639,16 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
             freshness = freshness_from_surface(surface)
         if admission:
             source_roles.append({"path": "node.admission.status", "role": "node_admission", "proof_ref": "capability"})
-        rows.append(make_row(site, sites, admission, declared, observed_match, source_roles, freshness))
+        ssh_target = find_match(admission, ssh_index) if admission else find_match(declared, ssh_index)
+        storage_row = find_storage_match(storage_index, admission, declared, observed_match)
+        backup_row = find_backup_match(backup_index, admission, declared, observed_match)
+        if ssh_target:
+            source_roles.append({"path": str(PATHS["ssh_targets"].relative_to(ROOT)), "role": "ssh_access_projection", "proof_ref": "binding"})
+        if storage_row:
+            source_roles.append({"path": "payload.custody.status", "role": "payload_custody", "proof_ref": "capability"})
+        if backup_row:
+            source_roles.append({"path": "backup.estate.readback.status", "role": "backup_estate", "proof_ref": "capability"})
+        rows.append(make_row(site, sites, admission, declared, observed_match, ssh_target, storage_row, backup_row, source_roles, freshness))
 
     for surface, path, capability in observed_sources:
         for observed in surface.get("devices", []) or []:
@@ -457,6 +661,26 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
             site = str(observed.get("site") or (admission or {}).get("site") or "unknown")
             if site_filter and site != site_filter:
                 continue
+            ssh_target = find_match(admission, ssh_index) if admission else find_match(observed, ssh_index)
+            storage_row = find_storage_match(storage_index, admission, observed)
+            backup_row = find_backup_match(backup_index, admission, observed)
+            source_roles = [
+                {
+                    "path": str(path.relative_to(ROOT)),
+                    "role": "folded_unifi_observation_input",
+                    "capability": capability,
+                    "proof_ref": "generated_at",
+                    "observed_at": surface.get("generated_at"),
+                }
+            ]
+            if admission:
+                source_roles.append({"path": "node.admission.status", "role": "node_admission", "proof_ref": "capability"})
+            if ssh_target:
+                source_roles.append({"path": str(PATHS["ssh_targets"].relative_to(ROOT)), "role": "ssh_access_projection", "proof_ref": "binding"})
+            if storage_row:
+                source_roles.append({"path": "payload.custody.status", "role": "payload_custody", "proof_ref": "capability"})
+            if backup_row:
+                source_roles.append({"path": "backup.estate.readback.status", "role": "backup_estate", "proof_ref": "capability"})
             rows.append(
                 make_row(
                     site,
@@ -464,15 +688,10 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
                     admission,
                     None,
                     observed,
-                    [
-                        {
-                            "path": str(path.relative_to(ROOT)),
-                            "role": "folded_unifi_observation_input",
-                            "capability": capability,
-                            "proof_ref": "generated_at",
-                            "observed_at": surface.get("generated_at"),
-                        }
-                    ],
+                    ssh_target,
+                    storage_row,
+                    backup_row,
+                    source_roles,
                     freshness_from_surface(surface),
                 )
             )
@@ -484,6 +703,16 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
         site = str(admission.get("site") or "unknown")
         if site_filter and site != site_filter:
             continue
+        ssh_target = find_match(admission, ssh_index)
+        storage_row = find_storage_match(storage_index, admission)
+        backup_row = find_backup_match(backup_index, admission)
+        source_roles = [{"path": "node.admission.status", "role": "node_admission", "proof_ref": "capability"}]
+        if ssh_target:
+            source_roles.append({"path": str(PATHS["ssh_targets"].relative_to(ROOT)), "role": "ssh_access_projection", "proof_ref": "binding"})
+        if storage_row:
+            source_roles.append({"path": "payload.custody.status", "role": "payload_custody", "proof_ref": "capability"})
+        if backup_row:
+            source_roles.append({"path": "backup.estate.readback.status", "role": "backup_estate", "proof_ref": "capability"})
         rows.append(
             make_row(
                 site,
@@ -491,7 +720,10 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
                 admission,
                 None,
                 None,
-                [{"path": "node.admission.status", "role": "node_admission", "proof_ref": "capability"}],
+                ssh_target,
+                storage_row,
+                backup_row,
+                source_roles,
                 {"state": "declared_only", "basis": "node_admission", "max_age": None, "last_observed_at": None},
             )
         )
@@ -567,14 +799,6 @@ def main() -> None:
             "legacy_input_policy": "folded_source_inputs_not_operator_surfaces",
         },
         "folded_legacy_inputs": FOLDED_LEGACY_INPUTS,
-        # Backward-compatible key retained for older consumers. The canonical
-        # interpretation is folded_legacy_inputs above, not peer evidence.
-        "subtracted_peer_authority": [
-            "ops/bindings/network.unifi.home.clients.observed.yaml",
-            "ops/bindings/network.unifi.shop.clients.observed.yaml",
-            "ops/bindings/home.device.registry.yaml",
-            "ops/bindings/home.unifi.network.inventory.yaml",
-        ],
     }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -615,7 +839,10 @@ def main() -> None:
     for row in rows:
         print(
             f"- {row['presence_id']} {row['presence_state']} "
-            f"{row['subject']['subject_kind']} {row['identity'].get('ip') or ''} "
+            f"{row['subject']['subject_kind']} identity={row.get('identity_state')} "
+            f"hardware={row.get('hardware_class')} bootstrap={row.get('bootstrap_state')} "
+            f"storage={row.get('storage_custody_state')} backup={row.get('backup_posture')} "
+            f"network={row.get('network_visibility_proof')} ip={row['identity'].get('ip') or ''} "
             f"profile_ref={row.get('profile_ref','')}"
         )
 

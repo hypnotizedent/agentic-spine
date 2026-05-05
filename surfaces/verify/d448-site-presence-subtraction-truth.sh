@@ -320,6 +320,22 @@ for rel, required_fragments in dhcp_script_expectations:
         if fragment not in text:
             fail(f"{rel} missing DHCP/Site Intelligence boundary fragment {fragment!r} (PACKET-1272)")
 
+shop_dhcp_text = (root / "ops/plugins/infra/network/bin/network-shop-dhcp-audit").read_text(encoding="utf-8")
+for fragment in ['.data | type == "array"', "yaml.safe_dump", "unregistered_clients"]:
+    if fragment not in shop_dhcp_text:
+        fail(f"network-shop-dhcp-audit must use hardened YAML/unregistered-client path fragment {fragment!r} (PACKET-1308)")
+
+for cap_name, cap_doc in sorted(dhcp_caps.items()):
+    if not cap_name.startswith("host.operator-hardware."):
+        continue
+    desc = cap_doc.get("description") or ""
+    if "site.presence.status is Site Intelligence read authority" not in desc:
+        fail(f"{cap_name} must teach host.operator-hardware is not Site Intelligence read authority (PACKET-1308)")
+
+backup_status_desc = (dhcp_caps.get("backup.status") or {}).get("description") or ""
+if "NOT primary estate truth" not in backup_status_desc or "backup.estate.readback.status" not in backup_status_desc:
+    fail("backup.status capability must remain drilldown only; backup.estate.readback.status owns estate truth (PACKET-1308)")
+
 projection_contract = yaml.safe_load((root / "ops/bindings/domain.projection.contract.yaml").read_text(encoding="utf-8")) or {}
 projection_rows = projection_contract.get("projections") or projection_contract.get("rows") or []
 projection_by_id = {row.get("id"): row for row in projection_rows if isinstance(row, dict)}
@@ -357,18 +373,74 @@ for required_path in [
     "ops/bindings/network.unifi.shop.clients.observed.yaml",
     "ops/bindings/home.unifi.network.inventory.yaml",
     "ops/bindings/shop.device.registry.yaml",
+    "ops/bindings/home.storage.map.yaml",
+    "ops/bindings/shop.storage.map.yaml",
 ]:
     if required_path not in folded_paths:
         fail(f"site.presence.status folded_legacy_inputs missing {required_path} (PACKET-1301)")
 for item in folded_inputs:
     if isinstance(item, dict) and item.get("standalone_operator_surface") is not False:
         fail(f"folded legacy input must not remain standalone operator surface: {item} (PACKET-1301)")
+
+for rel in ["ops/bindings/home.storage.map.yaml", "ops/bindings/shop.storage.map.yaml"]:
+    storage_map = yaml.safe_load((root / rel).read_text(encoding="utf-8")) or {}
+    if storage_map.get("subordinate_to") != "ops/bindings/storage.scaffold.authority.yaml":
+        fail(f"{rel} must declare subordinate_to=ops/bindings/storage.scaffold.authority.yaml (PACKET-1308)")
+    if storage_map.get("superseded_for_storage_truth_by") != "payload.custody.status":
+        fail(f"{rel} must declare superseded_for_storage_truth_by=payload.custody.status (PACKET-1308)")
+    if storage_map.get("superseded_for_payload_custody_by") != "payload.custody.status":
+        fail(f"{rel} must declare superseded_for_payload_custody_by=payload.custody.status (PACKET-1308)")
 freshness_summary = all_payload.get("freshness_summary") or {}
 if "stale" not in freshness_summary:
     fail("site.presence.status must emit freshness_summary with stale input count (PACKET-1301 honesty)")
 profile_summary = all_payload.get("profile_summary") or {}
 if not isinstance(profile_summary.get("unverified_fields_by_site"), dict):
     fail("site.presence.status must emit profile_summary.unverified_fields_by_site (PACKET-1301 honesty)")
+all_rows_for_convergence = [row for row in (all_payload.get("rows") or []) if isinstance(row, dict)]
+if not all_rows_for_convergence:
+    fail("site.presence.status --json emitted no rows")
+CONVERGENCE_REQUIRED = {
+    "network_visibility_proof",
+    "identity_state",
+    "hardware_class",
+    "bootstrap_state",
+    "storage_tier",
+    "storage_scaffold_class",
+    "storage_custody_state",
+    "storage_evidence_ref",
+    "backup_posture",
+}
+NETWORK_VISIBILITY = {"udr_observed", "declared_only", "unifi_snapshot_stale", "none"}
+IDENTITY_STATES = {"unknown", "declared", "ssh_target", "candidate", "admitted", "excluded"}
+BOOTSTRAP_STATES = {"unknown", "unprovisioned", "first_touch_claimed", "bootstrapped", "post_boot_normalized"}
+for row in all_rows_for_convergence:
+    presence_id = row.get("presence_id") or "<unknown>"
+    missing_convergence = sorted(CONVERGENCE_REQUIRED - set(row.keys()))
+    if missing_convergence:
+        fail(f"{presence_id}: site.presence.status row missing convergence fields {missing_convergence} (PACKET-1308)")
+    source_paths = {item.get("path") for item in (row.get("source_surfaces") or []) if isinstance(item, dict)}
+    if row.get("network_visibility_proof") not in NETWORK_VISIBILITY:
+        fail(f"{presence_id}: invalid network_visibility_proof={row.get('network_visibility_proof')!r} (PACKET-1308)")
+    if row.get("identity_state") not in IDENTITY_STATES:
+        fail(f"{presence_id}: invalid identity_state={row.get('identity_state')!r} (PACKET-1308)")
+    if row.get("bootstrap_state") not in BOOTSTRAP_STATES:
+        fail(f"{presence_id}: invalid bootstrap_state={row.get('bootstrap_state')!r} (PACKET-1308)")
+    if row.get("identity_state") == "admitted" and "node.admission.status" not in source_paths:
+        fail(f"{presence_id}: identity_state=admitted must source node.admission.status (PACKET-1308)")
+    if row.get("identity_state") == "ssh_target" and "ops/bindings/ssh.targets.yaml" not in source_paths:
+        fail(f"{presence_id}: identity_state=ssh_target must source ops/bindings/ssh.targets.yaml (PACKET-1308)")
+    if row.get("bootstrap_state") != "unknown" and "node.admission.status" not in source_paths:
+        fail(f"{presence_id}: non-unknown bootstrap_state must source node.admission.status (PACKET-1308)")
+    if row.get("storage_custody_state") != "unknown" and "payload.custody.status" not in source_paths:
+        fail(f"{presence_id}: non-unknown storage_custody_state must source payload.custody.status (PACKET-1308)")
+    if row.get("backup_posture") != "unknown" and "backup.estate.readback.status" not in source_paths:
+        fail(f"{presence_id}: non-unknown backup_posture must source backup.estate.readback.status (PACKET-1308)")
+    subject = row.get("subject") or {}
+    if subject.get("subject_kind") == "unknown_observed":
+        if row.get("match_state") != "observed_only_unknown_identity":
+            fail(f"{presence_id}: unknown_observed row must use observed_only_unknown_identity match_state (PACKET-1308)")
+        if row.get("actions_allowed", {}).get("may_create_node") is not False:
+            fail(f"{presence_id}: unknown_observed row must not allow node creation (PACKET-1308)")
 rows = [row for row in (all_payload.get("rows") or []) if isinstance(row, dict) and row.get("site") == "home"]
 if not rows:
     fail("site.presence.status --json emitted no home-site rows")
@@ -385,6 +457,15 @@ required = [
     "source_surfaces",
     "actions_allowed",
     "subtraction_caption",
+    "network_visibility_proof",
+    "identity_state",
+    "hardware_class",
+    "bootstrap_state",
+    "storage_tier",
+    "storage_scaffold_class",
+    "storage_custody_state",
+    "storage_evidence_ref",
+    "backup_posture",
 ]
 missing = [field for field in required if field not in rows[0]]
 if missing:
@@ -431,6 +512,19 @@ if not site_profile_path.exists():
 site_profile_doc = yaml.safe_load(site_profile_path.read_text(encoding="utf-8")) or {}
 if site_profile_doc.get("scope") != "hardware-intelligence-site-profile-ssot":
     fail("site.profile.contract.yaml scope must be hardware-intelligence-site-profile-ssot (PACKET-1115)")
+if "no per-site inventory authority" not in site_profile_path.read_text(encoding="utf-8"):
+    fail("site.profile.contract.yaml shop notes must subtract per-site shop UniFi inventory authority gap (PACKET-1308)")
+
+blueprint = yaml.safe_load((root / "ops/bindings/operator.blueprint.admission.yaml").read_text(encoding="utf-8")) or {}
+bpa016 = next((row for row in (blueprint.get("entries") or []) if isinstance(row, dict) and row.get("id") == "BPA-016"), None)
+if not isinstance(bpa016, dict):
+    fail("operator.blueprint.admission.yaml missing BPA-016 (PACKET-1308)")
+if bpa016.get("decision") != "materialize" or bpa016.get("status") != "proved":
+    fail("BPA-016 must read decision=materialize and status=proved after Site Intelligence convergence (PACKET-1308)")
+if "materialization_gap" in bpa016:
+    fail("BPA-016 must not retain materialization_gap after convergence closeout (PACKET-1308)")
+if "materialization_closeout" not in bpa016:
+    fail("BPA-016 must carry materialization_closeout after convergence closeout (PACKET-1308)")
 
 # (b) extension_set rows carry required fields
 extension_set = site_profile_doc.get("extension_set") or []
@@ -612,14 +706,15 @@ if home_auth_path.exists():
         if unifi_entry.get("replacement_readback") != "site.presence.status":
             fail("home.authority.contract.yaml inventories[home.unifi.network.inventory.yaml] must declare replacement_readback=site.presence.status (PACKET-1145)")
 
-# PACKET-1215: lock Site Intelligence canonical-authority + evidence-boundary teaching.
-# (v) JSON subtracted_peer_authority must enumerate home.unifi.network.inventory.yaml
-#     (PACKET-1145 demoted it; cap-side enumeration must reflect that demotion).
+# PACKET-1215/PACKET-1308: lock Site Intelligence canonical-authority +
+# evidence-boundary teaching.
+# (v) JSON must not retain the legacy subtracted_peer_authority compatibility
+#     key; folded_legacy_inputs is the canonical subtraction readback.
 # (w) Human readback must teach the first-class lifecycle (Site Intelligence is
 #     authority; topology stays separate; legacy inputs are folded).
 
-if "ops/bindings/home.unifi.network.inventory.yaml" not in (all_payload.get("subtracted_peer_authority") or []):
-    fail("site.presence.status JSON subtracted_peer_authority must enumerate ops/bindings/home.unifi.network.inventory.yaml (PACKET-1215; PACKET-1145 demoted it)")
+if "subtracted_peer_authority" in all_payload:
+    fail("site.presence.status JSON must not emit legacy subtracted_peer_authority; use folded_legacy_inputs (PACKET-1308)")
 
 required_teaching_phrases = [
     "First-Class Site Intelligence Lifecycle:",
@@ -634,5 +729,5 @@ for phrase in required_teaching_phrases:
     if phrase not in proc_h.stdout:
         fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
 
-print("D448 PASS: first-class Site Intelligence lifecycle is locked; old network/device registries are folded inputs rather than evidence-only subsystems; site.presence.status reports profile/topology/presence plus node admission, bootstrap, and provisioning boundaries; visibility cannot create node admission; site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115); home.unifi.network.inventory.yaml authority claims are folded at both leaf and parent; DHCP audit/status reads are bounded to folded DHCP intent under site.presence.status; UniFi snapshot caps are bounded to folded observed-client input; telemetry-proven dead network cap families/wrappers stay subtracted; and the zero-receipt shop readmodel generator stays retired under first-class Site Intelligence readbacks (PACKET-1301)")
+print("D448 PASS: first-class Site Intelligence lifecycle is locked; old network/device registries are folded inputs rather than evidence-only subsystems; site.presence.status reports profile/topology/presence plus node admission, bootstrap, provisioning, network_visibility_proof, identity_state, hardware_class, storage custody, and backup posture; visibility cannot create node admission; site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115); home.unifi.network.inventory.yaml authority claims are folded at both leaf and parent; DHCP audit/status reads are bounded to folded DHCP intent under site.presence.status; UniFi snapshot caps are bounded to folded observed-client input; telemetry-proven dead network cap families/wrappers stay subtracted; the legacy subtracted_peer_authority JSON key is deleted; storage maps are subordinate to payload.custody.status; and the zero-receipt shop readmodel generator stays retired under first-class Site Intelligence readbacks (PACKET-1308)")
 PY
