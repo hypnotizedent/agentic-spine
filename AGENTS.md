@@ -137,198 +137,86 @@ defer the work.
 
 <!-- Section: STRUCTURAL ENTRY CONTRACT (continued) — stable across apertures -->
 
-Governance is loaded at session attach. This file is the canonical entry surface
-for current operator rules and the first read for any agent session.
+This file is the canonical first-read entry surface for current operator rules.
+Day-one agent acclimation is exactly:
 
-- Current aperture and authority: this file
-- Platform identity: [`NORTH_STAR.md`](NORTH_STAR.md)
-- Operating contract: [`docs/governance/SPINE.md`](docs/governance/SPINE.md)
-- Membrane doctrine: [`docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`](docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)
-- Root authority: [`ops/bindings/root.authority.contract.yaml`](ops/bindings/root.authority.contract.yaml)
+1. [`AGENTS.md`](AGENTS.md) — current aperture and entry rules
+2. [`NORTH_STAR.md`](NORTH_STAR.md) — platform identity and invariants
+3. [`docs/governance/SPINE.md`](docs/governance/SPINE.md) — minimal operating contract
+4. [`docs/governance/SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md) — session behavior, router, lifecycle, and custody rules
+
+Drill down only when the task asks for that concern:
+
+- Membrane/boundary doctrine:
+  [`TRANSLATOR_AUTHORITY_DOCTRINE_V1.md`](docs/governance/TRANSLATOR_AUTHORITY_DOCTRINE_V1.md)
+- Root state/evidence/file authority:
+  [`root.authority.contract.yaml`](ops/bindings/root.authority.contract.yaml)
+- Node roles and canonical plane access:
+  [`node.role.contract.yaml`](ops/bindings/node.role.contract.yaml)
+- Runtime mutation roles:
+  [`role.runtime.control.contract.yaml`](ops/bindings/role.runtime.control.contract.yaml)
 
 ## Session Rules
 
-<!-- Section: DERIVATIVE — reinforcement only; authority lives in SESSION_PROTOCOL.md and SPINE.md -->
+<!-- Section: POINTER — detailed authority lives in SESSION_PROTOCOL.md and SPINE.md -->
 
-Do not treat archived or historical docs as first-read entry authority.
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md), [`SPINE.md`](docs/governance/SPINE.md))
+Do not treat archived docs, generated projections, tool-local memory, local
+state copies, or historical packets as first-read authority. If a rule is
+load-bearing for future agents, it belongs in this file, `SESSION_PROTOCOL.md`,
+or the relevant contract under `ops/bindings/`.
 
-Non-promoted work, synthesis artifacts, and parked material belong in
-`$SPINE_STATE/`, not in the repo. `$SPINE_STATE` is a **logical** root.
-Canonical authority lives on the `storage_evidence_node` (pve, currently
-`/md1400/spine/state`); consumer-host resolution (MacBook
-`~/code/.runtime/spine/state`, ai-cons `/home/ubuntu/code/.runtime/spine/state`,
-pve-r620 likewise) is **projection/cache**, not durable shared state. Writes
-that must be durable shared authority must run via `cap.sh`-routed cap
-execution (which lands on the authority host) or write through the
-canonical mount. Local-direct writes on a consumer host produce projection
-artifacts only — not durable. There is no governed writer today for
-non-authoritative durable research or derived-conclusion notes; until one
-exists, such notes are session-local only. New repo docs require deliberate
-promotion and human-steward co-sign.
-(Authority: [`root.authority.contract.yaml#taxonomy.storage_evidence_node_canonical.file_plane_policy`](ops/bindings/root.authority.contract.yaml),
-[`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
+The one boring entry path:
 
-Tool-local agent-harness state — `~/.claude/{plans, commands,
-projects/*/memory, todos, tasks, sessions, transcripts}` for Claude Code,
-and the equivalent per-machine homes from other harnesses — is
-**cache only**, not durable authority. Slash-command files
-(`~/.claude/commands/*.md`) are part of this enumeration: they are
-muscle-memory aliases living in tool-local cache, never first-class
-entry/orientation surfaces. A slash-command file that re-implements
-its own checklist instead of routing to a canonical cap is the same
-disease class as a packet body in `~/.claude/plans/` — truth in the
-wrong home. Packet-shaped plans, durable behavioral rules, shared tasks,
-and proof of governed work must be promoted into the existing spine
-authority surface before being treated as durable truth. Promotion uses
-capabilities that already exist (`controller_prompt.create/amend/close`
-for packets, `loops.create` and the mailroom for shared work, AGENTS.md
-or contracts under `ops/bindings/` for durable behavioral rules,
-governed RCAP/EXEC_RECEIPT for proof). Do not invent a new home, new
-adapter, or new tool-specific subsystem to preserve cache content; the
-fix is promotion through existing caps, not a parallel governance shelf.
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md),
-[`root.authority.contract.yaml`](ops/bindings/root.authority.contract.yaml))
+```bash
+cd ~/code/agentic-spine
+./bin/ops terminal launch --tool <tool> --terminal <name>
+./bin/ops status
+./bin/ops cap run verify.engine.run
+./bin/ops cap run spine.verify
+```
 
-Operator input and human intent are the entry point; loops are bounded
-execution containers, not intake buckets. Operator input is unverified
-outside thinking from the human steward (raw OI/HI drops); evidence is
-the verified proof — receipts, live probes, repo/runtime observations,
-authoritative doc readback — that the system produces by acting on or
-comparing against operator input. Do not create a loop just to hold Q&A,
-make status/readback prettier, or satisfy packet binding. Attach operator
-input to an existing loop when the fit is clear; create a loop only when
-there is a bounded objective with acceptance and close criteria.
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
+Use `./bin/ops cap run session.v3.attach` only to re-render read-only
+orientation inside an already admitted terminal. It is not admission.
 
-Human intent, examples, and packet prose are inputs to consider, not authority
-by themselves. They become actionable only when attached to the existing
-governed home that owns the concern. Examples and templates illustrate shape;
-they do not widen scope, create permission, or override contracts.
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md),
-[`SPINE.md`](docs/governance/SPINE.md))
+Operating invariants:
 
-When the human steward names a concrete example such as a Pi, Frigate, a Dell,
-or a VM, do not collapse the request into that example if the surrounding
-language asks for a systemic pattern. First identify the L1/L2 family, the
-existing canonical home, and the old surfaces to subtract; only then touch the
-example-specific runtime.
-(Authority: [`NORTH_STAR.md`](NORTH_STAR.md),
-[`NODE_PROMOTION_LADDER.md`](docs/governance/NODE_PROMOTION_LADDER.md),
-[`first.class.change.closure.contract.yaml`](ops/bindings/first.class.change.closure.contract.yaml))
+- `$SPINE_STATE` is logical. Canonical state/evidence/mailroom authority lives
+  on pve (`storage_evidence_node`, `/md1400/spine`); MacBook and execution-host
+  copies are projection/cache unless a routed cap lands the write on pve.
+- Mutating and DB-backed read caps go through `cap.sh`/`bin/ops`; do not patch
+  local projections and call them durable truth.
+- Tool-local harness homes (`~/.claude`, slash commands, todos, transcripts,
+  and equivalents) are cache. Promote shared work through existing caps
+  (`loops.create`, `controller_prompt.*`, mailroom, receipts), not a new shelf.
+- Operator input is provenance, not proof. Evidence is receipts, live probes,
+  repo/runtime observations, and authoritative readback. Create loops only for
+  bounded objectives with acceptance and close criteria.
+- Work-intake router policy lives in `SESSION_PROTOCOL.md`: read-only report,
+  direct tiny patch, engine lane required, or human approval required.
+- The primary `agentic-spine` checkout stays clean on `main`. Repo mutation
+  happens in a managed worktree.
+- Workflow telemetry from another lane is protected evidence. Read and cite it;
+  repair through the owning lifecycle capability, or file friction when the
+  repair path is missing.
+- Public readback is `./bin/ops status`. Use `--expert`, raw loops/waves,
+  packets, handoffs, direct SQLite, and runtime-path inspection only for
+  drilldown when status or the task scope gives a reason.
+- Foundational verify is only `verify.engine.run` plus `spine.verify`.
+  Estate/workload verifies are scoped secondary surfaces.
+- RAG is retrieval, not authority. Read the cited source or capability output
+  before deciding or mutating.
 
-When the work is repo-topology or domain extraction, classify the surface before
-moving it: L1 kernel, L2 shared rail/adapter, L3 unstable project/domain body,
-stable product body, generated projection, stale residue, or compatibility
-shim. Workbench is a valid target only for L2 rails or explicitly transitional
-domain homes with a named subtraction path; it is not proof that the surface is
-canonical.
-(Authority: [`NORTH_STAR.md`](NORTH_STAR.md),
-[`SPINE.md`](docs/governance/SPINE.md))
+Task-specific drilldown:
 
-When authoring CI workflows for a new repo (or modifying an existing one),
-read [`CI_GATE_AUTHORING_PATH.md`](docs/governance/CI_GATE_AUTHORING_PATH.md)
-**before** copying any existing workflow shape. The estate has a first-class
-split between `heavy_estate` (spine/workbench; substrate-aware runner) and
-`thin_vanilla` (product/L3 repos; vanilla runner only). The brittle failure
-mode is product-class repos copying the spine `heavy_estate` shape and
-bricking on a vanilla runner — the doc is the navigation guide that
-prevents that. Canonical taxonomy:
-[`cross-repo.authority.yaml`](ops/bindings/cross-repo.authority.yaml)
-`ci_gate_substrate_profiles:`.
-
-The primary `agentic-spine` checkout must stay on `main` and clean. If repo
-mutation is needed, do the work in a managed worktree; do not use the primary
-checkout as a work lane.
-
-Cross-repo symlinks are an edit-prevention hazard: editing the path you see
-silently mutates the target's repo, not yours. Known cross-repo symlink
-surfaces today include `workbench/bin/{ops,verify}` → `agentic-spine/...`
-and `~/.config/opencode/{commands,opencode.json,OPENCODE.md,
-oh-my-opencode.json}` → `workbench/dotfiles/opencode/...`. Before editing
-any file under `workbench/bin/` or under a tool-config directory like
-`~/.config/<tool>/`, run `ls -la <path>` first; if the path is a symlink,
-treat the **target** as the canonical edit surface (commit there, in that
-repo's worktree, under that repo's verify gates). Never `vi` a symlink
-into a different repo to "patch quickly" — the diff lands in the target's
-git index without your repo's verify or commit chain. New cross-repo
-symlinks should not be added; intra-repo symlinks (e.g.,
-`workbench/bin/mint` → `workbench/scripts/root/mint`) are fine.
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
-
-Governed session start/admission:
-`ops terminal launch --tool <tool> --terminal <name>`
-Public readback: `./bin/ops status`
-Expert drilldown: `./bin/ops status --expert` only when public status gives a
-reason for drilldown.
-Orientation (read-only, not admission): `./bin/ops cap run session.v3.attach`
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
-
-Agent entry mode is governed by the work-intake router policy in
-`SESSION_PROTOCOL.md`. Serious work defaults to engine lane; direct terminal
-work is limited to read-only reports and direct tiny patches with an explicit
-reason. Visible worker terminals are exceptional and must not substitute for
-lane telemetry.
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
-
-Telemetry ownership is strict: loop scopes, packets, orchestration manifests,
-claims, heartbeats, receipts, handoffs, worktree leases, and managed worktrees
-created by another lane are protected evidence. Read and cite them; do not
-delete, rewrite, recreate, or "fix" them directly. Use the governed lifecycle
-capability for that artifact class, or file friction when the missing repair
-path is the bug. Repair lifecycle residue at the owning object, not the visible
-leaf: if a wave created a worktree, branch, lease, or heartbeat, close or retire
-the wave through its governed close path so cleanup cascades; do not clean the
-leaf directly unless the owning lifecycle/readback has classified it orphaned.
-For loops, the lifecycle repair primitive is `loops.amend`
-(`./bin/ops cap run loops.amend -- --loop-id <id> --reason "<why>"` plus the
-field to change); never delete a `.scope.md` to repair lifecycle state. A
-suggestion to delete/recreate/move telemetry to repair state should be filed as
-friction with `--capability telemetry_surgery_attempt`. An active loop without
-custody scaffolding (packet/delegation/handoff/wave/worktree/heartbeat) may be
-classified `custody_exempt` with a reason via `loops.amend --custody-exempt
-true --exempt-reason "<text>"`; verify-engine E14 reports exempt loops
-separately and does not warn on them.
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
-
-Telemetry is also routing input, not background decoration. Before opening or
-executing adjacent work, read the active assignment, open-loop/delegation state,
-and worktree lifecycle. If that readback shows same-surface contention, blocked
-worktrees, stale branches, or high WIP pressure, the next action is attach to
-the owning lane, route/triage cleanup through the governed lifecycle surface, or
-name an explicit operator override. Do not start another nearby packet just
-because the requested symptom is clear while the work-state telemetry is
-unresolved.
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
-
-RAG retrieval is allowed as a discovery aid, not as authority. Use
-`rag.direct.retrieve` or `rag.direct.query` to find likely governed source refs,
-then read the cited packet, loop scope, contract, receipt, or capability
-readback directly before deciding or mutating.
-(Authority: [`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
-
-Verify hierarchy for all agent sessions:
-- `verify.engine.run` — foundational engine smoke (is the engine alive?)
-- `spine.verify` — canonical local spine truth (is control-plane coherent?)
-- these two are the only foundational verify surfaces
-- `verify.infra.run`, `verify.run domain <id>`, and `verify.run release` answer
-  estate/workload health — they are scoped secondary surfaces, not peers
-- estate/workload verify surfaces must not be treated as spine closeout truth or
-  as packet/loop/governance blockers unless a contract explicitly says so
-
-Live verify exit codes govern, not the cached `ops status` projection — re-run
-`verify.engine.run` and `spine.verify` directly before treating any failure as
-a blocker, since the "spine verify" line in `ops status` is a projection that
-may lag the live truth. A FAIL D-gate blocks bounded mutation only when its
-scope predicate overlaps the surface being modified; per-host scope skips such
-as `D153` and `D397` already establish the per-gate scope-predicate pattern. A
-bound `worker`-class terminal may proceed in a managed worktree on an
-orthogonal red with an explicit risk note. The real mutation gate is bound
-terminal identity (`SPINE_TERMINAL_ID` set by `ops terminal launch`) plus the
-capability role allowlist in `role.runtime.control.contract.yaml`
-(`runtime_roles.mutating_roles` and `mutating_capability_allowlist_by_role`),
-not posture telemetry such as `SPINE_RECOVERY_READY` (formerly
-`SPINE_SAFE_TO_MUTATE`, renamed for honesty — it signals execution-host
-recovery readiness, not mutation permission, and has no enforcement consumer).
-(Authority: [`role.runtime.control.contract.yaml`](ops/bindings/role.runtime.control.contract.yaml),
-[`SESSION_PROTOCOL.md`](docs/governance/SESSION_PROTOCOL.md))
+- CI workflow work: read
+  [`CI_GATE_AUTHORING_PATH.md`](docs/governance/CI_GATE_AUTHORING_PATH.md)
+  before copying any existing workflow shape.
+- Node or estate promotion: read
+  [`NODE_PROMOTION_LADDER.md`](docs/governance/NODE_PROMOTION_LADDER.md),
+  `node.role.contract.yaml`, and related runtime/status readbacks.
+- First-class L1/L2 authority work: answer
+  [`first.class.change.closure.contract.yaml`](ops/bindings/first.class.change.closure.contract.yaml).
+- Cross-repo or tool-config edits: check symlinks first. Known hazards include
+  `workbench/bin/{ops,verify}` into this repo and
+  `~/.config/opencode/*` into Workbench dotfiles. Edit the target repo in that
+  repo's governed worktree; do not patch through a symlink.

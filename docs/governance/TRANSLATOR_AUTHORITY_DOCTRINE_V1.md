@@ -2,27 +2,43 @@
 status: authoritative
 owner: "@human-steward"
 scope: membrane-boundary-doctrine
-version: 1.1
-updated: "2026-03-31"
+version: 1.2
+updated: "2026-05-05"
 decision_loop_id: LOOP-TRANSLATOR-DOCTRINE-CONSOLIDATION-20260324
 source_triangulation:
   - docs/governance/SPINE.md (controller lane, closure, and verify discipline)
   - docs/governance/SESSION_PROTOCOL.md (evidence-first anchorage and floating-WIP prevention)
-  - docs/governance/LOCAL_CONTROL_PLANE_CONTRACT.md (control-plane placement and entry surface)
   - ops/bindings/node.role.contract.yaml (live physical-node taxonomy and role semantics)
+  - ops/bindings/root.authority.contract.yaml (storage_evidence_node canonical file-plane authority)
   - ops/bindings/membrane.authority.contract.yaml (machine-evaluable boundary)
 enforcement:
   gate: D422 (membrane-boundary-isolation-lock)
   contract: ops/bindings/membrane.authority.contract.yaml
 ---
 
-# Membrane Boundary Doctrine v1.1
+# Membrane Boundary Doctrine v1.2
 
-**Purpose**: Define the permanent, non-negotiable rules governing the Membrane function, the 7-Node execution topology, and the binding "Membrane Analysis Framework" that every AI agent session must internalize before executing work.
+**Purpose**: Define the permanent, non-negotiable rules governing the Membrane
+function, node-role separation, and membrane analysis checks used when agent
+work touches ingress, routing, boundary enforcement, or control-plane
+architecture.
 
-**Authority**: This doctrine is the canonical source of truth for membrane governance, execution-plane separation, and session-entry analysis requirements. The machine-evaluable contract at `ops/bindings/membrane.authority.contract.yaml` MUST reference this document as its `doctrine_source`. Gate D422 enforces structural compliance. The repo-owned membrane stack is the single membrane boundary; tool-local or home-level adapters are deploy targets only and must remain thin wrappers around repo-owned truth.
+**Authority**: This doctrine is the canonical source of truth for membrane
+governance and execution-plane separation. It is not the day-one session entry
+surface. Daily agent entry remains `AGENTS.md` -> `NORTH_STAR.md` ->
+`SPINE.md` -> `SESSION_PROTOCOL.md`; this doctrine is drilldown for membrane
+and boundary work. The machine-evaluable contract at
+`ops/bindings/membrane.authority.contract.yaml` MUST reference this document as
+its `doctrine_source`. Gate D422 enforces structural compliance. The repo-owned
+membrane stack is the single membrane boundary; tool-local or home-level
+adapters are deploy targets only and must remain thin wrappers around
+repo-owned truth.
 
-**Scope**: Applies to every AI agent session (Claude Code, Codex, ChatGPT, any future surface), every human operator interaction via the operator console, and every automated pipeline that ingests, normalizes, routes, or renders spine state. AI sessions are always agent actors under explicit roles — never the human operator.
+**Scope**: Applies when an AI agent session, operator-console interaction, or
+automated pipeline ingests, normalizes, routes, or renders spine state across
+the membrane boundary. AI sessions are always agent actors under explicit roles
+— never the human operator. Everyday implementation entry uses the four-file
+entry path named in `AGENTS.md`.
 
 ---
 
@@ -93,10 +109,14 @@ Spine V3 decomposes operational authority into seven distinct node types. Each n
 
 ### 1. Operator Console
 
-- **Host**: MacBook (confirmed control-plane entry)
+- **Role**: `operator_console` per
+  `ops/bindings/node.role.contract.yaml#canonical_plane_access`
 - **Actor class**: This is a **node/client surface** used by the human steward, not an actor. No AI session holds the operator_console role as its identity — agent sessions attached to this surface act as membrane, controller, or worker.
-- **Purpose**: inspect, approve, converse, launch, review
-- **Rule**: Should not remain the long-term home of recurring system authority. The human operator observes and approves; the spine executes.
+- **Purpose**: inspect, approve, converse, launch, review, and carry governed
+  local runtime checkout work
+- **Rule**: The operator workstation is an admitting client, never the
+  unattended substrate. It reads state through routed caps and treats
+  consumer-local state/evidence/mailroom paths as projection/cache.
 
 ### 2. Membrane Function
 
@@ -108,11 +128,15 @@ Spine V3 decomposes operational authority into seven distinct node types. Each n
 
 ### 3. Control Node
 
-- **Host**: MacBook (Phase 1 decision, confirmed)
 - **Purpose**: broker, routing, loop/request state, packet compilation, attestation authority
 - **Properties**: stable, always-on, infrastructure-grade, not dependent on a user login session
 - **NOT here**: capability execution, verification, natural-language translation, operator console, domain decisions, storage/archive, git write authority
-- **Binding status**: Not in `node.role.contract.yaml`. Control Node has not been promoted past taxonomy — its functions are currently carried by `operator_console`. When promoted, it will get its own binding entry. See `NODE_PROMOTION_LADDER.md` for the L1 MVP kit (6 types, no control_node).
+- **Binding status**: Not a promoted node role today. Current placement truth
+  lives in `node.role.contract.yaml#canonical_plane_access`: pve
+  (`storage_evidence_node`) owns state/evidence/mailroom authority,
+  `execution_host` carries unattended runtime execution, and
+  `operator_console` admits and observes governed work. If a dedicated control
+  node is promoted later, it must land as a first-class role binding there.
 
 ### 4. Execution Nodes
 
@@ -135,9 +159,12 @@ Spine V3 decomposes operational authority into seven distinct node types. Each n
 
 ### 7. Storage and Archive Node
 
-- **Host**: md1400 (NAS), cold storage targets
-- **Purpose**: datasets, evidence, archives, cold history
-- **Rule**: Storage is append-mostly. Deletion requires break-glass.
+- **Role**: `storage_evidence_node` (pve, currently `/md1400/spine`)
+- **Purpose**: canonical state, evidence, mailroom, datasets, archives, and
+  cold history
+- **Rule**: State/evidence/mailroom authority lives here. Consumer-host copies
+  are projection/cache unless a governed routed cap lands the write on pve.
+  Deletion of evidence/archive material requires break-glass.
 
 ### Placement Rule
 
@@ -196,13 +223,20 @@ The membrane may start a workflow, but it must never be the final judge of succe
 
 ## The Membrane Analysis Framework
 
-**This framework is binding governance.** Every AI agent session — regardless of surface, model, or operator — MUST apply these four checks before executing any work. This is not a suggestion. It is a structural requirement that prevents the most common V3 failure modes.
+**This framework is binding governance for membrane and boundary-sensitive
+work.** Any agent session doing ingress, normalization, routing,
+boundary-enforcement, or control-plane architecture work MUST apply these checks
+before executing that work. This is not a suggestion. It is a structural
+requirement that prevents the most common V3 failure modes.
 
 ### Part 1: Core Assumptions
 
 The Membrane must assume:
 
-- **The MacBook environment is fully healthy.** Do not waste cycles re-verifying the control plane's basic functionality. The session attach capability already validates this.
+- **Local readiness is observed, not assumed.** Governed terminal launch,
+  public status, and foundational verify determine whether the current
+  terminal can act. Do not infer control-plane health from the operator
+  workstation existing.
 - **Evidence anchorage is never assumed.** First identify the human intent,
   trace, file path, receipt, status readback, or other evidence being carried.
   Attach it to an existing loop when the fit is clear. Create a loop only when
@@ -210,7 +244,11 @@ The Membrane must assume:
   doing mutation without evidence, custody, and a governed work home is
   producing floating WIP.
 
-**Why this asymmetry exists**: The MacBook is infrastructure — it either works or the session cannot start. Evidence and work home are context — they change between sessions, waves, and operator intents. Assuming the loop is correct, or inventing one to make the readback prettier, is a common source of ungoverned drift.
+**Why this asymmetry exists**: The current terminal is only a client until
+admission/readback proves otherwise. Evidence and work home are context — they
+change between sessions, waves, and operator intents. Assuming the loop is
+correct, or inventing one to make the readback prettier, is a common source of
+ungoverned drift.
 
 ### Part 2: Significant Context Verification
 
@@ -222,8 +260,12 @@ Before routing any work, the Membrane must establish three distinctions:
    - Read-only actions may proceed with lighter governance but still require loop awareness.
 
 2. **Correct Execution Target**
-   - MacBook (control plane): governance operations, verify runs, loop management, local dev
-   - VM 207 (ai-consolidation): membrane service, RAG queries, AI-adjacent workloads
+   - `operator_console`: governed admission, review, manual override, local
+     runtime checkout work
+   - `storage_evidence_node` (pve): canonical state, evidence, and mailroom
+     authority
+   - `execution_host` (ai-consolidation): unattended worker runtime, membrane
+     service, RAG queries, AI-adjacent workloads
    - VM 106 / domain VMs: infrastructure changes, service operations, domain-specific execution
    - Remote hosts: SSH-governed capability dispatch per `ssh.targets.yaml`
 
@@ -255,9 +297,11 @@ The most critical error in Spine V3 is **floating WIP**: starting ad-hoc work, r
 
 ### Part 4: The ONE Universal Gate
 
-Every session, every agent, every operator interaction must begin with this question:
+Every membrane or boundary-sensitive session must begin with this question:
 
-> **"What is the specific infrastructure or workload objective for this session, and have you read the startup docs, admitted through `./bin/ops terminal launch`, checked public state with `./bin/ops status`, and run `./bin/ops cap run verify.engine.run` plus `./bin/ops cap run spine.verify`?"**
+> **"What is the specific objective, what evidence or intent is being carried,
+> and has this terminal been admitted and checked through the current entry
+> path?"**
 
 This is not a formality. This question enforces:
 
@@ -304,8 +348,9 @@ This preserves the separation: **membrane is the boundary, wave.execute is the e
 | `SPINE.md` | Parent operating contract. This doctrine inherits controller-lane, closure, and verification discipline from the spine operating contract. |
 | `SESSION_PROTOCOL.md` | Defines evidence-first anchorage and floating-WIP requirements referenced in this doctrine. |
 | `SPINE_V3_COMPLETION_DECLARATION_20260403.md` | Historical V3 completion marker. Useful for closure context, not part of the daily operating stack. |
-| `LOCAL_CONTROL_PLANE_CONTRACT.md` | Current control-plane placement and workstation entry-surface authority. |
-| `ops/bindings/node.role.contract.yaml` | Current node taxonomy and role-semantics authority. |
+| `LOCAL_CONTROL_PLANE_CONTRACT.md` | Historical placement context only; current placement truth lives in node-role and root-authority contracts. |
+| `ops/bindings/node.role.contract.yaml` | Current node taxonomy, role semantics, and canonical plane access authority. |
+| `ops/bindings/root.authority.contract.yaml` | Current storage_evidence_node and file-plane authority. |
 | `EXECUTION_NODE_SPEC.md` | Archived historical draft only. Not part of the live authority stack. |
 | `membrane.authority.contract.yaml` | Machine-evaluable enforcement. MUST reference this doctrine as `doctrine_source`. |
 | `D422 gate` | Structural verification of membrane isolation. |
@@ -319,4 +364,5 @@ not replace them.
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2026-05-05 | 1.2 | Subtracted stale MacBook/control-node host bindings; routed current placement truth to `node.role.contract.yaml#canonical_plane_access` and `root.authority.contract.yaml` after pve became state/evidence/mailroom authority. Demoted this doctrine from day-one entry reading to membrane/boundary drilldown. |
 | 2026-03-24 | 1.0 | Initial doctrine. Triangulated from 6 source documents. 4-Part Analysis Framework codified. |

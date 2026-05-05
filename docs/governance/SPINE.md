@@ -171,7 +171,7 @@ truthful core would be:
 | internal execute/closeout machinery | `keep` | Minimal governed execution and closeout remain necessary engine internals, not public grammar. |
 | receipts + outcome | `keep` | Every meaningful action must emit proof. |
 | `verify.engine.run`, `spine.verify` | `keep` | Foundational verify must stay tiny and discoverable. These are the only foundational verify surfaces; `spine.status` is a unified status front door, not a verify surface. |
-| `delegate.to.execution` taught as an autonomous default queue | `demote` | Today it is an explicit interactive handoff, not admitted autonomous lane truth. |
+| explicit interactive worker handoff | `keep` | `delegate.to.execution` remains a governed handoff path, not an autonomous default queue or public operator grammar. |
 | manual custody path taught as normal operator grammar | `demote` | Expert compatibility only. |
 | cockpit/mobile/operator payload variants | `shelf` | Useful read shells, not irreducible core. |
 | broker read APIs | `shelf` | Convenience/read-model shell, not kernel substrate. |
