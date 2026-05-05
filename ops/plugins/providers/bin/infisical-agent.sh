@@ -8,8 +8,11 @@
 set -euo pipefail
 
 # Resolve SPINE_ROOT to an absolute path at script entry and export it
-# so subshells (command substitutions, pipes) inherit a stable value.
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# so subshells (command substitutions, pipes) inherit a stable value. The
+# script lives at ops/plugins/providers/bin/, so the repo root is four levels
+# up — earlier ../.. landed at ops/plugins/ and made fallback binding lookups
+# read ops/plugins/ops/bindings/... (PACKET-1327 follow-up).
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 export SPINE_ROOT
 
 # Source credentials if not already set (enables Desktop Commander / non-shell access)
