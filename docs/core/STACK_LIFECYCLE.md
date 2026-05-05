@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-05-05
 scope: stack-lifecycle
 ---
 
@@ -35,7 +35,10 @@ Mutating (stack lifecycle):
 
 Secrets-bearing deploys:
 
-- Use `./bin/ops cap run secrets.exec -- <cmd...>` when a stack must be run under injected secrets (Infisical) or when commands would otherwise expose secrets.
+- There is no public `secrets.exec` capability. Secrets-bearing deploys must
+  run through an owned domain/stack capability or tool that wraps the L2 helper
+  `ops/plugins/infra/secrets/bin/secrets-exec -- <cmd...>` without printing
+  secret values.
 
 ## Change Flow (End-to-End)
 
@@ -49,7 +52,8 @@ Secrets-bearing deploys:
    - `./bin/ops cap run probe.registry.projection.build`
 3. **Apply to the live host** (receipted):
    - Preferred: `docker.compose.*` capabilities for normal stack lifecycle operations.
-   - If secrets injection is required: `secrets.exec -- <ssh ... docker compose ...>`
+   - If secrets injection is required: use the owned domain/stack path that
+     wraps `ops/plugins/infra/secrets/bin/secrets-exec -- <ssh ... docker compose ...>`.
 4. **Verify health**:
    - `docker.compose.status` (containers running)
    - `services.health.status` (HTTP probes)
