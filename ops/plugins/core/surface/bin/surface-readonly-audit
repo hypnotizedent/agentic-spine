@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -13,13 +14,47 @@ def main() -> int:
     caps = yaml.safe_load((root / "ops/capabilities.yaml").read_text()) or {}
     registry = (caps.get("capabilities") or {})
     missing = []
+    mutation_violations = []
     for key, surface in ((contract.get("surfaces") or {}).items()):
         capability = (surface or {}).get("capability")
         if capability and capability not in registry:
             missing.append({"surface": key, "capability": capability})
-    payload = {"capability": "surface.readonly.audit", "status": "ok" if not missing else "fail", "missing_capabilities": missing}
+
+    for cap_id, cap in registry.items():
+        if not isinstance(cap, dict):
+            continue
+        tags = cap.get("tags") or []
+        is_readonly_surface = cap.get("safety") == "read-only" and "readonly" in tags
+        if not is_readonly_surface:
+            continue
+        if cap_id == "surface.readonly.audit":
+            continue
+        script_path = str(cap.get("script_path") or "").strip()
+        if not script_path:
+            continue
+        script = root / script_path.removeprefix("./")
+        try:
+            text = script.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if re.search(r"\b(?:python3|bash|env|nohup|exec)\b[^\n]*operator-surface-regenerate", text):
+            mutation_violations.append(
+                {
+                    "capability": cap_id,
+                    "script_path": script_path,
+                    "violation": "read_only_surface_invokes_operator_surface_regenerate",
+                }
+            )
+
+    status = "ok" if not missing and not mutation_violations else "fail"
+    payload = {
+        "capability": "surface.readonly.audit",
+        "status": status,
+        "missing_capabilities": missing,
+        "mutation_violations": mutation_violations,
+    }
     print(json.dumps(payload, indent=2))
-    return 0 if not missing else 1
+    return 0 if status == "ok" else 1
 
 
 if __name__ == "__main__":
