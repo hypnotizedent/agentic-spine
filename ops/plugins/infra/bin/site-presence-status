@@ -266,13 +266,35 @@ def ip_like(value: Any) -> str:
 
 
 def freshness_from_surface(surface: dict[str, Any], field: str = "generated_at") -> dict[str, Any]:
-    value = surface.get(field) or surface.get("updated_at") or surface.get("last_verified")
+    # PACKET-1317: surfaces declare freshness_policy.max_age_hours; resolve
+    # actual fresh/stale state from generated_at vs that policy instead of
+    # hardcoding stale. Honesty rule: only stamp "stale" when the snapshot is
+    # past its declared max age; missing policy/timestamp falls back to
+    # "policy_missing" — never silently stale.
+    policy = surface.get("freshness_policy") or {}
+    policy_field = str(policy.get("freshness_field") or field)
+    max_age_hours = policy.get("max_age_hours")
+    value = (
+        surface.get(policy_field)
+        or surface.get(field)
+        or surface.get("updated_at")
+        or surface.get("last_verified")
+    )
+    state = "policy_missing"
+    if max_age_hours and value:
+        try:
+            ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            now = datetime.now(UTC)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            age_hours = (now - ts).total_seconds() / 3600.0
+            state = "stale" if age_hours > float(max_age_hours) else "fresh"
+        except (TypeError, ValueError):
+            state = "policy_missing"
     return {
-        "state": "stale",
-        "basis": "legacy_surface_timestamp",
-        "max_age": str((surface.get("freshness_policy") or {}).get("max_age_hours", "")) + "h"
-        if (surface.get("freshness_policy") or {}).get("max_age_hours")
-        else None,
+        "state": state,
+        "basis": "freshness_policy_resolved" if state in {"fresh", "stale"} else "legacy_surface_timestamp",
+        "max_age": f"{max_age_hours}h" if max_age_hours else None,
         "last_observed_at": value,
     }
 
@@ -749,7 +771,15 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def summarize_freshness(rows: list[dict[str, Any]]) -> dict[str, int]:
-    summary: dict[str, int] = {}
+    # PACKET-1317: always emit the canonical state keys (fresh, stale,
+    # policy_missing, declared_only) so downstream readers and D448 see
+    # honest zero-counts after a refresh instead of disappearing keys.
+    summary: dict[str, int] = {
+        "fresh": 0,
+        "stale": 0,
+        "policy_missing": 0,
+        "declared_only": 0,
+    }
     for row in rows:
         state = str((row.get("freshness") or {}).get("state") or "unknown")
         summary[state] = summary.get(state, 0) + 1

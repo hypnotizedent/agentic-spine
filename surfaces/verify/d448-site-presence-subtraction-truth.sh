@@ -732,5 +732,78 @@ for phrase in required_teaching_phrases:
     if phrase not in proc_h.stdout:
         fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
 
-print("D448 PASS: first-class Site Intelligence lifecycle is locked; old network/device registries are folded inputs rather than evidence-only subsystems; site.presence.status reports profile/topology/presence plus node admission, bootstrap, provisioning, network_visibility_proof, identity_state, hardware_class, storage custody, and backup posture; visibility cannot create node admission; site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115); home.unifi.network.inventory.yaml authority claims are folded at both leaf and parent; DHCP audit/status reads are bounded to folded DHCP intent under site.presence.status and bind Infisical lookup to the canonical spine root; UniFi snapshot caps are bounded to folded observed-client input; telemetry-proven dead network cap families/wrappers stay subtracted; the legacy subtracted_peer_authority JSON key is deleted; storage maps are subordinate to payload.custody.status; and the zero-receipt shop readmodel generator stays retired under first-class Site Intelligence readbacks (PACKET-1312)")
+# PACKET-1317: lock coverage reconciliation behavior in place.
+# (x) freshness_summary must always emit canonical state keys (fresh, stale,
+#     policy_missing, declared_only) — disappearing keys after a refresh
+#     would silently hide stale debt; honest zero-counts stay visible.
+# (y) freshness_from_surface must resolve actual fresh/stale state from
+#     freshness_policy.max_age_hours rather than hardcoding stale; rows
+#     observed within the policy window must read network_visibility_proof
+#     != "unifi_snapshot_stale" when freshness state is "fresh".
+# (z) network.shop.dhcp.audit must emit unregistered_classification with
+#     the five canonical buckets so the unregistered-client set stops
+#     floating as audit-only bloat. Folded-input role only — node admission
+#     authority remains site.presence.status / node.admission.status.
+
+# (x) canonical freshness keys
+freshness_required_keys = {"fresh", "stale", "policy_missing", "declared_only"}
+freshness_keys = set(freshness_summary.keys())
+missing_freshness = freshness_required_keys - freshness_keys
+if missing_freshness:
+    fail(f"site.presence.status freshness_summary missing canonical keys {sorted(missing_freshness)} (PACKET-1317)")
+
+# (y) network_visibility_proof must agree with freshness state
+for row in all_rows_for_convergence:
+    fstate = (row.get("freshness") or {}).get("state")
+    nvp = row.get("network_visibility_proof")
+    if fstate == "fresh" and nvp == "unifi_snapshot_stale":
+        fail(f"{row.get('presence_id')}: freshness=fresh must not read network_visibility_proof=unifi_snapshot_stale (PACKET-1317)")
+    if fstate == "stale" and nvp not in {"unifi_snapshot_stale", "declared_only", "none"}:
+        fail(f"{row.get('presence_id')}: freshness=stale must read unifi_snapshot_stale (PACKET-1317; got {nvp!r})")
+
+# Cap source must declare freshness_policy resolution and never hardcode
+# state="stale" as the only return path.
+sps_text = (root / "ops/plugins/infra/bin/site-presence-status").read_text(encoding="utf-8")
+if "freshness_policy_resolved" not in sps_text:
+    fail("site-presence-status must resolve freshness from freshness_policy (PACKET-1317)")
+if 'state = "stale" if age_hours > float(max_age_hours) else "fresh"' not in sps_text:
+    fail("site-presence-status freshness resolver must compare age_hours against max_age_hours (PACKET-1317)")
+
+# (z) shop dhcp audit unregistered_classification
+shop_dhcp_audit_path = root / "ops/bindings/shop.dhcp.audit.yaml"
+if shop_dhcp_audit_path.exists():
+    shop_audit = yaml.safe_load(shop_dhcp_audit_path.read_text(encoding="utf-8")) or {}
+    classification = shop_audit.get("unregistered_classification")
+    if not isinstance(classification, dict):
+        fail("shop.dhcp.audit.yaml must emit unregistered_classification mapping (PACKET-1317)")
+    bucket_keys = {
+        "already_declared_other_key",
+        "transient_non_node",
+        "observed_only_unknown",
+        "stale_snapshot_artifact",
+        "candidate_pending_admission",
+    }
+    missing_buckets = bucket_keys - set(classification.keys())
+    if missing_buckets:
+        fail(f"shop.dhcp.audit.yaml unregistered_classification missing buckets {sorted(missing_buckets)} (PACKET-1317)")
+    classified_total = sum(len(rows) for rows in classification.values() if isinstance(rows, list))
+    declared_total = (shop_audit.get("summary") or {}).get("unregistered_clients") or 0
+    if classified_total != declared_total:
+        fail(f"shop.dhcp.audit.yaml classified count {classified_total} != unregistered_clients {declared_total} (PACKET-1317)")
+    cls_summary = (shop_audit.get("summary") or {}).get("unregistered_classification") or {}
+    if set(cls_summary.keys()) != bucket_keys:
+        fail(f"shop.dhcp.audit.yaml summary.unregistered_classification keys must equal {sorted(bucket_keys)} (PACKET-1317)")
+shop_dhcp_audit_text = (root / "ops/plugins/infra/network/bin/network-shop-dhcp-audit").read_text(encoding="utf-8")
+for fragment in [
+    "unregistered_classification",
+    "already_declared_other_key",
+    "transient_non_node",
+    "observed_only_unknown",
+    "stale_snapshot_artifact",
+    "candidate_pending_admission",
+]:
+    if fragment not in shop_dhcp_audit_text:
+        fail(f"network-shop-dhcp-audit must declare classification bucket {fragment!r} (PACKET-1317)")
+
+print("D448 PASS: first-class Site Intelligence lifecycle is locked; old network/device registries are folded inputs rather than evidence-only subsystems; site.presence.status reports profile/topology/presence plus node admission, bootstrap, provisioning, network_visibility_proof, identity_state, hardware_class, storage custody, and backup posture; visibility cannot create node admission; site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115); home.unifi.network.inventory.yaml authority claims are folded at both leaf and parent; DHCP audit/status reads are bounded to folded DHCP intent under site.presence.status and bind Infisical lookup to the canonical spine root; UniFi snapshot caps are bounded to folded observed-client input; telemetry-proven dead network cap families/wrappers stay subtracted; the legacy subtracted_peer_authority JSON key is deleted; storage maps are subordinate to payload.custody.status; the zero-receipt shop readmodel generator stays retired under first-class Site Intelligence readbacks (PACKET-1312); freshness state is resolved from declared freshness_policy max_age_hours (no hardcoded stale); freshness_summary always emits canonical fresh/stale/policy_missing/declared_only keys; and shop UniFi unregistered clients are classified into honest folded-input buckets (already_declared_other_key, transient_non_node, observed_only_unknown, stale_snapshot_artifact, candidate_pending_admission) so the 55-row set no longer floats as audit-only bloat (PACKET-1317)")
 PY

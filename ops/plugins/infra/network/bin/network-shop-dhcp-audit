@@ -140,22 +140,124 @@ def mac(value: Any) -> str:
 reservations = json.loads(reservations_path.read_text(encoding="utf-8"))
 clients = json.loads(clients_path.read_text(encoding="utf-8"))
 registry = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
-registry_macs = {mac(row.get("mac")) for row in registry.get("devices", []) or [] if mac(row.get("mac"))}
+registry_devices = [row for row in (registry.get("devices") or []) if isinstance(row, dict)]
+registry_macs = {mac(row.get("mac")) for row in registry_devices if mac(row.get("mac"))}
+registry_ips = {str(row.get("ip") or "").strip() for row in registry_devices if row.get("ip")}
 
-unregistered_clients = []
+
+def _name_tokens(value: Any) -> set[str]:
+    text = str(value or "").lower()
+    out: set[str] = set()
+    if not text:
+        return out
+    out.add(text)
+    cleaned = "".join(ch if ch.isalnum() or ch in "-_ " else " " for ch in text)
+    for token in cleaned.split():
+        if len(token) >= 4:
+            out.add(token)
+    return out
+
+
+registry_name_tokens: set[str] = set()
+for row in registry_devices:
+    registry_name_tokens |= _name_tokens(row.get("name"))
+    registry_name_tokens |= _name_tokens(row.get("hostname"))
+
+# PACKET-1317: classify unregistered shop UniFi clients into honest
+# folded-input buckets so the 55-row set stops floating as audit-only bloat.
+# Categories preserve packet vocabulary; node admission authority is NOT
+# inferred here — site.presence.status remains canonical.
+TRANSIENT_PREFIXES = (
+    "iphone",
+    "ipad",
+    "macbook",
+    "mac",
+    "mike-s-",
+    "ronnys-",
+    "sm-r",
+    "sm-g",
+    "galaxy",
+    "pixel",
+    "android",
+    "tablet-",
+    "laptop-",
+    "desktop-",
+)
+
+
+def _is_transient(host: str) -> bool:
+    h = host.lower().strip()
+    if not h or h == "unknown":
+        return False
+    return any(h.startswith(p) for p in TRANSIENT_PREFIXES)
+
+
+unregistered_clients: list[dict[str, Any]] = []
+seen_ips: dict[str, str] = {}
 for client in clients:
     if not isinstance(client, dict):
         continue
     client_mac = mac(client.get("mac"))
     if not client_mac or client_mac in registry_macs:
         continue
+    host = client.get("hostname") or client.get("name") or "unknown"
+    ip_value = client.get("ip") or client.get("last_ip") or ""
     unregistered_clients.append(
         {
             "mac": client_mac,
-            "ip": client.get("ip") or client.get("last_ip") or "",
-            "hostname": client.get("hostname") or client.get("name") or "unknown",
+            "ip": ip_value,
+            "hostname": host,
         }
     )
+    if ip_value:
+        seen_ips.setdefault(str(ip_value), client_mac)
+
+# Detect IP collisions across the unregistered set (same IP on >1 MAC) — a
+# strong signal of stale UniFi snapshot artifacts; bucket those explicitly.
+ip_macs: dict[str, set[str]] = {}
+for entry in unregistered_clients:
+    ip_value = str(entry.get("ip") or "")
+    if not ip_value:
+        continue
+    ip_macs.setdefault(ip_value, set()).add(entry["mac"])
+collision_ips = {ip for ip, macs in ip_macs.items() if len(macs) > 1}
+
+classification: dict[str, list[dict[str, Any]]] = {
+    "already_declared_other_key": [],
+    "transient_non_node": [],
+    "observed_only_unknown": [],
+    "stale_snapshot_artifact": [],
+    "candidate_pending_admission": [],
+}
+for entry in unregistered_clients:
+    host = str(entry.get("hostname") or "").strip()
+    host_lower = host.lower()
+    ip_value = str(entry.get("ip") or "")
+    declared_match = False
+    if host_lower and host_lower != "unknown":
+        if host_lower in registry_name_tokens:
+            declared_match = True
+        else:
+            for token in _name_tokens(host):
+                if token in registry_name_tokens:
+                    declared_match = True
+                    break
+    if not declared_match and ip_value and ip_value in registry_ips:
+        declared_match = True
+    bucket: str
+    if declared_match:
+        bucket = "already_declared_other_key"
+    elif ip_value and ip_value in collision_ips:
+        bucket = "stale_snapshot_artifact"
+    elif _is_transient(host):
+        bucket = "transient_non_node"
+    elif host_lower in {"", "unknown"}:
+        bucket = "observed_only_unknown"
+    else:
+        bucket = "candidate_pending_admission"
+    classification[bucket].append(entry)
+
+classification_summary = {bucket: len(rows) for bucket, rows in classification.items()}
 
 payload = {
     "schema_version": 1,
@@ -178,10 +280,12 @@ payload = {
         "total_reservations": len(reservations),
         "unifi_clients_total": len(clients),
         "unregistered_clients": len(unregistered_clients),
+        "unregistered_classification": classification_summary,
         "last_audit": timestamp,
     },
     "reservations": reservations,
     "unregistered_clients": unregistered_clients,
+    "unregistered_classification": classification,
 }
 
 with summary_path.open("w", encoding="utf-8") as handle:
@@ -192,6 +296,10 @@ PY
 echo "Audit complete. Results written to: $SUMMARY_FILE"
 
 if [[ "$MODE" == "apply" ]]; then
-  cp "$SUMMARY_FILE" "$TRACKED_SUMMARY_FILE"
-  echo "Tracked binding updated: $TRACKED_SUMMARY_FILE"
+  if [[ "$SUMMARY_FILE" != "$TRACKED_SUMMARY_FILE" ]]; then
+    cp "$SUMMARY_FILE" "$TRACKED_SUMMARY_FILE"
+    echo "Tracked binding updated: $TRACKED_SUMMARY_FILE"
+  else
+    echo "Tracked binding co-located with summary: $TRACKED_SUMMARY_FILE"
+  fi
 fi
