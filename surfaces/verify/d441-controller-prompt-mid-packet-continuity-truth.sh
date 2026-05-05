@@ -45,6 +45,35 @@ SESSION_V3_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/session-v3-attach"
 [[ -f "$SESSION_V3_BIN" ]] || fail "session-v3-attach surface missing"
 grep -q 'Narrator:.*commit\.narrator\.status' "$SESSION_V3_BIN" || fail "session.v3.attach default banner must teach commit.narrator.status as normal orientation pointer"
 
+NARRATOR_WORKFLOW="$SPINE_CODE/.gitea/workflows/narrator.yml"
+[[ -f "$NARRATOR_WORKFLOW" ]] || fail "Slice F narrator workflow missing at .gitea/workflows/narrator.yml"
+grep -q 'name: narrator' "$NARRATOR_WORKFLOW" || fail "narrator workflow must declare name: narrator"
+grep -q 'branches:' "$NARRATOR_WORKFLOW" || fail "narrator workflow must declare a branches trigger"
+grep -q '\- main' "$NARRATOR_WORKFLOW" || fail "narrator workflow must trigger on push to main"
+grep -q 'NARRATOR_DISPATCH_SSH_KEY' "$NARRATOR_WORKFLOW" || fail "narrator workflow must reference NARRATOR_DISPATCH_SSH_KEY secret"
+grep -q 'NARRATOR_DISPATCH_TARGET' "$NARRATOR_WORKFLOW" || fail "narrator workflow must reference NARRATOR_DISPATCH_TARGET secret"
+grep -q 'commit.narrator.status' "$NARRATOR_WORKFLOW" || fail "narrator workflow must dispatch commit.narrator.status"
+grep -q '\-\-write-artifacts' "$NARRATOR_WORKFLOW" || fail "narrator workflow dispatch must include --write-artifacts so canonical state populates"
+grep -q 'narrator dispatch deferred' "$NARRATOR_WORKFLOW" || fail "narrator workflow must short-circuit cleanly when secrets are absent (operator-eye signal not a verify gate)"
+python3 - "$NARRATOR_WORKFLOW" <<'PY'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+ops_idx = text.find("bin/ops cap run")
+if ops_idx == -1:
+    raise SystemExit("narrator workflow must dispatch commit.narrator.status via bin/ops cap run inside SSH")
+# Forge runner authority guard: forge_node has capability_execution=forbidden,
+# so any `bin/ops cap run` invocation in this workflow must be wrapped inside
+# an SSH command shipped to the dispatch target (where execution_host
+# authority applies). Coarse but honest: require `ssh` to appear before the
+# bin/ops invocation.
+ssh_idx = text.rfind("ssh \\", 0, ops_idx)
+if ssh_idx == -1:
+    ssh_idx = text.rfind("ssh ", 0, ops_idx)
+if ssh_idx == -1:
+    raise SystemExit("narrator workflow places bin/ops cap run outside an SSH command — forge_node may not gain capability_execution authority")
+PY
+
 NARRATOR_PAYLOAD="$("$COMMIT_NARRATOR_BIN" --json --limit 2 --skip-input-readbacks)"
 python3 - "$NARRATOR_PAYLOAD" <<'PY'
 import json
@@ -846,5 +875,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, commit.narrator.status --evaluate-rules runs the deterministic rule engine over committed governance and emits a rule_layer with verdict (good_direction|regression_risk|unknown_*) confidence rule_outcomes citations and honest_unknown_reason while preserving witness-only authority bounds, default narrator runs without --evaluate-rules MUST NOT publish rule_evaluation or row.rule_layer, commit.narrator.status --from-artifacts replays per-commit yamls into the rollup payload with artifact_reads summary and from_artifact rows pulling direction_signal/rule_layer from canonical state while missing artifacts produce explicit disclosure rows (no silent recompute) and default runs without --from-artifacts MUST NOT publish artifact_reads or row.from_artifact, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, deferred closed packets can be forward-corrected only with fresh evidence, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, commit.narrator.status --evaluate-rules runs the deterministic rule engine over committed governance and emits a rule_layer with verdict (good_direction|regression_risk|unknown_*) confidence rule_outcomes citations and honest_unknown_reason while preserving witness-only authority bounds, default narrator runs without --evaluate-rules MUST NOT publish rule_evaluation or row.rule_layer, commit.narrator.status --from-artifacts replays per-commit yamls into the rollup payload with artifact_reads summary and from_artifact rows pulling direction_signal/rule_layer from canonical state while missing artifacts produce explicit disclosure rows (no silent recompute) and default runs without --from-artifacts MUST NOT publish artifact_reads or row.from_artifact, .gitea/workflows/narrator.yml dispatches narrator on push-to-main only inside an SSH command to NARRATOR_DISPATCH_TARGET (forge runner does not gain capability_execution; secrets referenced not committed; deferred-cleanly when secrets absent), session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, deferred closed packets can be forward-corrected only with fresh evidence, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0

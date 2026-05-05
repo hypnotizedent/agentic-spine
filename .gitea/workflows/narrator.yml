@@ -1,0 +1,82 @@
+name: narrator
+
+# Slice F of Brain v1.5: dispatch commit.narrator.status onto execution_host
+# (ai-consolidation) when a commit lands on origin/main. The forge runner
+# does NOT execute spine caps directly against canonical state — per
+# `ops/bindings/node.role.contract.yaml#authority_matrix.forge_node`,
+# capability_execution and state_mutation are forbidden for forge_node.
+# This workflow only DISPATCHES via SSH to a host where capability_execution
+# is permitted (execution_host per PACKET-1340 placement audit).
+#
+# Operator-owned provisioning:
+#   - NARRATOR_DISPATCH_SSH_KEY  (private key, gitea repo secret)
+#   - NARRATOR_DISPATCH_TARGET   (e.g. "ubuntu@100.71.17.29")
+#   - NARRATOR_DISPATCH_REPO     (e.g. "/home/ubuntu/code/agentic-spine")
+# When any of these are missing, the workflow logs a deferred message and
+# exits cleanly. Narrator is operator-eye signal, not a verify gate; the
+# workflow MUST NOT fail the build when dispatch is unavailable.
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  narrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bootstrap (ssh-client only — no spine cap execution in runner)
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            openssh-client ca-certificates >/dev/null
+          ssh -V
+
+      - name: Check dispatch secrets
+        id: check
+        env:
+          NARRATOR_DISPATCH_SSH_KEY: ${{ secrets.NARRATOR_DISPATCH_SSH_KEY }}
+          NARRATOR_DISPATCH_TARGET: ${{ secrets.NARRATOR_DISPATCH_TARGET }}
+          NARRATOR_DISPATCH_REPO: ${{ secrets.NARRATOR_DISPATCH_REPO }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NARRATOR_DISPATCH_SSH_KEY}" ] || [ -z "${NARRATOR_DISPATCH_TARGET}" ] || [ -z "${NARRATOR_DISPATCH_REPO}" ]; then
+            echo "narrator dispatch deferred — operator must provision NARRATOR_DISPATCH_SSH_KEY + NARRATOR_DISPATCH_TARGET + NARRATOR_DISPATCH_REPO repository secrets"
+            echo "narrator is operator-eye signal, not a verify gate; this is not a build failure"
+            echo "ready=0" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "ready=1" >> "${GITHUB_OUTPUT}"
+
+      - name: Dispatch narrator on execution_host
+        if: steps.check.outputs.ready == '1'
+        env:
+          NARRATOR_DISPATCH_SSH_KEY: ${{ secrets.NARRATOR_DISPATCH_SSH_KEY }}
+          NARRATOR_DISPATCH_TARGET: ${{ secrets.NARRATOR_DISPATCH_TARGET }}
+          NARRATOR_DISPATCH_REPO: ${{ secrets.NARRATOR_DISPATCH_REPO }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          KEYFILE="$(mktemp)"
+          chmod 600 "${KEYFILE}"
+          printf '%s\n' "${NARRATOR_DISPATCH_SSH_KEY}" > "${KEYFILE}"
+          # Bounded SSH dispatch: pin StrictHostKeyChecking to accept-new so
+          # first-run host-key learn works; subsequent runs require match.
+          # The dispatch invokes commit.narrator.status which routes its
+          # canonical write through cap.sh — the runner does not touch
+          # canonical state directly. Limit=1 + --ref pins the run to the
+          # exact commit that triggered the workflow.
+          ssh \
+            -i "${KEYFILE}" \
+            -o StrictHostKeyChecking=accept-new \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            "${NARRATOR_DISPATCH_TARGET}" \
+            "set -e; cd '${NARRATOR_DISPATCH_REPO}' && ./bin/ops cap run commit.narrator.status -- --ref ${GITHUB_SHA} --include-diff --evaluate-rules --write-artifacts --limit 1 --skip-input-readbacks" \
+            || {
+              echo "narrator dispatch failed — operator-eye signal only, not blocking build"
+              exit 0
+            }
+          rm -f "${KEYFILE}"
+          echo "narrator dispatched for ${GITHUB_SHA}"
