@@ -17,7 +17,7 @@ set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$ROOT" ]]; then
-  ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 fi
 
 FAIL=0

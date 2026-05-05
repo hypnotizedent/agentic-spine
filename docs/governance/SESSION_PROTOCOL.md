@@ -701,13 +701,19 @@ These seams were previously absent and have been addressed.
 - **Control-surface delegation** — `delegate.to.execution` bridges control surface intent to worker execution custody without manual terminal switching as an explicit interactive handoff (landed 2026-04-25). It is not autonomous queue admission.
 - **Controller-prompt packet amend/checkpoint** — `controller_prompt.amend` is the governed mid-packet continuity seam between birth (`controller_prompt.create`) and death (`controller_prompt.close`). It preserves packet next action, continuity summary, and evidence refs, and `entry-compile` can recover one live packet from loop plus packet continuity when the execution tracker is absent.
 
-## Spine Repo Env Var Precedence
+## Spine Root Env Var Boundary
 
-When a script needs the spine repo path, four env vars may be set:
+When a script needs a repo path, do not collapse control-root and target-root
+meaning:
 
-- `SPINE_TARGET_REPO` — cap.sh's resolved target repo (post-resolution); same as `SPINE_REPO` after `cap.sh:24-30` runs
-- `SPINE_REPO` — canonical name for the spine repo path
-- `SPINE_CODE` — active code root (cwd-detected git toplevel containing `ops/capabilities.yaml`); usually equal to `SPINE_REPO`
+- `SPINE_CODE` — spine control checkout: contracts, capabilities, bindings,
+  gates, governed helpers, and authority logic.
+- `SPINE_TARGET_REPO` — target checkout: the repo/worktree the current
+  operation is about, such as a workbench or packet lane.
+- `SPINE_REPO` — compatibility alias that may equal the target repo after
+  `cap.sh` resolution. Treat unclassified `SPINE_REPO` use as suspect in new
+  code; classify whether the call site needs `SPINE_CODE` or
+  `SPINE_TARGET_REPO`.
 - `SPINE_ROOT` — generic fallback used by libs that do not import `runtime-paths.sh`
 
 Resolution chain (`ops/commands/cap.sh:24`):
@@ -717,10 +723,11 @@ SPINE_TARGET_REPO ← VALID_AMBIENT_TARGET_REPO || ACTIVE_CODE_ROOT || SPINE_REP
 SPINE_REPO ← SPINE_TARGET_REPO (after cap.sh resolution)
 ```
 
-New code should prefer `SPINE_REPO`. The other three names exist as
-compatibility aliases — `SPINE_TARGET_REPO` is cap.sh-internal, `SPINE_CODE`
-is the cap-registry root (currently always equal to repo root), and
-`SPINE_ROOT` is a fallback for libs that resolve their own root.
+New code that reads spine contracts, bindings, capabilities, gates, secrets
+binding, runtime-path helpers, or authority logic should resolve from
+`SPINE_CODE` or a `BASH_SOURCE`-relative control root. New code that operates on
+the repo being patched, verified, published, or closed out should use
+`SPINE_TARGET_REPO`.
 
 For workbench paths, use `SPINE_WORKBENCH_ROOT` (PACKET-597 canonical name).
 `SPINE_FOUNDATION_ROOT` is retained as a one-release compatibility alias

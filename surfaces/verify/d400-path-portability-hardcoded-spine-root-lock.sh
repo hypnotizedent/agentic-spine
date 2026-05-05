@@ -16,10 +16,37 @@ set -euo pipefail
 GATE_ID="D400"
 GATE_NAME="path-portability-hardcoded-spine-root-lock"
 
-# Resolve spine root
-ROOT="${SPINE_ROOT:-}"
+# Resolve the checkout being verified.
+#
+# Explicit --root wins. Otherwise prefer the current git checkout so running
+# this gate from a packet worktree verifies that lane, not an ambient root
+# checkout leaked through SPINE_ROOT. Fall back to this script's checkout for
+# direct invocations outside git.
+ROOT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root)
+      [[ -n "${2:-}" ]] || { echo "D400 FAIL: --root requires a path" >&2; exit 2; }
+      ROOT="$(cd "${2:-}" && pwd -P)"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: $(basename "$0") [--root <target-checkout>]" >&2
+      echo "Detects hardcoded \$HOME/code/agentic-spine in gate/plugin scripts." >&2
+      exit 0
+      ;;
+    *)
+      echo "D400 FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
 if [[ -z "$ROOT" ]]; then
-  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 fi
 
 VERIFY_TARGET_DIRS=(
