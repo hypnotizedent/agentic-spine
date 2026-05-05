@@ -396,6 +396,7 @@ def retire_unclaimed_close_residue(
                 delegation_id,
                 terminal_state,
                 loop_id=str(data.get("loop_id", "")),
+                terminal_disposition=terminal_state,
             )
 
         retired.append({
@@ -1425,6 +1426,193 @@ def reconcile_temporal_truth(
     return {
         "status": "ok",
         "dry_run": dry_run,
+        "count": len(reconciled),
+        "reconciled": reconciled,
+        "skipped": skipped,
+    }
+
+
+def preview_closed_packet_pickup_residue_reconciliations(
+    state_root: str,
+    *,
+    delegation_id: str = "",
+    loop_id: str = "",
+) -> dict[str, Any]:
+    """Preview active picked-up/no-wave delegations linked to closed packets.
+
+    This is intentionally narrower than the controller-prompt close hook: it
+    exists only to reconcile historical rows that pre-date the close-hook
+    behavior. Wave-owned picked-up delegations remain wave-owned.
+    """
+    if not state_root or not os.path.isdir(state_root):
+        raise DelegationError(f"state_root not found: {state_root}")
+
+    del_dir = _delegations_dir(state_root)
+    if delegation_id:
+        target = del_dir / f"{delegation_id}.yaml"
+        if not target.exists():
+            raise DelegationError(f"delegation '{delegation_id}' not found")
+        targets = [target]
+    else:
+        targets = sorted(del_dir.glob("DEL-*.yaml"))
+
+    previews: list[dict[str, Any]] = []
+    skipped = 0
+    for path in targets:
+        try:
+            data = _read_delegation(path)
+        except DelegationError:
+            skipped += 1
+            continue
+
+        current_state = str(data.get("delegation_state", "")).strip().lower()
+        if current_state != "picked_up":
+            skipped += 1
+            continue
+        if str(data.get("wave_id") or "").strip():
+            skipped += 1
+            continue
+        if loop_id and str(data.get("loop_id", "")).strip() != loop_id:
+            skipped += 1
+            continue
+
+        packet_id = str(data.get("packet_id", "")).strip()
+        packet_path = str(data.get("packet_path", "")).strip()
+        if not packet_id or packet_id.startswith("INTERVENTION-"):
+            skipped += 1
+            continue
+        if not packet_path or not os.path.isfile(packet_path):
+            skipped += 1
+            continue
+
+        packet_fm = _linked_packet_frontmatter(packet_path)
+        if str(packet_fm.get("status", "")).strip().lower() != "closed":
+            skipped += 1
+            continue
+        frontmatter_packet_id = str(packet_fm.get("packet_id", "")).strip()
+        if frontmatter_packet_id and frontmatter_packet_id != packet_id:
+            skipped += 1
+            continue
+        close_disposition = str(packet_fm.get("disposition", "")).strip().lower()
+        if not close_disposition:
+            skipped += 1
+            continue
+
+        previews.append({
+            "delegation_id": str(data.get("delegation_id", "")).strip() or path.stem,
+            "loop_id": str(data.get("loop_id", "")).strip(),
+            "packet_id": packet_id,
+            "packet_path": packet_path,
+            "previous_state": current_state,
+            "terminal_state": _terminal_state_for_packet_close(current_state, close_disposition),
+            "terminal_disposition": _terminal_disposition_for_close(close_disposition),
+            "close_reason": (
+                "historical picked_up/no-wave delegation linked to already closed "
+                f"controller packet {packet_id} (packet disposition={close_disposition})"
+            ),
+            "packet_status": "closed",
+            "packet_disposition": close_disposition,
+            "closed_at_utc": str(packet_fm.get("closed_at_utc", "")).strip(),
+            "terminal_at_utc": str(packet_fm.get("terminal_at_utc", "")).strip(),
+        })
+
+    return {
+        "status": "ok",
+        "mode": "closed_packet_pickup_residue",
+        "count": len(previews),
+        "previews": previews,
+        "skipped": skipped,
+    }
+
+
+def reconcile_closed_packet_pickup_residue(
+    state_root: str,
+    *,
+    delegation_id: str = "",
+    loop_id: str = "",
+    dry_run: bool = False,
+    close_source: str = "delegation.reconcile.temporal.truth.closed_packet_pickup_residue",
+) -> dict[str, Any]:
+    """Terminalize historical picked-up/no-wave delegations for closed packets."""
+    preview_result = preview_closed_packet_pickup_residue_reconciliations(
+        state_root,
+        delegation_id=delegation_id,
+        loop_id=loop_id,
+    )
+    previews = list(preview_result.get("previews") or [])
+    reconciled: list[dict[str, Any]] = []
+    skipped = int(preview_result.get("skipped") or 0)
+    if dry_run:
+        return {
+            "status": "ok",
+            "mode": "closed_packet_pickup_residue",
+            "dry_run": True,
+            "count": len(previews),
+            "reconciled": previews,
+            "skipped": skipped,
+        }
+
+    now = _now_utc()
+    for preview in previews:
+        delegation_id_value = str(preview.get("delegation_id", "")).strip()
+        if not delegation_id_value:
+            skipped += 1
+            continue
+        path = _delegations_dir(state_root) / f"{delegation_id_value}.yaml"
+        if not path.exists():
+            skipped += 1
+            continue
+        data = _read_delegation(path)
+        if str(data.get("delegation_state", "")).strip().lower() != "picked_up":
+            skipped += 1
+            continue
+        if str(data.get("wave_id") or "").strip():
+            skipped += 1
+            continue
+        if loop_id and str(data.get("loop_id", "")).strip() != loop_id:
+            skipped += 1
+            continue
+
+        packet_id = str(data.get("packet_id", "")).strip()
+        packet_path = str(data.get("packet_path", "")).strip()
+        packet_fm = _linked_packet_frontmatter(packet_path)
+        if (
+            packet_id != str(preview.get("packet_id", "")).strip()
+            or str(packet_fm.get("status", "")).strip().lower() != "closed"
+        ):
+            skipped += 1
+            continue
+
+        terminal_state = str(preview.get("terminal_state", "")).strip().lower() or "cancelled"
+        terminal_disposition = (
+            str(preview.get("terminal_disposition", "")).strip().lower() or "cancelled"
+        )
+        data["delegation_state"] = terminal_state
+        data["disposition"] = terminal_disposition
+        data["completed_at_utc"] = now
+        data["close_terminalized_by"] = close_source
+        data["close_terminalized_reason"] = str(preview.get("close_reason", "")).strip()
+        _atomic_write(str(path), data)
+
+        if packet_path and os.path.isfile(packet_path):
+            _update_packet_frontmatter(
+                packet_path,
+                delegation_id_value,
+                terminal_state,
+                loop_id=str(data.get("loop_id", "")),
+                terminal_disposition=terminal_state,
+            )
+
+        reconciled.append({
+            **preview,
+            "completed_at_utc": now,
+            "close_terminalized_by": close_source,
+        })
+
+    return {
+        "status": "ok",
+        "mode": "closed_packet_pickup_residue",
+        "dry_run": False,
         "count": len(reconciled),
         "reconciled": reconciled,
         "skipped": skipped,

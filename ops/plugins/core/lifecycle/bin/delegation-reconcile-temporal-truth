@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Forward-reconcile controller-prompt packet terminal_at_utc from delegation.
+"""Forward-reconcile controller-prompt/delegation terminal truth.
 
 PACKET-1349: governed retirement path for the D433 hardcoded baseline. Walks
 terminal delegations whose linked controller-prompt packet markdown lacks
 ``terminal_at_utc`` and writes the field from the delegation's
 ``completed_at_utc``. Active delegations and intervention-backed delegations
 are skipped.
+
+PACKET-1372 adds a bounded historical-residue mode for already closed packets
+whose linked delegation is still ``picked_up`` with no wave owner. This reuses
+the packet-close-derived terminalization contract; it is not a delegation
+completion primitive.
 """
 from __future__ import annotations
 
@@ -27,12 +32,25 @@ def main() -> int:
         "--id",
         dest="delegation_id",
         default="",
-        help="Reconcile a single delegation by id (default: walk all terminal delegations)",
+        help="Reconcile a single delegation by id (default: walk the selected mode)",
+    )
+    parser.add_argument(
+        "--loop-id",
+        default="",
+        help="Limit --closed-packet-pickup-residue to one loop id",
+    )
+    parser.add_argument(
+        "--closed-packet-pickup-residue",
+        action="store_true",
+        help=(
+            "Terminalize historical picked_up/no-wave delegations linked to already "
+            "closed controller packets. Narrow PACKET-1372 repair mode."
+        ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview the reconcile plan without writing packet frontmatter",
+        help="Preview the reconcile plan without writing state",
     )
     parser.add_argument("--json", action="store_true", help="Emit machine-consumable JSON")
     parser.add_argument(
@@ -52,11 +70,21 @@ def main() -> int:
         return 2
 
     try:
-        result = db.reconcile_temporal_truth(
-            state_root,
-            delegation_id=args.delegation_id,
-            dry_run=args.dry_run,
-        )
+        if args.closed_packet_pickup_residue:
+            result = db.reconcile_closed_packet_pickup_residue(
+                state_root,
+                delegation_id=args.delegation_id,
+                loop_id=args.loop_id,
+                dry_run=args.dry_run,
+            )
+        else:
+            if args.loop_id:
+                raise db.DelegationError("--loop-id requires --closed-packet-pickup-residue")
+            result = db.reconcile_temporal_truth(
+                state_root,
+                delegation_id=args.delegation_id,
+                dry_run=args.dry_run,
+            )
     except db.DelegationError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
@@ -66,15 +94,23 @@ def main() -> int:
         return 0
 
     mode = "DRY-RUN" if args.dry_run else "APPLIED"
-    print(f"delegation.reconcile.temporal.truth ({mode})")
+    result_mode = result.get("mode") or "temporal_truth"
+    print(f"delegation.reconcile.temporal.truth {result_mode} ({mode})")
     print(f"  reconciled: {result['count']}")
     print(f"  skipped:    {result['skipped']}")
     for r in result.get("reconciled", []):
-        print(
-            f"  - {r['delegation_id']} -> {r['packet_id']}: "
-            f"terminal_at_utc <- {r['wrote_terminal_at_utc']} "
-            f"(disposition={r['wrote_terminal_disposition']})"
-        )
+        if result_mode == "closed_packet_pickup_residue":
+            print(
+                f"  - {r['delegation_id']} -> {r['packet_id']}: "
+                f"{r.get('previous_state', '')} -> {r.get('terminal_state', '')} "
+                f"(packet disposition={r.get('packet_disposition', '')})"
+            )
+        else:
+            print(
+                f"  - {r['delegation_id']} -> {r['packet_id']}: "
+                f"terminal_at_utc <- {r['wrote_terminal_at_utc']} "
+                f"(disposition={r['wrote_terminal_disposition']})"
+            )
     return 0
 
 

@@ -443,6 +443,20 @@ import controller_prompt_close as cpc_close
 import delegation_broker as db
 import loops_sql_authority as lsa
 
+
+def packet_frontmatter(packet_path):
+    text = Path(packet_path).read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        raise SystemExit(f"packet {packet_path} is not frontmatter markdown")
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        raise SystemExit(f"packet {packet_path} has malformed frontmatter")
+    doc = yaml.safe_load(parts[1])
+    if not isinstance(doc, dict):
+        raise SystemExit(f"packet {packet_path} frontmatter is not a mapping")
+    return doc
+
+
 open_loop = {
     "loop_id": "LOOP-D441-OPEN",
     "status": "active",
@@ -724,6 +738,89 @@ if picked_up_row.get("disposition") != "superseded":
     raise SystemExit(f"unexpected picked-up non-wave disposition: {picked_up_row.get('disposition')}")
 if picked_up_row.get("close_terminalized_by") != "controller_prompt.close":
     raise SystemExit("picked-up non-wave terminalization source missing from delegation row")
+picked_up_fm = packet_frontmatter(picked_up_packet["packet_path"])
+if picked_up_fm.get("terminal_disposition") != "landed":
+    raise SystemExit("picked-up non-wave packet terminal_disposition was not written")
+if not picked_up_fm.get("terminal_at_utc"):
+    raise SystemExit("picked-up non-wave packet terminal_at_utc was not written")
+
+historical_packet = cpc.create_packet(
+    packet_id="PACKET-08-D441-HISTORICAL-PICKED-UP-NONWAVE",
+    loop_id="LOOP-D441-STALE",
+    concern="verify historical picked-up non-wave residue reconcile",
+    state_root=str(state_root),
+    owner="@test",
+)
+historical_close = cpc_close.close_packet(
+    historical_packet["packet_path"],
+    "delivered",
+    "verify historical picked-up non-wave residue packet close",
+    str(repo),
+    starting_head=head,
+    ending_head=head,
+    verify_result="pass",
+    auto_close_loop=False,
+)
+if historical_close.get("terminalized_unclaimed_delegations"):
+    raise SystemExit("historical residue setup unexpectedly terminalized delegation before it existed")
+historical_delegation_id = "DEL-D441-HISTORICAL-PICKED-UP-NONWAVE"
+(state_root / "delegations" / f"{historical_delegation_id}.yaml").write_text(
+    yaml.safe_dump(
+        {
+            "delegation_id": historical_delegation_id,
+            "loop_id": "LOOP-D441-STALE",
+            "packet_id": "PACKET-08-D441-HISTORICAL-PICKED-UP-NONWAVE",
+            "packet_path": historical_packet["packet_path"],
+            "packet_kind": "controller_prompt",
+            "objective": "historical picked-up non-wave delegation specimen",
+            "delegation_state": "picked_up",
+            "delegated_at_utc": "2026-04-26T00:00:00Z",
+            "delegator_terminal": "TEST-CONTROL-01",
+            "target_role": "worker",
+            "picked_up_by": "TEST-WORKER-01",
+            "picked_up_at_utc": "2026-04-26T00:01:00Z",
+            "wave_id": None,
+            "disposition": None,
+            "completed_at_utc": None,
+        },
+        sort_keys=False,
+    ),
+    encoding="utf-8",
+)
+historical_dry_run = db.reconcile_closed_packet_pickup_residue(
+    str(state_root),
+    loop_id="LOOP-D441-STALE",
+    dry_run=True,
+)
+historical_ids = {
+    item.get("delegation_id")
+    for item in historical_dry_run.get("reconciled", [])
+}
+if historical_ids != {historical_delegation_id}:
+    raise SystemExit(f"historical dry-run did not name exactly the residue specimen: {historical_ids}")
+historical_apply = db.reconcile_closed_packet_pickup_residue(
+    str(state_root),
+    loop_id="LOOP-D441-STALE",
+)
+historical_applied = historical_apply.get("reconciled") or []
+if len(historical_applied) != 1 or historical_applied[0].get("delegation_id") != historical_delegation_id:
+    raise SystemExit("historical picked-up non-wave reconcile did not apply exactly one specimen")
+historical_row = db.status(str(state_root), delegation_id=historical_delegation_id)["delegations"][0]
+if historical_row.get("delegation_state") != "landed":
+    raise SystemExit(f"unexpected historical delegation_state: {historical_row.get('delegation_state')}")
+if historical_row.get("disposition") != "superseded":
+    raise SystemExit(f"unexpected historical disposition: {historical_row.get('disposition')}")
+if historical_row.get("close_terminalized_by") != "delegation.reconcile.temporal.truth.closed_packet_pickup_residue":
+    raise SystemExit("historical reconcile source missing from delegation row")
+historical_fm = packet_frontmatter(historical_packet["packet_path"])
+if historical_fm.get("delegation_state") != "landed":
+    raise SystemExit("historical reconcile did not update packet delegation_state")
+if historical_fm.get("terminal_disposition") != "landed":
+    raise SystemExit("historical reconcile did not update packet terminal_disposition")
+if not historical_fm.get("terminal_at_utc"):
+    raise SystemExit("historical reconcile did not update packet terminal_at_utc")
+if historical_fm.get("disposition") != "delivered":
+    raise SystemExit("historical reconcile changed packet close disposition")
 
 wave_bound_packet = cpc.create_packet(
     packet_id="PACKET-07-D441-PICKED-UP-WAVE",
@@ -774,6 +871,13 @@ if wave_bound_row.get("delegation_state") != "picked_up":
     raise SystemExit(f"wave-bound delegation state changed unexpectedly: {wave_bound_row.get('delegation_state')}")
 if wave_bound_row.get("wave_id") != "WAVE-D441-OWNED":
     raise SystemExit("wave-bound delegation lost wave_id")
+wave_bound_reconcile = db.reconcile_closed_packet_pickup_residue(
+    str(state_root),
+    delegation_id=wave_bound_delegation_id,
+    dry_run=True,
+)
+if wave_bound_reconcile.get("count") != 0:
+    raise SystemExit("historical reconcile proposed wave-bound picked-up delegation")
 
 closed_status = json.loads(subprocess.check_output(
     [
@@ -985,5 +1089,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, commit.narrator.status --evaluate-rules runs the deterministic rule engine over committed governance and emits a rule_layer with verdict (good_direction|regression_risk|unknown_*) confidence rule_outcomes citations and honest_unknown_reason while preserving witness-only authority bounds, default narrator runs without --evaluate-rules MUST NOT publish rule_evaluation or row.rule_layer, commit.narrator.status --from-artifacts replays per-commit yamls into the rollup payload with artifact_reads summary and from_artifact rows pulling direction_signal/rule_layer from canonical state while missing artifacts produce explicit disclosure rows (no silent recompute) and default runs without --from-artifacts MUST NOT publish artifact_reads or row.from_artifact, .gitea/workflows/narrator.yml dispatches narrator on push-to-main only inside an SSH command to NARRATOR_DISPATCH_TARGET (forge runner does not gain capability_execution; secrets referenced not committed; deferred-cleanly when secrets absent; SSH dispatch carries SPINE_ROLE_POLICY_OVERRIDE_REF + REASON so non-interactive cap admission treats the run as governed automation rather than silent bypass), session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed and picked-up non-wave delegations, deferred closed packets can be forward-corrected only with fresh evidence, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, commit.narrator.status --evaluate-rules runs the deterministic rule engine over committed governance and emits a rule_layer with verdict (good_direction|regression_risk|unknown_*) confidence rule_outcomes citations and honest_unknown_reason while preserving witness-only authority bounds, default narrator runs without --evaluate-rules MUST NOT publish rule_evaluation or row.rule_layer, commit.narrator.status --from-artifacts replays per-commit yamls into the rollup payload with artifact_reads summary and from_artifact rows pulling direction_signal/rule_layer from canonical state while missing artifacts produce explicit disclosure rows (no silent recompute) and default runs without --from-artifacts MUST NOT publish artifact_reads or row.from_artifact, .gitea/workflows/narrator.yml dispatches narrator on push-to-main only inside an SSH command to NARRATOR_DISPATCH_TARGET (forge runner does not gain capability_execution; secrets referenced not committed; deferred-cleanly when secrets absent; SSH dispatch carries SPINE_ROLE_POLICY_OVERRIDE_REF + REASON so non-interactive cap admission treats the run as governed automation rather than silent bypass), session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed and picked-up non-wave delegations with packet terminal_at_utc, historical picked-up non-wave closed-packet residue reconciles without touching wave-owned pickups, deferred closed packets can be forward-corrected only with fresh evidence, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0
