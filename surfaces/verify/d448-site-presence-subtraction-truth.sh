@@ -147,6 +147,54 @@ missing_home_device_dnd = HOME_DEVICE_REQUIRED_DOES_NOT_DECIDE - home_device_dnd
 if missing_home_device_dnd:
     fail(f"home.device.registry.yaml authority_scope.does_not_decide missing boundary entries: {sorted(missing_home_device_dnd)} (PACKET-1270)")
 
+# PACKET-1272: DHCP audit/status surfaces may consume registry DHCP
+# reservation intent, but must not teach registries as Site Intelligence or
+# current presence authority.
+dhcp_caps = caps.get("capabilities") or {}
+for cap_name in ["network.home.dhcp.audit", "network.shop.dhcp.audit"]:
+    cap_doc = dhcp_caps.get(cap_name) or {}
+    desc = cap_doc.get("description") or ""
+    if "declared DHCP reservation intent" not in desc:
+        fail(f"{cap_name} description must name declared DHCP reservation intent (PACKET-1272)")
+    if "site.presence.status remains current site presence authority" not in desc:
+        fail(f"{cap_name} description must point current site presence authority at site.presence.status (PACKET-1272)")
+    if "against home.device.registry.yaml" in desc or "against shop.device.registry.yaml" in desc:
+        fail(f"{cap_name} description must not teach registry-as-audit-authority grammar (PACKET-1272)")
+
+dhcp_script_expectations = [
+    (
+        "ops/plugins/infra/network/bin/network-home-dhcp-audit",
+        [
+            "declared DHCP intent",
+            "canonical_site_presence: $SITE_PRESENCE_AUTHORITY",
+            "intent_source: ops/bindings/home.device.registry.yaml",
+        ],
+    ),
+    (
+        "ops/plugins/infra/network/bin/network-shop-dhcp-audit",
+        [
+            "DHCP intent evidence",
+            "canonical_site_presence: $SITE_PRESENCE_AUTHORITY",
+            "intent_source: ops/bindings/shop.device.registry.yaml",
+        ],
+    ),
+    (
+        "ops/plugins/infra/network/bin/network-home-dhcp-reservation-status",
+        [
+            "declared DHCP reservation intent",
+            'SITE_PRESENCE_AUTHORITY = "site.presence.status"',
+            "device not found in declared DHCP intent sources",
+        ],
+    ),
+]
+for rel, required_fragments in dhcp_script_expectations:
+    text = (root / rel).read_text(encoding="utf-8")
+    if "against device registry" in text:
+        fail(f"{rel} must not teach DHCP audit against generic device registry (PACKET-1272)")
+    for fragment in required_fragments:
+        if fragment not in text:
+            fail(f"{rel} missing DHCP/Site Intelligence boundary fragment {fragment!r} (PACKET-1272)")
+
 # One all-sites JSON sample feeds both the home-row assertions and the
 # site-profile assertions below. This keeps the first-class readback intact
 # while avoiding duplicate site.presence.status subprocess rebuilds.
@@ -415,5 +463,5 @@ for phrase in required_teaching_phrases:
     if phrase not in proc_h.stdout:
         fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
 
-print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215), and home.device.registry.yaml authority_scope is bounded to compatibility evidence (PACKET-1270)")
+print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215), home.device.registry.yaml authority_scope is bounded to compatibility evidence (PACKET-1270), and DHCP audit/status registry reads are bounded to DHCP intent evidence under site.presence.status presence authority (PACKET-1272)")
 PY

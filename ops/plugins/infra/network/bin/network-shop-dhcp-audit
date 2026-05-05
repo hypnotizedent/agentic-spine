@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# network.shop.dhcp.audit — Audit shop UniFi DHCP reservations against device registry
+# network.shop.dhcp.audit — Read back shop UniFi DHCP reservations as DHCP intent evidence
 # Uses UNIFI_SHOP_API_KEY via X-API-KEY header (no cookie auth needed).
 # Proxied through PVE SSH (UDR6 is LAN-only).
 
@@ -14,6 +14,8 @@ SPINE_ROOT="$SNAPSHOT_SURFACE_ROOT"
 REGISTRY="$SPINE_ROOT/ops/bindings/shop.device.registry.yaml"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
 INFISICAL_AGENT="$SPINE_ROOT/ops/plugins/providers/bin/infisical-agent.sh"
+SITE_PRESENCE_AUTHORITY="site.presence.status"
+INTENT_ROLE="declared_dhcp_reservation_intent"
 TRACKED_SUMMARY_FILE="$SNAPSHOT_SURFACE_TRACKED_OUTPUT"
 SUMMARY_FILE="$SNAPSHOT_SURFACE_OUTPUT"
 MODE="$SNAPSHOT_SURFACE_MODE"
@@ -106,6 +108,16 @@ cat > "$SUMMARY_FILE" <<YAML
 # Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 # Source: UDR6 UniFi API via PVE SSH proxy
 # Mode: $MODE
+
+canonical_site_presence: $SITE_PRESENCE_AUTHORITY
+authority_boundary:
+  intent_source: ops/bindings/shop.device.registry.yaml
+  intent_role: $INTENT_ROLE
+  does_not_decide:
+    - current_site_presence
+    - site_profile_authority
+    - node_admission
+    - role_assignment
 
 summary:
   total_reservations: $RESERVATION_COUNT
