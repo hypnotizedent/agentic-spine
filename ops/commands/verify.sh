@@ -11,7 +11,6 @@ usage() {
 Usage: ops verify [OPTION]  # compatibility / expert wrapper
 
 First-class verify:
-  ops verify --foundation        Runs the two foundational readback caps below
   ops cap run verify.engine.run    Foundational engine smoke
   ops cap run spine.verify         Foundational spine/control-plane truth
 

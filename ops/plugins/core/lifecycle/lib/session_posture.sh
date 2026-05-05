@@ -341,7 +341,7 @@ session_posture_emit_env() {
     printf 'export SPINE_RECOVERY_READY=%q\n' "${__SP_RECOVERY_READY:-false}"
     printf 'export SPINE_SITE_DETECTION_BASIS=%q\n' "${__SP_SITE_DETECTION_BASIS:-unavailable}"
 
-    printf 'export SPINE_DEFAULT_VERIFY_CMD=%q\n' "./bin/ops verify --foundation"
+    printf 'export SPINE_DEFAULT_VERIFY_CMD=%q\n' "./bin/ops cap run verify.engine.run && ./bin/ops cap run spine.verify"
     printf 'export SPINE_DEFAULT_CONTROL_LOOP_CMD=%q\n' "./bin/ops status --control-loop"
 
     if [ -n "${SPINE_STATE:-}" ]; then
