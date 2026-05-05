@@ -11,6 +11,7 @@ AMEND_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/controller-prompt-amend"
 STATUS_PACKET_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/controller-prompt-status"
 RESERVE_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/controller-prompt-reserve"
 ENTRY_COMPILE_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/entry-compile"
+COMMIT_NARRATOR_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/commit-narrator-status"
 
 fail() { echo "D441 FAIL: $*" >&2; exit 1; }
 
@@ -18,6 +19,7 @@ fail() { echo "D441 FAIL: $*" >&2; exit 1; }
 [[ -f "$STATUS_PACKET_BIN" ]] || fail "controller-prompt-status surface missing"
 [[ -x "$RESERVE_BIN" ]] || fail "controller-prompt-reserve surface missing"
 [[ -f "$ENTRY_COMPILE_BIN" ]] || fail "entry-compile surface missing"
+[[ -x "$COMMIT_NARRATOR_BIN" ]] || fail "commit-narrator-status surface missing"
 grep -q 'continuity_live' "$STATUS_BIN" || fail "ops status does not classify delegation activity through continuity_live"
 grep -q 'secondary_verify_readback' "$STATUS_BIN" || fail "ops status JSON must expose actionable secondary verify readback"
 grep -q 'verify.infra.run (scoped estate/workload health, not foundational spine truth)' "$STATUS_BIN" || fail "ops status must name secondary verify owner without promoting it to foundational truth"
@@ -26,10 +28,42 @@ grep -q 'OPS_STATUS_BRIEF_FORCE_CACHE_FALLBACK' "$STATUS_BIN" || fail "ops statu
 grep -q 'Status: cached' "$STATUS_BIN" || fail "ops status brief must render cached fallback instead of all-unknown degradation"
 grep -q 'controller_prompt.status:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing controller_prompt.status"
 grep -q 'controller_prompt.reserve:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing controller_prompt.reserve"
+grep -q 'commit.narrator.status:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing commit.narrator.status"
 grep -q 'controller_prompt.status' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing controller_prompt.status"
 grep -q 'controller_prompt.reserve' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing controller_prompt.reserve"
+grep -q 'commit.narrator.status' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing commit.narrator.status"
 "$STATUS_PACKET_BIN" --self-check >/dev/null || fail "controller_prompt.status self-check failed"
 "$RESERVE_BIN" --self-check >/dev/null || fail "controller_prompt.reserve self-check failed"
+"$COMMIT_NARRATOR_BIN" --self-check >/dev/null || fail "commit.narrator.status self-check failed"
+
+NARRATOR_PAYLOAD="$("$COMMIT_NARRATOR_BIN" --json --limit 2 --skip-input-readbacks)"
+python3 - "$NARRATOR_PAYLOAD" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+if payload.get("canonical_authority") != "commit.narrator.status":
+    raise SystemExit("commit narrator canonical authority mismatch")
+boundary = payload.get("authority_boundary") or {}
+if boundary.get("mutation_access") != "none" or boundary.get("decision_authority") != "none":
+    raise SystemExit("commit narrator must stay witness-only")
+subtraction = payload.get("subtraction") or {}
+if not any("manual after-the-fact conversational commit narration" in item for item in subtraction.get("replaces", [])):
+    raise SystemExit("commit narrator must name the manual narration subtraction target")
+if "site.presence.status" not in boundary.get("does_not_replace", []):
+    raise SystemExit("commit narrator must not replace Site Intelligence")
+if "node.admission.status" not in boundary.get("does_not_replace", []):
+    raise SystemExit("commit narrator must not replace node admission")
+commits = payload.get("commits") or []
+if not commits:
+    raise SystemExit("commit narrator emitted no commit rows")
+for row in commits:
+    for key in ("direction_signal", "plain_verdict", "confidence", "confidence_boundary"):
+        if not row.get(key):
+            raise SystemExit(f"commit narrator row missing {key}")
+if (payload.get("input_readbacks") or {}).get("status") != "skipped":
+    raise SystemExit("commit narrator --skip-input-readbacks did not report skipped input readbacks")
+PY
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/d441-mid-packet.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -469,5 +503,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0

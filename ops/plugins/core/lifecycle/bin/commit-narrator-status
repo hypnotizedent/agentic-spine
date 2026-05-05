@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+"""commit.narrator.status - read-only commit-class narrative witness.
+
+The narrator is a signal surface, not authority. It reads recent commit
+metadata, changed paths, and shortstat only, then classifies direction signals
+with explicit confidence boundaries. Governed node admission and Site
+Intelligence are optional input readbacks; they do not own this program.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from collections import Counter
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[5]
+NODE_ADMISSION = ROOT / "ops/plugins/infra/bin/node-admission-status"
+SITE_PRESENCE = ROOT / "ops/plugins/infra/bin/site-presence-status"
+
+CAPABILITY = "commit.narrator.status"
+READ_BOUNDARY = "commit_metadata_changed_paths_shortstat_only_not_full_diff"
+DEFAULT_LIMIT = 12
+DEFAULT_INPUT_NODES = ("pve-r620", "observability-r620")
+
+SUBTRACTION_TOKENS = {
+    "subtract",
+    "subtraction",
+    "retire",
+    "retired",
+    "demote",
+    "demoted",
+    "fold",
+    "folded",
+    "delete",
+    "deleted",
+    "trim",
+    "remove",
+    "removed",
+}
+EXPANSION_TOKENS = {
+    "add",
+    "added",
+    "create",
+    "created",
+    "new",
+    "promote",
+    "promoted",
+    "register",
+    "registered",
+    "emit",
+    "integrate",
+    "first-class",
+    "first_class",
+}
+
+AUTHORITY_PREFIXES = (
+    "AGENTS.md",
+    "NORTH_STAR.md",
+    "docs/governance/",
+    "ops/bindings/",
+)
+VERIFY_PREFIXES = (
+    "surfaces/verify/",
+    "ops/plugins/core/verify/",
+)
+LIFECYCLE_PREFIXES = (
+    "ops/plugins/core/lifecycle/",
+    "ops/plugins/core/orchestration/",
+    "ops/plugins/core/loops/",
+    "ops/plugins/infra/mailroom-bridge/",
+    "ops/commands/status.sh",
+)
+SURFACE_PREFIXES = (
+    "ops/capabilities.yaml",
+    "ops/plugins/MANIFEST.yaml",
+    "ops/plugins/core/surface/",
+)
+ESTATE_INPUT_PREFIXES = (
+    "ops/plugins/infra/bin/node-admission-status",
+    "ops/plugins/infra/bin/site-presence-status",
+    "ops/bindings/node.role.contract.yaml",
+    "ops/bindings/topology.sites.yaml",
+    "ops/bindings/site.profile.contract.yaml",
+)
+
+
+def run(cmd: list[str], *, timeout: int = 10) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout)
+
+
+def git(*args: str, timeout: int = 10) -> subprocess.CompletedProcess[str]:
+    return run(["git", *args], timeout=timeout)
+
+
+def token_hit(text: str, tokens: set[str]) -> list[str]:
+    lowered = text.lower()
+    return sorted(token for token in tokens if token in lowered)
+
+
+def path_matches(path: str, prefixes: tuple[str, ...]) -> bool:
+    return any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in prefixes)
+
+
+def parse_shortstat(text: str) -> dict[str, int]:
+    stats = {"files_changed": 0, "insertions": 0, "deletions": 0}
+    if not text.strip():
+        return stats
+    files = re.search(r"(\d+)\s+files? changed", text)
+    insertions = re.search(r"(\d+)\s+insertions?\(\+\)", text)
+    deletions = re.search(r"(\d+)\s+deletions?\(-\)", text)
+    if files:
+        stats["files_changed"] = int(files.group(1))
+    if insertions:
+        stats["insertions"] = int(insertions.group(1))
+    if deletions:
+        stats["deletions"] = int(deletions.group(1))
+    return stats
+
+
+def changed_paths_for_commit(sha: str) -> tuple[list[str], dict[str, int]]:
+    # diff-tree with -m keeps merge commits honest; `git show --name-status`
+    # can emit no paths for a merge even when shortstat shows real changes.
+    proc = git("diff-tree", "--no-commit-id", "--name-status", "-r", "-m", sha)
+    if proc.returncode != 0:
+        return [], {}
+    paths: list[str] = []
+    statuses: Counter[str] = Counter()
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        status = parts[0]
+        path = parts[-1] if len(parts) > 1 else ""
+        if not path:
+            continue
+        paths.append(path)
+        statuses[status[:1]] += 1
+    return sorted(dict.fromkeys(paths)), dict(statuses)
+
+
+def commit_shortstat(sha: str) -> dict[str, int]:
+    proc = git("show", "--shortstat", "--format=", "--no-renames", sha)
+    if proc.returncode != 0:
+        return {"files_changed": 0, "insertions": 0, "deletions": 0}
+    return parse_shortstat(proc.stdout)
+
+
+def gate_script_count(treeish: str) -> int | None:
+    proc = git("ls-tree", "-r", "--name-only", treeish, "--", "surfaces/verify")
+    if proc.returncode != 0:
+        return None
+    return sum(1 for line in proc.stdout.splitlines() if re.search(r"/d[0-9].*\.sh$", line))
+
+
+def classify_commit(commit: dict[str, Any]) -> dict[str, Any]:
+    subject = str(commit.get("subject") or "")
+    paths = [str(path) for path in commit.get("paths") or []]
+    path_text = " ".join(paths)
+    combined = f"{subject} {path_text}"
+    subtraction_hits = token_hit(combined, SUBTRACTION_TOKENS)
+    expansion_hits = token_hit(combined, EXPANSION_TOKENS)
+
+    touched = []
+    if any(path_matches(path, AUTHORITY_PREFIXES) for path in paths):
+        touched.append("governance_or_contract")
+    if any(path_matches(path, VERIFY_PREFIXES) for path in paths):
+        touched.append("verify_lock")
+    if any(path_matches(path, LIFECYCLE_PREFIXES) for path in paths):
+        touched.append("core_lifecycle")
+    if any(path_matches(path, SURFACE_PREFIXES) for path in paths):
+        touched.append("capability_or_operator_surface")
+    if any(path_matches(path, ESTATE_INPUT_PREFIXES) for path in paths):
+        touched.append("node_or_site_input_readback")
+    if not touched:
+        touched.append("unclassified_repo_surface")
+
+    status_counts = commit.get("status_counts") or {}
+    added_files = int(status_counts.get("A", 0) or 0)
+    deleted_files = int(status_counts.get("D", 0) or 0)
+    shortstat = commit.get("shortstat") or {}
+    net_lines = int(shortstat.get("insertions", 0) or 0) - int(shortstat.get("deletions", 0) or 0)
+    adds_new_surface = (
+        "capability_or_operator_surface" in touched
+        or added_files > 0
+        or any(path.endswith(".sh") and path.startswith("surfaces/verify/") for path in paths)
+    )
+
+    reasons: list[str] = []
+    if subtraction_hits:
+        reasons.append(f"subtraction language: {', '.join(subtraction_hits)}")
+    if expansion_hits:
+        reasons.append(f"expansion language: {', '.join(expansion_hits)}")
+    if added_files:
+        reasons.append(f"added_files={added_files}")
+    if deleted_files:
+        reasons.append(f"deleted_files={deleted_files}")
+    if net_lines:
+        reasons.append(f"net_lines={net_lines:+d}")
+    reasons.extend(f"touches {surface}" for surface in touched if surface != "unclassified_repo_surface")
+
+    if adds_new_surface and not subtraction_hits and not deleted_files:
+        signal = "expansion_pressure_operator_eye"
+        verdict = "unknown_requires_closure_check"
+        confidence = "medium"
+    elif "governance_or_contract" in touched:
+        signal = "authority_shift_operator_eye"
+        verdict = "unknown_requires_authority_read"
+        confidence = "medium"
+    elif "verify_lock" in touched:
+        signal = "verify_lock_change"
+        verdict = "unknown_until_gate_read"
+        confidence = "medium"
+    elif subtraction_hits and (deleted_files or shortstat.get("deletions", 0)):
+        signal = "subtraction_signal"
+        verdict = "likely_subtraction_aligned"
+        confidence = "medium"
+    elif subtraction_hits:
+        signal = "named_subtraction_without_deletion_proof"
+        verdict = "unknown_check_if_old_surface_was_removed"
+        confidence = "low"
+    elif "core_lifecycle" in touched:
+        signal = "core_lifecycle_change"
+        verdict = "unknown_needs_diff_read"
+        confidence = "medium"
+    elif "node_or_site_input_readback" in touched:
+        signal = "input_readback_change"
+        verdict = "unknown_not_narrator_owner"
+        confidence = "medium"
+    else:
+        signal = "unknown_surface_change"
+        verdict = "unknown_not_enough_read"
+        confidence = "low"
+
+    if not paths:
+        signal = "unknown_paths_unread"
+        verdict = "unknown"
+        confidence = "low"
+        reasons.append("changed paths unavailable")
+
+    return {
+        "direction_signal": signal,
+        "plain_verdict": verdict,
+        "confidence": confidence,
+        "confidence_boundary": READ_BOUNDARY,
+        "touched_surfaces": touched,
+        "operator_eye": signal.endswith("operator_eye") or confidence == "low",
+        "reason": "; ".join(reasons) if reasons else "metadata did not expose a strong direction signal",
+    }
+
+
+def recent_commits(ref: str, limit: int) -> list[dict[str, Any]]:
+    proc = git(
+        "log",
+        ref,
+        f"--max-count={limit}",
+        "--date=iso-strict",
+        "--format=%H%x1f%aI%x1f%an%x1f%ae%x1f%s",
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "git log failed")
+    rows: list[dict[str, Any]] = []
+    for line in proc.stdout.splitlines():
+        parts = line.split("\x1f", 4)
+        if len(parts) != 5:
+            continue
+        sha, author_date, author_name, author_email, subject = parts
+        paths, status_counts = changed_paths_for_commit(sha)
+        row: dict[str, Any] = {
+            "sha": sha,
+            "short_sha": sha[:8],
+            "author_date": author_date,
+            "author_name": author_name,
+            "author_email_class": classify_author_email(author_email),
+            "subject": subject,
+            "paths": paths,
+            "status_counts": status_counts,
+            "shortstat": commit_shortstat(sha),
+        }
+        row.update(classify_commit(row))
+        rows.append(row)
+    return rows
+
+
+def classify_author_email(email: str) -> str:
+    lowered = email.lower()
+    if "bot" in lowered or "runner" in lowered or "codex" in lowered or "claude" in lowered:
+        return "agent_or_automation"
+    if lowered == "hypnotizedent@gmail.com":
+        return "operator"
+    return "unknown"
+
+
+def summarize(commits: list[dict[str, Any]], ref: str) -> dict[str, Any]:
+    by_signal = Counter(str(row.get("direction_signal") or "unknown") for row in commits)
+    touched = Counter()
+    operator_eye = []
+    for row in commits:
+        touched.update(row.get("touched_surfaces") or [])
+        if row.get("operator_eye"):
+            operator_eye.append(
+                {
+                    "sha": row.get("short_sha"),
+                    "subject": row.get("subject"),
+                    "reason": row.get("reason"),
+                    "direction_signal": row.get("direction_signal"),
+                }
+            )
+    latest_sha = commits[0]["sha"] if commits else ref
+    oldest_sha = commits[-1]["sha"] if commits else ref
+    return {
+        "ref": ref,
+        "count_inspected": len(commits),
+        "by_direction_signal": dict(sorted(by_signal.items())),
+        "touched_surface_counts": dict(sorted(touched.items())),
+        "operator_eye_count": len(operator_eye),
+        "operator_eye": operator_eye[:8],
+        "gate_script_count": {
+            "latest": gate_script_count(latest_sha),
+            "oldest_inspected": gate_script_count(oldest_sha),
+            "boundary": "D-gate script count only; active registry budget remains owned by D127.",
+        },
+    }
+
+
+def run_json_script(script: Path, args: list[str], timeout: int) -> dict[str, Any]:
+    proc = run([str(script), *args], timeout=timeout)
+    if proc.returncode != 0:
+        return {
+            "status": "unavailable",
+            "error": (proc.stderr or proc.stdout).strip()[:500],
+        }
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {
+            "status": "unavailable",
+            "error": "readback did not emit JSON",
+        }
+
+
+def input_readbacks(nodes: list[str]) -> dict[str, Any]:
+    node_rows: dict[str, Any] = {}
+    for node in nodes:
+        payload = run_json_script(NODE_ADMISSION, ["--node", node, "--json"], timeout=20)
+        rows = payload.get("rows") if isinstance(payload, dict) else None
+        row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
+        node_rows[node] = {
+            "readback": "node.admission.status",
+            "boundary": "input_readback_only_not_narrator_owner",
+            "status": payload.get("status", "unknown") if isinstance(payload, dict) else "unknown",
+            "admission_state": row.get("admission_state", "unknown"),
+            "promotion_stage": row.get("promotion_stage", "unknown"),
+            "lifecycle_state": row.get("lifecycle_state", "unknown"),
+            "role_candidacy": row.get("role_candidacy", []),
+            "active_runtime_roles": ((row.get("runtime_obligations") or {}).get("active_runtime_roles") or []),
+            "canonical_plane_access_roles": sorted(((row.get("canonical_plane_access") or {}).get("by_role") or {}).keys()),
+        }
+        if payload.get("status") == "unavailable":
+            node_rows[node]["error"] = payload.get("error")
+    site_payload = run_json_script(SITE_PRESENCE, ["--json"], timeout=30)
+    first_class_system = site_payload.get("first_class_system") if isinstance(site_payload, dict) else {}
+    return {
+        "node_admission": {
+            "capability": "node.admission.status",
+            "boundary": "input_readback_only_not_narrator_owner",
+            "nodes": node_rows,
+        },
+        "site_intelligence": {
+            "capability": "site.presence.status",
+            "boundary": "input_readback_only_not_narrator_owner",
+            "status": site_payload.get("status", "unknown") if isinstance(site_payload, dict) else "unknown",
+            "summary": site_payload.get("summary", {}) if isinstance(site_payload, dict) else {},
+            "first_class_system": {
+                "name": (first_class_system or {}).get("name"),
+                "public_readback": (first_class_system or {}).get("public_readback"),
+                "admission_readback": (first_class_system or {}).get("admission_readback"),
+            },
+        },
+    }
+
+
+def build_payload(args: argparse.Namespace) -> dict[str, Any]:
+    commits = recent_commits(args.ref, args.limit)
+    payload: dict[str, Any] = {
+        "canonical_authority": CAPABILITY,
+        "capability": CAPABILITY,
+        "status": "ok",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "scope": {
+            "class": "witness",
+            "subject": "commit_class_estate_narrative",
+            "ref": args.ref,
+            "limit": args.limit,
+            "read_depth": READ_BOUNDARY,
+        },
+        "authority_boundary": {
+            "mutation_access": "none",
+            "decision_authority": "none",
+            "does_not_decide": [
+                "node_admission",
+                "runtime_placement",
+                "backup_authority",
+                "watcher_authority",
+                "verify_pass_fail",
+                "loop_or_packet_closure",
+            ],
+            "does_not_replace": [
+                "git history",
+                "packet.label.validate",
+                "verify.engine.run",
+                "spine.verify",
+                "node.admission.status",
+                "site.presence.status",
+            ],
+        },
+        "subtraction": {
+            "replaces": [
+                "manual after-the-fact conversational commit narration as the only aggregate signal",
+                "per-agent self-report as the only direction signal for commits",
+            ],
+            "demotes_to_drilldown": [
+                "raw git show/git log spelunking for ordinary narrator status",
+                "individual agent commit narration when aggregate trend is needed",
+            ],
+            "does_not_delete": [
+                "expert git inspection",
+                "operator judgment",
+                "verify gates",
+            ],
+        },
+        "input_readbacks": (
+            {"status": "skipped", "reason": "--skip-input-readbacks"}
+            if args.skip_input_readbacks
+            else input_readbacks(args.input_node)
+        ),
+        "direction_signals": summarize(commits, args.ref),
+        "commits": commits,
+        "read_boundaries": [
+            READ_BOUNDARY,
+            "no LLM inference in v1",
+            "no full diff body read in v1",
+            "node admission and site intelligence are consumed only as readback inputs",
+        ],
+    }
+    return payload
+
+
+def print_human(payload: dict[str, Any]) -> None:
+    print(CAPABILITY)
+    print(f"status: {payload.get('status')}")
+    scope = payload.get("scope") or {}
+    print(f"scope: {scope.get('subject')} ref={scope.get('ref')} limit={scope.get('limit')}")
+    print("authority: witness signal only; mutation_access=none; decision_authority=none")
+    print("subtraction:")
+    for item in (payload.get("subtraction") or {}).get("replaces", []):
+        print(f"  replaces: {item}")
+    print("direction_signals:")
+    summary = payload.get("direction_signals") or {}
+    print(f"  inspected: {summary.get('count_inspected')}")
+    print(f"  by_signal: {json.dumps(summary.get('by_direction_signal') or {}, sort_keys=True)}")
+    print(f"  operator_eye_count: {summary.get('operator_eye_count')}")
+    gates = summary.get("gate_script_count") or {}
+    print(f"  gate_scripts: latest={gates.get('latest')} oldest_inspected={gates.get('oldest_inspected')}")
+    inputs = payload.get("input_readbacks") or {}
+    if inputs.get("status") == "skipped":
+        print("input_readbacks: skipped")
+    else:
+        print("input_readbacks:")
+        site = inputs.get("site_intelligence") or {}
+        print(f"  site_intelligence: {site.get('status')} via {site.get('capability')} (input only)")
+        nodes = ((inputs.get("node_admission") or {}).get("nodes") or {})
+        for node, row in nodes.items():
+            print(
+                f"  node_admission: {node} state={row.get('admission_state')} "
+                f"stage={row.get('promotion_stage')} lifecycle={row.get('lifecycle_state')}"
+            )
+    print("commits:")
+    for row in payload.get("commits") or []:
+        print(
+            f"- {row.get('short_sha')} {row.get('direction_signal')} "
+            f"confidence={row.get('confidence')} verdict={row.get('plain_verdict')}"
+        )
+        print(f"  subject: {row.get('subject')}")
+        print(f"  reason: {row.get('reason')}")
+        paths = row.get("paths") or []
+        shown = ", ".join(paths[:5])
+        suffix = f" (+{len(paths) - 5} more)" if len(paths) > 5 else ""
+        print(f"  paths: {shown}{suffix}")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Read-only commit-class narrative witness")
+    parser.add_argument("--ref", default="HEAD", help="Git ref to inspect")
+    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Recent commit count")
+    parser.add_argument("--input-node", action="append", default=[], help="Node id to summarize via node.admission.status")
+    parser.add_argument("--skip-input-readbacks", action="store_true", help="Do not invoke node/site input readbacks")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    parser.add_argument("--self-check", action="store_true", help="Run a lightweight self-check")
+    args = parser.parse_args(argv)
+    if args.limit < 1 or args.limit > 100:
+        parser.error("--limit must be between 1 and 100")
+    if not args.input_node:
+        args.input_node = list(DEFAULT_INPUT_NODES)
+    return args
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    if args.self_check:
+        _ = recent_commits("HEAD", 1)
+        print(f"{CAPABILITY} self-check PASS")
+        return 0
+    try:
+        payload = build_payload(args)
+    except Exception as exc:
+        print(f"{CAPABILITY} FAIL: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print_human(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
