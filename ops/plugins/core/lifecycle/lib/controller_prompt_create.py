@@ -231,6 +231,58 @@ def _check_packet_id_uniqueness(
             )
 
 
+def _check_packet_reservation_conflicts(
+    nn: str,
+    packet_id: str,
+    controller_prompts_dir: str,
+) -> None:
+    """Refuse same-number create when another active reservation exists.
+
+    `controller_prompt.reserve` is the first-class multi-terminal packet-number
+    claim. Create remains a single packet-file write target, but it must respect
+    active reservation files so parallel terminals cannot reserve PACKET-1300
+    for one slug while another terminal births PACKET-1300 with a different
+    slug.
+    """
+    reservations_dir = Path(controller_prompts_dir) / "reservations"
+    if not reservations_dir.is_dir():
+        return
+
+    now = datetime.now(timezone.utc)
+    conflicts: list[str] = []
+    for path in sorted(reservations_dir.glob("PACKET-*.reservation.yaml")):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if str(data.get("status") or "").strip().lower() != "reserved":
+            continue
+        reserved_packet_id = str(data.get("packet_id") or "").strip()
+        match = PACKET_ID_RE.match(reserved_packet_id)
+        if not match or match.group(1) != nn:
+            continue
+        expires_raw = str(data.get("expires_at_utc") or "").strip()
+        if expires_raw:
+            try:
+                expires = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if expires <= now:
+                continue
+        if reserved_packet_id != packet_id:
+            conflicts.append(f"{reserved_packet_id} ({path.name})")
+
+    if conflicts:
+        raise ControllerPromptCreateError(
+            f"PACKET-{nn} reservation conflict: active reservation(s) exist "
+            f"for another packet id: {', '.join(conflicts)}. Run "
+            "`controller_prompt.reserve --status` and choose an unreserved "
+            "packet number."
+        )
+
+
 def _packet_frontmatter(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -519,6 +571,11 @@ def create_packet(
     # ── Uniqueness checks ─────────────────────────────────────────
     _check_filesystem_uniqueness(packet_path)
     _check_packet_id_uniqueness(packet_id, controller_prompts_dir)
+    _check_packet_reservation_conflicts(
+        nn=nn,
+        packet_id=packet_id,
+        controller_prompts_dir=controller_prompts_dir,
+    )
     _check_packet_nn_uniqueness(
         nn=nn,
         packet_id=packet_id,

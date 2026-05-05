@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""controller-prompt-reserve — reserve the next controller packet number.
+
+This is intentionally small: it writes one reservation YAML under canonical
+controller-prompts state, guarded by a file lock, and prints the packet id the
+agent should use with controller_prompt.create.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+PACKET_ID_RE = re.compile(r"^PACKET-(\d+)-([A-Z][A-Z0-9-]*)$")
+PACKET_GLOBS = ("CONTROLLER-PACKET-*.md", "MAILROOM-CONTROLLER-PACKET-*.md")
+RESERVATION_GLOB = "PACKET-*.reservation.yaml"
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def normalize_slug(raw: str) -> str:
+    slug = re.sub(r"[^A-Z0-9-]+", "-", raw.strip().upper())
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    if not slug or not re.match(r"^[A-Z]", slug):
+        raise ValueError("slug must start with an ASCII letter after normalization")
+    return slug
+
+
+def read_frontmatter(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    if not text.startswith("---"):
+        return {}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        data = yaml.safe_load(parts[1])
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def packet_rows(cp_dir: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for glob in PACKET_GLOBS:
+        for path in cp_dir.glob(glob):
+            if path in seen:
+                continue
+            seen.add(path)
+            fm = read_frontmatter(path)
+            packet_id = str(fm.get("packet_id") or "").strip()
+            match = PACKET_ID_RE.match(packet_id)
+            if not match:
+                continue
+            rows.append({
+                "packet_number": int(match.group(1)),
+                "packet_id": packet_id,
+                "status": str(fm.get("status") or "").strip(),
+                "path": str(path),
+            })
+    return rows
+
+
+def reservation_rows(res_dir: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in sorted(res_dir.glob(RESERVATION_GLOB)):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        packet_id = str(data.get("packet_id") or "").strip()
+        match = PACKET_ID_RE.match(packet_id)
+        if not match:
+            continue
+        expires_raw = str(data.get("expires_at_utc") or "").strip()
+        active = str(data.get("status") or "").strip().lower() == "reserved"
+        if expires_raw:
+            try:
+                expires = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+                active = active and expires > utcnow()
+            except ValueError:
+                active = False
+        data["packet_number"] = int(match.group(1))
+        data["active"] = bool(active)
+        data["path"] = str(path)
+        rows.append(data)
+    return rows
+
+
+def self_check() -> int:
+    assert normalize_slug("packet reservation lane publish") == "PACKET-RESERVATION-LANE-PUBLISH"
+    assert PACKET_ID_RE.match("PACKET-1300-PACKET-RESERVATION-LANE-PUBLISH")
+    assert not PACKET_ID_RE.match("packet-1300-lower")
+    print("controller_prompt.reserve self-check PASS")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="controller-prompt-reserve")
+    parser.add_argument("--slug", default="", help="Packet slug; normalized to uppercase hyphen form.")
+    parser.add_argument("--packet-id", default="", help="Explicit PACKET-NN-SLUG to reserve.")
+    parser.add_argument("--loop-id", default="", help="Loop this reservation is for.")
+    parser.add_argument("--owner", default=os.environ.get("SPINE_TERMINAL_ID") or os.environ.get("OPS_TERMINAL_ID") or "@ronny")
+    parser.add_argument("--ttl-hours", type=int, default=24)
+    parser.add_argument("--status", action="store_true", help="List packet namespace and active reservations.")
+    parser.add_argument("--json", action="store_true", dest="json_output")
+    parser.add_argument("--self-check", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_check:
+        return self_check()
+
+    state_root = os.environ.get("SPINE_STATE", "").strip()
+    if not state_root:
+        print("controller_prompt.reserve FAIL: SPINE_STATE not set", file=sys.stderr)
+        return 1
+
+    cp_dir = Path(state_root) / "controller-prompts"
+    res_dir = cp_dir / "reservations"
+
+    existing_packets = packet_rows(cp_dir)
+    reservations = reservation_rows(res_dir)
+    active_reservations = [row for row in reservations if row.get("active")]
+    max_number = max([0] + [int(row["packet_number"]) for row in existing_packets + reservations])
+
+    if args.status:
+        payload = {
+            "capability": "controller_prompt.reserve",
+            "status": "ok",
+            "controller_prompts_dir": str(cp_dir),
+            "reservation_dir": str(res_dir),
+            "max_packet_number_seen": max_number,
+            "next_packet_number": max_number + 1,
+            "active_reservations": active_reservations,
+            "active_reservation_count": len(active_reservations),
+        }
+        if args.json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print("controller_prompt.reserve")
+            print(f"next_packet_number={payload['next_packet_number']}")
+            print(f"active_reservations={len(active_reservations)}")
+            for row in active_reservations[:12]:
+                print(f"  - {row.get('packet_id')} owner={row.get('owner')} loop={row.get('loop_id')}")
+        return 0
+
+    if not args.packet_id and not args.slug:
+        print("controller_prompt.reserve FAIL: --slug or --packet-id is required", file=sys.stderr)
+        return 2
+    if args.ttl_hours <= 0:
+        print("controller_prompt.reserve FAIL: --ttl-hours must be positive", file=sys.stderr)
+        return 2
+
+    res_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = res_dir / ".packet-number.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        existing_packets = packet_rows(cp_dir)
+        reservations = reservation_rows(res_dir)
+        active_reservations = [row for row in reservations if row.get("active")]
+        packet_numbers_in_use = {int(row["packet_number"]) for row in existing_packets}
+        reserved_numbers = {int(row["packet_number"]) for row in active_reservations}
+
+        if args.packet_id:
+            match = PACKET_ID_RE.match(args.packet_id.strip())
+            if not match:
+                print("controller_prompt.reserve FAIL: --packet-id must be PACKET-NN-SLUG", file=sys.stderr)
+                return 2
+            number = int(match.group(1))
+            slug = match.group(2)
+            packet_id = args.packet_id.strip()
+        else:
+            slug = normalize_slug(args.slug)
+            number = max([0] + list(packet_numbers_in_use) + [int(row["packet_number"]) for row in reservations]) + 1
+            while number in packet_numbers_in_use or number in reserved_numbers:
+                number += 1
+            packet_id = f"PACKET-{number}-{slug}"
+
+        if number in packet_numbers_in_use:
+            print(f"controller_prompt.reserve FAIL: PACKET-{number} already has a controller packet", file=sys.stderr)
+            return 1
+        conflicting = [row for row in active_reservations if int(row["packet_number"]) == number and row.get("packet_id") != packet_id]
+        if conflicting:
+            print(
+                "controller_prompt.reserve FAIL: packet number already actively reserved: "
+                + ", ".join(str(row.get("packet_id")) for row in conflicting),
+                file=sys.stderr,
+            )
+            return 1
+
+        reservation_path = res_dir / f"{packet_id}.reservation.yaml"
+        if reservation_path.exists():
+            try:
+                existing = yaml.safe_load(reservation_path.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                existing = {}
+            if isinstance(existing, dict) and str(existing.get("packet_id") or "").strip() == packet_id:
+                result = {
+                    "capability": "controller_prompt.reserve",
+                    "status": "already_reserved",
+                    "packet_id": packet_id,
+                    "packet_number": number,
+                    "reservation_path": str(reservation_path),
+                    "expires_at_utc": str(existing.get("expires_at_utc") or ""),
+                    "create_command": str(existing.get("create_command") or ""),
+                }
+                if args.json_output:
+                    print(json.dumps(result, indent=2, sort_keys=True))
+                else:
+                    print("controller_prompt.reserve")
+                    print(f"packet_id={packet_id}")
+                    print(f"reservation={reservation_path}")
+                    print(f"expires_at_utc={result['expires_at_utc']}")
+                    print(f"create_command={result['create_command']}")
+                return 0
+
+        now = utcnow()
+        expires = now + timedelta(hours=args.ttl_hours)
+        branch = ""
+        try:
+            import subprocess
+
+            proc = subprocess.run(["git", "branch", "--show-current"], text=True, capture_output=True)
+            branch = (proc.stdout or "").strip()
+        except Exception:
+            branch = ""
+
+        payload = {
+            "version": 1,
+            "status": "reserved",
+            "packet_id": packet_id,
+            "packet_number": number,
+            "slug": slug,
+            "loop_id": args.loop_id,
+            "owner": args.owner,
+            "terminal_id": os.environ.get("SPINE_TERMINAL_ID") or os.environ.get("OPS_TERMINAL_ID") or "",
+            "branch": branch,
+            "reserved_at_utc": iso(now),
+            "expires_at_utc": iso(expires),
+            "ttl_hours": args.ttl_hours,
+            "create_command": f"./bin/ops cap run controller_prompt.create -- --packet-id {packet_id} --loop-id {args.loop_id or '<LOOP-ID>'} --concern '<concern>' --body-source <path> --mutation-permitted",
+        }
+        try:
+            fd = os.open(str(reservation_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            print(f"controller_prompt.reserve FAIL: reservation already exists: {reservation_path}", file=sys.stderr)
+            return 1
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(payload, f, sort_keys=False)
+
+    result = {
+        "capability": "controller_prompt.reserve",
+        "status": "reserved",
+        "packet_id": packet_id,
+        "packet_number": number,
+        "reservation_path": str(reservation_path),
+        "expires_at_utc": payload["expires_at_utc"],
+        "create_command": payload["create_command"],
+    }
+    if args.json_output:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print("controller_prompt.reserve")
+        print(f"packet_id={packet_id}")
+        print(f"reservation={reservation_path}")
+        print(f"expires_at_utc={payload['expires_at_utc']}")
+        print(f"create_command={payload['create_command']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

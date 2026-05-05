@@ -9,17 +9,22 @@ SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 STATUS_BIN="$SPINE_CODE/ops/commands/status.sh"
 AMEND_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/controller-prompt-amend"
 STATUS_PACKET_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/controller-prompt-status"
+RESERVE_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/controller-prompt-reserve"
 ENTRY_COMPILE_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/entry-compile"
 
 fail() { echo "D441 FAIL: $*" >&2; exit 1; }
 
 [[ -f "$AMEND_BIN" ]] || fail "controller-prompt-amend surface missing"
 [[ -f "$STATUS_PACKET_BIN" ]] || fail "controller-prompt-status surface missing"
+[[ -x "$RESERVE_BIN" ]] || fail "controller-prompt-reserve surface missing"
 [[ -f "$ENTRY_COMPILE_BIN" ]] || fail "entry-compile surface missing"
 grep -q 'continuity_live' "$STATUS_BIN" || fail "ops status does not classify delegation activity through continuity_live"
 grep -q 'controller_prompt.status:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing controller_prompt.status"
+grep -q 'controller_prompt.reserve:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing controller_prompt.reserve"
 grep -q 'controller_prompt.status' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing controller_prompt.status"
+grep -q 'controller_prompt.reserve' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing controller_prompt.reserve"
 "$STATUS_PACKET_BIN" --self-check >/dev/null || fail "controller_prompt.status self-check failed"
+"$RESERVE_BIN" --self-check >/dev/null || fail "controller_prompt.reserve self-check failed"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/d441-mid-packet.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -46,6 +51,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -105,6 +111,22 @@ closed_residue_loop = {
     "objective": "verify closed loop delegation residue classification",
     "blocked_by": [],
     "next_action": "prove closed loop residue is terminal, not stale work",
+    "evidence_refs": [],
+    "linked_gaps": [],
+}
+reservation_loop = {
+    "loop_id": "LOOP-D441-RESERVATION",
+    "status": "active",
+    "owner": "@test",
+    "created": "20260426",
+    "scope": "verify",
+    "priority": "medium",
+    "horizon": "now",
+    "execution_readiness": "runnable",
+    "execution_mode": "single_worker",
+    "objective": "verify controller-prompt packet-number reservation",
+    "blocked_by": [],
+    "next_action": "reserve packet number before packet birth",
     "evidence_refs": [],
     "linked_gaps": [],
 }
@@ -179,6 +201,7 @@ cconn = lsa.connect(state_root / "shared_authority.db")
 try:
     lsa.upsert_loop(cconn, stale_loop)
     lsa.upsert_loop(cconn, closed_residue_loop)
+    lsa.upsert_loop(cconn, reservation_loop)
     cconn.commit()
 finally:
     cconn.close()
@@ -264,6 +287,51 @@ closed_status = json.loads(subprocess.check_output(
 if closed_status["packets"][0].get("status") != "closed":
     raise SystemExit("controller_prompt.status did not expose closed packet state")
 
+reservations_dir = state_root / "controller-prompts" / "reservations"
+reservations_dir.mkdir(parents=True, exist_ok=True)
+reservation_path = reservations_dir / "PACKET-04-D441-OTHER.reservation.yaml"
+reservation_path.write_text(
+    yaml.safe_dump(
+        {
+            "version": 1,
+            "status": "reserved",
+            "packet_id": "PACKET-04-D441-OTHER",
+            "packet_number": 4,
+            "slug": "D441-OTHER",
+            "loop_id": "LOOP-D441-RESERVATION",
+            "owner": "@test",
+            "terminal_id": "TEST-CONTROL-01",
+            "reserved_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "expires_at_utc": (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        sort_keys=False,
+    ),
+    encoding="utf-8",
+)
+try:
+    cpc.create_packet(
+        packet_id="PACKET-04-D441-CONFLICT",
+        loop_id="LOOP-D441-RESERVATION",
+        concern="verify reservation conflict",
+        state_root=str(state_root),
+        owner="@test",
+    )
+except cpc.ControllerPromptCreateError as exc:
+    if "reservation conflict" not in str(exc):
+        raise SystemExit(f"unexpected reservation conflict error: {exc}")
+else:
+    raise SystemExit("controller_prompt.create ignored active packet-number reservation")
+
+reserved_packet = cpc.create_packet(
+    packet_id="PACKET-04-D441-OTHER",
+    loop_id="LOOP-D441-RESERVATION",
+    concern="verify exact reservation can birth packet",
+    state_root=str(state_root),
+    owner="@test",
+)
+if not Path(reserved_packet["packet_path"]).is_file():
+    raise SystemExit("controller_prompt.create did not birth exact reserved packet")
+
 closed_residue_packet = cpc.create_packet(
     packet_id="PACKET-03-D441-CLOSED-RESIDUE",
     loop_id="LOOP-D441-CLOSED-RESIDUE",
@@ -323,5 +391,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet state, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet state, controller_prompt.reserve blocks parallel packet-number collision, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, and closed-loop delegation residue is terminal instead of stale work"
 exit 0

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+REMOTE="origin"
+LANE_BRANCH=""
+DRY_RUN=0
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+coordinator-lane-publish
+
+Usage:
+  coordinator-lane-publish [--lane-branch <branch>] [--remote origin] [--dry-run] [--json]
+
+Publishes the current clean lane branch before routed coordinator.lane.closeout.
+It does not integrate or mutate the target branch.
+USAGE
+}
+
+fail() {
+  echo "coordinator.lane.publish FAIL: $*" >&2
+  exit 1
+}
+
+if [[ "${1:-}" == "--self-check" ]]; then
+  grep -q "push -u" "$0" || fail "self-check missing push marker"
+  grep -q "closeout_command" "$0" || fail "self-check missing closeout command marker"
+  echo "coordinator.lane.publish self-check PASS"
+  exit 0
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --lane-branch) LANE_BRANCH="${2:-}"; shift 2 ;;
+    --remote) REMOTE="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not a git repository: $ROOT"
+
+CURRENT_BRANCH="$(git -C "$ROOT" branch --show-current 2>/dev/null || true)"
+[[ -n "$LANE_BRANCH" ]] || LANE_BRANCH="$CURRENT_BRANCH"
+[[ -n "$LANE_BRANCH" && "$LANE_BRANCH" != "HEAD" ]] || fail "lane branch cannot be detached"
+[[ "$LANE_BRANCH" != "main" ]] || fail "refusing to publish main as a lane"
+git -C "$ROOT" show-ref --verify "refs/heads/$LANE_BRANCH" >/dev/null 2>&1 || fail "missing local lane branch: $LANE_BRANCH"
+
+if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
+  fail "lane worktree must be clean before publish"
+fi
+
+lane_head="$(git -C "$ROOT" rev-parse "$LANE_BRANCH")"
+remote_lane_head="$(git -C "$ROOT" ls-remote --heads "$REMOTE" "$LANE_BRANCH" 2>/dev/null | awk '{print $1}' | head -1 || true)"
+publish_required=0
+publish_status="already_published"
+if [[ "$lane_head" != "${remote_lane_head:-}" ]]; then
+  publish_required=1
+  publish_status="publish_required"
+fi
+
+publish_command="git -C $ROOT push -u $REMOTE $LANE_BRANCH:$LANE_BRANCH"
+closeout_command="./bin/ops cap run coordinator.lane.closeout -- --loop-id <LOOP-ID> --lane-branch $LANE_BRANCH --cleanup-mode report-only --json"
+
+if [[ "$DRY_RUN" -eq 0 && "$publish_required" -eq 1 ]]; then
+  git -C "$ROOT" push -u "$REMOTE" "$LANE_BRANCH:$LANE_BRANCH" >/dev/null
+  git -C "$ROOT" fetch "$REMOTE" "$LANE_BRANCH" >/dev/null 2>&1 || true
+  remote_lane_head="$(git -C "$ROOT" ls-remote --heads "$REMOTE" "$LANE_BRANCH" 2>/dev/null | awk '{print $1}' | head -1 || true)"
+  [[ "$remote_lane_head" == "$lane_head" ]] || fail "remote lane head did not match after publish"
+  publish_status="published"
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  publish_status="dry_run_${publish_status}"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  python3 - "$publish_status" "$ROOT" "$REMOTE" "$LANE_BRANCH" "$lane_head" "${remote_lane_head:-}" "$publish_required" "$publish_command" "$closeout_command" <<'PY'
+import json
+import sys
+
+status, repo, remote, lane_branch, lane_head, remote_lane_head, publish_required, publish_command, closeout_command = sys.argv[1:10]
+print(json.dumps(
+    {
+        "capability": "coordinator.lane.publish",
+        "status": status,
+        "repo": repo,
+        "remote": remote,
+        "lane_branch": lane_branch,
+        "lane_head": lane_head,
+        "remote_lane_head": remote_lane_head or None,
+        "publish_required": publish_required == "1",
+        "publish_command": publish_command,
+        "next_command": closeout_command,
+    },
+    indent=2,
+    sort_keys=True,
+))
+PY
+else
+  echo "coordinator.lane.publish"
+  echo "status: $publish_status"
+  echo "lane_branch: $LANE_BRANCH"
+  echo "lane_head: $lane_head"
+  echo "remote_lane_head: ${remote_lane_head:-missing}"
+  echo "publish_required: $publish_required"
+  echo "publish_command: $publish_command"
+  echo "next_command: $closeout_command"
+fi
