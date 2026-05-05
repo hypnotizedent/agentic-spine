@@ -123,6 +123,49 @@ FIRST_CLASS_LIFECYCLE = [
 ]
 
 
+# PACKET-1329: minimal-lever model. site.presence.status is the only
+# operator first-read for Site Intelligence; everything below is a closed
+# set of authorized drilldown levers. Anything else that surfaces is folded
+# input or implementation detail, not a peer dashboard knob.
+DRILLDOWN_LEVERS = [
+    {
+        "lever": "node.admission.status",
+        "scope": "admission, hardware class, bootstrap state, provisioning boundary",
+        "kind": "branch_authority",
+    },
+    {
+        "lever": "payload.custody.status",
+        "scope": "storage custody, scaffold class, evidence ref",
+        "kind": "branch_authority",
+    },
+    {
+        "lever": "backup.estate.readback.status",
+        "scope": "backup posture per subject",
+        "kind": "branch_authority",
+    },
+    {
+        "lever": "network.home.unifi.clients.snapshot",
+        "scope": "home UniFi observed-client refresh (folded input producer)",
+        "kind": "bounded_producer",
+    },
+    {
+        "lever": "network.unifi.clients.snapshot",
+        "scope": "shop UniFi observed-client refresh (folded input producer)",
+        "kind": "bounded_producer",
+    },
+    {
+        "lever": "network.home.dhcp.audit",
+        "scope": "home DHCP intent audit (folded input producer)",
+        "kind": "bounded_producer",
+    },
+    {
+        "lever": "network.shop.dhcp.audit",
+        "scope": "shop DHCP intent audit + unregistered classification (folded input producer)",
+        "kind": "bounded_producer",
+    },
+]
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
@@ -827,7 +870,10 @@ def main() -> None:
             "admission_readback": "node.admission.status",
             "lifecycle": FIRST_CLASS_LIFECYCLE,
             "legacy_input_policy": "folded_source_inputs_not_operator_surfaces",
+            "operator_first_read": "site.presence.status",
+            "drilldown_levers_policy": "closed_set",
         },
+        "drilldown_levers": DRILLDOWN_LEVERS,
         "folded_legacy_inputs": FOLDED_LEGACY_INPUTS,
     }
     if args.json:
@@ -846,7 +892,11 @@ def main() -> None:
         print(f"  {stage['stage']:<14} {stage['authority']}{suffix}")
         print(f"    boundary: {stage['boundary']}")
     print("")
-    print("Folded legacy inputs (not operator-facing subsystems):")
+    print("Drilldown levers (only):")
+    for lever in DRILLDOWN_LEVERS:
+        print(f"  {lever['lever']:<40} [{lever['kind']}] {lever['scope']}")
+    print("")
+    print("Folded legacy inputs (implementation detail, not operator first-read):")
     for item in FOLDED_LEGACY_INPUTS:
         print(f"  {item['path']} -> {item['folded_into']} [{item['subtraction_state']}]")
     # PACKET-1115: human readback teaches Site Profiles before per-row presence.
