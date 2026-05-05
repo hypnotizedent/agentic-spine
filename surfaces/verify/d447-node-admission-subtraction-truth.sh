@@ -1008,6 +1008,12 @@ by_id = {row.get("surface_id"): row for row in surfaces if isinstance(row, dict)
 home_hw = by_id.get("home.hardware.inventory")
 internet_asset = by_id.get("internet.asset.registry")
 node_admission_surface = by_id.get("node.admission.readback")
+# PACKET-1235: extend snapshot.surface.contract enforcement to include
+# home.proxmox.inventory (compute_nodes evidence superseded by node.admission)
+# and home.unifi.network.inventory (network-equipment evidence superseded by
+# site.profile authority + site.presence readback per PACKET-1145).
+home_proxmox = by_id.get("home.proxmox.inventory")
+home_unifi_net = by_id.get("home.unifi.network.inventory")
 
 if not isinstance(node_admission_surface, dict):
     fail("snapshot.surface.contract.yaml missing node.admission.readback surface")
@@ -1016,18 +1022,34 @@ if node_admission_surface.get("refresh_binding") != "node.admission.status":
 if node_admission_surface.get("authority_layer") != "L2_readmodel":
     fail("node.admission.readback must be L2_readmodel")
 
+# Surfaces demoted with node_admission as replacement readback.
 for surface_id, row in {
     "home.hardware.inventory": home_hw,
     "internet.asset.registry": internet_asset,
+    "home.proxmox.inventory": home_proxmox,
 }.items():
     if not isinstance(row, dict):
-        fail(f"missing {surface_id} in snapshot surface contract")
+        fail(f"missing {surface_id} in snapshot surface contract (PACKET-1235)")
     if row.get("authority_layer") in {"L1_authority", "L2_authority"}:
         fail(f"{surface_id} still reads as peer authority")
     policy = str(row.get("consumer_policy") or "")
     disposition = str(row.get("subtraction_disposition") or "")
     if "node_admission" not in policy and "node_admission" not in disposition:
         fail(f"{surface_id} demotion must name node_admission replacement")
+
+# PACKET-1235: home.unifi.network.inventory demoted by site.profile authority +
+# site.presence readback per PACKET-1145; replacement chain is named there
+# rather than node_admission.
+if not isinstance(home_unifi_net, dict):
+    fail("missing home.unifi.network.inventory in snapshot surface contract (PACKET-1235; completes PACKET-1145 demotion)")
+if home_unifi_net.get("authority_layer") in {"L1_authority", "L2_authority"}:
+    fail("home.unifi.network.inventory still reads as peer authority (PACKET-1235)")
+unifi_policy = str(home_unifi_net.get("consumer_policy") or "")
+unifi_disposition = str(home_unifi_net.get("subtraction_disposition") or "")
+if "site.profile" not in unifi_policy and "site.profile" not in unifi_disposition and "site_profile" not in unifi_policy and "site_profile" not in unifi_disposition:
+    fail("home.unifi.network.inventory demotion must name site.profile/site_profile replacement (PACKET-1235)")
+if "site.presence" not in unifi_policy and "site_presence" not in unifi_disposition and "site.presence" not in unifi_disposition:
+    fail("home.unifi.network.inventory demotion must name site.presence replacement readback (PACKET-1235)")
 
 master = load_yaml(master_path)
 rows = master.get("rows") or []
