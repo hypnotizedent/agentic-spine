@@ -121,6 +121,11 @@ If the answer is "nothing was replaced," the change must say why. If the
 answer is "old work needs catchup," the catchup must use the new canonical
 authority rather than create a second migration plane.
 
+If a missed adoption is discovered after delivery, record the correction
+forward in the existing owning binding or capability metadata. Do not rewrite
+closed packet bodies, loop closeouts, receipts, or commit history to simulate
+original compliance.
+
 Surface expansion also follows
 [`SESSION_PROTOCOL.md#surface-expansion-discipline`](SESSION_PROTOCOL.md#surface-expansion-discipline):
 new first-class surfaces must retire, fold, hide, or demote an old peer path in
