@@ -1064,6 +1064,17 @@ for surface_id, row in {
     if "node_admission" not in policy and "node_admission" not in disposition:
         fail(f"{surface_id} demotion must name node_admission replacement")
 
+# PACKET-1282: home hardware/proxmox compatibility evidence must not keep
+# dead reconcile cap names as refresh truth once node.admission.status is the
+# declared replacement readback.
+for surface_id in ["home.hardware.inventory", "home.proxmox.inventory"]:
+    row = by_id.get(surface_id) or {}
+    if row.get("refresh_binding") != "node.admission.status":
+        fail(f"{surface_id} refresh_binding must point at node.admission.status, not stale reconcile cap (PACKET-1282)")
+    proof = (row.get("heartbeat") or {}).get("proof_channel") or {}
+    if proof.get("type") != "replacement_readback" or proof.get("ref") != "node.admission.status":
+        fail(f"{surface_id} heartbeat proof must use replacement_readback node.admission.status (PACKET-1282)")
+
 # PACKET-1235: home.unifi.network.inventory demoted by site.profile authority +
 # site.presence readback per PACKET-1145; replacement chain is named there
 # rather than node_admission.
