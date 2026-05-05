@@ -134,7 +134,10 @@ def _read_scope_frontmatter(path: Path) -> dict[str, Any]:
 
 # ── Parity checks ────────────────────────────────────────────────────
 
+# Lifecycle-live records include planned work, but public "open work" readbacks
+# intentionally count only work that is active, draft, or open.
 LIVE_STATUSES = {"active", "open", "draft", "planned"}
+OPEN_WORK_STATUSES = {"active", "open", "draft"}
 CLOSED_STATUSES = {"closed", "completed", "deferred", "superseded", "abandoned", "landed"}
 RECEIPT_DISCIPLINE_EPOCH_UTC = "2026-04-14T00:00:00Z"
 
@@ -307,13 +310,14 @@ def check_c3_sqlite_vs_status(
     sqlite_loops: list[dict[str, Any]],
     status_output: dict[str, Any],
 ) -> dict[str, Any]:
-    """C3: status --json open_loops set == SQLite live-status loop set."""
-    # SQLite live loops
+    """C3: status --json open_loops set == SQLite public open-work loop set."""
+    # SQLite public open-work loops. Planned loops remain live lifecycle rows,
+    # but ops status does not expose them as open operator work.
     sqlite_open: set[str] = set()
     for loop in sqlite_loops:
         status = (loop.get("status") or "unknown").lower()
         lid = loop.get("loop_id", "")
-        if status in LIVE_STATUSES and lid:
+        if status in OPEN_WORK_STATUSES and lid:
             sqlite_open.add(lid)
 
     # Status open loops
