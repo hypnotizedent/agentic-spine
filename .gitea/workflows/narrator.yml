@@ -75,6 +75,14 @@ jobs:
           #   that forge_node never gains capability_execution itself, and the
           #   dispatch target's execution_host authority is what carries the
           #   mutation right (per PACKET-1340 placement audit).
+          # Self-sync the local git database only: the dispatch target
+          # may not yet have the triggering SHA in its object store
+          # because runtime.checkout.deploy.update normally runs from
+          # operator_console, which is slower than the gitea workflow.
+          # `git fetch` makes the SHA visible to git log; narrator
+          # resolves --ref by SHA from the object store, not the working
+          # tree, so we do NOT checkout/move the working tree (that
+          # would later collide with deploy.update --ff-only).
           ssh \
             -i "${KEYFILE}" \
             -o StrictHostKeyChecking=accept-new \
@@ -82,6 +90,7 @@ jobs:
             -o BatchMode=yes \
             "${NARRATOR_DISPATCH_TARGET}" \
             "set -e; cd '${NARRATOR_DISPATCH_REPO}' && \
+              git fetch --quiet origin ${GITHUB_SHA} && \
               SPINE_ROLE_POLICY_OVERRIDE_REF='gitea-workflow-narrator/${GITHUB_RUN_ID}' \
               SPINE_ROLE_POLICY_OVERRIDE_REASON='narrator-v1.5-auto-dispatch-on-push-to-main-PACKET-1367' \
               ./bin/ops cap run commit.narrator.status -- --ref ${GITHUB_SHA} --include-diff --evaluate-rules --write-artifacts --limit 1 --skip-input-readbacks" \
