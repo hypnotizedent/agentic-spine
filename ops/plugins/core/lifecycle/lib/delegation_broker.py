@@ -1086,6 +1086,81 @@ def transition(
     }
 
 
+def complete_for_wave_close(
+    state_root: str,
+    *,
+    loop_id: str,
+    wave_id: str,
+    disposition: str,
+) -> dict[str, Any]:
+    """Terminalize the owning interactive delegation before loop closeout.
+
+    wave-close performs packet and loop closeout reconciliation while the wave
+    close command is still running. If the linked delegation stays active until
+    after wave.finish, loop closeout can report that same delegation as a
+    blocker. This helper makes the closed-wave disposition visible to delegation
+    readbacks before loop closeout reconciliation runs.
+    """
+    target_state = "landed" if disposition == "landed" else "needs_review"
+    loop_id = str(loop_id or "").strip()
+    wave_id = str(wave_id or "").strip()
+
+    for row in status(state_root).get("delegations", []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("loop_id") or "").strip() != loop_id:
+            continue
+
+        delegation_id = str(row.get("delegation_id") or "").strip()
+        if not delegation_id:
+            continue
+
+        current_state = str(row.get("delegation_state") or "").strip()
+        current_wave = str(row.get("wave_id") or "").strip()
+        if current_state == target_state and current_wave == wave_id:
+            return {
+                "status": target_state,
+                "delegation_id": delegation_id,
+                "previous_state": current_state,
+                "wave_id": wave_id,
+                "disposition": disposition,
+                "changed": False,
+            }
+
+        if current_state == "picked_up" and (current_wave == wave_id or not current_wave):
+            transition(state_root, delegation_id, "executing", wave_id=wave_id)
+            result = transition(
+                state_root,
+                delegation_id,
+                target_state,
+                wave_id=wave_id,
+                disposition=disposition,
+            )
+            result["intermediate_state"] = "executing"
+            result["changed"] = True
+            return result
+
+        if current_state == "executing" and (current_wave == wave_id or not current_wave):
+            result = transition(
+                state_root,
+                delegation_id,
+                target_state,
+                wave_id=wave_id,
+                disposition=disposition,
+            )
+            result["changed"] = True
+            return result
+
+    return {
+        "status": "not_found",
+        "delegation_id": "",
+        "previous_state": "",
+        "wave_id": wave_id,
+        "disposition": disposition,
+        "changed": False,
+    }
+
+
 def reconcile_terminal_intervention_alignment(
     state_root: str,
     *,

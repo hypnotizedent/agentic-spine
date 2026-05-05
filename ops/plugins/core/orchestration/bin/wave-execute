@@ -94,14 +94,16 @@ import delegation_broker as db
 state_root = sys.argv[2]
 wave_id = sys.argv[3]
 loop_id = sys.argv[4]
-new_state = sys.argv[5]
 disposition = sys.argv[6]
-result = db.status(state_root)
-for d in result.get('delegations', []):
-    if d.get('loop_id') == loop_id and d.get('delegation_state') == 'executing' and d.get('wave_id') == wave_id:
-        db.transition(state_root, d['delegation_id'], new_state, wave_id=wave_id, disposition=disposition)
-        print(f'delegation {d[\"delegation_id\"]} -> {new_state} (disposition: {disposition})')
-        break
+result = db.complete_for_wave_close(
+    state_root,
+    loop_id=loop_id,
+    wave_id=wave_id,
+    disposition=disposition,
+)
+delegation_id = result.get('delegation_id') or ''
+if delegation_id:
+    print(f'delegation {delegation_id} -> {result.get(\"status\")} (disposition: {disposition})')
 " "$SP" "$spine_state" "$wave_id" "$loop_id" "$new_state" "$disposition" 2>/dev/null || true
 }
 
@@ -1552,6 +1554,15 @@ for p in pending:
     _fail "wave.sh close failed"
   }
   echo ""
+
+  # A closed wave must not leave its owning interactive delegation active while
+  # finish/loop-closeout propagation runs. Otherwise loop.closeout.finalize can
+  # report the same delegation as a blocker and leave workers at local packet
+  # closure instead of terminal closeout.
+  if [[ -n "$disposition" ]]; then
+    _delegation_transition_complete "$loop_id" "$wave_id" "$disposition" || true
+    echo ""
+  fi
 
   if [[ "$disposition" == "landed" && "$dispatch_total" == "0" ]]; then
     if [[ "$controller_only" -eq 1 || "$wave_kind" == "engineering" || "$wave_kind" == "proof" ]]; then
