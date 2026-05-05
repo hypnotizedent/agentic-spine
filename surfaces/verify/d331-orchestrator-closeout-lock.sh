@@ -372,6 +372,7 @@ PY
 python3 "$REGRESSION_SCRIPT" "$ROOT" || fail "wave.sh regression harness failed"
 
 "$WAVE_RESIDUE_BIN" --json >/dev/null || fail "wave.residue readback failed"
+grep -q -- "--wave-id" "$WAVE_RESIDUE_BIN" || fail "wave.residue missing scoped --wave-id report/sweep filter"
 
 python3 - "$ROOT" <<'PY' || fail "wave.residue merged-branch synthetic regression failed"
 import importlib.util

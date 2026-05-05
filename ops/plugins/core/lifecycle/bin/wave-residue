@@ -16,14 +16,25 @@ def _repo_root() -> Path:
 def main(argv: list[str]) -> int:
     sweep = False
     json_out = False
-    for token in argv[1:]:
+    wave_id_filter = ""
+    idx = 1
+    while idx < len(argv):
+        token = argv[idx]
         if token == "--sweep":
             sweep = True
+            idx += 1
         elif token == "--json":
             json_out = True
+            idx += 1
+        elif token == "--wave-id":
+            if idx + 1 >= len(argv):
+                print("--wave-id requires a value", file=sys.stderr)
+                return 2
+            wave_id_filter = argv[idx + 1].strip()
+            idx += 2
         elif token in {"-h", "--help"}:
             print(
-                "Usage: wave-residue [--sweep] [--json]\n\n"
+                "Usage: wave-residue [--wave-id WAVE-ID] [--sweep] [--json]\n\n"
                 "Canonical wave-owned residue surface. Reports and optionally sweeps\n"
                 "stale wave worktrees, stale codex/WAVE-* branches, and waves whose\n"
                 "workspace was marked cleaned but still have residue."
@@ -50,14 +61,42 @@ def main(argv: list[str]) -> int:
     sys.path.insert(0, str(root / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
     from wave_residue import collect_residue, sweep_residue
 
-    report = collect_residue(str(wave_root), str(root))
+    def filtered(report_data: dict) -> dict:
+        if not wave_id_filter:
+            return report_data
+        items = [
+            item for item in (report_data.get("items") or [])
+            if item.get("wave_id") == wave_id_filter
+        ]
+        by_class: dict[str, int] = {}
+        safe_to_sweep = 0
+        ambiguous = 0
+        for item in items:
+            cls = str(item.get("class") or "")
+            by_class[cls] = by_class.get(cls, 0) + 1
+            if item.get("safe_to_sweep"):
+                safe_to_sweep += 1
+            else:
+                ambiguous += 1
+        filtered_report = dict(report_data)
+        filtered_report["items"] = items
+        filtered_report["counts"] = {
+            "total": len(items),
+            "safe_to_sweep": safe_to_sweep,
+            "ambiguous": ambiguous,
+            "by_class": by_class,
+        }
+        filtered_report["wave_id_filter"] = wave_id_filter
+        return filtered_report
+
+    report = filtered(collect_residue(str(wave_root), str(root)))
     if sweep:
         sweep_result = sweep_residue(str(wave_root), str(root), report=report)
         payload = {
             "mode": "sweep",
             "pre": report,
             "sweep": sweep_result,
-            "post": collect_residue(str(wave_root), str(root)),
+            "post": filtered(collect_residue(str(wave_root), str(root))),
         }
     else:
         payload = {"mode": "report", "report": report}
