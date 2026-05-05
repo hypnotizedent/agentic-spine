@@ -743,10 +743,18 @@ for phrase in required_teaching_phrases:
 drilldown_levers_payload = all_payload.get("drilldown_levers")
 if not isinstance(drilldown_levers_payload, list) or not drilldown_levers_payload:
     fail("site.presence.status JSON must emit non-empty drilldown_levers list (PACKET-1329)")
+# PACKET-1341: branch-framework lever model replaces the seven-entry list
+# from PACKET-1329. The four UniFi/DHCP producer caps are now hidden behind
+# network.presence.status as private producers; site.presence.status drilldown
+# levers must be exactly the closed set of branch readbacks (Network, Node
+# lifecycle, Storage, Backup). Hardware branch joins under PACKET-1342.
 required_levers = {
+    "network.presence.status",
     "node.admission.status",
     "payload.custody.status",
     "backup.estate.readback.status",
+}
+forbidden_levers = {
     "network.home.unifi.clients.snapshot",
     "network.unifi.clients.snapshot",
     "network.home.dhcp.audit",
@@ -755,14 +763,17 @@ required_levers = {
 emitted_levers = {row.get("lever") for row in drilldown_levers_payload if isinstance(row, dict)}
 missing_levers = required_levers - emitted_levers
 if missing_levers:
-    fail(f"site.presence.status drilldown_levers missing {sorted(missing_levers)} (PACKET-1329)")
+    fail(f"site.presence.status drilldown_levers missing {sorted(missing_levers)} (PACKET-1341)")
+leaked_producers = forbidden_levers & emitted_levers
+if leaked_producers:
+    fail(f"site.presence.status drilldown_levers must not expose private network producers {sorted(leaked_producers)}; they belong behind network.presence.status (PACKET-1341)")
 extra_levers = emitted_levers - required_levers
 if extra_levers:
-    fail(f"site.presence.status drilldown_levers must remain closed set; unexpected entries {sorted(extra_levers)} (PACKET-1329)")
+    fail(f"site.presence.status drilldown_levers must remain closed branch set; unexpected entries {sorted(extra_levers)} (PACKET-1341)")
 for row in drilldown_levers_payload:
     kind = (row or {}).get("kind")
-    if kind not in {"branch_authority", "bounded_producer"}:
-        fail(f"site.presence.status drilldown_levers entry must declare kind in {{branch_authority, bounded_producer}}, got {kind!r} (PACKET-1329)")
+    if kind != "branch_authority":
+        fail(f"site.presence.status drilldown_levers entry must declare kind=branch_authority under PACKET-1341 branch framework, got {kind!r}")
 fcs_block = all_payload.get("first_class_system") or {}
 if fcs_block.get("operator_first_read") != "site.presence.status":
     fail("site.presence.status first_class_system.operator_first_read must be 'site.presence.status' (PACKET-1329)")
@@ -770,7 +781,81 @@ if fcs_block.get("drilldown_levers_policy") != "closed_set":
     fail("site.presence.status first_class_system.drilldown_levers_policy must be 'closed_set' (PACKET-1329)")
 for lever in required_levers:
     if lever not in proc_h.stdout:
-        fail(f"site.presence.status human readback must teach drilldown lever {lever!r} (PACKET-1329)")
+        fail(f"site.presence.status human readback must teach drilldown lever {lever!r} (PACKET-1341)")
+for producer in forbidden_levers:
+    # Producer cap names may still appear in the FOLDED_LEGACY_INPUTS path
+    # listing, but must not appear in the human readback's drilldown levers
+    # section. Search the rendered "Drilldown levers (only):" subsection
+    # specifically.
+    lines = proc_h.stdout.splitlines()
+    in_levers = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "Drilldown levers (only):":
+            in_levers = True
+            continue
+        if in_levers and (not stripped or not stripped.startswith(" ")) and stripped and ":" in stripped and not stripped[0].isspace():
+            in_levers = False
+        if in_levers and producer in line:
+            fail(f"site.presence.status human readback Drilldown levers section must not name private producer {producer!r} (PACKET-1341)")
+
+# PACKET-1341: network.presence.status JSON must be valid, declare
+# branch_role=network_branch_readback, refuse admission/promotion authority,
+# and name all four private producers.
+network_presence_script = root / "ops/plugins/infra/network/bin/network-presence-status"
+if not network_presence_script.exists():
+    fail("missing ops/plugins/infra/network/bin/network-presence-status (PACKET-1341)")
+network_proc = subprocess.run(
+    [str(network_presence_script), "--json"], text=True, capture_output=True
+)
+if network_proc.returncode != 0:
+    fail(f"network.presence.status --json must succeed: {network_proc.stderr.strip()[:200]}")
+network_payload = json.loads(network_proc.stdout)
+if network_payload.get("canonical_authority") != "network.presence.status":
+    fail("network.presence.status payload missing canonical_authority")
+if network_payload.get("branch_role") != "network_branch_readback":
+    fail("network.presence.status branch_role must be network_branch_readback (PACKET-1341)")
+if network_payload.get("operator_label") != "Network":
+    fail("network.presence.status operator_label must be 'Network' (PACKET-1341)")
+nb_boundary = network_payload.get("boundary") or {}
+required_does_not_decide = {"node_admission", "node_promotion", "hardware_identity", "storage_custody", "backup_posture"}
+nb_dnd = set(nb_boundary.get("does_not_decide") or [])
+missing_dnd = required_does_not_decide - nb_dnd
+if missing_dnd:
+    fail(f"network.presence.status boundary.does_not_decide missing {sorted(missing_dnd)} (PACKET-1341)")
+if nb_boundary.get("admission_authority") != "node.admission.status":
+    fail("network.presence.status must defer admission_authority to node.admission.status (PACKET-1341)")
+producers_emitted = {p.get("capability") for p in (network_payload.get("private_producers") or []) if isinstance(p, dict)}
+missing_producers = forbidden_levers - producers_emitted
+if missing_producers:
+    fail(f"network.presence.status private_producers must enumerate all four bounded producers; missing {sorted(missing_producers)} (PACKET-1341)")
+network_sites = network_payload.get("sites") or {}
+for required_site in ("home", "shop"):
+    if required_site not in network_sites:
+        fail(f"network.presence.status sites must include {required_site!r} (PACKET-1341)")
+    site_block = network_sites[required_site] or {}
+    if (site_block.get("actions_allowed") or {}).get("may_admit_node") is not False:
+        fail(f"network.presence.status site {required_site!r} must not allow node admission (PACKET-1341)")
+
+# PACKET-1341: the four producer cap descriptions must teach themselves as
+# private network branch producers (not operator drilldown levers); the new
+# Network branch readback registration must be present.
+caps_doc = caps  # re-use earlier load_yaml(caps_path)
+caps_map = caps_doc.get("capabilities") or {}
+network_presence_cap = caps_map.get("network.presence.status")
+if not isinstance(network_presence_cap, dict):
+    fail("network.presence.status missing from ops/capabilities.yaml (PACKET-1341)")
+if network_presence_cap.get("safety") != "read-only":
+    fail("network.presence.status must be read-only (PACKET-1341)")
+if network_presence_cap.get("script_path") != "./ops/plugins/infra/network/bin/network-presence-status":
+    fail("network.presence.status script_path must point at network-presence-status (PACKET-1341)")
+for producer_cap_name in forbidden_levers:
+    cap_doc = caps_map.get(producer_cap_name) or {}
+    desc = cap_doc.get("description") or ""
+    if "Private network branch producer" not in desc or "network.presence.status" not in desc:
+        fail(f"{producer_cap_name} description must teach 'Private network branch producer' under network.presence.status (PACKET-1341)")
+    if "operator-facing Site Intelligence drilldown lever" not in desc:
+        fail(f"{producer_cap_name} description must explicitly reject operator-facing Site Intelligence drilldown lever framing (PACKET-1341)")
 
 # PACKET-1317: lock coverage reconciliation behavior in place.
 # (x) freshness_summary must always emit canonical state keys (fresh, stale,
@@ -911,6 +996,9 @@ print(
     "keys; shop unregistered clients are classified into bounded folded-input "
     "buckets; every folded input declares producer_metadata naming either "
     "the cap that generates it or the exact operator-assertion blocker plus "
-    "the next governed packet hint."
+    "the next governed packet hint; network.presence.status is the single "
+    "Network branch readback fusing all four private UniFi/DHCP producers "
+    "behind it, and the four producer caps no longer appear as operator "
+    "drilldown levers."
 )
 PY
