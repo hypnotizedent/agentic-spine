@@ -31,6 +31,86 @@ fail() {
   exit 1
 }
 
+branch_worktree_path() {
+  local branch="$1"
+  python3 - "$ROOT" "$branch" <<'PY'
+import subprocess
+import sys
+
+repo = sys.argv[1]
+branch = sys.argv[2]
+proc = subprocess.run(
+    ["git", "-C", repo, "worktree", "list", "--porcelain"],
+    text=True,
+    capture_output=True,
+)
+if proc.returncode != 0:
+    raise SystemExit(0)
+current = ""
+for raw in proc.stdout.splitlines():
+    line = raw.strip()
+    if not line:
+        continue
+    if line.startswith("worktree "):
+        current = line.split(" ", 1)[1].strip()
+        continue
+    if line == f"branch refs/heads/{branch}":
+        print(current)
+        break
+PY
+}
+
+worktree_is_clean() {
+  local path="$1"
+  [[ -n "$path" ]] || return 0
+  [[ -z "$(git -C "$path" status --porcelain 2>/dev/null)" ]]
+}
+
+reconcile_refused_publish_residue() {
+  local target_branch="$1"
+  local remote_head="$2"
+  local source_head="$3"
+  local local_target_head target_wt
+
+  # Only roll back the exact guarded residue shape left by a --no-push closeout.
+  if [[ -z "$EXPECT_HEAD" || "$EXPECT_HEAD" != "$source_head" ]]; then
+    echo "skipped_expect_head_missing_or_mismatch"
+    return 1
+  fi
+
+  local_target_head="$(git -C "$ROOT" rev-parse --verify "${target_branch}^{commit}" 2>/dev/null || true)"
+  if [[ -z "$local_target_head" ]]; then
+    echo "skipped_no_local_target_branch"
+    return 1
+  fi
+  if [[ "$local_target_head" != "$source_head" ]]; then
+    echo "skipped_local_target_not_unpublished_head"
+    return 1
+  fi
+
+  target_wt="$(branch_worktree_path "$target_branch")"
+  if [[ -n "$target_wt" ]]; then
+    if ! worktree_is_clean "$target_wt"; then
+      echo "blocked_dirty_target_worktree:$target_wt"
+      return 1
+    fi
+    git -C "$target_wt" reset --hard "$remote_head" >/dev/null 2>&1 \
+      || {
+        echo "failed_reset_target_worktree_to_remote:$target_wt"
+        return 1
+      }
+    echo "reset_clean_target_worktree_to_remote:$target_wt"
+    return 0
+  fi
+
+  git -C "$ROOT" update-ref "refs/heads/$target_branch" "$remote_head" "$source_head" >/dev/null 2>&1 \
+    || {
+      echo "failed_update_target_ref_to_remote"
+      return 1
+    }
+  echo "reset_target_ref_to_remote"
+}
+
 resolve_source_head() {
   local ref="$1"
   local head=""
@@ -65,6 +145,9 @@ if [[ "${1:-}" == "--self-check" ]]; then
   grep -q "refs/heads/" "$0" || fail "self-check missing target push marker"
   grep -q "refs/remotes/" "$0" || fail "self-check missing remote source resolution marker"
   grep -q -- "--expect-head" "$0" || fail "self-check missing expected-head marker"
+  grep -q "reconcile_refused_publish_residue" "$0" || fail "self-check missing refused-publish reconcile marker"
+  grep -q 'reset --hard "$remote_head"' "$0" || fail "self-check missing target worktree reconcile marker"
+  grep -q 'update-ref "refs/heads/$target_branch" "$remote_head" "$source_head"' "$0" || fail "self-check missing target ref reconcile marker"
   echo "coordinator.target.publish self-check PASS"
   exit 0
 fi
@@ -108,8 +191,15 @@ git -C "$ROOT" cat-file -e "${remote_target_head}^{commit}" 2>/dev/null \
   || git -C "$ROOT" fetch "$REMOTE" "$TARGET_BRANCH" >/dev/null 2>&1 \
   || fail "cannot fetch remote target head object: $remote_target_head"
 
-git -C "$ROOT" merge-base --is-ancestor "$remote_target_head" "$source_head" >/dev/null 2>&1 \
-  || fail "non-fast-forward target publish refused: $REMOTE/$TARGET_BRANCH=$remote_target_head source=$source_head"
+if ! git -C "$ROOT" merge-base --is-ancestor "$remote_target_head" "$source_head" >/dev/null 2>&1; then
+  target_reconcile_status="not_attempted"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    if target_reconcile_status="$(reconcile_refused_publish_residue "$TARGET_BRANCH" "$remote_target_head" "$source_head")"; then
+      fail "non-fast-forward target publish refused: $REMOTE/$TARGET_BRANCH=$remote_target_head source=$source_head; target_checkout_reconcile=$target_reconcile_status"
+    fi
+  fi
+  fail "non-fast-forward target publish refused: $REMOTE/$TARGET_BRANCH=$remote_target_head source=$source_head; target_checkout_reconcile=$target_reconcile_status"
+fi
 
 publish_required=0
 publish_status="already_published"
