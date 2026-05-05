@@ -942,17 +942,21 @@ authority_constraints:
     heartbeat_observation: "Observation-only; watcher does not itself emit governed heartbeats."
 
 state_access_model:
+  # Legacy coarse role matrix retained for compatibility/readback shape only.
+  # It is NOT current file-plane authority and must not be read as peer truth
+  # beside canonical_plane_access below. canonical_plane_access is the governing
+  # per-plane contract for state, evidence, runtime, and mailroom locality.
   operator_console:
-    state_access: "full read-write"
-    evidence_access: "full read-write"
-    mailroom_access: "full read-write"
-    path_authority_relationship: "Reads and mutates governed repo/runtime/evidence paths under root.authority.contract.yaml during operator-directed work."
+    state_access: "read_via_routed_cap"
+    evidence_access: "read_via_ssh_merge_or_routed_cap"
+    mailroom_access: "read_via_routed_cap"
+    path_authority_relationship: "Admits and observes governed work. Mutating caps route to storage_evidence_node; consumer-local state/evidence/mailroom paths are projection/cache."
 
   execution_host:
-    state_access: "full read-write"
-    evidence_access: "full read-write"
-    mailroom_access: "full read-write"
-    path_authority_relationship: "Executes against canonical runtime, evidence, and mailroom roots; physical authority complements launchd.runtime.contract.yaml and mailroom.runtime.contract.yaml."
+    state_access: "read_via_routed_cap"
+    evidence_access: "read_via_ssh_merge_or_routed_cap"
+    mailroom_access: "read_via_ssh_merge_then_routed_mutation"
+    path_authority_relationship: "Carries unattended runtime. Reads canonical queue/state via governed transport and routes mutations to storage_evidence_node."
 
   translator_node:
     state_access: "read-only"
@@ -985,11 +989,12 @@ state_access_model:
     path_authority_relationship: "Read-only access is limited to heartbeat and liveness observation surfaces; no general state ownership."
 
 canonical_plane_access:
-  # PACKET-840 Stage 1 substrate. Declares — per node role — how each role
+  # PACKET-840 plane-access authority. Declares — per node role — how each role
   # reaches the four canonical planes (state / evidence / runtime / mailroom)
-  # and what its authority relationship is. Additive to state_access_model
-  # (no field above is touched). Stage 1 is declarative-only; organ-private
-  # access helpers are NOT yet consumed against this block (Stage 2).
+  # and what its authority relationship is. This supersedes the legacy coarse
+  # state_access_model above for current file-plane truth. Current consumers
+  # include node.admission.status, the mailroom worker, execution.pickup.status,
+  # deploy receipt writer, clerk/friction readbacks, and verify locks.
   #
   # Invariant (operator-named):
   #   evidence proves work
@@ -1098,7 +1103,7 @@ canonical_plane_access:
     - "Does not declare canonical access in multiple homes — this is the one home."
     - "Does not change any organ behavior. Stage 2 organ-consumption slices land separately (mailroom worker → execution.pickup.status → deploy receipt writer → clerk/friction → verify enforcement)."
 
-  enforcement_note: "Readback: ./bin/ops cap run node.admission.status surfaces a CANONICAL PLANE ACCESS section per row plus the global by_role table in --json output. PACKET-840 closeout: Stage 1 substrate landed; not golden until organ-private access helpers are consumed or named as remaining subtraction follow-ons."
+  enforcement_note: "Readback: ./bin/ops cap run node.admission.status surfaces a CANONICAL PLANE ACCESS section per row plus the global by_role table in --json output. Stage 2 consumers have landed for the mailroom worker, execution pickup, deploy receipts, clerk/friction readbacks, and verify enforcement; new plane-locality work must consume this block instead of reopening legacy state_access_model authority."
 
 connectivity_requirements:
   principle: "Relationships are device-agnostic L1 reachability requirements only. No hostnames, machine ids, or deployment topology are assigned here."

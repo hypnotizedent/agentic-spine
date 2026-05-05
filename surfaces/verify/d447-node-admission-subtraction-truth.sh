@@ -87,6 +87,11 @@ for proof_name in ("dataset_substrate_proof", "canonical_root_export_proof", "au
 # true or false — it prevents drift where the block is partially declared and
 # cap.sh falls through to legacy behavior because of missing fields.
 runtime_bootstrap_contract = load_yaml(root / "ops/bindings/runtime.bootstrap.contract.yaml")
+runtime_bootstrap_text = (root / "ops/bindings/runtime.bootstrap.contract.yaml").read_text(encoding="utf-8")
+if "v3.attach since deprecated" in runtime_bootstrap_text:
+    fail("runtime.bootstrap.contract.yaml must not describe session.v3.attach as deprecated; it is read-only orientation demoted from admission")
+if "ops status" not in runtime_bootstrap_text:
+    fail("runtime.bootstrap.contract.yaml canonical_bootstrap_sequence must include ops status public readback")
 db_authority = runtime_bootstrap_contract.get("db_authority")
 if db_authority is None:
     fail("runtime.bootstrap.contract.yaml#db_authority block missing (declares Phase D.3 routing target)")
@@ -1645,6 +1650,11 @@ for required_phrase in ("disabled_by_policy", "decommissioned_residue", "app_loc
 # new D-gate (subtraction discipline; gate count unchanged).
 node_role_contract_path = root / "ops/bindings/node.role.contract.yaml"
 node_role_contract = yaml.safe_load(node_role_contract_path.read_text(encoding="utf-8")) or {}
+node_role_contract_text = node_role_contract_path.read_text(encoding="utf-8")
+if "NOT yet consumed" in node_role_contract_text:
+    fail("node.role.contract.yaml canonical_plane_access must not claim Stage 2 consumers are NOT yet consumed")
+if "canonical_plane_access is the governing" not in node_role_contract_text:
+    fail("node.role.contract.yaml must explicitly subordinate legacy state_access_model to canonical_plane_access")
 cpa_block = node_role_contract.get("canonical_plane_access") or {}
 if not isinstance(cpa_block, dict):
     fail("node.role.contract.yaml canonical_plane_access must be a mapping (PACKET-840 Stage 1)")

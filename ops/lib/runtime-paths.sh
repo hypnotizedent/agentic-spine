@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Shared runtime/evidence/data path resolution for spine surfaces.
 #
-# Canonical boring split:
-# - agentic-spine: authored control plane only
-# - .runtime/spine: live execution + mutable operational state
-# - .evidence/spine: receipts, verification output, cap-run evidence
+# Boring local split:
+# - agentic-spine: authored control plane checkout
+# - .runtime/spine: host-local runtime substrate, worktrees, and projection/cache
+# - .evidence/spine: host-local cap output and evidence projection/cache
 # - .data: business/domain truth
 # - .backups: preserved archives and backups
+#
+# Post-D.3b, canonical state/evidence/mailroom/receipts/archive authority lives
+# on the storage_evidence_node at /md1400/spine. Consumer-host paths resolved by
+# this helper are install defaults and runtime substrate unless a routed cap or
+# canonical mount explicitly lands the write on pve.
 
 _spine_expand_home_token() {
   local raw="${1:-}"

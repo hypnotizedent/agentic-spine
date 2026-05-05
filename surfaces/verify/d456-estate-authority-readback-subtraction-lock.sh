@@ -70,6 +70,18 @@ gate_registry = load_yaml(gate_registry_path)
 gate_profiles = load_yaml(gate_profiles_path)
 lifecycle = load_yaml(lifecycle_path)
 placement = load_yaml(placement_path)
+root_dir = bindings_dir.parent.parent
+root_authority_path = root_dir / "ops/bindings/root.authority.contract.yaml"
+root_authority_text = root_authority_path.read_text(encoding="utf-8")
+root_authority = load_yaml(root_authority_path)
+
+if "All versioned repos, runtime state, and evidence live under this root." in root_authority_text:
+    fail("root.authority.contract.yaml platform note still teaches Darwin root as state/evidence authority")
+
+platform_note = str((((root_authority.get("taxonomy") or {}).get("platform") or {}).get("note") or ""))
+for required_phrase in ("projection/cache", "storage_evidence_node", "/md1400/spine"):
+    if required_phrase not in platform_note:
+        fail(f"root.authority.contract.yaml platform note must teach post-cutover authority/projection boundary: missing {required_phrase!r}")
 
 for phrase in [
     "diagnostic evidence only",

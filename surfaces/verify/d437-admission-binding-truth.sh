@@ -48,5 +48,18 @@ if [[ "$main_launch_output" == *"worktree"* && "$main_launch_output" != *"SPINE_
   fail "terminal launch emitted ambiguous worktree routing text"
 fi
 
+set +e
+explicit_worker_output="$("$OPS_BIN" terminal launch --role solo --tool codex --terminal SPINE-CONTROL-01 --session-posture worker --dry-run 2>&1)"
+explicit_worker_rc=$?
+set -e
+
+if [[ "$explicit_worker_rc" -ne 0 ]]; then
+  fail "explicit worker session posture is broken for contract-worker terminal: $explicit_worker_output"
+fi
+
+if [[ "$explicit_worker_output" != *"# Session posture: worker"* ]]; then
+  fail "explicit worker session posture did not resolve to worker"
+fi
+
 echo "D437 PASS: admission binding truth is explicit and first-class terminal entry is not blocked"
 exit 0

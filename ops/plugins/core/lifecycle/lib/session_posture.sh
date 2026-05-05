@@ -120,8 +120,11 @@ session_posture_resolve() {
             operator_console)
                 case "$requested_posture" in
                     worker)
-                        # Allow if runtime_role=worker (contract-driven)
-                        if [ "$runtime_role" != "worker" ]; then
+                        # Allow if execution_class=worker (contract-driven).
+                        # execution_class is the canonical identity passed by
+                        # terminal.sh; runtime_role is only a legacy alias and
+                        # may be unset under `set -u`.
+                        if [ "$execution_class" != "worker" ]; then
                             printf "session_posture: posture '%s' is forbidden for node type '%s' without contract worker role\n" \
                                 "$requested_posture" "$__SP_NODE_TYPE" >&2
                             printf "session_posture:   allowed for operator_console: controller membrane (or worker with contract role)\n" >&2
