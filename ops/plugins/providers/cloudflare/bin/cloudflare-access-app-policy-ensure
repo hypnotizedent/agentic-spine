@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+"""Ensure a Cloudflare Access app with an operator email policy.
+
+This cap deliberately avoids accepting policy rule bodies on the CLI. It clones
+the existing human-operator email policy from a source Access app and summarizes
+rule shape only, so receipts do not expose identity values.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+SECRETS_EXEC = ROOT / "ops/plugins/infra/secrets/bin/secrets-exec"
+BINDING_FILE = ROOT / "ops/bindings/cloudflare.inventory.yaml"
+CF_API = os.environ.get("CLOUDFLARE_API_BASE", "https://api.cloudflare.com/client/v4").rstrip("/")
+
+
+class Stop(RuntimeError):
+    pass
+
+
+def load_binding() -> dict[str, Any]:
+    if not BINDING_FILE.exists():
+        return {}
+    with BINDING_FILE.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def account_id(binding: dict[str, Any]) -> str:
+    value = os.environ.get("CLOUDFLARE_ACCOUNT_ID") or binding.get("account_id") or ""
+    if not value:
+        raise Stop("CLOUDFLARE_ACCOUNT_ID missing and account_id not present in cloudflare.inventory.yaml")
+    return str(value).strip()
+
+
+def auth_headers(mode: str) -> dict[str, str] | None:
+    if mode == "token":
+        token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+        if not token:
+            return None
+        return {"Authorization": f"Bearer {token}"}
+    if mode == "read_all_token":
+        token = os.environ.get("CLOUDFLARE_TOKEN_READ_ALL_RESOURCES", "")
+        if not token:
+            return None
+        return {"Authorization": f"Bearer {token}"}
+    if mode == "global":
+        email = os.environ.get("CLOUDFLARE_AUTH_EMAIL", "")
+        key = os.environ.get("CLOUDFLARE_GLOBAL_API_KEY", "")
+        if not email or not key:
+            return None
+        return {"X-Auth-Email": email, "X-Auth-Key": key}
+    raise Stop(f"unknown auth mode: {mode}")
+
+
+def request_json(method: str, path: str, payload: dict[str, Any] | None, mutable: bool) -> tuple[dict[str, Any], str]:
+    url = path if path.startswith("http") else f"{CF_API}{path}"
+    body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    modes = ["token", "global"] if mutable else ["token", "read_all_token", "global"]
+    attempts: list[str] = []
+    for mode in modes:
+        headers = auth_headers(mode)
+        if headers is None:
+            attempts.append(f"{mode}:missing")
+            continue
+        req_headers = {"Content-Type": "application/json", **headers}
+        req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.load(resp)
+            if not data.get("success", True):
+                attempts.append(f"{mode}:success_false")
+                continue
+            return data, mode
+        except urllib.error.HTTPError as exc:
+            attempts.append(f"{mode}:http_{exc.code}")
+            if exc.code not in (401, 403):
+                break
+        except Exception as exc:  # noqa: BLE001 - convert to governed failure
+            attempts.append(f"{mode}:{type(exc).__name__}")
+            break
+    raise Stop(f"Cloudflare API request failed: {method} {path}; attempts={','.join(attempts)}")
+
+
+def cf_get(path: str) -> tuple[dict[str, Any], str]:
+    return request_json("GET", path, None, mutable=False)
+
+
+def cf_post(path: str, payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    return request_json("POST", path, payload, mutable=True)
+
+
+def cf_put(path: str, payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    return request_json("PUT", path, payload, mutable=True)
+
+
+def list_apps(account: str) -> tuple[list[dict[str, Any]], str]:
+    data, mode = cf_get(f"/accounts/{account}/access/apps")
+    return list(data.get("result") or []), mode
+
+
+def list_policies(account: str, app_id: str) -> tuple[list[dict[str, Any]], str]:
+    data, mode = cf_get(f"/accounts/{account}/access/apps/{app_id}/policies")
+    return list(data.get("result") or []), mode
+
+
+def domains_for_app(app: dict[str, Any]) -> list[str]:
+    raw = app.get("domain")
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list):
+        return [str(item) for item in raw if item]
+    return []
+
+
+def find_app(apps: list[dict[str, Any]], domain: str) -> dict[str, Any] | None:
+    wanted = domain.strip().lower()
+    for app in apps:
+        if any(item.strip().lower() == wanted for item in domains_for_app(app)):
+            return app
+    return None
+
+
+def rule_contains_key(rule: Any, key: str) -> bool:
+    if isinstance(rule, dict):
+        if key in rule:
+            return True
+        return any(rule_contains_key(value, key) for value in rule.values())
+    if isinstance(rule, list):
+        return any(rule_contains_key(item, key) for item in rule)
+    return False
+
+
+def has_service_token(policy: dict[str, Any]) -> bool:
+    buckets = (policy.get("include") or []) + (policy.get("require") or []) + (policy.get("exclude") or [])
+    return any(rule_contains_key(rule, "service_token") for rule in buckets)
+
+
+def is_email_policy(policy: dict[str, Any]) -> bool:
+    if (policy.get("decision") or "").lower() != "allow":
+        return False
+    if has_service_token(policy):
+        return False
+    include = policy.get("include") or []
+    return any(rule_contains_key(rule, "email") for rule in include)
+
+
+def choose_source_policy(policies: list[dict[str, Any]]) -> dict[str, Any]:
+    email_policies = [policy for policy in policies if is_email_policy(policy)]
+    named = [
+        policy
+        for policy in email_policies
+        if "operator" in (policy.get("name") or "").lower() or "email" in (policy.get("name") or "").lower()
+    ]
+    if named:
+        return named[0]
+    if email_policies:
+        return email_policies[0]
+    raise Stop("no allow/email source Access policy found to clone")
+
+
+def summarize_rule(rule: Any) -> str:
+    if not isinstance(rule, dict):
+        return "unknown"
+    parts = []
+    for key, value in sorted(rule.items()):
+        if isinstance(value, dict):
+            parts.append(f"{key}:{','.join(sorted(value.keys()))}")
+        elif isinstance(value, list):
+            parts.append(f"{key}:list[{len(value)}]")
+        else:
+            parts.append(key)
+    return "+".join(parts) if parts else "unknown"
+
+
+def summarize_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": policy.get("name", ""),
+        "decision": policy.get("decision", ""),
+        "include": [summarize_rule(rule) for rule in policy.get("include") or []],
+        "require": [summarize_rule(rule) for rule in policy.get("require") or []],
+        "exclude": [summarize_rule(rule) for rule in policy.get("exclude") or []],
+        "precedence": policy.get("precedence", ""),
+    }
+
+
+def policy_payload_from_source(source: dict[str, Any], name: str, precedence: int) -> dict[str, Any]:
+    payload = {
+        "name": name,
+        "decision": source.get("decision") or "allow",
+        "include": copy.deepcopy(source.get("include") or []),
+        "precedence": precedence,
+    }
+    for field in ("require", "exclude"):
+        value = source.get(field)
+        if value:
+            payload[field] = copy.deepcopy(value)
+    return payload
+
+
+def same_policy(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
+    left = {
+        "name": existing.get("name", ""),
+        "decision": existing.get("decision", ""),
+        "include": existing.get("include") or [],
+        "require": existing.get("require") or [],
+        "exclude": existing.get("exclude") or [],
+        "precedence": existing.get("precedence", 0),
+    }
+    right = {
+        "name": desired.get("name", ""),
+        "decision": desired.get("decision", ""),
+        "include": desired.get("include") or [],
+        "require": desired.get("require") or [],
+        "exclude": desired.get("exclude") or [],
+        "precedence": desired.get("precedence", 0),
+    }
+    return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+
+
+def app_create_payload(app_name: str, hostname: str, session_duration: str) -> dict[str, Any]:
+    return {
+        "name": app_name,
+        "domain": hostname,
+        "type": "self_hosted",
+        "session_duration": session_duration,
+        "auto_redirect_to_identity": True,
+    }
+
+
+def policy_by_name_or_email(policies: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    for policy in policies:
+        if (policy.get("name") or "") == name:
+            return policy
+    for policy in policies:
+        if is_email_policy(policy):
+            return policy
+    return None
+
+
+def ensure(args: argparse.Namespace) -> dict[str, Any]:
+    binding = load_binding()
+    account = account_id(binding)
+    apps, apps_auth = list_apps(account)
+
+    source_app = find_app(apps, args.source_domain)
+    if not source_app or not source_app.get("id"):
+        raise Stop(f"source Access app not found for domain {args.source_domain}")
+    source_policies, source_policy_auth = list_policies(account, str(source_app["id"]))
+    source_policy = choose_source_policy(source_policies)
+    desired_policy = policy_payload_from_source(source_policy, args.policy_name, args.precedence)
+
+    target_app = find_app(apps, args.hostname)
+    app_action = "noop"
+    app_write_auth = ""
+    if not target_app:
+        app_action = "create"
+        if not args.dry_run:
+            app_data, app_write_auth = cf_post(
+                f"/accounts/{account}/access/apps",
+                app_create_payload(args.app_name, args.hostname, args.session_duration),
+            )
+            target_app = app_data.get("result") or {}
+    if not target_app:
+        target_app = {
+            "id": "",
+            "name": args.app_name,
+            "domain": args.hostname,
+            "type": "self_hosted",
+        }
+
+    target_policy_auth = ""
+    target_policy_write_auth = ""
+    target_policy = None
+    policy_action = "pending_app_create" if args.dry_run and app_action == "create" else "noop"
+    if target_app.get("id"):
+        target_policies, target_policy_auth = list_policies(account, str(target_app["id"]))
+        target_policy = policy_by_name_or_email(target_policies, args.policy_name)
+        if target_policy:
+            if same_policy(target_policy, desired_policy):
+                policy_action = "noop"
+            else:
+                policy_action = "update"
+                if not args.dry_run:
+                    policy_data, target_policy_write_auth = cf_put(
+                        f"/accounts/{account}/access/apps/{target_app['id']}/policies/{target_policy['id']}",
+                        desired_policy,
+                    )
+                    target_policy = policy_data.get("result") or target_policy
+        else:
+            policy_action = "create"
+            if not args.dry_run:
+                policy_data, target_policy_write_auth = cf_post(
+                    f"/accounts/{account}/access/apps/{target_app['id']}/policies",
+                    desired_policy,
+                )
+                target_policy = policy_data.get("result") or {}
+
+    return {
+        "capability": "cloudflare.access.app_policy.ensure",
+        "status": "dry_run" if args.dry_run else "ok",
+        "hostname": args.hostname,
+        "source_domain": args.source_domain,
+        "app": {
+            "action": app_action,
+            "name": target_app.get("name") or args.app_name,
+            "type": target_app.get("type") or "self_hosted",
+            "id_known": bool(target_app.get("id")),
+        },
+        "policy": {
+            "action": policy_action,
+            "name": args.policy_name,
+            "desired_summary": summarize_policy(desired_policy),
+            "live_summary": summarize_policy(target_policy or desired_policy) if policy_action == "noop" else {},
+        },
+        "auth_modes": {
+            "apps_read": apps_auth,
+            "source_policy_read": source_policy_auth,
+            "app_write": app_write_auth,
+            "target_policy_read": target_policy_auth,
+            "target_policy_write": target_policy_write_auth,
+        },
+        "receipt_redaction": "policy rule values are not emitted; only rule shape is summarized",
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hostname", required=True)
+    parser.add_argument("--source-domain", default="spine.ronny.works")
+    parser.add_argument("--app-name", default="surveillance-camera-viewer")
+    parser.add_argument("--policy-name", default="Allow operator email OTP")
+    parser.add_argument("--session-duration", default="24h")
+    parser.add_argument("--precedence", type=int, default=1)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    if not os.environ.get("SPINE_SECRETS_INJECTED"):
+        env = os.environ.copy()
+        env["SPINE_SECRETS_INJECTED"] = "1"
+        cmd = [str(SECRETS_EXEC), "--", sys.executable, __file__] + sys.argv[1:]
+        return subprocess.call(cmd, env=env)
+
+    try:
+        payload = ensure(args)
+    except Stop as exc:
+        print(f"STOP: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("cloudflare.access.app_policy.ensure")
+        print(f"hostname: {payload['hostname']}")
+        print(f"source_domain: {payload['source_domain']}")
+        print(f"app_action: {payload['app']['action']}")
+        print(f"policy_action: {payload['policy']['action']}")
+        print(f"policy_summary: {payload['policy']['desired_summary']}")
+        print(f"auth_modes: {payload['auth_modes']}")
+        print(f"status: {payload['status'].upper()}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

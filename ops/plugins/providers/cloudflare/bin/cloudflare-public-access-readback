@@ -215,15 +215,20 @@ def access_apps(binding):
         domain = app.get("domain")
         if not domain:
             continue
-        by_domain.setdefault(domain, {
+        declared = {
             "name": app.get("name", ""),
             "legacy_name": app.get("legacy_name", ""),
             "purpose": app.get("purpose", ""),
+            "owner": app.get("owner", ""),
             "actor_class": app.get("actor_class", ""),
             "auth_method": app.get("auth_method", ""),
             "live_policy_proof": app.get("live_policy_proof", ""),
-            "source": "cloudflare.inventory.yaml",
-        })
+            "declaration_source": "cloudflare.inventory.yaml",
+        }
+        existing = by_domain.setdefault(domain, {"source": "cloudflare.inventory.yaml"})
+        for key, value in declared.items():
+            if value:
+                existing[key] = value
     return by_domain, policies_by_domain, api_status
 
 
@@ -332,7 +337,8 @@ def access_policy_proof(app, policy_summary, access_api_status):
 
 
 def build_proofs(host, meta, dns, dns_status, tunnel, tunnel_status, app, policy_summary, auth_policy):
-    declared = bool(meta)
+    declaration_source = app.get("declaration_source", "")
+    declared = bool(meta) or bool(declaration_source)
     dns_entry = dns.get(host)
     routing_layer = meta.get("routing_layer") or ("cloudflare_tunnel" if host in tunnel else "")
     tunnel_expected = routing_layer == "cloudflare_tunnel" or host in tunnel
@@ -360,8 +366,8 @@ def build_proofs(host, meta, dns, dns_status, tunnel, tunnel_status, app, policy
     return {
         "declaration": {
             "status": "proved" if declared else "missing",
-            "source": meta.get("source", ""),
-            "authority_source": meta.get("authority_source", ""),
+            "source": meta.get("source", "") or declaration_source,
+            "authority_source": meta.get("authority_source", "") or declaration_source,
         },
         "dns_record": dns_proof,
         "tunnel_route": tunnel_proof,
@@ -444,6 +450,11 @@ def build_rows():
             notes.append(f"mailroom_bridge_public_claim={bridge_public.get('lifecycle_state', 'unknown')}")
 
         app = access.get(host, {})
+        app_declared = bool(app.get("declaration_source"))
+        if app.get("purpose") and not purpose:
+            purpose = app["purpose"]
+        if app.get("owner") and owner == "unknown":
+            owner = app["owner"]
         if app.get("actor_class"):
             actor_class = app["actor_class"]
         auth_mode = app.get("auth_method", "")
@@ -459,7 +470,7 @@ def build_rows():
         if not route_target:
             route_target = meta.get("target_hint", "")
         route_state = "live_tunnel" if host in tunnel else "declared_only"
-        lifecycle = normalize_lifecycle(meta.get("lifecycle_class", ""), host, bool(meta), host in tunnel, public_cockpit)
+        lifecycle = normalize_lifecycle(meta.get("lifecycle_class", ""), host, bool(meta) or app_declared, host in tunnel, public_cockpit)
         proofs = build_proofs(host, meta, dns, dns_status, tunnel, tunnel_status or {}, app, policy_summary, auth_policy_proof)
         proof_status = summarize_proof_status(lifecycle, proofs)
 
@@ -485,7 +496,7 @@ def build_rows():
             "proof_status": proof_status,
             "proofs": proofs,
             "notes": "; ".join(notes),
-            "source": meta.get("source", ""),
+            "source": meta.get("source", "") or app.get("declaration_source", ""),
         })
     return {
         "capability": "cloudflare.public_access.readback",
