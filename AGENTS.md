@@ -180,6 +180,29 @@ loses orientation and needs the entry banner again. It is read-only
 orientation, not admission. If it reports `UNBOUND`, stop and run
 `./bin/ops terminal launch --tool <tool> --terminal <name>` before mutation.
 
+Agent cockpit habits:
+
+- First 60 seconds: read the four files above, then run
+  `./bin/ops status --brief`. Drill into `worktree.lifecycle.report`,
+  `controller_prompt.status`, or `execution.pickup.status` only when status or
+  the task asks for that concern.
+- Identity before mutation: `SPINE_TERMINAL_ID` and `SPINE_EXECUTION_CLASS`
+  must be bound. `session.v3.attach` re-renders orientation; it does not admit,
+  attach, or grant mutation.
+- Classifier: `read-only report` / `direct tiny patch` /
+  `engine lane required` / `human approval required`. Runtime, authority,
+  host, storage, backup, watcher, control-plane, packet, or mailroom work is
+  not a casual edit.
+- Worktree states: `cleanable_after_archive` means archive/delete through
+  `worktree.lifecycle.cleanup`; `blocked_active_lease` is owned;
+  `blocked_dirty_residue_reclaim_or_clean` needs inspect/rehydrate;
+  `blocked_packet_owner_not_terminal` needs `controller_prompt.status`;
+  `blocked_unmerged_branch` is not deletion-safe.
+- Before acting, answer: what is the authority, what is the routed readback,
+  who owns the work, and what receipt will prove closure?
+- Before leaving, close the packet, release the lease, clean landed residue,
+  and dispose filed friction with evidence.
+
 Operating invariants:
 
 - `$SPINE_STATE` is logical. Canonical state/evidence/mailroom authority lives
@@ -193,8 +216,6 @@ Operating invariants:
 - Operator input is provenance, not proof. Evidence is receipts, live probes,
   repo/runtime observations, and authoritative readback. Create loops only for
   bounded objectives with acceptance and close criteria.
-- Work-intake router policy lives in `SESSION_PROTOCOL.md`: read-only report,
-  direct tiny patch, engine lane required, or human approval required.
 - The primary `agentic-spine` checkout stays clean on `main`. Repo mutation
   happens in a managed worktree.
 - Workflow telemetry from another lane is protected evidence. Read and cite it;
