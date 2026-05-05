@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Direct git push is a mutating follow-through edge outside cap.sh. Keep the
+# hook thin: terminal admission remains ops terminal launch; this hook only
+# refuses publication from shells that have neither admission nor a governed
+# role-policy override.
+
+current_terminal_id() {
+  printf '%s\n' "${SPINE_TERMINAL_ID:-}"
+}
+
+current_execution_class() {
+  printf '%s\n' "${SPINE_EXECUTION_CLASS:-}"
+}
+
+has_role_policy_override() {
+  [[ -n "${SPINE_ROLE_POLICY_OVERRIDE_REF:-}" && -n "${SPINE_ROLE_POLICY_OVERRIDE_REASON:-}" ]]
+}
+
+has_ref_update_on_stdin() {
+  local local_ref local_oid remote_ref remote_oid
+  while read -r local_ref local_oid remote_ref remote_oid; do
+    [[ -n "${local_ref:-}${local_oid:-}${remote_ref:-}${remote_oid:-}" ]] || continue
+    return 0
+  done
+  return 1
+}
+
+admission_stop() {
+  local remote="${1:-unknown}"
+  local url="${2:-unknown}"
+  cat >&2 <<EOF
+STOP: direct git push requires governed terminal admission
+  remote:    $remote
+  url:       $url
+  terminal:  ${terminal_id:-unset}
+  execution: ${execution_class:-unset}
+  next:      cd ~/code/agentic-spine && ./bin/ops terminal launch --tool <tool> --terminal <name>
+             or set SPINE_ROLE_POLICY_OVERRIDE_REF and SPINE_ROLE_POLICY_OVERRIDE_REASON with governed justification
+EOF
+}
+
+self_check() {
+  local hook="$1"
+  local out rc=0
+
+  set +e
+  out="$(env -u SPINE_TERMINAL_ID -u OPS_TERMINAL_ID -u OPS_TERMINAL_ROLE -u SPINE_TERMINAL_ROLE -u SPINE_TERMINAL_NAME -u SPINE_EXECUTION_CLASS -u SPINE_RUNTIME_ROLE \
+    "$hook" origin ssh://example.invalid/owner/repo.git <<'EOF' 2>&1
+refs/heads/topic 1111111111111111111111111111111111111111 refs/heads/topic 0000000000000000000000000000000000000000
+EOF
+)"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 || "$out" != *"direct git push requires governed terminal admission"* ]]; then
+    echo "pre-push self-check FAIL: unbound push was not blocked" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+
+  set +e
+  out="$(SPINE_TERMINAL_ID=TEST-CONTROL-01 SPINE_EXECUTION_CLASS=worker \
+    "$hook" origin ssh://example.invalid/owner/repo.git <<'EOF' 2>&1
+refs/heads/topic 1111111111111111111111111111111111111111 refs/heads/topic 0000000000000000000000000000000000000000
+EOF
+)"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    echo "pre-push self-check FAIL: admitted push was blocked" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+
+  set +e
+  out="$(SPINE_ROLE_POLICY_OVERRIDE_REF=FR-SELF-CHECK SPINE_ROLE_POLICY_OVERRIDE_REASON=self-check \
+    "$hook" origin ssh://example.invalid/owner/repo.git <<'EOF' 2>&1
+refs/heads/topic 1111111111111111111111111111111111111111 refs/heads/topic 0000000000000000000000000000000000000000
+EOF
+)"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    echo "pre-push self-check FAIL: governed override push was blocked" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+
+  echo "pre-push self-check PASS"
+}
+
+if [[ "${1:-}" == "--self-check" ]]; then
+  self_check "$0"
+  exit $?
+fi
+
+remote="${1:-unknown}"
+url="${2:-unknown}"
+
+if ! has_ref_update_on_stdin; then
+  exit 0
+fi
+
+terminal_id="$(current_terminal_id)"
+execution_class="$(current_execution_class)"
+
+if [[ -z "$terminal_id" || -z "$execution_class" ]]; then
+  if has_role_policy_override; then
+    exit 0
+  fi
+  admission_stop "$remote" "$url"
+  exit 1
+fi
+
+exit 0

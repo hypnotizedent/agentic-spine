@@ -16,7 +16,7 @@ set -euo pipefail
 # that worktree's hooks; same status surface for both.
 #
 # Status policy:
-#   OK   — core.hooksPath=.githooks AND .githooks/{pre-commit,commit-msg}
+#   OK   — core.hooksPath=.githooks AND .githooks/{pre-commit,commit-msg,pre-push}
 #          executable AND validator smoke classification works.
 #   WARN — install never ran here (hooksPath unset/wrong) OR hook files
 #          missing/non-executable OR validator smoke failed. Each WARN
@@ -47,6 +47,7 @@ EOF
 
 hooks_path="$(git -C "$REPO_ROOT" config --get core.hooksPath 2>/dev/null || true)"
 pre_hook="$REPO_ROOT/.githooks/pre-commit"
+pre_push_hook="$REPO_ROOT/.githooks/pre-push"
 # commit-msg hook (PACKET-675): L1 engine packet-label governance enforced
 # at the forge commit boundary. Calls packet.label.validate via cap.sh so
 # reads route to storage_evidence_node, not consumer-host projection.
@@ -79,6 +80,24 @@ validator_smoke() {
   return 1
 }
 
+pre_push_smoke() {
+  if [[ ! -x "$pre_push_hook" ]]; then
+    echo "pre-push: WARN ($pre_push_hook missing or not executable)"
+    return 1
+  fi
+  local out rc
+  set +e
+  out="$("$pre_push_hook" --self-check 2>&1)"
+  rc=$?
+  set -e
+  if [[ $rc -eq 0 ]]; then
+    echo "pre-push: OK (direct git push requires terminal admission)"
+    return 0
+  fi
+  echo "pre-push: WARN (self-check failed: rc=$rc; output: $out)"
+  return 1
+}
+
 case "$cmd" in
   status)
     overall_ok=1
@@ -107,7 +126,11 @@ case "$cmd" in
     else
       overall_ok=0
     fi
-    echo "pre-push: not implemented (enforcement via verify, not hook)"
+    if pre_push_smoke; then
+      :
+    else
+      overall_ok=0
+    fi
     if [[ $overall_ok -eq 1 ]]; then
       echo "overall: OK"
     else
@@ -121,6 +144,9 @@ case "$cmd" in
     fi
     if [[ -f "$commit_msg_hook" ]]; then
       chmod +x "$commit_msg_hook" || true
+    fi
+    if [[ -f "$pre_push_hook" ]]; then
+      chmod +x "$pre_push_hook" || true
     fi
     git -C "$REPO_ROOT" config core.hooksPath .githooks
 
@@ -138,7 +164,12 @@ case "$cmd" in
       # commit-msg missing is a WARN, not a hard fail at install time —
       # repo may be at an older commit before PACKET-675 landed.
     fi
-    echo "pre-push: not implemented (enforcement via verify, not hook)"
+    if [[ -x "$pre_push_hook" ]]; then
+      echo "pre-push: OK (direct git push requires terminal admission)"
+    else
+      echo "pre-push: WARN (missing or not executable): $pre_push_hook"
+      exit 1
+    fi
     ;;
   -h|--help|"")
     usage
