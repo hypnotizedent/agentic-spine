@@ -56,24 +56,35 @@ jobs:
           NARRATOR_DISPATCH_TARGET: ${{ secrets.NARRATOR_DISPATCH_TARGET }}
           NARRATOR_DISPATCH_REPO: ${{ secrets.NARRATOR_DISPATCH_REPO }}
           GITHUB_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           KEYFILE="$(mktemp)"
           chmod 600 "${KEYFILE}"
           printf '%s\n' "${NARRATOR_DISPATCH_SSH_KEY}" > "${KEYFILE}"
-          # Bounded SSH dispatch: pin StrictHostKeyChecking to accept-new so
-          # first-run host-key learn works; subsequent runs require match.
-          # The dispatch invokes commit.narrator.status which routes its
-          # canonical write through cap.sh — the runner does not touch
-          # canonical state directly. Limit=1 + --ref pins the run to the
-          # exact commit that triggered the workflow.
+          # Bounded SSH dispatch:
+          # - StrictHostKeyChecking=accept-new lets first-run host-key learn;
+          #   subsequent runs require match.
+          # - The dispatch invokes commit.narrator.status which routes its
+          #   canonical write through cap.sh; runner does not touch canonical
+          #   state directly. Limit=1 + --ref pins the run to the exact commit.
+          # - SPINE_ROLE_POLICY_OVERRIDE_REF + _REASON name this dispatch as
+          #   governed automation per the cap admission policy's documented
+          #   escape hatch (PACKET-1367 follow-up to PACKET-1363). This is the
+          #   visible-named-override form, NOT a silent bypass — D441 enforces
+          #   that forge_node never gains capability_execution itself, and the
+          #   dispatch target's execution_host authority is what carries the
+          #   mutation right (per PACKET-1340 placement audit).
           ssh \
             -i "${KEYFILE}" \
             -o StrictHostKeyChecking=accept-new \
             -o IdentitiesOnly=yes \
             -o BatchMode=yes \
             "${NARRATOR_DISPATCH_TARGET}" \
-            "set -e; cd '${NARRATOR_DISPATCH_REPO}' && ./bin/ops cap run commit.narrator.status -- --ref ${GITHUB_SHA} --include-diff --evaluate-rules --write-artifacts --limit 1 --skip-input-readbacks" \
+            "set -e; cd '${NARRATOR_DISPATCH_REPO}' && \
+              SPINE_ROLE_POLICY_OVERRIDE_REF='gitea-workflow-narrator/${GITHUB_RUN_ID}' \
+              SPINE_ROLE_POLICY_OVERRIDE_REASON='narrator-v1.5-auto-dispatch-on-push-to-main-PACKET-1367' \
+              ./bin/ops cap run commit.narrator.status -- --ref ${GITHUB_SHA} --include-diff --evaluate-rules --write-artifacts --limit 1 --skip-input-readbacks" \
             || {
               echo "narrator dispatch failed — operator-eye signal only, not blocking build"
               exit 0
