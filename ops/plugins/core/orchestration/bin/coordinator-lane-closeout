@@ -78,6 +78,24 @@ worktree_is_clean() {
   [[ -z "$(git -C "$path" status --porcelain 2>/dev/null)" ]]
 }
 
+dirty_status_for_path() {
+  local path="$1"
+  git -C "$path" status --porcelain=v1 2>/dev/null | sed 's/^/    /' | head -50
+}
+
+fail_dirty_worktree() {
+  local role="$1"
+  local path="$2"
+  local status=""
+
+  status="$(dirty_status_for_path "$path" || true)"
+  [[ -n "$status" ]] || status="    <no porcelain status available>"
+
+  fail "$role worktree is dirty before closeout: $path
+dirty status:
+$status"
+}
+
 self_hosting_closeout_paths_changed() {
   local base="$1"
   local head="$2"
@@ -105,7 +123,7 @@ sync_target_branch_checkout() {
   local target_head="$3"
 
   if [[ -n "$target_wt" ]]; then
-    worktree_is_clean "$target_wt" || fail "target branch worktree is dirty; refusing target sync after closeout push: $target_wt"
+    worktree_is_clean "$target_wt" || fail_dirty_worktree "target branch" "$target_wt"
     git -C "$target_wt" merge --ff-only "$target_head" >/dev/null 2>&1 \
       || fail "failed to fast-forward target worktree after closeout push: $target_wt"
     echo "fast_forwarded_worktree"
@@ -157,10 +175,6 @@ cleanup_branch_restore() {
 }
 trap cleanup_branch_restore EXIT INT TERM
 
-if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
-  fail "lane worktree must be clean before closeout"
-fi
-
 git -C "$ROOT" rev-parse --verify "$TARGET_BRANCH" >/dev/null 2>&1 || fail "missing target branch: $TARGET_BRANCH"
 
 if ! git -C "$ROOT" fetch "$REMOTE" "$TARGET_BRANCH" >/dev/null 2>&1; then
@@ -174,6 +188,15 @@ fi
 
 remote_lane_head_ls="$(git -C "$ROOT" ls-remote --heads "$REMOTE" "$LANE_BRANCH" 2>/dev/null | awk '{print $1}' | head -1 || true)"
 lane_branch_worktree="$(branch_worktree_path "$LANE_BRANCH")"
+lane_worktree_status="not_present"
+if [[ -n "$lane_branch_worktree" ]]; then
+  lane_worktree_status="clean"
+  worktree_is_clean "$lane_branch_worktree" || fail_dirty_worktree "lane branch" "$lane_branch_worktree"
+elif [[ -n "$remote_lane_head_ls" ]]; then
+  lane_worktree_status="published_ref_no_local_worktree"
+elif [[ "$lane_local_present" -eq 1 ]]; then
+  lane_worktree_status="local_ref_no_worktree"
+fi
 if [[ -n "$remote_lane_head_ls" && "$DRY_RUN" -eq 0 && -z "$lane_branch_worktree" ]]; then
   git -C "$ROOT" fetch "$REMOTE" "+refs/heads/$LANE_BRANCH:refs/heads/$LANE_BRANCH" >/dev/null 2>&1 \
     || fail "failed to fetch published lane branch $REMOTE/$LANE_BRANCH into local branch $LANE_BRANCH"
@@ -298,8 +321,7 @@ else
   integration_status="integrated"
   integration_strategy="detached_runner"
   if [[ -n "$target_branch_worktree" ]]; then
-    worktree_is_clean "$target_branch_worktree" \
-      || fail "target branch worktree is dirty before closeout; clean or shelve before integrating: $target_branch_worktree"
+    worktree_is_clean "$target_branch_worktree" || fail_dirty_worktree "target branch" "$target_branch_worktree"
   fi
   integration_worktree="$(mktemp -d "${TMPDIR:-/tmp}/spine-closeout-${TARGET_BRANCH//\//-}.XXXXXX")"
   git -C "$ROOT" worktree add --detach "$integration_worktree" "$target_start_ref" >/dev/null 2>&1 \
@@ -346,6 +368,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
       --arg target_start_head "$target_start_head" \
       --arg integration_status "$integration_status" \
       --arg integration_strategy "$integration_strategy" \
+      --arg lane_branch_worktree "${lane_branch_worktree:-}" \
+      --arg lane_worktree_status "$lane_worktree_status" \
       --arg target_branch_worktree "${target_branch_worktree:-}" \
       --arg self_hosting_proof_command "$self_hosting_proof_command" \
       --arg self_hosting_proof_note "$self_hosting_proof_note" \
@@ -365,6 +389,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
         target_start_head: $target_start_head,
         integration_status: $integration_status,
         integration_strategy: $integration_strategy,
+        lane_branch_worktree: (if $lane_branch_worktree == "" then null else $lane_branch_worktree end),
+        lane_worktree_status: $lane_worktree_status,
         target_branch_worktree: (if $target_branch_worktree == "" then null else $target_branch_worktree end),
         self_hosting_proof_required: ($self_hosting_proof_required == 1),
         self_hosting_proof_command: (if $self_hosting_proof_command == "" then null else $self_hosting_proof_command end),
@@ -386,6 +412,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "target_start_head: $target_start_head"
     echo "integration_status: $integration_status"
     echo "integration_strategy: $integration_strategy"
+    echo "lane_branch_worktree: ${lane_branch_worktree:-none}"
+    echo "lane_worktree_status: $lane_worktree_status"
     echo "target_branch_worktree: ${target_branch_worktree:-none}"
     echo "self_hosting_proof_required: $self_hosting_proof_required"
     echo "self_hosting_proof_command: ${self_hosting_proof_command:-none}"
@@ -434,6 +462,8 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg target_start_head "$target_start_head" \
     --arg integration_status "$integration_status" \
     --arg integration_strategy "$integration_strategy" \
+    --arg lane_branch_worktree "${lane_branch_worktree:-}" \
+    --arg lane_worktree_status "$lane_worktree_status" \
     --arg target_branch_worktree "${target_branch_worktree:-}" \
     --arg target_sync_status "$target_sync_status" \
     --arg target_publish_command "$target_publish_command" \
@@ -461,6 +491,8 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       target_start_head: $target_start_head,
       integration_status: $integration_status,
       integration_strategy: $integration_strategy,
+      lane_branch_worktree: (if $lane_branch_worktree == "" then null else $lane_branch_worktree end),
+      lane_worktree_status: $lane_worktree_status,
       target_branch_worktree: (if $target_branch_worktree == "" then null else $target_branch_worktree end),
       target_sync_status: $target_sync_status,
       target_publish_required: ($target_publish_required == 1),
@@ -489,6 +521,8 @@ else
   echo "target_start_head: $target_start_head"
   echo "integration_status: $integration_status"
   echo "integration_strategy: $integration_strategy"
+  echo "lane_branch_worktree: ${lane_branch_worktree:-none}"
+  echo "lane_worktree_status: $lane_worktree_status"
   echo "target_branch_worktree: ${target_branch_worktree:-none}"
   echo "target_sync_status: $target_sync_status"
   echo "target_publish_required: $target_publish_required"

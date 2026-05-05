@@ -89,6 +89,13 @@ for marker in \
   "cleanup_integration_worktree_for_lifecycle_report" \
   "removed transient integration runner before lifecycle report" \
   "transient integration runner cleanup" \
+  "dirty_status_for_path" \
+  "fail_dirty_worktree" \
+  "dirty status:" \
+  "lane_branch_worktree" \
+  "lane_worktree_status" \
+  "published_ref_no_local_worktree" \
+  "local_ref_no_worktree" \
   "missing lane branch" \
   "coordinator.lane.publish" \
   "coordinator.target.publish"; do
@@ -122,6 +129,27 @@ if call_idx > report_idx:
     fail("closeout script runs worktree.lifecycle.report before removing its transient integration runner")
 if call_idx > cleanup_step_idx:
     fail("closeout script runs worktree.lifecycle.cleanup before removing its transient integration runner")
+
+old_generic = 'fail "lane worktree must be clean before closeout"'
+if old_generic in text:
+    fail("closeout script still emits generic lane dirty failure without checkout/path detail")
+if 'git -C "$ROOT" status --porcelain' in text:
+    fail("closeout script must not use ambient ROOT cleanliness as the lane dirty gate")
+
+resolve_idx = text.find('lane_branch_worktree="$(branch_worktree_path "$LANE_BRANCH")"')
+lane_dirty_idx = text.find('fail_dirty_worktree "lane branch" "$lane_branch_worktree"')
+target_dirty_idx = text.find('fail_dirty_worktree "target branch" "$target_branch_worktree"')
+if resolve_idx < 0:
+    fail("closeout script must resolve lane_branch_worktree before lane dirty checks")
+if lane_dirty_idx < 0:
+    fail("closeout script must dirty-check the resolved lane branch worktree with path detail")
+if lane_dirty_idx < resolve_idx:
+    fail("closeout script dirty-checks lane before resolving the lane branch worktree path")
+if target_dirty_idx < 0:
+    fail("closeout script must dirty-check the resolved target branch worktree with path detail")
+for token in ("lane_branch_worktree:", "lane_worktree_status:"):
+    if token not in text:
+        fail(f"closeout script must emit {token} in closeout readback")
 PY
 
 for marker in \
