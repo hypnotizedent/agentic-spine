@@ -200,6 +200,61 @@ def _has_exec_receipt(wave_id: str, runtime_root: str = "") -> bool:
         return False
 
 
+def _canonical_main_ref(repo_path: str) -> str | None:
+    """Return the strongest local ref for canonical main truth."""
+    for ref in ("refs/remotes/origin/main", "refs/heads/main", "main"):
+        rc, _out, _err = _git(repo_path, "rev-parse", "--verify", "--quiet", ref)
+        if rc == 0:
+            return ref
+    return None
+
+
+def _branch_merged_into_canonical_main(
+    repo_path: str,
+    branch: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Proof for stale local branch-only wave residue.
+
+    This is intentionally narrower than wave close truth: it only authorizes
+    sweeping a local branch with no unique commits relative to canonical main.
+    It does not claim the wave closed, and it never authorizes worktree cleanup.
+    """
+    proof: dict[str, Any] = {
+        "canonical_main_ref": None,
+        "merged_into_canonical_main": False,
+        "unique_commits_vs_canonical_main": None,
+    }
+    main_ref = _canonical_main_ref(repo_path)
+    proof["canonical_main_ref"] = main_ref
+    if not main_ref:
+        proof["error"] = "canonical main ref unavailable"
+        return False, proof
+
+    rc_ancestor, _out, err_ancestor = _git(
+        repo_path, "merge-base", "--is-ancestor", branch, main_ref
+    )
+    merged = rc_ancestor == 0
+    proof["merged_into_canonical_main"] = merged
+    if rc_ancestor not in (0, 1) and err_ancestor.strip():
+        proof["error"] = err_ancestor.strip()
+
+    rc_count, out_count, err_count = _git(
+        repo_path, "rev-list", "--count", branch, "--not", main_ref
+    )
+    if rc_count != 0:
+        if err_count.strip():
+            proof["error"] = err_count.strip()
+        return False, proof
+    try:
+        unique = int(out_count.strip())
+    except ValueError:
+        proof["error"] = "unable to parse unique commit count"
+        return False, proof
+    proof["unique_commits_vs_canonical_main"] = unique
+
+    return bool(merged and unique == 0), proof
+
+
 def _load_wave_state(runtime_root: str, wave_id: str) -> dict[str, Any] | None:
     path = _wave_state_path(runtime_root, wave_id)
     if not os.path.isfile(path):
@@ -350,8 +405,10 @@ def _make_item(
     safe_to_sweep: bool,
     ambiguous_reason: str | None,
     identity: str,
+    closure_proof: str | None = None,
+    proof: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    item: dict[str, Any] = {
         "class": class_,
         "wave_id": wave_id,
         "path": path,
@@ -362,6 +419,11 @@ def _make_item(
         "ambiguous_reason": ambiguous_reason,
         "identity": identity,
     }
+    if closure_proof:
+        item["closure_proof"] = closure_proof
+    if proof:
+        item["proof"] = proof
+    return item
 
 
 def _item_sort_key(item: dict[str, Any]) -> tuple[str, str, str]:
@@ -440,6 +502,7 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
                         safe_to_sweep=False,
                         ambiguous_reason=dirty_err or "worktree has uncommitted changes",
                         identity=identity,
+                        closure_proof="exec_receipt",
                     ))
                 else:
                     items.append(_make_item(
@@ -452,6 +515,7 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
                         safe_to_sweep=True,
                         ambiguous_reason=None,
                         identity=identity,
+                        closure_proof="exec_receipt",
                     ))
                 continue
             items.append(_make_item(
@@ -565,7 +629,37 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
                     safe_to_sweep=True,
                     ambiguous_reason=None,
                     identity=identity,
+                    closure_proof="exec_receipt",
                 ))
+            elif wave_id and branch != current_head_branch:
+                merged, proof = _branch_merged_into_canonical_main(repo_path, branch)
+                if merged:
+                    items.append(_make_item(
+                        "stale_wave_branch",
+                        wave_id=wave_id,
+                        path=None,
+                        branch=branch,
+                        wave_status="closed (reconstructed from merged branch)",
+                        workspace_lifecycle_state=ws_lifecycle,
+                        safe_to_sweep=True,
+                        ambiguous_reason=None,
+                        identity=identity,
+                        closure_proof="merged_into_main",
+                        proof=proof,
+                    ))
+                else:
+                    items.append(_make_item(
+                        "stale_wave_branch",
+                        wave_id=wave_id,
+                        path=None,
+                        branch=branch,
+                        wave_status="unknown",
+                        workspace_lifecycle_state=ws_lifecycle,
+                        safe_to_sweep=False,
+                        ambiguous_reason="no matching wave state.json",
+                        identity=identity,
+                        proof=proof,
+                    ))
             else:
                 items.append(_make_item(
                     "stale_wave_branch",
@@ -575,7 +669,11 @@ def collect_residue(runtime_root: str, repo_path: str) -> dict[str, Any]:
                     wave_status="unknown",
                     workspace_lifecycle_state=ws_lifecycle,
                     safe_to_sweep=False,
-                    ambiguous_reason="no matching wave state.json",
+                    ambiguous_reason=(
+                        "branch is currently checked out (HEAD)"
+                        if branch == current_head_branch
+                        else "no matching wave state.json"
+                    ),
                     identity=identity,
                 ))
             continue
@@ -761,12 +859,25 @@ def sweep_residue(
         if wave_id:
             live_state = _load_wave_state(runtime_root, wave_id)
             if _wave_status(live_state) != "closed":
-                skipped_ambiguous.append({
-                    "class": cls,
-                    "identity": identity,
-                    "reason": "wave no longer closed at sweep time",
-                })
-                continue
+                closure_proof = str(item.get("closure_proof") or "")
+                branch = str(item.get("branch") or "")
+                exec_receipt_closed = (
+                    closure_proof == "exec_receipt"
+                    and live_state is None
+                    and _has_exec_receipt(str(wave_id), runtime_root)
+                )
+                merged_branch_closed = False
+                if closure_proof == "merged_into_main" and branch:
+                    merged_branch_closed, _proof = _branch_merged_into_canonical_main(
+                        repo_path, branch
+                    )
+                if not exec_receipt_closed and not merged_branch_closed:
+                    skipped_ambiguous.append({
+                        "class": cls,
+                        "identity": identity,
+                        "reason": "wave no longer closed at sweep time",
+                    })
+                    continue
 
         try:
             if cls in ("stale_worktree", "inconsistent_cleaned_workspace") and item.get("path"):

@@ -372,3 +372,72 @@ PY
 python3 "$REGRESSION_SCRIPT" "$ROOT" || fail "wave.sh regression harness failed"
 
 "$WAVE_RESIDUE_BIN" --json >/dev/null || fail "wave.residue readback failed"
+
+python3 - "$ROOT" <<'PY' || fail "wave.residue merged-branch synthetic regression failed"
+import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_path = root / "ops/plugins/core/lifecycle/lib/wave_residue.py"
+spec = importlib.util.spec_from_file_location("wave_residue", module_path)
+if spec is None or spec.loader is None:
+    raise SystemExit("unable to load wave_residue module")
+wave_residue = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wave_residue)
+
+
+def run(args: list[str], cwd: Path) -> None:
+    proc = subprocess.run(args, cwd=str(cwd), text=True, capture_output=True)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise SystemExit(f"{' '.join(args)} failed: {detail}")
+
+
+with tempfile.TemporaryDirectory(prefix="d331-wave-residue-") as td:
+    base = Path(td)
+    repo = base / "repo"
+    runtime = base / "runtime"
+    repo.mkdir()
+    runtime.mkdir()
+
+    run(["git", "init", "-b", "main"], repo)
+    run(["git", "config", "user.email", "verify@example.invalid"], repo)
+    run(["git", "config", "user.name", "Verify"], repo)
+    (repo / "README.md").write_text("verify\n", encoding="utf-8")
+    run(["git", "add", "README.md"], repo)
+    run(["git", "commit", "-m", "init"], repo)
+    run(["git", "branch", "codex/WAVE-MERGED-BRANCH-TEST"], repo)
+
+    report = wave_residue.collect_residue(str(runtime), str(repo))
+    rows = [
+        item for item in report.get("items", [])
+        if item.get("branch") == "codex/WAVE-MERGED-BRANCH-TEST"
+    ]
+    if len(rows) != 1:
+        raise SystemExit(f"expected one merged branch residue row, got {json.dumps(rows)}")
+    row = rows[0]
+    if not row.get("safe_to_sweep"):
+        raise SystemExit(f"merged local wave branch was not safe_to_sweep: {json.dumps(row, sort_keys=True)}")
+    if row.get("closure_proof") != "merged_into_main":
+        raise SystemExit(f"wrong closure_proof for merged local wave branch: {json.dumps(row, sort_keys=True)}")
+
+    sweep = wave_residue.sweep_residue(str(runtime), str(repo), report=report)
+    if not any(
+        item.get("identity") == "branch:codex/WAVE-MERGED-BRANCH-TEST"
+        and item.get("action_taken") == "git_branch_delete"
+        for item in sweep.get("swept", [])
+    ):
+        raise SystemExit(f"merged local wave branch was not swept: {json.dumps(sweep, sort_keys=True)}")
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", "refs/heads/codex/WAVE-MERGED-BRANCH-TEST"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode == 0:
+        raise SystemExit("merged local wave branch still exists after sweep")
+PY
