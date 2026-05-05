@@ -269,6 +269,15 @@ def _terminal_disposition_for_close(disposition: str) -> str:
     )
 
 
+def _terminal_state_for_packet_close(delegation_state: str, close_disposition: str) -> str:
+    state = str(delegation_state or "").strip().lower()
+    if state == "picked_up":
+        disposition = str(close_disposition or "").strip().lower()
+        if disposition in {"landed", "delivered", "superseded"}:
+            return "landed"
+    return "cancelled"
+
+
 def preview_unclaimed_close_retirements(
     state_root: str,
     *,
@@ -286,9 +295,17 @@ def preview_unclaimed_close_retirements(
             data = _read_delegation(path)
         except DelegationError:
             continue
-        if str(data.get("delegation_state", "")).strip().lower() != "delegated":
-            continue
-        if data.get("picked_up_by") or data.get("picked_up_at_utc") or data.get("wave_id"):
+        current_state = str(data.get("delegation_state", "")).strip().lower()
+        picked_up_by = str(data.get("picked_up_by") or "").strip()
+        picked_up_at = str(data.get("picked_up_at_utc") or "").strip()
+        wave_id = str(data.get("wave_id") or "").strip()
+        if current_state == "delegated":
+            if picked_up_by or picked_up_at or wave_id:
+                continue
+        elif current_state == "picked_up":
+            if wave_id:
+                continue
+        else:
             continue
         if loop_id and str(data.get("loop_id", "")).strip() != loop_id:
             continue
@@ -306,8 +323,8 @@ def preview_unclaimed_close_retirements(
             "loop_id": linked_loop_id,
             "packet_id": str(data.get("packet_id", "")).strip(),
             "packet_path": linked_packet_path,
-            "previous_state": "delegated",
-            "terminal_state": "cancelled",
+            "previous_state": current_state,
+            "terminal_state": _terminal_state_for_packet_close(current_state, close_disposition),
             "terminal_disposition": terminal_disposition,
             "close_reason": close_reason,
             "loop_status": str(loop_meta.get("status", "")).strip(),
@@ -350,12 +367,20 @@ def retire_unclaimed_close_residue(
         if not path.exists():
             continue
         data = _read_delegation(path)
-        if str(data.get("delegation_state", "")).strip().lower() != "delegated":
+        current_state = str(data.get("delegation_state", "")).strip().lower()
+        if current_state != str(preview.get("previous_state", "")).strip().lower():
             continue
-        if data.get("picked_up_by") or data.get("picked_up_at_utc") or data.get("wave_id"):
+        if current_state == "delegated":
+            if data.get("picked_up_by") or data.get("picked_up_at_utc") or data.get("wave_id"):
+                continue
+        elif current_state == "picked_up":
+            if data.get("wave_id"):
+                continue
+        else:
             continue
 
-        data["delegation_state"] = "cancelled"
+        terminal_state = str(preview.get("terminal_state", "")).strip().lower() or "cancelled"
+        data["delegation_state"] = terminal_state
         data["disposition"] = str(preview.get("terminal_disposition", "")).strip().lower() or "cancelled"
         data["completed_at_utc"] = now
         data["close_terminalized_by"] = close_source or "delegation_broker"
@@ -369,7 +394,7 @@ def retire_unclaimed_close_residue(
             _update_packet_frontmatter(
                 linked_packet_path,
                 delegation_id,
-                "cancelled",
+                terminal_state,
                 loop_id=str(data.get("loop_id", "")),
             )
 

@@ -665,6 +665,114 @@ if row.get("disposition") != "superseded":
 if row.get("close_terminalized_by") != "controller_prompt.close":
     raise SystemExit("terminalization source missing from delegation row")
 
+picked_up_packet = cpc.create_packet(
+    packet_id="PACKET-06-D441-PICKED-UP-NONWAVE",
+    loop_id="LOOP-D441-STALE",
+    concern="verify picked-up non-wave delegation terminalization",
+    state_root=str(state_root),
+    owner="@test",
+)
+picked_up_delegation_id = "DEL-D441-PICKED-UP-NONWAVE"
+(state_root / "delegations" / f"{picked_up_delegation_id}.yaml").write_text(
+    yaml.safe_dump(
+        {
+            "delegation_id": picked_up_delegation_id,
+            "loop_id": "LOOP-D441-STALE",
+            "packet_id": "PACKET-06-D441-PICKED-UP-NONWAVE",
+            "packet_path": picked_up_packet["packet_path"],
+            "packet_kind": "controller_prompt",
+            "objective": "picked-up non-wave delegation specimen",
+            "delegation_state": "picked_up",
+            "delegated_at_utc": "2026-04-26T00:00:00Z",
+            "delegator_terminal": "TEST-CONTROL-01",
+            "target_role": "worker",
+            "picked_up_by": "TEST-WORKER-01",
+            "picked_up_at_utc": "2026-04-26T00:01:00Z",
+            "wave_id": None,
+            "disposition": None,
+            "completed_at_utc": None,
+        },
+        sort_keys=False,
+    ),
+    encoding="utf-8",
+)
+picked_up_close = cpc_close.close_packet(
+    picked_up_packet["packet_path"],
+    "delivered",
+    "verify picked-up non-wave delegation terminalization",
+    str(repo),
+    starting_head=head,
+    ending_head=head,
+    verify_result="pass",
+    auto_close_loop=False,
+)
+picked_up_retired = picked_up_close.get("terminalized_unclaimed_delegations") or []
+if not picked_up_retired or picked_up_retired[0].get("delegation_id") != picked_up_delegation_id:
+    raise SystemExit("close path did not terminalize picked-up non-wave delegation")
+if picked_up_retired[0].get("previous_state") != "picked_up":
+    raise SystemExit("picked-up non-wave terminalization did not record previous_state")
+if picked_up_retired[0].get("terminal_state") != "landed":
+    raise SystemExit("picked-up non-wave terminalization did not land success close")
+picked_up_row = db.status(str(state_root), delegation_id=picked_up_delegation_id)["delegations"][0]
+if picked_up_row.get("delegation_state") != "landed":
+    raise SystemExit(f"unexpected picked-up non-wave delegation_state: {picked_up_row.get('delegation_state')}")
+if picked_up_row.get("effective_state") != "landed":
+    raise SystemExit(f"unexpected picked-up non-wave effective_state: {picked_up_row.get('effective_state')}")
+if picked_up_row.get("disposition") != "superseded":
+    raise SystemExit(f"unexpected picked-up non-wave disposition: {picked_up_row.get('disposition')}")
+if picked_up_row.get("close_terminalized_by") != "controller_prompt.close":
+    raise SystemExit("picked-up non-wave terminalization source missing from delegation row")
+
+wave_bound_packet = cpc.create_packet(
+    packet_id="PACKET-07-D441-PICKED-UP-WAVE",
+    loop_id="LOOP-D441-STALE",
+    concern="verify wave-bound picked-up delegation remains wave-owned",
+    state_root=str(state_root),
+    owner="@test",
+)
+wave_bound_delegation_id = "DEL-D441-PICKED-UP-WAVE"
+(state_root / "delegations" / f"{wave_bound_delegation_id}.yaml").write_text(
+    yaml.safe_dump(
+        {
+            "delegation_id": wave_bound_delegation_id,
+            "loop_id": "LOOP-D441-STALE",
+            "packet_id": "PACKET-07-D441-PICKED-UP-WAVE",
+            "packet_path": wave_bound_packet["packet_path"],
+            "packet_kind": "controller_prompt",
+            "objective": "wave-bound picked-up delegation specimen",
+            "delegation_state": "picked_up",
+            "delegated_at_utc": "2026-04-26T00:00:00Z",
+            "delegator_terminal": "TEST-CONTROL-01",
+            "target_role": "worker",
+            "picked_up_by": "TEST-WORKER-01",
+            "picked_up_at_utc": "2026-04-26T00:01:00Z",
+            "wave_id": "WAVE-D441-OWNED",
+            "disposition": None,
+            "completed_at_utc": None,
+        },
+        sort_keys=False,
+    ),
+    encoding="utf-8",
+)
+wave_bound_close = cpc_close.close_packet(
+    wave_bound_packet["packet_path"],
+    "delivered",
+    "verify wave-bound delegation remains wave-owned",
+    str(repo),
+    starting_head=head,
+    ending_head=head,
+    verify_result="pass",
+    auto_close_loop=False,
+)
+wave_bound_retired = wave_bound_close.get("terminalized_unclaimed_delegations") or []
+if any(item.get("delegation_id") == wave_bound_delegation_id for item in wave_bound_retired):
+    raise SystemExit("packet close terminalized wave-bound picked-up delegation")
+wave_bound_row = db.status(str(state_root), delegation_id=wave_bound_delegation_id)["delegations"][0]
+if wave_bound_row.get("delegation_state") != "picked_up":
+    raise SystemExit(f"wave-bound delegation state changed unexpectedly: {wave_bound_row.get('delegation_state')}")
+if wave_bound_row.get("wave_id") != "WAVE-D441-OWNED":
+    raise SystemExit("wave-bound delegation lost wave_id")
+
 closed_status = json.loads(subprocess.check_output(
     [
         sys.executable,
@@ -875,5 +983,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, commit.narrator.status --evaluate-rules runs the deterministic rule engine over committed governance and emits a rule_layer with verdict (good_direction|regression_risk|unknown_*) confidence rule_outcomes citations and honest_unknown_reason while preserving witness-only authority bounds, default narrator runs without --evaluate-rules MUST NOT publish rule_evaluation or row.rule_layer, commit.narrator.status --from-artifacts replays per-commit yamls into the rollup payload with artifact_reads summary and from_artifact rows pulling direction_signal/rule_layer from canonical state while missing artifacts produce explicit disclosure rows (no silent recompute) and default runs without --from-artifacts MUST NOT publish artifact_reads or row.from_artifact, .gitea/workflows/narrator.yml dispatches narrator on push-to-main only inside an SSH command to NARRATOR_DISPATCH_TARGET (forge runner does not gain capability_execution; secrets referenced not committed; deferred-cleanly when secrets absent), session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, deferred closed packets can be forward-corrected only with fresh evidence, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, commit.narrator.status --evaluate-rules runs the deterministic rule engine over committed governance and emits a rule_layer with verdict (good_direction|regression_risk|unknown_*) confidence rule_outcomes citations and honest_unknown_reason while preserving witness-only authority bounds, default narrator runs without --evaluate-rules MUST NOT publish rule_evaluation or row.rule_layer, commit.narrator.status --from-artifacts replays per-commit yamls into the rollup payload with artifact_reads summary and from_artifact rows pulling direction_signal/rule_layer from canonical state while missing artifacts produce explicit disclosure rows (no silent recompute) and default runs without --from-artifacts MUST NOT publish artifact_reads or row.from_artifact, .gitea/workflows/narrator.yml dispatches narrator on push-to-main only inside an SSH command to NARRATOR_DISPATCH_TARGET (forge runner does not gain capability_execution; secrets referenced not committed; deferred-cleanly when secrets absent), session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed and picked-up non-wave delegations, deferred closed packets can be forward-corrected only with fresh evidence, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0

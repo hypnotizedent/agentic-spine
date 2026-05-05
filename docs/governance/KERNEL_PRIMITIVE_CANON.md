@@ -248,7 +248,8 @@ Each governed receipt class expresses result through its native field:
 - Controller-prompt: `disposition: delivered` → `outcome: success`
 - Loop closeout: `disposition: landed` → `outcome: success`
 
-**What is derived:** delegation disposition (derived from wave close hook),
+**What is derived:** delegation disposition (derived from wave close hook, or
+controller-prompt close hook for picked-up non-wave packet realization),
 operator overview result display, completion state classification.
 
 **What is compatibility residue:** Narrative receipts claiming result status
@@ -332,7 +333,8 @@ The collapse is:
 
 **What is derived:** `completion.state.reconcile` output (derives state from
 receipt existence/absence), `ops status` receipt summary, delegation disposition
-(derived from wave close hook).
+(derived from wave close hook, or controller-prompt close hook for picked-up
+non-wave packet realization).
 
 **What is compatibility residue:** Narrative receipts (`*-RECEIPT-*.md` in
 domain-state). Session memory only. If they disagree with a governed receipt,
