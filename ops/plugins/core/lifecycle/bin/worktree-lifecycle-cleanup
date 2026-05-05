@@ -130,6 +130,7 @@ ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
 mkdir -p "$ARTIFACT_DIR"
 
 REPORT_JSON="$ARTIFACT_DIR/report.json"
+POST_REPORT_JSON=""
 REPORT_MD="$ARTIFACT_DIR/report.md"
 ARCHIVE_MANIFEST="$ARTIFACT_DIR/archive-manifest.json"
 ACTIONS_LOG="$ARTIFACT_DIR/actions.log"
@@ -203,6 +204,9 @@ def lease_only_dirty(row):
 for row in rows:
     reasons = []
     lease = row.get("lease") or {}
+    cleanup_class = str(row.get("cleanup_class") or "")
+    if cleanup_class.startswith("blocked_"):
+        reasons.append(cleanup_class)
     if row.get("managed_worktree"):
         reasons.append("managed_worktree_protected")
     elif not row.get("canonical_root_ok", True):
@@ -654,15 +658,62 @@ with actions.open("a", encoding="utf-8") as log:
         else:
             log.write(f"skip_root={root_action.get('path')}|{(switch.stderr or switch.stdout).strip()}\n")
 PY
+
+  POST_REPORT_JSON="$ARTIFACT_DIR/post-report.json"
+  SPINE_TARGET_REPO="$TARGET_ROOT" "$RECONCILE_SCRIPT" --json > "$POST_REPORT_JSON"
 fi
 
 if [[ "$JSON_MODE" -eq 1 ]]; then
-  cat "$REPORT_JSON"
+  python3 - "$MODE" "$REPORT_JSON" "${POST_REPORT_JSON:-}" "$REPORT_MD" "$ARCHIVE_MANIFEST" "$ACTIONS_LOG" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+mode = sys.argv[1]
+pre_report_path = Path(sys.argv[2])
+post_report_arg = sys.argv[3]
+report_md = Path(sys.argv[4])
+archive_manifest = Path(sys.argv[5])
+actions_log = Path(sys.argv[6])
+
+pre_report = json.loads(pre_report_path.read_text(encoding="utf-8"))
+post_report_path = Path(post_report_arg) if post_report_arg else None
+payload = pre_report
+if post_report_path and post_report_path.exists():
+    payload = json.loads(post_report_path.read_text(encoding="utf-8"))
+    payload["pre_cleanup_summary"] = pre_report.get("summary", {})
+
+action_counts = {}
+actions = []
+if actions_log.exists():
+    for raw in actions_log.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        key = line.split("=", 1)[0].split("|", 1)[0]
+        action_counts[key] = action_counts.get(key, 0) + 1
+        actions.append(line)
+
+payload["cleanup_run"] = {
+    "mode": mode,
+    "pre_report_json": str(pre_report_path),
+    "post_report_json": str(post_report_path) if post_report_path and post_report_path.exists() else "",
+    "report_md": str(report_md),
+    "archive_manifest": str(archive_manifest) if archive_manifest.exists() else "",
+    "actions_log": str(actions_log),
+    "action_counts": action_counts,
+    "actions": actions[:200],
+}
+print(json.dumps(payload, indent=2))
+PY
 else
   echo "worktree.lifecycle.cleanup"
   echo "mode=$MODE"
   echo "artifact.report_md=$REPORT_MD"
   echo "artifact.report_json=$REPORT_JSON"
+  if [[ -n "${POST_REPORT_JSON:-}" && -f "$POST_REPORT_JSON" ]]; then
+    echo "artifact.post_report_json=$POST_REPORT_JSON"
+  fi
   echo "artifact.archive_manifest=${ARCHIVE_MANIFEST:-none}"
   echo "artifact.actions=$ACTIONS_LOG"
 fi

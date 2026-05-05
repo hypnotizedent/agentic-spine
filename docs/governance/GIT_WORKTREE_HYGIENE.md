@@ -29,7 +29,7 @@ Run governed inventory/readback only:
 Apply explicit cleanup actions only when archive/delete is intended:
 
 ```bash
-./bin/ops cap run worktree.lifecycle.cleanup -- --mode archive --json
+./bin/ops cap run worktree.lifecycle.cleanup -- --mode archive-only --json
 ```
 
 The lower-level hygiene script remains an implementation detail. It is not the

@@ -721,6 +721,28 @@ def collect_worktree_state(paths: dict[str, Path]) -> dict[str, Any]:
     }
 
 
+def collect_worktree_lifecycle_report(paths: dict[str, Path]) -> dict[str, Any]:
+    script = paths["root"] / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "worktree-lifecycle-report"
+    if not script.exists():
+        return {"summary": {}, "blocked": [], "raw": {}}
+
+    rc, out, err = run_cmd([str(script), "--json"], cwd=paths["root"])
+    text = out.strip() or err.strip()
+    if rc != 0 or not text:
+        return {"summary": {}, "blocked": [], "raw": {"error": text}}
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return {"summary": {}, "blocked": [], "raw": {"error": text[:500]}}
+
+    return {
+        "summary": payload.get("summary", {}) if isinstance(payload, dict) else {},
+        "blocked": payload.get("blocked", []) if isinstance(payload.get("blocked"), list) else [],
+        "raw": payload,
+    }
+
+
 def collect_wave_state(paths: dict[str, Path]) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     active_rows: list[dict[str, Any]] = []
     force_close_rows: list[dict[str, Any]] = []
@@ -1682,12 +1704,97 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
     return payload
 
 
+def synthesize_brief(root: Path) -> dict[str, Any]:
+    """Build the bounded payload used by `ops status --brief`.
+
+    The public brief needs current counts and verify posture, not the full
+    joined-state detail graph. Keeping this path small prevents routine entry
+    readback from falling back to stale cache when slower drilldown joins run
+    past the banner timeout.
+    """
+    paths = resolve_paths(root)
+    open_loops, _loop_status_index, scope_only_orphans, projection_residue = collect_loop_rows(paths)
+
+    canonical_open_loop_count = fetch_canonical_open_loop_count(paths["root"])
+    loop_count = canonical_open_loop_count if canonical_open_loop_count is not None else len(open_loops)
+    loop_source = "canonical_routed" if canonical_open_loop_count is not None else "local_db"
+    if canonical_open_loop_count is not None and is_consumer_projection_state_root(paths["state_root"]):
+        scope_only_orphans = []
+
+    gap_state = collect_gap_state(paths, {})
+    worktrees = collect_worktree_lifecycle_report(paths)
+    latest_secondary_verify = collect_latest_secondary_verify(paths)
+    latest_engine_verify = collect_latest_engine_verify(paths)
+    latest_spine_verify = collect_latest_spine_verify(paths)
+
+    worktree_summary = worktrees.get("summary", {}) if isinstance(worktrees.get("summary"), dict) else {}
+    blocked_worktrees = worktrees.get("blocked", []) if isinstance(worktrees.get("blocked"), list) else []
+    dirty_blocked = 0
+    for row in blocked_worktrees:
+        reasons = row.get("reasons", []) if isinstance(row, dict) else []
+        if "dirty_worktree" in reasons:
+            dirty_blocked += 1
+
+    return {
+        "schema_version": "1.0",
+        "generated_at_utc": utc_now(),
+        "paths": {
+            "root": str(paths["root"]),
+            "state_root": str(paths["state_root"]),
+            "joined_state_path": str(paths["joined_state_path"]),
+        },
+        "summary": {
+            "open_loops": loop_count,
+            "open_loops_local_count": len(open_loops),
+            "open_loops_canonical_count": canonical_open_loop_count,
+            "open_loops_source": loop_source,
+            "scope_only_orphans": len(scope_only_orphans),
+            "projection_residue": len(projection_residue),
+            "open_gaps": None if gap_state.get("status") != "ok" else len(gap_state.get("open", [])),
+            "gap_authority_status": gap_state.get("status", "degraded"),
+            "engine_verify_status": latest_engine_verify.get("status", "unknown"),
+            "spine_verify_status": latest_spine_verify.get("status", "unknown"),
+            "secondary_verify_status": latest_secondary_verify.get("status", "unknown"),
+            "secondary_verify_freshness": latest_secondary_verify.get("freshness", "unknown"),
+            "secondary_verify_stale_status": latest_secondary_verify.get("stale_status", ""),
+            "engine_coherence_needs_attention": False,
+            "engine_coherence_status": "skipped",
+            "worktree_lifecycle": {
+                "worktree_count": int(worktree_summary.get("worktree_count") or 0),
+                "cleanable_worktrees": int(worktree_summary.get("cleanable_worktrees") or 0),
+                "blocked_worktrees": int(worktree_summary.get("blocked_worktrees") or 0),
+                "dirty_blocked_worktrees": dirty_blocked,
+            },
+        },
+        "verify": {
+            "engine": latest_engine_verify,
+            "spine": latest_spine_verify,
+            "secondary": latest_secondary_verify,
+        },
+        "worktrees": {
+            "summary": worktree_summary,
+            "blocked": blocked_worktrees,
+        },
+        "gaps": {
+            "status": gap_state.get("status", "degraded"),
+            "source": gap_state.get("source", "gaps_sql_authority"),
+            "message": gap_state.get("message", ""),
+        },
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build the canonical spine engine joined-state runtime surface.")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of a human summary")
+    parser.add_argument("--brief-json", action="store_true", help="Emit bounded JSON for ops status --brief")
     parser.add_argument("--loop-id", default="", help="Include loop-scoped residue and evidence context")
     parser.add_argument("--no-write", action="store_true", help="Do not write the YAML joined-state file")
     args = parser.parse_args()
+
+    if args.brief_json:
+        json.dump(synthesize_brief(resolve_root()), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
 
     payload = synthesize(resolve_root(), loop_id=str(args.loop_id or "").strip(), write=not args.no_write)
     if args.json:

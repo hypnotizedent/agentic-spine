@@ -171,7 +171,7 @@ def rehydrate_command(branch: str | None, owner_id: str | None, repo: Path) -> s
 
 
 def cleanup_command() -> str:
-    return "./bin/ops cap run worktree.lifecycle.cleanup -- --mode archive --json"
+    return "./bin/ops cap run worktree.lifecycle.cleanup -- --mode archive-only --json"
 
 
 def classify_ownership(
@@ -226,6 +226,14 @@ def classify_ownership(
             "ownership_evidence": evidence,
             "cleanup_class": "blocked_dirty_residue_reclaim_or_clean",
             "next_action": rehydrate_command(branch, owner_id, repo),
+        }
+
+    if owner_type == "packet" and owner_state in {"unresolved", "draft", "open", "active", "in_progress", "present"}:
+        return {
+            "ownership_status": f"packet_owner_{owner_state}",
+            "ownership_evidence": evidence,
+            "cleanup_class": "blocked_packet_owner_not_terminal",
+            "next_action": f"./bin/ops cap run controller_prompt.status -- --packet-id {owner_id}",
         }
 
     if not merged:

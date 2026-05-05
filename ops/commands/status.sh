@@ -388,17 +388,26 @@ def _render(payload, status_note=""):
     completion = summary.get("completion_state") if isinstance(summary.get("completion_state"), dict) else {}
     orphaned = int(completion.get("orphaned") or 0)
     owned_elsewhere = int(completion.get("owned_elsewhere") or 0)
-    if orphaned or owned_elsewhere:
+    worktree_lifecycle = summary.get("worktree_lifecycle") if isinstance(summary.get("worktree_lifecycle"), dict) else {}
+    cleanable_worktrees = int(worktree_lifecycle.get("cleanable_worktrees") or 0)
+    dirty_blocked_worktrees = int(worktree_lifecycle.get("dirty_blocked_worktrees") or 0)
+    if cleanable_worktrees or dirty_blocked_worktrees:
+        parts.append(f"Worktrees: {cleanable_worktrees} cleanable / {dirty_blocked_worktrees} dirty blocked")
+    elif orphaned or owned_elsewhere:
         parts.append(f"Worktrees: {orphaned} orphaned / {owned_elsewhere} owned elsewhere")
 
+    coherence_status = str(summary.get("engine_coherence_status") or "").strip().lower()
     coherence_attention = bool(summary.get("engine_coherence_needs_attention"))
-    parts.append("Coherence: attention" if coherence_attention else "Coherence: ok")
+    if coherence_status == "skipped":
+        parts.append("Coherence: skipped")
+    else:
+        parts.append("Coherence: attention" if coherence_attention else "Coherence: ok")
     parts.append("Code drift: skipped")
     parts.append("Authority: skipped")
     parts.append("Clerk: skipped")
     if status_note:
         parts.append(status_note)
-    anomalies = 1 if coherence_attention else 0
+    anomalies = 1 if coherence_attention and coherence_status != "skipped" else 0
     parts.append(f"Anomalies: {anomalies}")
     return " | ".join(parts), anomalies
 
@@ -418,7 +427,7 @@ try:
     if os.environ.get("OPS_STATUS_BRIEF_FORCE_CACHE_FALLBACK") == "1":
         raise TimeoutError("forced cache fallback")
     proc = subprocess.run(
-        ["python3", str(joined_bin), "--json", "--no-write"],
+        ["python3", str(joined_bin), "--brief-json", "--no-write"],
         capture_output=True,
         text=True,
         timeout=timeout_seconds,

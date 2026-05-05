@@ -332,7 +332,7 @@ stay on `main` and clean. All wave/feature work happens in managed worktrees.
 - Open: any time repo mutation is needed
 - Close: prune only when boring (landed on main, zero unique commits, no dirty state)
 - Inspect: `./bin/ops cap run worktree.lifecycle.report -- --json`
-- Cleanup: `./bin/ops cap run worktree.lifecycle.cleanup -- --mode archive --json` only when explicit archive/delete cleanup is intended
+- Cleanup: `./bin/ops cap run worktree.lifecycle.cleanup -- --mode archive-only --json` only when explicit archive/delete cleanup is intended
 - Authority: `docs/governance/GIT_WORKTREE_HYGIENE.md`, `ops/bindings/worktree.lifecycle.contract.yaml`
 
 ### Propose/change artery (v1)
