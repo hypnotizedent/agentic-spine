@@ -279,6 +279,17 @@ _CANONICAL_LOOP_COUNT_CACHE: int | None = None
 _CANONICAL_LOOP_COUNT_PROBED: bool = False
 
 
+def is_consumer_projection_state_root(state_root: Path) -> bool:
+    """Return true when state is a consumer-local projection/cache.
+
+    After the D.3b authority cutover, non-authority hosts keep local
+    `.runtime/spine/state` projections. Scope files found only there can be
+    stale cache residue; they must not read back as canonical scope orphans when
+    routed loop authority is reachable.
+    """
+    return "/.runtime/spine/state" in str(state_root)
+
+
 def fetch_canonical_open_loop_count(repo_root: Path) -> int | None:
     """Return canonical open loop count via routed `loops.status` cap.
 
@@ -1405,6 +1416,10 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
     # canonical authority. This stops a stale/spurious local DB from
     # silently presenting 0 while pve holds the real number.
     canonical_open_loop_count = fetch_canonical_open_loop_count(paths["root"])
+    if canonical_open_loop_count is not None and is_consumer_projection_state_root(paths["state_root"]):
+        # pve SQLite is canonical. Consumer-local scope-only files are
+        # projection residue, not public scope-orphan truth.
+        scope_only_orphans = []
     gap_state = collect_gap_state(paths, loop_status_index)
     open_gaps = gap_state.get("open", []) if gap_state.get("status") == "ok" else []
     orphaned_gaps = gap_state.get("orphaned", []) if gap_state.get("status") == "ok" else []
