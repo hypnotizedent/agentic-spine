@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""network.presence.status — single Site Intelligence Network branch readback.
+
+Fuses the four bounded network producers (home/shop UniFi observed-client
+snapshots + home/shop DHCP audits) into one operator-facing branch readback.
+The four producer caps remain legal as private producer/materialization
+surfaces; they are not operator drilldown levers under the branch framework
+landed in PACKET-1341.
+
+Read-only. Does not decide node admission, hardware identity, storage
+custody, or backup posture. May surface admission-review hints when shop
+DHCP audit classification flags candidate_pending_admission rows; the hint
+is advisory — node.admission.status remains the admission/lifecycle
+authority.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[5]
+PATHS = {
+    "home_observed": ROOT / "ops/bindings/network.unifi.home.clients.observed.yaml",
+    "shop_observed": ROOT / "ops/bindings/network.unifi.shop.clients.observed.yaml",
+    "home_dhcp_audit": ROOT / "ops/bindings/home.dhcp.audit.yaml",
+    "shop_dhcp_audit": ROOT / "ops/bindings/shop.dhcp.audit.yaml",
+}
+
+PRIVATE_PRODUCERS = [
+    {
+        "capability": "network.home.unifi.clients.snapshot",
+        "kind": "private_producer",
+        "writes": "ops/bindings/network.unifi.home.clients.observed.yaml",
+    },
+    {
+        "capability": "network.unifi.clients.snapshot",
+        "kind": "private_producer",
+        "writes": "ops/bindings/network.unifi.shop.clients.observed.yaml",
+    },
+    {
+        "capability": "network.home.dhcp.audit",
+        "kind": "private_producer",
+        "writes": "ops/bindings/home.dhcp.audit.yaml",
+    },
+    {
+        "capability": "network.shop.dhcp.audit",
+        "kind": "private_producer",
+        "writes": "ops/bindings/shop.dhcp.audit.yaml",
+    },
+]
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def freshness_state(generated_at: Any, max_age_hours: float | None) -> str:
+    if not generated_at or not max_age_hours:
+        return "policy_missing"
+    try:
+        ts = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        age_hours = (datetime.now(UTC) - ts).total_seconds() / 3600.0
+        return "stale" if age_hours > float(max_age_hours) else "fresh"
+    except (TypeError, ValueError):
+        return "policy_missing"
+
+
+def site_block(
+    site: str,
+    observed_doc: dict[str, Any],
+    dhcp_doc: dict[str, Any],
+    observed_path: Path,
+    dhcp_path: Path,
+) -> dict[str, Any]:
+    devices = [d for d in (observed_doc.get("devices") or []) if isinstance(d, dict)]
+    visibility = {
+        "observed_clients_total": len(devices),
+        "observed_clients_active": sum(
+            1 for d in devices if str(d.get("status") or "").lower() == "active"
+        ),
+    }
+
+    freshness_policy = observed_doc.get("freshness_policy") or {}
+    state = freshness_state(
+        observed_doc.get("generated_at") or observed_doc.get("updated_at"),
+        freshness_policy.get("max_age_hours"),
+    )
+    freshness = {
+        "state": state,
+        "max_age_hours": freshness_policy.get("max_age_hours"),
+        "last_observed_at": observed_doc.get("generated_at")
+        or observed_doc.get("updated_at"),
+    }
+
+    summary = dhcp_doc.get("summary") or {}
+    classification_summary = (
+        summary.get("unregistered_classification")
+        if isinstance(summary.get("unregistered_classification"), dict)
+        else None
+    )
+    classification_full = (
+        dhcp_doc.get("unregistered_classification")
+        if isinstance(dhcp_doc.get("unregistered_classification"), dict)
+        else None
+    )
+
+    dhcp = {
+        "audit_present": bool(dhcp_doc),
+        "audit_generated_at": dhcp_doc.get("generated") or dhcp_doc.get("generated_at"),
+        "reservations_total": summary.get("total_reservations"),
+        "unifi_clients_total": summary.get("unifi_clients_total"),
+        "unregistered_clients_total": summary.get("unregistered_clients"),
+        "classification_summary": classification_summary,
+        "classification_state": (
+            "classified" if classification_summary else "no_classification_available"
+        ),
+    }
+
+    admission_review_hint_count = 0
+    if classification_full and isinstance(
+        classification_full.get("candidate_pending_admission"), list
+    ):
+        admission_review_hint_count = len(classification_full["candidate_pending_admission"])
+    elif classification_summary and isinstance(
+        classification_summary.get("candidate_pending_admission"), int
+    ):
+        admission_review_hint_count = int(
+            classification_summary["candidate_pending_admission"]
+        )
+
+    stale_snapshot_artifacts = 0
+    if classification_full and isinstance(
+        classification_full.get("stale_snapshot_artifact"), list
+    ):
+        stale_snapshot_artifacts = len(classification_full["stale_snapshot_artifact"])
+    elif classification_summary and isinstance(
+        classification_summary.get("stale_snapshot_artifact"), int
+    ):
+        stale_snapshot_artifacts = int(classification_summary["stale_snapshot_artifact"])
+
+    unknown_observed = 0
+    if classification_full and isinstance(
+        classification_full.get("observed_only_unknown"), list
+    ):
+        unknown_observed = len(classification_full["observed_only_unknown"])
+    elif classification_summary and isinstance(
+        classification_summary.get("observed_only_unknown"), int
+    ):
+        unknown_observed = int(classification_summary["observed_only_unknown"])
+
+    return {
+        "site": site,
+        "visibility": visibility,
+        "freshness": freshness,
+        "dhcp": dhcp,
+        "admission_review_hint_count": admission_review_hint_count,
+        "stale_snapshot_artifacts": stale_snapshot_artifacts,
+        "unknown_observed_clients": unknown_observed,
+        "source_refs": {
+            "observed_clients": str(observed_path.relative_to(ROOT))
+            if observed_path.exists()
+            else None,
+            "dhcp_audit": str(dhcp_path.relative_to(ROOT))
+            if dhcp_path.exists()
+            else None,
+        },
+        "actions_allowed": {
+            "may_create_node": False,
+            "may_admit_node": False,
+            "may_promote_node": False,
+            "may_decide_hardware_identity": False,
+            "may_decide_storage_custody": False,
+            "may_decide_backup_posture": False,
+        },
+    }
+
+
+def build_payload() -> dict[str, Any]:
+    home_observed = load_yaml(PATHS["home_observed"])
+    shop_observed = load_yaml(PATHS["shop_observed"])
+    home_dhcp = load_yaml(PATHS["home_dhcp_audit"])
+    shop_dhcp = load_yaml(PATHS["shop_dhcp_audit"])
+
+    home = site_block(
+        "home", home_observed, home_dhcp, PATHS["home_observed"], PATHS["home_dhcp_audit"]
+    )
+    shop = site_block(
+        "shop", shop_observed, shop_dhcp, PATHS["shop_observed"], PATHS["shop_dhcp_audit"]
+    )
+
+    return {
+        "canonical_authority": "network.presence.status",
+        "capability": "network.presence.status",
+        "branch_role": "network_branch_readback",
+        "operator_label": "Network",
+        "status": "ok",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "boundary": {
+            "owns": [
+                "network_visibility_summary",
+                "freshness_state_summary",
+                "dhcp_intent_match_summary",
+                "unknown_observed_summary",
+                "admission_review_hint_count",
+            ],
+            "does_not_decide": [
+                "node_admission",
+                "node_promotion",
+                "hardware_identity",
+                "storage_custody",
+                "backup_posture",
+            ],
+            "admission_authority": "node.admission.status",
+        },
+        "private_producers": PRIVATE_PRODUCERS,
+        "sites": {"home": home, "shop": shop},
+        "summary": {
+            "sites": 2,
+            "fresh_sites": sum(
+                1 for s in (home, shop) if s["freshness"]["state"] == "fresh"
+            ),
+            "stale_sites": sum(
+                1 for s in (home, shop) if s["freshness"]["state"] == "stale"
+            ),
+            "admission_review_hint_total": home["admission_review_hint_count"]
+            + shop["admission_review_hint_count"],
+            "unknown_observed_total": home["unknown_observed_clients"]
+            + shop["unknown_observed_clients"],
+            "stale_snapshot_artifacts_total": home["stale_snapshot_artifacts"]
+            + shop["stale_snapshot_artifacts"],
+        },
+    }
+
+
+def render_human(payload: dict[str, Any]) -> None:
+    print("network.presence.status")
+    print(f"branch: {payload['branch_role']} (operator label: {payload['operator_label']})")
+    summary = payload["summary"]
+    print(
+        f"summary: sites={summary['sites']} fresh={summary['fresh_sites']} "
+        f"stale={summary['stale_sites']} admission_review_hint_total="
+        f"{summary['admission_review_hint_total']} unknown_observed_total="
+        f"{summary['unknown_observed_total']} stale_snapshot_artifacts_total="
+        f"{summary['stale_snapshot_artifacts_total']}"
+    )
+    print("")
+    print("Private producers (not operator drilldowns):")
+    for prod in payload["private_producers"]:
+        print(f"  {prod['capability']:<40} writes {prod['writes']}")
+    print("")
+    print("Per-site summary:")
+    for site_id, site in payload["sites"].items():
+        vis = site["visibility"]
+        fr = site["freshness"]
+        dh = site["dhcp"]
+        print(
+            f"  {site_id:<5} observed={vis['observed_clients_total']} "
+            f"active={vis['observed_clients_active']} "
+            f"freshness={fr['state']} max_age={fr['max_age_hours']}h "
+            f"dhcp_state={dh['classification_state']} "
+            f"reservations={dh['reservations_total']} "
+            f"unregistered={dh['unregistered_clients_total']} "
+            f"admission_hints={site['admission_review_hint_count']}"
+        )
+    print("")
+    print("Boundary: Network does not decide admission/promotion/hardware/storage/backup;")
+    print("          node.admission.status remains admission/lifecycle authority.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Site Intelligence Network branch readback")
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args()
+
+    payload = build_payload()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    render_human(payload)
+
+
+if __name__ == "__main__":
+    main()
