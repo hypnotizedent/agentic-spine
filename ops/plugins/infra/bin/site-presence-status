@@ -160,6 +160,75 @@ DRILLDOWN_LEVERS = [
 ]
 
 
+# PACKET-1343: Site Intelligence is a family of exactly five branches.
+# Each branch has one operator-facing readback. Granular producers, audits,
+# snapshots, and transition caps are private/folded implementation details
+# below the branches, not branch peers. site.presence.status is the family
+# first-read; the branches are its only operator drilldowns.
+BRANCH_MODEL = [
+    {
+        "branch": "network",
+        "operator_label": "Network",
+        "readback": "network.presence.status",
+        "summary_field": "network_state",
+        "private_machinery": [
+            "network.home.unifi.clients.snapshot",
+            "network.unifi.clients.snapshot",
+            "network.home.dhcp.audit",
+            "network.shop.dhcp.audit",
+        ],
+    },
+    {
+        "branch": "hardware",
+        "operator_label": "Hardware",
+        "readback": "hardware.inventory.status",
+        "summary_field": "hardware_state",
+        "private_machinery": [
+            "host.operator-hardware.bootstrap-kit.render",
+            "host.operator-hardware.post-boot.normalize",
+            "host.operator-hardware.firstboot.claim",
+        ],
+    },
+    {
+        "branch": "node_lifecycle",
+        "operator_label": "Node lifecycle",
+        "readback": "node.admission.status",
+        "summary_field": "node_lifecycle_state",
+        "lifecycle_states": [
+            "interview",
+            "candidate",
+            "admitted",
+            "promoted",
+            "excluded",
+            "retired",
+        ],
+        "private_machinery": [],
+    },
+    {
+        "branch": "storage",
+        "operator_label": "Storage",
+        "readback": "payload.custody.status",
+        "summary_field": "storage_state",
+        "private_machinery": [
+            "ops/bindings/home.storage.map.yaml",
+            "ops/bindings/shop.storage.map.yaml",
+            "infra.estate.boringness.build",
+            "infra.shop.storage.authority.build",
+        ],
+    },
+    {
+        "branch": "backup",
+        "operator_label": "Backup",
+        "readback": "backup.estate.readback.status",
+        "summary_field": "backup_state",
+        "private_machinery": [
+            "backup.posture.snapshot.build",
+            "backup.status",
+        ],
+    },
+]
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
@@ -447,6 +516,23 @@ def network_visibility_proof(declared: dict[str, Any] | None, observed: dict[str
     return "none"
 
 
+def _compose_network_state(visibility_proof: str, freshness: dict[str, Any]) -> str:
+    # PACKET-1343: per-row Network branch summary. Coarse fusion of visibility
+    # proof + freshness; full detail lives in network.presence.status.
+    state = (freshness or {}).get("state")
+    if visibility_proof == "udr_observed":
+        if state == "fresh":
+            return "udr_observed_fresh"
+        if state == "stale":
+            return "udr_observed_stale"
+        return "udr_observed"
+    if visibility_proof == "unifi_snapshot_stale":
+        return "udr_observed_stale"
+    if visibility_proof == "declared_only":
+        return "declared_only"
+    return "absent"
+
+
 def build_storage_index(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     index: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -609,6 +695,17 @@ def make_row(
         "storage_custody_state": (storage_row or {}).get("custody_state", "unknown"),
         "storage_evidence_ref": (storage_row or {}).get("custody_id", ""),
         "backup_posture": (backup_row or {}).get("status", "unknown"),
+        # PACKET-1343: per-row branch summary scalars. Each is a coarse
+        # truthful projection sourced from existing row state; branch
+        # readbacks own the full detail. Five scalars = five branches.
+        "network_state": _compose_network_state(
+            network_visibility_proof(declared, observed, freshness),
+            freshness,
+        ),
+        "hardware_state": hardware_class(admission),
+        "node_lifecycle_state": identity_state(admission, declared, ssh_target),
+        "storage_state": (storage_row or {}).get("custody_state", "unknown"),
+        "backup_state": (backup_row or {}).get("status", "unknown"),
         "presence_state": presence_state,
         "match_state": match_state,
         "proof_channels": proof_channels,
@@ -866,6 +963,13 @@ def main() -> None:
             "legacy_input_policy": "folded_source_inputs_not_operator_surfaces",
             "operator_first_read": "site.presence.status",
             "drilldown_levers_policy": "closed_set",
+            # PACKET-1343: Site Intelligence is one family with exactly five
+            # branches. The drilldown lever set IS the branch readback set;
+            # everything else is private machinery feeding a branch.
+            "family": "site_intelligence",
+            "branch_count": 5,
+            "branch_model": BRANCH_MODEL,
+            "producer_policy": "private_or_folded_implementation_detail_not_branch_peer",
         },
         "drilldown_levers": DRILLDOWN_LEVERS,
         "folded_legacy_inputs": FOLDED_LEGACY_INPUTS,
@@ -885,6 +989,19 @@ def main() -> None:
         suffix = f" caps={','.join(caps)}" if caps else ""
         print(f"  {stage['stage']:<14} {stage['authority']}{suffix}")
         print(f"    boundary: {stage['boundary']}")
+    print("")
+    # PACKET-1343: teach the Site Intelligence family + five branches model
+    # before the lever list so a fresh agent reads "one family, five branches"
+    # before they read individual cap names.
+    print("Site Intelligence Branches (one family, five branches):")
+    for branch in BRANCH_MODEL:
+        print(
+            f"  {branch['operator_label']:<16} -> {branch['readback']:<32} "
+            f"row.field={branch['summary_field']}"
+        )
+        machinery = branch.get("private_machinery") or []
+        if machinery:
+            print(f"    private machinery (not operator drilldowns): {', '.join(machinery)}")
     print("")
     print("Drilldown levers (only):")
     for lever in DRILLDOWN_LEVERS:
@@ -911,12 +1028,19 @@ def main() -> None:
         print("  (site.profile.contract.yaml absent — profiles not loaded)")
     print("")
     for row in rows:
+        # PACKET-1343: per-row five-branch summary line (network_state,
+        # hardware_state, node_lifecycle_state, storage_state, backup_state)
+        # is the operator-readable shape; full details live in branch
+        # readbacks.
         print(
             f"- {row['presence_id']} {row['presence_state']} "
-            f"{row['subject']['subject_kind']} identity={row.get('identity_state')} "
-            f"hardware={row.get('hardware_class')} bootstrap={row.get('bootstrap_state')} "
-            f"storage={row.get('storage_custody_state')} backup={row.get('backup_posture')} "
-            f"network={row.get('network_visibility_proof')} ip={row['identity'].get('ip') or ''} "
+            f"{row['subject']['subject_kind']} "
+            f"network={row.get('network_state')} "
+            f"hardware={row.get('hardware_state')} "
+            f"node_lifecycle={row.get('node_lifecycle_state')} "
+            f"storage={row.get('storage_state')} "
+            f"backup={row.get('backup_state')} "
+            f"ip={row['identity'].get('ip') or ''} "
             f"profile_ref={row.get('profile_ref','')}"
         )
 
