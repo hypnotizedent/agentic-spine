@@ -923,6 +923,57 @@ def run_json_command(cmd: list[str], *, timeout: int = 20) -> dict:
     return payload if isinstance(payload, dict) else {"status": "error", "error": "non-object json payload"}
 
 
+def run_cap_json_command(capability: str, args: list[str] | None = None, *, timeout: int = 20) -> dict:
+    ops_bin = spine / "bin" / "ops"
+    if not ops_bin.exists():
+        return {"status": "error", "error": f"missing ops entrypoint: {ops_bin}"}
+    cmd = [str(ops_bin), "cap", "run", capability]
+    cap_args = args or []
+    if cap_args:
+        cmd.append("--")
+        cmd.extend(cap_args)
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            cwd=str(spine),
+            env=os.environ.copy(),
+        )
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+    if proc.returncode != 0:
+        return {"status": "error", "error": (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()}
+    text = proc.stdout or ""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end < start:
+        return {"status": "error", "error": "cap output did not contain a JSON object"}
+    try:
+        payload = json.loads(text[start : end + 1])
+    except Exception as exc:
+        return {"status": "error", "error": f"invalid cap json: {exc}"}
+    return payload if isinstance(payload, dict) else {"status": "error", "error": "non-object cap json payload"}
+
+
+def collect_current_assignment() -> dict:
+    data = run_cap_json_command("entry.compile", ["--format", "json"], timeout=20)
+    if data.get("status") == "error":
+        return {"status": "unavailable", "error": data.get("error", "entry.compile failed")}
+    return {
+        "status": "ok",
+        "compilation_state": str(data.get("compilation_state") or "").strip(),
+        "loop_id": str(data.get("loop_id") or "").strip(),
+        "loop_objective": str(data.get("loop_objective") or "").strip(),
+        "packet_id": str(data.get("packet_id") or "").strip(),
+        "packet_next_action": str(data.get("packet_next_action") or "").strip(),
+        "delegation_preferred": bool(data.get("delegation_preferred")),
+        "operational_lane_preferred": bool(data.get("operational_lane_preferred")),
+    }
+
+
 def collect_standing_program_health():
     result = {
         "status": "unavailable",
@@ -1250,6 +1301,7 @@ unlinked_gap_count = len(unlinked_gaps) if gaps_available else None
 standing_program_health = collect_standing_program_health()
 watcher_input_projection = collect_watcher_input_projection()
 worktree_cleanup_state = collect_worktree_cleanup_state()
+current_assignment = collect_current_assignment()
 delegation_summary = collect_delegation_summary()
 execution_pickup_status = collect_execution_pickup_status()
 execution_recovery_drill_status = collect_execution_recovery_drill_status()
@@ -1371,6 +1423,9 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                 joined_state_summary = {
                     "source": "joined_state",
                     "open_loops": _summary.get("open_loops", len(open_loops)),
+                    "open_loops_source": _summary.get("open_loops_source", "local_db"),
+                    "open_loops_local_count": _summary.get("open_loops_local_count", len(open_loops)),
+                    "open_loops_canonical_count": _summary.get("open_loops_canonical_count"),
                     "projection_residue": _summary.get("projection_residue", 0),
                     "open_gaps": _summary.get("open_gaps", open_gap_count),
                     "active_waves": int(_aw) if isinstance(_aw, (int, float)) else 0,
@@ -1387,6 +1442,7 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                 }
             _joined_open_rows = ((_jdata.get("loops") or {}).get("open")) or []
             if isinstance(_joined_open_rows, list) and _joined_open_rows:
+                _joined_rows_are_canonical = str(_summary.get("open_loops_source") or "") == "canonical_routed"
                 _current_loops_by_id = {
                     str(_loop.get("loop_id") or "").strip(): dict(_loop)
                     for _loop in open_loops
@@ -1401,10 +1457,26 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                         continue
                     _merged = dict(_current_loops_by_id.get(_loop_id) or {})
                     if not _merged:
-                        # SQLite-backed open loops are authoritative. Joined-state
-                        # may enrich those rows, but it must not introduce extra
-                        # open loops on its own.
-                        continue
+                        if not _joined_rows_are_canonical:
+                            continue
+                        _merged = {
+                            "loop_id": _loop_id,
+                            "status": str(_row.get("status") or "active").strip().lower() or "active",
+                            "severity": str(_row.get("severity") or _row.get("priority") or "-").strip() or "-",
+                            "owner": str(_row.get("owner") or "unassigned").strip() or "unassigned",
+                            "execution_mode": str(_row.get("execution_mode") or "").strip(),
+                            "active_terminal": "",
+                            "blocked_by": "",
+                            "operator_note": "",
+                            "last_heartbeat_utc": "",
+                            "heartbeat_ttl_minutes": "",
+                            "heartbeat_source": "",
+                            "horizon": str(_row.get("horizon") or "now").strip() or "now",
+                            "execution_readiness": str(_row.get("execution_readiness") or "runnable").strip() or "runnable",
+                            "title": str(_row.get("objective") or _row.get("title") or _loop_id).strip() or _loop_id,
+                            "file": str(_row.get("file") or _row.get("scope_file") or _row.get("path") or "canonical_routed").strip() or "canonical_routed",
+                            "source": "canonical_routed",
+                        }
                     _priority = str(_row.get("priority") or _row.get("severity") or "").strip()
                     if _priority:
                         _merged["severity"] = _priority
@@ -2016,6 +2088,7 @@ if mode == "--json":
         "standing_program_health": standing_program_health,
         "watcher_input_projection": watcher_input_projection,
         "worktree_cleanup": worktree_cleanup_state,
+        "current_assignment": current_assignment,
         "delegations": delegation_summary,
         "execution_pickup": execution_pickup_status,
         "execution_recovery_drill": execution_recovery_drill_status,
@@ -2030,8 +2103,9 @@ if mode == "--json":
             "public_readback": "execution.pickup.status",
         },
         "counts": {
-            # Direct SQLite-backed open loops are authoritative for loop count.
-            # Joined-state may enrich the rows, but it must not widen the set.
+            # Routed joined-state rows are canonical when local SQLite is only
+            # consumer projection; direct SQLite rows win only on the authority
+            # host.
             "open_loops": len(open_loops),
             "projection_residue": int(joined_state_summary.get("projection_residue", 0) or 0),
             "mapped_open_loops": mapped_open_loops,
@@ -2376,6 +2450,8 @@ if mode != "--expert":
     print(f"  open:              {len(open_loops)} work item(s)")
     print(f"  runnable now:      {len(_now_runnable)}")
     print(f"  deferred/blocked:  {len(_deferred_loops)}")
+    if current_assignment.get("status") == "ok" and current_assignment.get("packet_id"):
+        print(f"  packet:            {current_assignment.get('packet_id')}")
     for loop in sorted(open_loops, key=lambda x: sev_order.get(x["severity"], 9))[:5]:
         tags = []
         if loop.get("horizon", "now") != "now":

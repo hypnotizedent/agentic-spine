@@ -277,6 +277,8 @@ def resolve_paths(root: Path) -> dict[str, Path]:
 
 _CANONICAL_LOOP_COUNT_CACHE: int | None = None
 _CANONICAL_LOOP_COUNT_PROBED: bool = False
+_CANONICAL_LOOP_ROWS_CACHE: list[dict[str, Any]] | None = None
+_CANONICAL_LOOP_ROWS_PROBED: bool = False
 
 
 def is_consumer_projection_state_root(state_root: Path) -> bool:
@@ -346,6 +348,73 @@ def fetch_canonical_open_loop_count(repo_root: Path) -> int | None:
             _CANONICAL_LOOP_COUNT_CACHE = count
             return count
         return None
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    except Exception:
+        return None
+
+
+def fetch_canonical_open_loop_rows(repo_root: Path) -> list[dict[str, Any]] | None:
+    """Return canonical open loop rows via routed `loops.status --list-ids`."""
+    global _CANONICAL_LOOP_ROWS_CACHE, _CANONICAL_LOOP_ROWS_PROBED
+    if _CANONICAL_LOOP_ROWS_PROBED:
+        return _CANONICAL_LOOP_ROWS_CACHE
+    _CANONICAL_LOOP_ROWS_PROBED = True
+    if (os.environ.get("SPINE_OPS_STATUS_CANONICAL_LOOPS_PROBE", "") or "").strip().lower() == "disable":
+        return None
+    ops_bin = repo_root / "bin" / "ops"
+    if not ops_bin.is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            [str(ops_bin), "cap", "run", "loops.status", "--", "--list-ids", "--status", "open"],
+            capture_output=True,
+            text=True,
+            timeout=12,
+            cwd=str(repo_root),
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        text = proc.stdout
+        start = text.find("[")
+        end = text.rfind("]")
+        if start < 0 or end < start:
+            return None
+        try:
+            payload = json.loads(text[start : end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(payload, list):
+            return None
+        rows: list[dict[str, Any]] = []
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            loop_id = str(row.get("loop_id") or "").strip()
+            if not loop_id:
+                continue
+            status = str(row.get("status") or "active").strip().lower() or "active"
+            rows.append({
+                "loop_id": loop_id,
+                "status": status,
+                "severity": str(row.get("severity") or row.get("priority") or "-").strip() or "-",
+                "owner": str(row.get("owner") or "unassigned").strip() or "unassigned",
+                "execution_mode": str(row.get("execution_mode") or "").strip(),
+                "active_terminal": "",
+                "blocked_by": "",
+                "operator_note": "",
+                "last_heartbeat_utc": "",
+                "heartbeat_ttl_minutes": "",
+                "heartbeat_source": "",
+                "horizon": str(row.get("horizon") or "now").strip() or "now",
+                "execution_readiness": str(row.get("execution_readiness") or "runnable").strip() or "runnable",
+                "title": str(row.get("objective") or row.get("title") or loop_id).strip() or loop_id,
+                "file": str(row.get("scope_file") or row.get("path") or "canonical_routed").strip() or "canonical_routed",
+                "source": "canonical_routed",
+            })
+        rows.sort(key=lambda item: str(item.get("loop_id") or ""))
+        _CANONICAL_LOOP_ROWS_CACHE = rows
+        return rows
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return None
     except Exception:
@@ -1415,11 +1484,35 @@ def synthesize(root: Path, *, loop_id: str = "", write: bool = True) -> dict[str
     # detail (objective, owner, etc.) but the headline count reflects pve
     # canonical authority. This stops a stale/spurious local DB from
     # silently presenting 0 while pve holds the real number.
-    canonical_open_loop_count = fetch_canonical_open_loop_count(paths["root"])
+    canonical_open_loop_rows = fetch_canonical_open_loop_rows(paths["root"])
+    canonical_open_loop_count = (
+        len(canonical_open_loop_rows)
+        if canonical_open_loop_rows is not None
+        else fetch_canonical_open_loop_count(paths["root"])
+    )
     if canonical_open_loop_count is not None and is_consumer_projection_state_root(paths["state_root"]):
         # pve SQLite is canonical. Consumer-local scope-only files are
         # projection residue, not public scope-orphan truth.
         scope_only_orphans = []
+        if canonical_open_loop_rows is not None:
+            canonical_loop_ids = {
+                str(row.get("loop_id") or "").strip()
+                for row in canonical_open_loop_rows
+                if str(row.get("loop_id") or "").strip()
+            }
+            for local_row in open_loops:
+                local_loop_id = str(local_row.get("loop_id") or "").strip()
+                if local_loop_id and local_loop_id not in canonical_loop_ids:
+                    projection_residue.append({
+                        **dict(local_row),
+                        "residue_class": "consumer_projection_open_loop_not_in_canonical",
+                        "source": "consumer_projection",
+                    })
+            open_loops = [dict(row) for row in canonical_open_loop_rows]
+            for row in open_loops:
+                loop_id = str(row.get("loop_id") or "").strip()
+                if loop_id:
+                    loop_status_index[loop_id] = str(row.get("status") or "active").strip().lower() or "active"
     gap_state = collect_gap_state(paths, loop_status_index)
     open_gaps = gap_state.get("open", []) if gap_state.get("status") == "ok" else []
     orphaned_gaps = gap_state.get("orphaned", []) if gap_state.get("status") == "ok" else []
