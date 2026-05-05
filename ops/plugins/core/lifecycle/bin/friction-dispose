@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Friction per-id disposition — closes a friction item with structured
-disposition + evidence_refs, so packets can retire friction through the
-engine instead of leaving resolved/superseded items as packet prose.
+"""Friction disposition — closes friction items with structured disposition
++ evidence_refs, so packets can retire friction through the engine instead
+of leaving resolved/superseded items as packet prose.
 
 Authority: shared_authority.db (friction + friction_events tables) via
 the existing close_friction lib hook. Encodes disposition + evidence_refs
@@ -28,8 +28,10 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
@@ -63,20 +65,222 @@ def _pack_closed_reason(disposition: str, evidence_refs: list[str], reason: str)
     )
 
 
+def _unique_ordered(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _dispose_many(
+    conn,
+    *,
+    friction_ids: list[str],
+    disposition: str,
+    evidence_refs: list[str],
+    reason: str,
+    actor: str,
+    force: bool,
+    run_key: str | None,
+) -> dict[str, Any]:
+    friction_ids = _unique_ordered(friction_ids)
+    if not friction_ids:
+        return {"status": "error", "errors": ["at least one --friction-id is required"]}
+
+    preflight: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for friction_id in friction_ids:
+        existing = authority.get_friction(conn, friction_id)
+        if existing is None:
+            errors.append(f"friction_id not found: {friction_id}")
+            continue
+        if existing.get("status") == "closed" and not force:
+            errors.append(f"friction_id already closed: {friction_id} (use --force to re-dispose)")
+            continue
+        preflight.append({"friction_id": friction_id, "existing": existing})
+
+    if errors:
+        return {"status": "error", "errors": errors, "count": 0, "items": []}
+
+    items: list[dict[str, Any]] = []
+    packed_reason = _pack_closed_reason(disposition, evidence_refs, reason)
+    for row in preflight:
+        friction_id = row["friction_id"]
+        existing = row["existing"]
+        item = authority.close_friction(
+            conn,
+            friction_id,
+            reason=packed_reason,
+            actor=actor,
+            run_key=run_key,
+            mutation_source="governed",
+        )
+        if item is None:
+            errors.append(f"close_friction returned None for {friction_id}")
+            continue
+
+        authority.insert_friction_event(
+            conn,
+            friction_id=friction_id,
+            event_type=disposition,
+            from_status=existing.get("status", "unknown"),
+            to_status="closed",
+            reason=reason,
+            actor=actor,
+            run_key=run_key,
+            mutation_source="governed",
+            payload={"evidence_refs": evidence_refs},
+        )
+        items.append(
+            {
+                "friction_id": friction_id,
+                "disposition": disposition,
+                "from_status": existing.get("status"),
+                "to_status": "closed",
+            }
+        )
+
+    if errors:
+        conn.rollback()
+        return {"status": "error", "errors": errors, "count": 0, "items": []}
+
+    conn.commit()
+    return {
+        "status": "ok",
+        "count": len(items),
+        "items": items,
+    }
+
+
+def self_check() -> int:
+    for fn in ("close_friction", "get_friction", "ensure_schema", "connect", "resolve_paths", "insert_friction_event"):
+        if not hasattr(authority, fn):
+            print(f"friction.dispose self-check FAIL: missing authority.{fn}", file=sys.stderr)
+            return 1
+
+    with tempfile.TemporaryDirectory(prefix="friction-dispose-self-check-") as td:
+        db_path = Path(td) / "shared_authority.db"
+        db_path.touch()
+        conn = authority.connect(db_path)
+        try:
+            authority.ensure_schema(conn)
+            now = utc_now()
+            for friction_id in ("FR-DISPOSE-BATCH-1", "FR-DISPOSE-BATCH-2"):
+                authority.upsert_friction(
+                    conn,
+                    {
+                        "friction_id": friction_id,
+                        "fingerprint": friction_id.lower(),
+                        "capability": "friction.dispose.self_check",
+                        "expected": "batch disposition closes each requested friction id",
+                        "actual": "queued",
+                        "severity": "medium",
+                        "status": "queued",
+                        "first_seen_utc": now,
+                        "last_seen_utc": now,
+                        "updated_at_utc": now,
+                        "created_at_utc": now,
+                        "hit_count": 1,
+                        "sources": ["LOOP-FRICTION-DISPOSE-SELF-CHECK"],
+                    },
+                )
+            conn.commit()
+
+            result = _dispose_many(
+                conn,
+                friction_ids=["FR-DISPOSE-BATCH-1", "FR-DISPOSE-BATCH-2"],
+                disposition="resolved",
+                evidence_refs=["self-check"],
+                reason="Verify batch disposition.",
+                actor="friction.dispose.self_check",
+                force=False,
+                run_key="CAP-SELF-CHECK",
+            )
+            if result.get("status") != "ok" or result.get("count") != 2:
+                print(f"friction.dispose self-check FAIL: batch result wrong: {result!r}", file=sys.stderr)
+                return 1
+            for friction_id in ("FR-DISPOSE-BATCH-1", "FR-DISPOSE-BATCH-2"):
+                item = authority.get_friction(conn, friction_id)
+                if not item or item.get("status") != "closed":
+                    print(f"friction.dispose self-check FAIL: {friction_id} not closed", file=sys.stderr)
+                    return 1
+            duplicate = _dispose_many(
+                conn,
+                friction_ids=["FR-DISPOSE-BATCH-1"],
+                disposition="resolved",
+                evidence_refs=["self-check"],
+                reason="Verify closed rows reject without force.",
+                actor="friction.dispose.self_check",
+                force=False,
+                run_key="CAP-SELF-CHECK",
+            )
+            if duplicate.get("status") != "error":
+                print("friction.dispose self-check FAIL: closed row accepted without force", file=sys.stderr)
+                return 1
+
+            authority.upsert_friction(
+                conn,
+                {
+                    "friction_id": "FR-DISPOSE-BATCH-3",
+                    "fingerprint": "fr-dispose-batch-3",
+                    "capability": "friction.dispose.self_check",
+                    "expected": "bad batch preflight leaves valid rows open",
+                    "actual": "queued",
+                    "severity": "medium",
+                    "status": "queued",
+                    "first_seen_utc": now,
+                    "last_seen_utc": now,
+                    "updated_at_utc": now,
+                    "created_at_utc": now,
+                    "hit_count": 1,
+                    "sources": ["LOOP-FRICTION-DISPOSE-SELF-CHECK"],
+                },
+            )
+            conn.commit()
+            bad_batch = _dispose_many(
+                conn,
+                friction_ids=["FR-DISPOSE-BATCH-3", "FR-DISPOSE-MISSING"],
+                disposition="resolved",
+                evidence_refs=["self-check"],
+                reason="Verify failed batch does not partially close valid rows.",
+                actor="friction.dispose.self_check",
+                force=False,
+                run_key="CAP-SELF-CHECK",
+            )
+            if bad_batch.get("status") != "error":
+                print("friction.dispose self-check FAIL: missing id batch unexpectedly succeeded", file=sys.stderr)
+                return 1
+            item = authority.get_friction(conn, "FR-DISPOSE-BATCH-3")
+            if not item or item.get("status") != "queued":
+                print("friction.dispose self-check FAIL: failed batch partially closed a valid row", file=sys.stderr)
+                return 1
+        finally:
+            conn.close()
+
+    print("friction.dispose self-check PASS")
+    return 0
+
+
 def main() -> int:
     # Bypass required-args enforcement when --self-check is passed standalone.
     if "--self-check" in sys.argv[1:]:
-        for fn in ("close_friction", "get_friction", "ensure_schema", "connect", "resolve_paths", "insert_friction_event"):
-            if not hasattr(authority, fn):
-                print(f"friction.dispose self-check FAIL: missing authority.{fn}", file=sys.stderr)
-                return 1
-        print("friction.dispose self-check PASS")
-        return 0
+        return self_check()
 
     parser = argparse.ArgumentParser(
         description="Per-id friction disposition with evidence_refs to the proof receipt."
     )
-    parser.add_argument("--friction-id", required=True, help="Friction id (e.g., FR-20260504T053922Z-6dae16 or legacy short id)")
+    parser.add_argument(
+        "--friction-id",
+        action="append",
+        dest="friction_ids",
+        required=True,
+        help="Friction id (repeatable for a governed batch disposition).",
+    )
     parser.add_argument(
         "--disposition", required=True, choices=VALID_DISPOSITIONS,
         help="resolved | superseded | duplicate | invalid",
@@ -102,72 +306,50 @@ def main() -> int:
     try:
         authority.ensure_schema(conn)
 
-        existing = authority.get_friction(conn, args.friction_id)
-        if existing is None:
-            payload = {"status": "error", "error": f"friction_id not found: {args.friction_id}"}
-            print(json.dumps(payload) if args.json_output else f"FAIL: {payload['error']}", file=sys.stderr)
-            return 1
-        if existing.get("status") == "closed" and not args.force:
-            payload = {
-                "status": "error",
-                "error": f"friction_id already closed: {args.friction_id} (use --force to re-dispose)",
-            }
-            print(json.dumps(payload) if args.json_output else f"FAIL: {payload['error']}", file=sys.stderr)
-            return 1
-
         run_key = os.environ.get("SPINE_CAP_RUN_KEY", "").strip() or None
         evidence_refs = [str(r).strip() for r in (args.evidence_ref or []) if str(r).strip()]
-        packed_reason = _pack_closed_reason(args.disposition, evidence_refs, args.reason)
 
-        # close_friction sets status=closed, closed_reason, closed_at_utc and
-        # inserts a friction_events row with event_type='close'. We also insert
-        # a second event row with event_type=<disposition> so the disposition
-        # is queryable from friction_events alone (auditors who look at events
-        # see the verb directly, not packed JSON).
-        item = authority.close_friction(
+        result = _dispose_many(
             conn,
-            args.friction_id,
-            reason=packed_reason,
-            actor=args.actor,
-            run_key=run_key,
-            mutation_source="governed",
-        )
-        if item is None:
-            payload = {"status": "error", "error": f"close_friction returned None for {args.friction_id}"}
-            print(json.dumps(payload) if args.json_output else f"FAIL: {payload['error']}", file=sys.stderr)
-            return 1
-
-        authority.insert_friction_event(
-            conn,
-            friction_id=args.friction_id,
-            event_type=args.disposition,
-            from_status=existing.get("status", "unknown"),
-            to_status="closed",
+            friction_ids=args.friction_ids,
+            disposition=args.disposition,
+            evidence_refs=evidence_refs,
             reason=args.reason,
             actor=args.actor,
+            force=args.force,
             run_key=run_key,
-            mutation_source="governed",
-            payload={"evidence_refs": evidence_refs},
         )
-        conn.commit()
+        if result.get("status") != "ok":
+            errors = result.get("errors") or ["friction.dispose failed"]
+            payload = {
+                "status": "error",
+                "error": "; ".join(errors),
+                "errors": errors,
+            }
+            print(json.dumps(payload, indent=2) if args.json_output else "FAIL: " + "; ".join(payload["errors"]), file=sys.stderr)
+            return 1
 
-        result = {
+        payload = {
             "status": "ok",
-            "friction_id": args.friction_id,
             "disposition": args.disposition,
             "evidence_refs": evidence_refs,
-            "from_status": existing.get("status"),
-            "to_status": "closed",
             "actor": args.actor,
             "run_key": run_key,
+            "count": result["count"],
+            "items": result["items"],
         }
+        if result["count"] == 1:
+            payload["friction_id"] = result["items"][0]["friction_id"]
+            payload["from_status"] = result["items"][0]["from_status"]
+            payload["to_status"] = "closed"
         if args.json_output:
-            print(json.dumps(result, indent=2))
+            print(json.dumps(payload, indent=2))
         else:
             print("friction.dispose")
-            print(f"friction_id: {args.friction_id}")
+            print(f"count: {result['count']}")
             print(f"disposition: {args.disposition}")
-            print(f"from_status: {existing.get('status')} -> closed")
+            for item in result["items"]:
+                print(f"  - {item['friction_id']}: {item['from_status']} -> closed")
             print(f"evidence_refs: {', '.join(evidence_refs) or '<none>'}")
             print(f"reason: {args.reason}")
         return 0

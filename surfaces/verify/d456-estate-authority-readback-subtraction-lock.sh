@@ -377,6 +377,26 @@ for required_token in ('FRICTION_DRAIN_CAPS', '"friction_drain"', '"worker_owned
     if required_token not in capability_autonomy_text:
         fail(f"capability-autonomy-status must expose friction drain worker ownership: missing {required_token} (PACKET-1307)")
 
+mailroom_contract_text = (root_dir / "ops/bindings/mailroom.task.worker.contract.yaml").read_text(encoding="utf-8")
+for required_token in ("friction.reconcile", "friction.dispose"):
+    if required_token not in mailroom_contract_text:
+        fail(f"mailroom task worker must own friction drain capability: missing {required_token} (PACKET-1315)")
+
+friction_dispose_path = root_dir / "ops/plugins/core/lifecycle/bin/friction-dispose"
+friction_dispose_text = friction_dispose_path.read_text(encoding="utf-8")
+for required_token in ('action="append"', "_dispose_many", "FR-DISPOSE-BATCH-2"):
+    if required_token not in friction_dispose_text:
+        fail(f"friction.dispose must support repeatable --friction-id batch disposition: missing {required_token} (PACKET-1315)")
+dispose_self_check = subprocess.run(
+    [str(friction_dispose_path), "--self-check"],
+    text=True,
+    capture_output=True,
+    check=False,
+    env={**os.environ, "SPINE_ROOT": str(root_dir)},
+)
+if dispose_self_check.returncode != 0:
+    fail(f"friction.dispose --self-check failed: {dispose_self_check.stderr.strip() or dispose_self_check.stdout.strip()}")
+
 clerk_text = (root_dir / "ops/plugins/infra/host/bin/clerk-symptom-classify-and-file").read_text(encoding="utf-8")
 for required_token in ('"canonical_plane_access_role"', '"plane_access_source"', '"output_disposition"', '"canonical_filing_path"', "local_diagnostic_not_canonical_friction_state"):
     if required_token not in clerk_text:
