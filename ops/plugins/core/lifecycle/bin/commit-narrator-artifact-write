@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""commit.narrator.artifact.write - governed per-commit narrator artifact writer.
+
+Writes a structured per-commit yaml under
+$SPINE_STATE/domain-state/narrator/per-commit/<sha>.yaml as durable evidence
+of one narrator analysis. Witness-only: this cap's only mutation surface is
+the artifact path it owns; it does not decide node admission, runtime
+placement, closure, gate authority, or any other authority surface.
+
+Routed via cap.sh: invoking via `./bin/ops cap run commit.narrator.artifact.write`
+lands the write on storage_evidence_node canonical regardless of the calling
+host. Direct local invocation on a consumer host produces a projection, not
+canonical authority — same locality discipline as every other governed write.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+import yaml
+
+
+CAPABILITY = "commit.narrator.artifact.write"
+SCHEMA_VERSION = 1
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+ARTIFACT_REL_PATH = "domain-state/narrator/per-commit"
+
+
+def resolve_state_root(explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit)
+    env = os.environ.get("SPINE_STATE")
+    if env:
+        return Path(env)
+    raise SystemExit(f"{CAPABILITY} FAIL: SPINE_STATE not set and --state-root not supplied")
+
+
+def load_payload(args: argparse.Namespace) -> dict:
+    if args.payload_source:
+        text = Path(args.payload_source).read_text(encoding="utf-8")
+    elif args.payload_inline:
+        text = sys.stdin.read()
+    else:
+        raise SystemExit(f"{CAPABILITY} FAIL: must supply --payload-source or --payload-inline")
+    if not text.strip():
+        raise SystemExit(f"{CAPABILITY} FAIL: empty payload")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{CAPABILITY} FAIL: payload is not valid JSON: {exc}")
+
+
+def build_artifact(sha: str, payload: dict) -> dict:
+    fact_layer = payload.get("fact_layer") or {}
+    rule_layer = payload.get("rule_layer") or {
+        "status": "not_yet_evaluated",
+        "verdicts": [],
+        "citations": [],
+    }
+    narrative_layer = payload.get("narrative_layer") or {
+        "status": "deferred_v2",
+        "prose": None,
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "canonical_authority": "commit.narrator.artifact",
+        "written_by": CAPABILITY,
+        "written_at_utc": datetime.now(UTC).isoformat(),
+        "sha": sha,
+        "short_sha": sha[:8],
+        "witness_bound": {
+            "mutation_access": "scoped_to_artifact_self",
+            "decision_authority": "none",
+            "does_not_decide": [
+                "node_admission",
+                "runtime_placement",
+                "backup_authority",
+                "watcher_authority",
+                "verify_pass_fail",
+                "loop_or_packet_closure",
+            ],
+            "does_not_replace": [
+                "site.presence.status",
+                "node.admission.status",
+                "verify.engine.run",
+                "spine.verify",
+                "git history",
+            ],
+        },
+        "fact_layer": fact_layer,
+        "direction_signal": payload.get("direction_signal"),
+        "plain_verdict": payload.get("plain_verdict"),
+        "confidence": payload.get("confidence"),
+        "confidence_boundary": payload.get("confidence_boundary"),
+        "reason": payload.get("reason"),
+        "operator_eye": bool(payload.get("operator_eye", False)),
+        "touched_surfaces": list(payload.get("touched_surfaces") or []),
+        "rule_layer": rule_layer,
+        "narrative_layer": narrative_layer,
+    }
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=CAPABILITY)
+    parser.add_argument("--sha", required=False, help="Commit SHA (40-hex).")
+    parser.add_argument("--payload-source", help="Path to JSON payload file (read on cap-execution host).")
+    parser.add_argument("--payload-inline", action="store_true", help="Read payload JSON from stdin instead of --payload-source.")
+    parser.add_argument("--state-root", default=None, help="Override SPINE_STATE root (default: env SPINE_STATE).")
+    parser.add_argument("--json", action="store_true", help="Emit JSON outcome.")
+    parser.add_argument("--self-check", action="store_true", help="Verify dependencies and exit.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+
+    if args.self_check:
+        try:
+            import yaml as _yaml  # noqa: F401
+        except Exception as exc:  # pragma: no cover
+            print(f"{CAPABILITY} self-check FAIL: pyyaml import: {exc}", file=sys.stderr)
+            return 1
+        print(f"{CAPABILITY} self-check PASS")
+        return 0
+
+    if not args.sha:
+        print(f"{CAPABILITY} FAIL: --sha is required", file=sys.stderr)
+        return 1
+    if not SHA_RE.match(args.sha):
+        print(f"{CAPABILITY} FAIL: --sha must be 40-hex, got {args.sha!r}", file=sys.stderr)
+        return 1
+
+    payload = load_payload(args)
+    artifact = build_artifact(args.sha, payload)
+
+    state_root = resolve_state_root(args.state_root)
+    target_dir = state_root / ARTIFACT_REL_PATH
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / f"{args.sha}.yaml"
+
+    target_path.write_text(yaml.safe_dump(artifact, sort_keys=False), encoding="utf-8")
+
+    outcome = {
+        "status": "written",
+        "capability": CAPABILITY,
+        "schema_version": SCHEMA_VERSION,
+        "sha": args.sha,
+        "artifact_path": str(target_path),
+        "state_root": str(state_root),
+    }
+
+    if args.json:
+        print(json.dumps(outcome, indent=2))
+    else:
+        print(f"{CAPABILITY}: wrote {target_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

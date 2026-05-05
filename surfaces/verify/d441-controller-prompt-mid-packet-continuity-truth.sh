@@ -12,6 +12,7 @@ STATUS_PACKET_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/controller-prompt-
 RESERVE_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/controller-prompt-reserve"
 ENTRY_COMPILE_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/entry-compile"
 COMMIT_NARRATOR_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/commit-narrator-status"
+COMMIT_NARRATOR_ARTIFACT_WRITE_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/commit-narrator-artifact-write"
 
 fail() { echo "D441 FAIL: $*" >&2; exit 1; }
 
@@ -20,6 +21,7 @@ fail() { echo "D441 FAIL: $*" >&2; exit 1; }
 [[ -x "$RESERVE_BIN" ]] || fail "controller-prompt-reserve surface missing"
 [[ -f "$ENTRY_COMPILE_BIN" ]] || fail "entry-compile surface missing"
 [[ -x "$COMMIT_NARRATOR_BIN" ]] || fail "commit-narrator-status surface missing"
+[[ -x "$COMMIT_NARRATOR_ARTIFACT_WRITE_BIN" ]] || fail "commit-narrator-artifact-write surface missing"
 grep -q 'continuity_live' "$STATUS_BIN" || fail "ops status does not classify delegation activity through continuity_live"
 grep -q 'secondary_verify_readback' "$STATUS_BIN" || fail "ops status JSON must expose actionable secondary verify readback"
 grep -q 'verify.infra.run (scoped estate/workload health, not foundational spine truth)' "$STATUS_BIN" || fail "ops status must name secondary verify owner without promoting it to foundational truth"
@@ -29,12 +31,15 @@ grep -q 'Status: cached' "$STATUS_BIN" || fail "ops status brief must render cac
 grep -q 'controller_prompt.status:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing controller_prompt.status"
 grep -q 'controller_prompt.reserve:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing controller_prompt.reserve"
 grep -q 'commit.narrator.status:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing commit.narrator.status"
+grep -q 'commit.narrator.artifact.write:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing commit.narrator.artifact.write"
 grep -q 'controller_prompt.status' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing controller_prompt.status"
 grep -q 'controller_prompt.reserve' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing controller_prompt.reserve"
 grep -q 'commit.narrator.status' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing commit.narrator.status"
+grep -q 'commit.narrator.artifact.write' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing commit.narrator.artifact.write"
 "$STATUS_PACKET_BIN" --self-check >/dev/null || fail "controller_prompt.status self-check failed"
 "$RESERVE_BIN" --self-check >/dev/null || fail "controller_prompt.reserve self-check failed"
 "$COMMIT_NARRATOR_BIN" --self-check >/dev/null || fail "commit.narrator.status self-check failed"
+"$COMMIT_NARRATOR_ARTIFACT_WRITE_BIN" --self-check >/dev/null || fail "commit.narrator.artifact.write self-check failed"
 
 SESSION_V3_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/session-v3-attach"
 [[ -f "$SESSION_V3_BIN" ]] || fail "session-v3-attach surface missing"
@@ -153,8 +158,55 @@ if not saw_truncation_or_small:
     raise SystemExit("commit narrator --include-diff did not produce a recognizable diff_body status under cap probe")
 PY
 
+NARRATOR_ARTIFACT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/d441-narrator-artifact.XXXXXX")"
+ARTIFACT_FAKE_SHA="abcdef0123456789abcdef0123456789abcdef01"
+ARTIFACT_PAYLOAD_JSON='{"fact_layer":{"subject":"d441 narrator artifact lock","paths":["nope.txt"],"shortstat":{"files_changed":1,"insertions":1,"deletions":0}},"direction_signal":"d441_locked","plain_verdict":"d441_locked","confidence":"locked","confidence_boundary":"d441_only","reason":"d441 fixture","operator_eye":false,"touched_surfaces":[]}'
+ARTIFACT_OUT_1="$(SPINE_STATE="$NARRATOR_ARTIFACT_TMP" "$COMMIT_NARRATOR_ARTIFACT_WRITE_BIN" --sha "$ARTIFACT_FAKE_SHA" --payload-inline --json <<<"$ARTIFACT_PAYLOAD_JSON")"
+ARTIFACT_PATH_1="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('artifact_path',''))" "$ARTIFACT_OUT_1")"
+[[ -f "$ARTIFACT_PATH_1" ]] || fail "commit.narrator.artifact.write did not produce expected artifact file"
+python3 - "$ARTIFACT_PATH_1" <<'PY'
+import sys, yaml
+data = yaml.safe_load(open(sys.argv[1]))
+if data.get("schema_version") != 1:
+    raise SystemExit("artifact schema_version must be 1")
+if data.get("canonical_authority") != "commit.narrator.artifact":
+    raise SystemExit("artifact canonical_authority must be commit.narrator.artifact")
+if data.get("written_by") != "commit.narrator.artifact.write":
+    raise SystemExit("artifact written_by must name the writer cap")
+wb = data.get("witness_bound") or {}
+if wb.get("decision_authority") != "none":
+    raise SystemExit("artifact must declare decision_authority=none")
+if wb.get("mutation_access") != "scoped_to_artifact_self":
+    raise SystemExit("artifact must declare mutation_access scoped_to_artifact_self")
+for must in ("site.presence.status", "node.admission.status", "verify.engine.run", "spine.verify"):
+    if must not in (wb.get("does_not_replace") or []):
+        raise SystemExit(f"artifact must declare does_not_replace contains {must}")
+if "fact_layer" not in data:
+    raise SystemExit("artifact must contain fact_layer")
+rl = data.get("rule_layer") or {}
+if rl.get("status") != "not_yet_evaluated":
+    raise SystemExit("artifact rule_layer must default to not_yet_evaluated for slice C")
+nl = data.get("narrative_layer") or {}
+if nl.get("status") != "deferred_v2":
+    raise SystemExit("artifact narrative_layer must default to deferred_v2")
+PY
+
+ARTIFACT_OUT_2="$(SPINE_STATE="$NARRATOR_ARTIFACT_TMP" "$COMMIT_NARRATOR_ARTIFACT_WRITE_BIN" --sha "$ARTIFACT_FAKE_SHA" --payload-inline --json <<<"$ARTIFACT_PAYLOAD_JSON")"
+ARTIFACT_PATH_2="$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('artifact_path',''))" "$ARTIFACT_OUT_2")"
+[[ "$ARTIFACT_PATH_1" == "$ARTIFACT_PATH_2" ]] || fail "commit.narrator.artifact.write idempotent re-write must reuse same artifact path"
+python3 - "$ARTIFACT_PATH_1" "$ARTIFACT_PATH_2" <<'PY'
+import sys, yaml
+a = yaml.safe_load(open(sys.argv[1]))
+b = yaml.safe_load(open(sys.argv[2]))
+for key in ("written_at_utc",):
+    a.pop(key, None)
+    b.pop(key, None)
+if a != b:
+    raise SystemExit("artifact write is not structurally stable across re-runs (witness-only artifact must be deterministic given same payload)")
+PY
+
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/d441-mid-packet.XXXXXX")"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'rm -rf "$TMP_ROOT" "${NARRATOR_ARTIFACT_TMP:-}"' EXIT
 STATE_ROOT="$TMP_ROOT/state"
 mkdir -p "$STATE_ROOT/controller-prompts" "$STATE_ROOT/delegations"
 touch "$STATE_ROOT/shared_authority.db"
@@ -591,5 +643,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0

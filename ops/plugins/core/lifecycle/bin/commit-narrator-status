@@ -728,6 +728,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--since", default=None, help="Filter to commits within window. Accepts compact forms like 14.days, 7d, 2w, 24h, 2.months, or git-readable forms (ISO date, '2 weeks ago').")
     parser.add_argument("--format", dest="format", choices=("line", "markdown", "json"), default="line", help="Output format (default: line). --json is a compat alias for --format json.")
     parser.add_argument("--include-diff", action="store_true", help="Include bounded full-diff body per commit (size-capped, with skipped-diff disclosure). Default off; preserves slice-A payload shape when absent.")
+    parser.add_argument("--write-artifacts", action="store_true", help="Persist each commit row to canonical state via commit.narrator.artifact.write (Slice C). Default off.")
     parser.add_argument("--diff-max-lines-per-file", type=int, default=500, help="Max diff lines included per file when --include-diff (default 500); excess truncated with disclosure.")
     parser.add_argument("--diff-max-lines-per-commit", type=int, default=5000, help="Max diff lines collected per commit when --include-diff (default 5000); excess truncated with disclosure.")
     parser.add_argument("--diff-max-files-per-commit", type=int, default=100, help="Max files emitted per commit when --include-diff (default 100); excess truncated with disclosure.")
@@ -753,6 +754,101 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def _row_to_artifact_payload(row: dict[str, Any]) -> dict[str, Any]:
+    fact_layer = {
+        "author_date": row.get("author_date"),
+        "author_name": row.get("author_name"),
+        "author_email_class": row.get("author_email_class"),
+        "subject": row.get("subject"),
+        "paths": row.get("paths") or [],
+        "status_counts": row.get("status_counts") or {},
+        "shortstat": row.get("shortstat") or {},
+    }
+    diff_body = row.get("diff_body")
+    if diff_body and diff_body.get("status") != "skipped_disabled":
+        fact_layer["diff_body"] = diff_body
+    return {
+        "fact_layer": fact_layer,
+        "direction_signal": row.get("direction_signal"),
+        "plain_verdict": row.get("plain_verdict"),
+        "confidence": row.get("confidence"),
+        "confidence_boundary": row.get("confidence_boundary"),
+        "reason": row.get("reason"),
+        "operator_eye": row.get("operator_eye"),
+        "touched_surfaces": row.get("touched_surfaces") or [],
+    }
+
+
+def write_artifacts(commits: list[dict[str, Any]]) -> dict[str, Any]:
+    """Persist each commit row to canonical state via routed cap.sh dispatch.
+
+    Witness-only: the write cap's mutation surface is the per-commit yaml path
+    only; this function does not promote, decide, gate, or close anything.
+    """
+    bin_ops = ROOT / "bin" / "ops"
+    summary: dict[str, Any] = {
+        "capability": "commit.narrator.artifact.write",
+        "attempted": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "errors": [],
+    }
+    for row in commits:
+        sha = row.get("sha")
+        if not sha:
+            continue
+        summary["attempted"] += 1
+        payload = _row_to_artifact_payload(row)
+        try:
+            proc = subprocess.run(
+                [str(bin_ops), "cap", "run", "commit.narrator.artifact.write",
+                 "--", "--sha", sha, "--payload-inline", "--json"],
+                input=json.dumps(payload),
+                cwd=str(ROOT),
+                text=True,
+                capture_output=True,
+                timeout=45,
+            )
+        except subprocess.TimeoutExpired:
+            summary["failed"] += 1
+            summary["errors"].append({"sha": sha, "error": "write_timeout"})
+            row["artifact_status"] = "failed_timeout"
+            continue
+        if proc.returncode != 0:
+            summary["failed"] += 1
+            summary["errors"].append({"sha": sha, "error": (proc.stderr or proc.stdout).strip()[:300]})
+            row["artifact_status"] = "failed"
+            continue
+        artifact_path = None
+        for line in proc.stdout.splitlines():
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and obj.get("status") == "written" and obj.get("artifact_path"):
+                artifact_path = obj["artifact_path"]
+                break
+        if not artifact_path:
+            try:
+                start = proc.stdout.find("{")
+                end = proc.stdout.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    obj = json.loads(proc.stdout[start:end + 1])
+                    if obj.get("status") == "written":
+                        artifact_path = obj.get("artifact_path")
+            except json.JSONDecodeError:
+                pass
+        if artifact_path:
+            row["artifact_path"] = artifact_path
+            row["artifact_status"] = "written"
+            summary["succeeded"] += 1
+        else:
+            summary["failed"] += 1
+            summary["errors"].append({"sha": sha, "error": "write_cap_returned_no_path"})
+            row["artifact_status"] = "failed_no_path"
+    return summary
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     if args.self_check:
@@ -764,6 +860,8 @@ def main(argv: list[str]) -> int:
     except Exception as exc:
         print(f"{CAPABILITY} FAIL: {exc}", file=sys.stderr)
         return 1
+    if getattr(args, "write_artifacts", False):
+        payload["artifact_writes"] = write_artifacts(payload.get("commits") or [])
     if args.format == "json":
         print(json.dumps(payload, indent=2, sort_keys=True))
     elif args.format == "markdown":
