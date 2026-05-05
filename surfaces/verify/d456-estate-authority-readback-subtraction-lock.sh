@@ -48,7 +48,10 @@ python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CONTROL_BASELINE" "$CAPABIL
 import sys
 import os
 import json
+import hashlib
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -368,5 +371,133 @@ for required_token in ('"canonical_plane_access_role"', '"plane_access_source"',
     if required_token not in clerk_text:
         fail(f"clerk-symptom-classify-and-file must emit {required_token} (PACKET-840 Stage 2 organ 4)")
 
-print("D456 PASS: estate authority readbacks are first-class/subordinate and old expert probes cannot silently masquerade as drift")
+baseline_contract_path = root_dir / "ops/bindings/friction.baseline.contract.yaml"
+baseline_contract = load_yaml(baseline_contract_path)
+if ((baseline_contract.get("artifact") or {}).get("path")) != "$SPINE_STATE/friction-baseline.yaml":
+    fail("friction baseline artifact path must remain the logical $SPINE_STATE/friction-baseline.yaml")
+baseline_verify_cap = (caps.get("capabilities") or {}).get("friction.baseline.verify") or {}
+if baseline_verify_cap.get("state_authority") != "shared_authority_db":
+    fail("friction.baseline.verify must route to canonical state authority instead of reading consumer-local projections")
+
+baseline_capture_path = root_dir / "ops/plugins/core/lifecycle/bin/friction-baseline-capture"
+baseline_verify_path = root_dir / "ops/plugins/core/lifecycle/bin/friction-baseline-verify"
+for script_path in (baseline_capture_path, baseline_verify_path):
+    text = script_path.read_text(encoding="utf-8")
+    for token in ("resolve_artifact_path", "default_state_root", "replace(\"$SPINE_STATE\""):
+        if token not in text:
+            fail(f"{script_path.name} must expand logical $SPINE_STATE paths before repo-relative fallback")
+if "required_command_strings" not in baseline_capture_path.read_text(encoding="utf-8"):
+    fail("friction-baseline-capture must derive command list from contract required_commands")
+if "artifact commands do not match contract required_commands" not in baseline_verify_path.read_text(encoding="utf-8"):
+    fail("friction-baseline-verify must reject artifact command drift from contract required_commands")
+
+
+def baseline_payload(commands: list[str]) -> dict:
+    payload = {
+        "version": "1.0",
+        "contract_id": "friction-baseline-v1",
+        "generated_at_utc": "2026-05-05T00:00:00Z",
+        "timezone_human": "America/New_York",
+        "loop_id": "LOOP-D456-FRICTION-BASELINE-PATH-LOCK",
+        "commands": [
+            {
+                "command": command,
+                "run_key": "TEST-RUN",
+                "status": "done",
+                "failing_gate_ids": [],
+            }
+            for command in commands
+        ],
+        "baseline_failing_gate_ids": [],
+    }
+    canon = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload["checksum_sha256"] = hashlib.sha256(canon).hexdigest()
+    return payload
+
+
+literal_residue_dir = root_dir / "$SPINE_STATE"
+literal_residue_preexisting = literal_residue_dir.exists()
+try:
+    with tempfile.TemporaryDirectory(prefix="d456-friction-baseline.") as tmp:
+        tmp_path = Path(tmp)
+        state_root = tmp_path / "state"
+        state_root.mkdir()
+        contract_path = tmp_path / "friction.baseline.contract.yaml"
+        required_commands = [
+            "python3 -c 'print(\"Run Key: TEST-RUN\"); print(\"Status: done\")'",
+        ]
+        contract_path.write_text(
+            yaml.safe_dump(
+                {
+                    "artifact": {
+                        "path": "$SPINE_STATE/friction-baseline.yaml",
+                        "checksum_algorithm": "sha256",
+                        "checksum_field": "checksum_sha256",
+                    },
+                    "required_fields": [
+                        "version",
+                        "contract_id",
+                        "generated_at_utc",
+                        "timezone_human",
+                        "loop_id",
+                        "commands",
+                        "baseline_failing_gate_ids",
+                        "checksum_sha256",
+                    ],
+                    "required_commands": required_commands,
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        env = dict(os.environ)
+        env["SPINE_STATE"] = str(state_root)
+
+        capture = subprocess.run(
+            ["python3", str(baseline_capture_path), "--contract", str(contract_path), "--json"],
+            cwd=str(root_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if capture.returncode != 0:
+            fail(f"friction-baseline-capture synthetic path test failed: {capture.stdout} {capture.stderr}")
+        artifact_path = state_root / "friction-baseline.yaml"
+        if not artifact_path.is_file():
+            fail("friction-baseline-capture did not write under expanded SPINE_STATE")
+        if literal_residue_dir.exists() and not literal_residue_preexisting:
+            fail("friction-baseline-capture created literal repo/$SPINE_STATE residue")
+
+        verify = subprocess.run(
+            ["python3", str(baseline_verify_path), "--contract", str(contract_path), "--json"],
+            cwd=str(root_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if verify.returncode != 0:
+            fail(f"friction-baseline-verify synthetic path test failed: {verify.stdout} {verify.stderr}")
+        verify_payload = json.loads(verify.stdout)
+        if verify_payload.get("artifact") != str(artifact_path):
+            fail("friction-baseline-verify did not report the expanded SPINE_STATE artifact path")
+
+        bad_payload = baseline_payload(["./bin/ops cap run verify.run -- fast"])
+        artifact_path.write_text(yaml.safe_dump(bad_payload, sort_keys=False), encoding="utf-8")
+        drift = subprocess.run(
+            ["python3", str(baseline_verify_path), "--contract", str(contract_path), "--json"],
+            cwd=str(root_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if drift.returncode == 0 or "required_commands" not in f"{drift.stdout} {drift.stderr}":
+            fail("friction-baseline-verify must fail closed on command-list drift")
+finally:
+    if not literal_residue_preexisting and literal_residue_dir.exists():
+        shutil.rmtree(literal_residue_dir)
+
+print("D456 PASS: estate authority readbacks are first-class/subordinate and old expert probes cannot silently masquerade as drift; friction baseline capture/verify expands canonical state paths and rejects command drift")
 PY

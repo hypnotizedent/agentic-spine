@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -27,13 +29,34 @@ def yq_json(path: Path) -> dict:
     return obj
 
 
+def default_state_root() -> Path:
+    workspace_root = ROOT.parent if ROOT.parent.name == "code" else Path.home() / "code"
+    return workspace_root / ".runtime" / "spine" / "state"
+
+
+def resolve_artifact_path(raw: str) -> Path:
+    value = raw.strip()
+    if "$SPINE_STATE" in value or "${SPINE_STATE}" in value:
+        state_root = os.environ.get("SPINE_STATE", "").strip() or str(default_state_root())
+        value = value.replace("${SPINE_STATE}", state_root).replace("$SPINE_STATE", state_root)
+    value = os.path.expandvars(os.path.expanduser(value))
+    path = Path(value)
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def normalize_command(raw: str) -> str:
+    return " ".join(shlex.quote(part) for part in shlex.split(str(raw)))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Validate friction baseline artifact schema and checksum")
     ap.add_argument("--contract", default=str(CONTRACT))
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
-    contract_path = Path(args.contract).expanduser()
+    contract_path = Path(os.path.expandvars(args.contract)).expanduser()
     if not contract_path.exists():
         return fail(f"missing contract: {contract_path}")
 
@@ -46,7 +69,7 @@ def main() -> int:
     if not artifact_rel:
         return fail("contract missing artifact.path")
 
-    artifact_path = ROOT / artifact_rel if not artifact_rel.startswith("/") else Path(artifact_rel)
+    artifact_path = resolve_artifact_path(artifact_rel)
     if not artifact_path.exists():
         return fail(f"missing artifact: {artifact_path}")
 
@@ -59,6 +82,27 @@ def main() -> int:
     missing = [f for f in req_fields if f not in data]
     if missing:
         return fail(f"artifact missing fields: {','.join(missing)}")
+
+    required_commands = contract.get("required_commands") or []
+    if required_commands:
+        if not isinstance(required_commands, list):
+            return fail("contract required_commands must be a list")
+        artifact_commands = data.get("commands") or []
+        if not isinstance(artifact_commands, list):
+            return fail("artifact commands must be a list")
+        try:
+            expected_commands = [normalize_command(str(cmd)) for cmd in required_commands]
+            actual_commands = [
+                normalize_command(str(row.get("command") if isinstance(row, dict) else row))
+                for row in artifact_commands
+            ]
+        except ValueError as exc:
+            return fail(f"invalid command string: {exc}")
+        if actual_commands != expected_commands:
+            return fail(
+                "artifact commands do not match contract required_commands: "
+                f"expected={expected_commands} actual={actual_commands}"
+            )
 
     checksum_field = str(((contract.get("artifact") or {}).get("checksum_field") or "checksum_sha256")).strip()
     declared = str(data.get(checksum_field, "")).strip()

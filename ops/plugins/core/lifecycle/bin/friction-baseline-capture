@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -12,6 +13,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[5]
 CONTRACT = ROOT / "ops/bindings/friction.baseline.contract.yaml"
+DEFAULT_REQUIRED_COMMANDS = [
+    "./bin/ops cap run verify.infra.run",
+    "./bin/ops cap run verify.pack.run loop_gap",
+    "./bin/ops cap run verify.route.recommend",
+]
+
+
+def fail(msg: str) -> int:
+    print(f"friction.baseline.capture FAIL: {msg}")
+    return 1
 
 
 def run_cmd(args: list[str]) -> tuple[int, str]:
@@ -46,6 +57,37 @@ def yq_json(path: Path) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
+def default_state_root() -> Path:
+    workspace_root = ROOT.parent if ROOT.parent.name == "code" else Path.home() / "code"
+    return workspace_root / ".runtime" / "spine" / "state"
+
+
+def resolve_artifact_path(raw: str) -> Path:
+    value = raw.strip()
+    if "$SPINE_STATE" in value or "${SPINE_STATE}" in value:
+        state_root = os.environ.get("SPINE_STATE", "").strip() or str(default_state_root())
+        value = value.replace("${SPINE_STATE}", state_root).replace("$SPINE_STATE", state_root)
+    value = os.path.expandvars(os.path.expanduser(value))
+    path = Path(value)
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def normalize_command(raw: str) -> str:
+    return " ".join(shlex.quote(part) for part in shlex.split(str(raw)))
+
+
+def required_command_strings(contract: dict) -> list[str]:
+    raw = contract.get("required_commands") or DEFAULT_REQUIRED_COMMANDS
+    if not isinstance(raw, list):
+        raise ValueError("required_commands must be a list")
+    commands = [normalize_command(str(item)) for item in raw if str(item).strip()]
+    if not commands:
+        raise ValueError("required_commands must not be empty")
+    return commands
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Capture friction baseline artifact with stable checksum")
     ap.add_argument("--contract", default=str(CONTRACT))
@@ -53,26 +95,33 @@ def main() -> int:
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
-    contract = yq_json(Path(args.contract).expanduser())
-    artifact_rel = str(((contract.get("artifact") or {}).get("path") or "mailroom/state/friction-baseline.yaml")).strip()
-    artifact = ROOT / artifact_rel if not artifact_rel.startswith("/") else Path(artifact_rel)
+    contract_path = Path(os.path.expandvars(args.contract)).expanduser()
+    if not contract_path.exists():
+        return fail(f"missing contract: {contract_path}")
+    contract = yq_json(contract_path)
+    if not contract:
+        return fail(f"invalid contract: {contract_path}")
 
-    commands = [
-        ["./bin/ops", "cap", "run", "verify.run", "--", "fast"],
-        ["./bin/ops", "cap", "run", "verify.pack.run", "loop_gap"],
-        ["./bin/ops", "cap", "run", "verify.route.recommend"],
-    ]
+    artifact_rel = str(((contract.get("artifact") or {}).get("path") or "")).strip()
+    if not artifact_rel:
+        return fail("contract missing artifact.path")
+    artifact = resolve_artifact_path(artifact_rel)
+
+    try:
+        commands = required_command_strings(contract)
+    except ValueError as exc:
+        return fail(str(exc))
 
     results = []
     baseline_ids: list[str] = []
-    for argv in commands:
+    for command in commands:
+        argv = shlex.split(command)
         rc, output = run_cmd(argv)
-        cmd = " ".join(shlex.quote(part) for part in argv)
         failing = extract_failing_ids(output)
         baseline_ids.extend(failing)
         results.append(
             {
-                "command": cmd,
+                "command": command,
                 "run_key": extract_run_key(output),
                 "status": extract_status(output) if rc == 0 else "failed",
                 "failing_gate_ids": failing,
