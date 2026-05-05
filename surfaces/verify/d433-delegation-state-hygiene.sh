@@ -46,9 +46,34 @@ except ImportError:
 
 REQUIRED_FIELDS = ["delegation_id", "loop_id", "packet_id", "delegation_state", "delegated_at_utc"]
 VALID_STATES = {"delegated", "picked_up", "executing", "landed", "needs_review", "cancelled"}
+TERMINAL_STATES = {"landed", "needs_review", "cancelled"}
 INTERVENTION_TERMINAL_DISPOSITIONS = {"cancelled", "dismissed", "landed", "resolved", "superseded"}
 
+# PACKET-1344 known temporal-truth specimens: controller packets that closed
+# before the linked delegation reached a terminal state. These predate the
+# delegation_broker.markdown branch fix that writes terminal_at_utc on
+# delegation transition. They are accepted as historical residue so D433
+# fails only on NEW inversions; remove an entry once forward-reconciled.
+TEMPORAL_TRUTH_KNOWN_SPECIMENS = frozenset({
+    "DEL-20260503-215556",
+    "DEL-20260505-175320",
+    "DEL-20260505-190323",
+    "DEL-20260505-192146",
+    "DEL-20260505-202114",
+})
+
+import datetime
+def _parse_utc(ts):
+    if not ts: return None
+    try:
+        return datetime.datetime.strptime(ts.strip(), "%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, AttributeError):
+        return None
+
 violations = []
+temporal_inversions = []  # NEW (not in known-specimen baseline)
+temporal_known = []        # known historical residue
+terminal_at_utc_present = 0
 counts = {}
 total = 0
 
@@ -115,14 +140,65 @@ for fpath in sys.argv[1:]:
 
     counts[state] = counts.get(state, 0) + 1
 
+    # PACKET-1344: temporal-truth check for terminal delegations linked to
+    # controller-prompt packets. delegation.completed_at_utc must not be
+    # later than packet.terminal_at_utc (when present) or packet.closed_at_utc
+    # (legacy fallback). New inversions hard-fail; known historical specimens
+    # are accepted via the baseline above and reported as residue.
+    if (
+        state in TERMINAL_STATES
+        and packet_id
+        and not packet_id.startswith("INTERVENTION-")
+        and packet_path
+        and os.path.isfile(packet_path)
+    ):
+        del_completed = _parse_utc(str(doc.get("completed_at_utc", "")))
+        if del_completed:
+            try:
+                with open(packet_path, encoding="utf-8") as pf:
+                    ptext = pf.read()
+                if ptext.startswith("---"):
+                    pparts = ptext.split("---", 2)
+                    pfm = yaml.safe_load(pparts[1]) if len(pparts) >= 3 else None
+                else:
+                    pfm = yaml.safe_load(ptext)
+            except Exception:
+                pfm = None
+            if isinstance(pfm, dict):
+                terminal_at = _parse_utc(str(pfm.get("terminal_at_utc", "")))
+                closed_at = _parse_utc(str(pfm.get("closed_at_utc", "")))
+                if terminal_at:
+                    terminal_at_utc_present += 1
+                # Use terminal_at_utc when present, else closed_at_utc
+                packet_ref_time = terminal_at or closed_at
+                if packet_ref_time and del_completed > packet_ref_time:
+                    delta_s = int((del_completed - packet_ref_time).total_seconds())
+                    del_id = str(doc.get("delegation_id", "")).strip() or fname
+                    field_used = "terminal_at_utc" if terminal_at else "closed_at_utc"
+                    record = f"{del_id} -> {packet_id} (delegation.completed_at_utc later than packet.{field_used} by {delta_s}s)"
+                    if del_id in TEMPORAL_TRUTH_KNOWN_SPECIMENS:
+                        temporal_known.append(record)
+                    else:
+                        temporal_inversions.append(record)
+
 if violations:
     print(f"FAIL:{len(violations)} violation(s):")
     for v in violations:
         print(f"  - {v}")
+elif temporal_inversions:
+    print(f"FAIL:{len(temporal_inversions)} new temporal-truth inversion(s) (PACKET-1344):")
+    for v in temporal_inversions:
+        print(f"  - {v}")
+    print("  remediation: ensure delegation transition writes packet terminal_at_utc before completed_at_utc; or add specimen to TEMPORAL_TRUTH_KNOWN_SPECIMENS in d433-delegation-state-hygiene.sh after forward reconcile")
 else:
     parts = [f"{counts.get(s, 0)} {s}" for s in sorted(VALID_STATES) if counts.get(s, 0) > 0]
     summary = ", ".join(parts) if parts else "none"
-    print(f"PASS:{total} delegation(s), all valid ({summary})")
+    extra = ""
+    if temporal_known:
+        extra = f"; {len(temporal_known)} known historical temporal-inversion residue(s) accepted"
+    if terminal_at_utc_present:
+        extra += f"; terminal_at_utc present on {terminal_at_utc_present} terminal delegation(s)"
+    print(f"PASS:{total} delegation(s), all valid ({summary}){extra}")
 PYEOF
 )
 

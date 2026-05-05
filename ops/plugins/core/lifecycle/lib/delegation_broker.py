@@ -569,6 +569,16 @@ def _update_packet_frontmatter(
                 fm[key] = value
     for key in clear_fields or []:
         fm.pop(key, None)
+    # PACKET-1344: when a linked delegation reaches a terminal state (landed,
+    # needs_review, cancelled), record the terminal-execution time on the
+    # packet frontmatter so readback distinguishes slice-level controller
+    # close (closed_at_utc) from execution-terminal completion. closed_at_utc
+    # may be earlier (e.g. wave.finish closed the packet first, then ran the
+    # delegation transition). terminal_at_utc reflects when execution actually
+    # finished according to the delegation broker.
+    if terminal_disposition:
+        fm["terminal_disposition"] = terminal_disposition
+        fm["terminal_at_utc"] = _now_utc()
 
     new_fm = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True)
     new_text = "---\n" + new_fm + "---" + parts[2]

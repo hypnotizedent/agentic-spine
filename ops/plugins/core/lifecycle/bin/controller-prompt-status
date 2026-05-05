@@ -69,6 +69,10 @@ def _packet_row(path: Path, fm: dict[str, Any]) -> dict[str, Any]:
         "evidence_ref_count": len(evidence_refs),
         "disposition": str(fm.get("disposition") or fm.get("close_disposition") or "").strip(),
         "closed_at": str(fm.get("closed_at") or fm.get("closed_at_utc") or "").strip(),
+        "terminal_at": str(fm.get("terminal_at_utc") or "").strip(),
+        "terminal_disposition": str(fm.get("terminal_disposition") or "").strip(),
+        "delegation_id": str(fm.get("delegation_id") or "").strip(),
+        "delegation_state": str(fm.get("delegation_state") or "").strip(),
         "path": str(path),
     }
 
@@ -243,6 +247,21 @@ def render_human(data: dict[str, Any]) -> None:
             next_action = str(row.get("next_action") or "")
             if next_action:
                 print(f"  next:    {next_action[:120]}")
+            # PACKET-1344: surface temporal-truth split for closed packets
+            closed_at = str(row.get("closed_at") or "")
+            terminal_at = str(row.get("terminal_at") or "")
+            del_id = str(row.get("delegation_id") or "")
+            del_state = str(row.get("delegation_state") or "")
+            if closed_at or terminal_at:
+                if terminal_at and closed_at and terminal_at != closed_at:
+                    print(f"  closed:  {closed_at} (slice/controller-close)")
+                    print(f"  terminal:{terminal_at} (execution-terminal via {del_state or 'delegation'})")
+                elif terminal_at:
+                    print(f"  terminal:{terminal_at} ({row.get('terminal_disposition') or del_state or 'delegation'})")
+                elif closed_at:
+                    print(f"  closed:  {closed_at}")
+            if del_id and not terminal_at and del_state and del_state.lower() in {"landed", "needs_review", "cancelled"}:
+                print(f"  WARN: linked {del_id} reached {del_state} but packet has no terminal_at_utc — pre-PACKET-1344 residue")
             print(f"  path:    {row.get('path')}")
     if reservations:
         print()
