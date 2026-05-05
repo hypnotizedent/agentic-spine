@@ -20,6 +20,43 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
 
 need python3
 
+# PACKET-1349: projection-honesty. Direct local invocation against a
+# non-canonical SPINE_STATE used to silently disagree with routed canonical
+# results. Read the canonical state path from root.authority.contract.yaml and
+# emit a clear projection notice when SPINE_STATE points elsewhere. Routed
+# spine.verify keeps its existing canonical SPINE_STATE and is unaffected.
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CANONICAL_STATE="$(python3 - <<PY 2>/dev/null || true
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)
+try:
+    with open("$SCRIPT_ROOT/ops/bindings/root.authority.contract.yaml") as f:
+        d = yaml.safe_load(f)
+    print(d["taxonomy"]["storage_evidence_node_canonical"]["primary_canonical_subpaths"]["state"])
+except Exception:
+    pass
+PY
+)"
+CANONICAL_STATE="${CANONICAL_STATE:-/md1400/spine/state}"
+SPINE_STATE_REAL="$(cd "$SPINE_STATE" 2>/dev/null && pwd -P || echo "$SPINE_STATE")"
+CANONICAL_STATE_REAL="$(cd "$CANONICAL_STATE" 2>/dev/null && pwd -P || echo "$CANONICAL_STATE")"
+if [[ "$SPINE_STATE_REAL" != "$CANONICAL_STATE_REAL" && "${D433_ALLOW_PROJECTION:-0}" != "1" ]]; then
+  cat >&2 <<NOTICE
+D433 SKIP: SPINE_STATE points at a projection/cache, not canonical.
+  current   : $SPINE_STATE_REAL
+  canonical : $CANONICAL_STATE_REAL
+Direct local D433 reads projection state and may disagree with canonical.
+Run via the routed cap so canonical state is read on the storage_evidence_node:
+  ./bin/ops cap run spine.verify
+Or set D433_ALLOW_PROJECTION=1 to override (for explicit projection-only
+  inspection; result will not represent canonical truth).
+NOTICE
+  exit 0
+fi
+
 # Clean state: no delegations directory is valid
 if [[ ! -d "$DELEGATIONS_DIR" ]]; then
   echo "D433 PASS: 0 delegation(s), all valid"

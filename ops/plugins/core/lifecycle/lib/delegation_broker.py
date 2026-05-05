@@ -1198,6 +1198,139 @@ def reconcile_terminal_intervention_alignment(
     }
 
 
+def reconcile_temporal_truth(
+    state_root: str,
+    *,
+    delegation_id: str = "",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Forward-reconcile controller-prompt packets that pre-date PACKET-1344.
+
+    Walks terminal delegations whose linked controller-prompt packet markdown
+    frontmatter lacks ``terminal_at_utc``. For each, writes ``terminal_at_utc``
+    (and ``terminal_disposition``) sourced from the delegation's
+    ``completed_at_utc``. Active or non-terminal delegations are never
+    touched; intervention-backed delegations are out of scope (use
+    ``reconcile_terminal_intervention_alignment`` for those).
+
+    PACKET-1349: this is the governed retirement path for the D433 hardcoded
+    baseline introduced by PACKET-1344. After running, every named historical
+    inversion has the explicit terminal-truth field; D433 then passes without
+    a hardcoded specimen list.
+    """
+    if not state_root or not os.path.isdir(state_root):
+        raise DelegationError(f"state_root not found: {state_root}")
+
+    del_dir = _delegations_dir(state_root)
+    targets: list[Path]
+    if delegation_id:
+        target = del_dir / f"{delegation_id}.yaml"
+        if not target.exists():
+            raise DelegationError(f"delegation '{delegation_id}' not found")
+        targets = [target]
+    else:
+        targets = sorted(del_dir.glob("DEL-*.yaml"))
+
+    reconciled: list[dict[str, Any]] = []
+    skipped = 0
+
+    for path in targets:
+        data = _read_delegation(path)
+        current_state = str(data.get("delegation_state", "")).strip().lower()
+        if current_state not in TERMINAL_STATES:
+            skipped += 1
+            continue
+
+        packet_id = str(data.get("packet_id", "")).strip()
+        packet_path = str(data.get("packet_path", "")).strip()
+        if not packet_id or packet_id.startswith("INTERVENTION-"):
+            skipped += 1
+            continue
+        if not packet_path or not os.path.isfile(packet_path):
+            skipped += 1
+            continue
+
+        completed_at = str(data.get("completed_at_utc", "")).strip()
+        if not completed_at:
+            skipped += 1
+            continue
+
+        try:
+            text = Path(packet_path).read_text(encoding="utf-8")
+        except OSError:
+            skipped += 1
+            continue
+        if not text.startswith("---"):
+            skipped += 1
+            continue
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            skipped += 1
+            continue
+        try:
+            fm = yaml.safe_load(parts[1])
+        except yaml.YAMLError:
+            skipped += 1
+            continue
+        if not isinstance(fm, dict):
+            skipped += 1
+            continue
+
+        existing_terminal_at = str(fm.get("terminal_at_utc", "")).strip()
+        if existing_terminal_at:
+            skipped += 1
+            continue
+
+        terminal_disposition = ""
+        if current_state == "landed":
+            terminal_disposition = "landed"
+        elif current_state == "cancelled":
+            terminal_disposition = "cancelled"
+        elif current_state == "needs_review":
+            terminal_disposition = "needs_review"
+
+        record = {
+            "delegation_id": str(data.get("delegation_id", "")).strip() or path.stem,
+            "packet_id": packet_id,
+            "packet_path": packet_path,
+            "delegation_completed_at_utc": completed_at,
+            "wrote_terminal_at_utc": completed_at,
+            "wrote_terminal_disposition": terminal_disposition,
+        }
+
+        if dry_run:
+            reconciled.append(record)
+            continue
+
+        fm["terminal_at_utc"] = completed_at
+        if terminal_disposition:
+            fm["terminal_disposition"] = terminal_disposition
+        new_fm = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True)
+        new_text = "---\n" + new_fm + "---" + parts[2]
+        tmp_path = f"{packet_path}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(new_text)
+            os.replace(tmp_path, packet_path)
+        except OSError as exc:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise DelegationError(f"packet update failed: {exc}") from exc
+
+        reconciled.append(record)
+
+    return {
+        "status": "ok",
+        "dry_run": dry_run,
+        "count": len(reconciled),
+        "reconciled": reconciled,
+        "skipped": skipped,
+    }
+
+
 def status(
     state_root: str,
     *,
