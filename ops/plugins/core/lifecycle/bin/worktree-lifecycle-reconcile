@@ -126,25 +126,7 @@ def packet_status(state_root: Path, packet_id: str) -> str | None:
     return status
 
 
-def routed_packet_status(repo: Path, packet_id: str) -> str | None:
-    if os.environ.get("SPINE_WORKTREE_LIFECYCLE_DISABLE_ROUTED_PACKET_STATUS"):
-        return None
-    bin_ops = repo / "bin" / "ops"
-    if not bin_ops.exists():
-        return None
-    proc = run(
-        [
-            str(bin_ops),
-            "cap",
-            "run",
-            "controller_prompt.status",
-            "--",
-            "--packet-id",
-            packet_id,
-            "--json",
-        ],
-        cwd=repo,
-    )
+def controller_prompt_status_payload(proc: subprocess.CompletedProcess[str]) -> dict[str, Any] | None:
     decoder = json.JSONDecoder()
     for idx, ch in enumerate(proc.stdout or ""):
         if ch != "{":
@@ -155,12 +137,56 @@ def routed_packet_status(repo: Path, packet_id: str) -> str | None:
             continue
         if not isinstance(payload, dict) or payload.get("capability") != "controller_prompt.status":
             continue
-        packets = payload.get("packets")
-        if isinstance(packets, list) and packets:
-            status = str((packets[0] or {}).get("status") or "").strip().lower()
-            return status or None
-        return None
+        return payload
     return None
+
+
+class RoutedPacketStatusCache:
+    def __init__(self, repo: Path):
+        self.repo = repo
+        self.loaded = False
+        self.status_by_packet: dict[str, str] = {}
+
+    def get(self, packet_id: str) -> str | None:
+        if os.environ.get("SPINE_WORKTREE_LIFECYCLE_DISABLE_ROUTED_PACKET_STATUS"):
+            return None
+        if not self.loaded:
+            self.loaded = True
+            self.status_by_packet = self._load_all_statuses()
+        return self.status_by_packet.get(packet_id)
+
+    def _load_all_statuses(self) -> dict[str, str]:
+        bin_ops = self.repo / "bin" / "ops"
+        if not bin_ops.exists():
+            return {}
+        limit = os.environ.get("SPINE_WORKTREE_LIFECYCLE_PACKET_STATUS_LIMIT", "1000")
+        proc = run(
+            [
+                str(bin_ops),
+                "cap",
+                "run",
+                "controller_prompt.status",
+                "--",
+                "--all",
+                "--limit",
+                str(limit),
+                "--json",
+            ],
+            cwd=self.repo,
+        )
+        payload = controller_prompt_status_payload(proc)
+        packets = payload.get("packets") if isinstance(payload, dict) else None
+        if not isinstance(packets, list):
+            return {}
+        statuses: dict[str, str] = {}
+        for packet in packets:
+            if not isinstance(packet, dict):
+                continue
+            packet_id = str(packet.get("packet_id") or "").strip()
+            status = str(packet.get("status") or "").strip().lower()
+            if packet_id and status:
+                statuses[packet_id] = status
+        return statuses
 
 
 def classify_owner(state_root: Path, identity: str | None) -> tuple[str | None, str | None]:
@@ -381,6 +407,7 @@ def main() -> int:
     )
 
     rows: list[dict[str, Any]] = []
+    routed_status_cache = RoutedPacketStatusCache(repo)
     for wt in worktree_entries:
         path = Path(str(wt.get("path") or "")).resolve()
         if not path.exists() or wt.get("is_primary"):
@@ -400,7 +427,7 @@ def main() -> int:
             and merged
             and not dirty
         ):
-            owner_state = routed_packet_status(repo, owner_id) or owner_state
+            owner_state = routed_status_cache.get(owner_id) or owner_state
         ownership = classify_ownership(
             repo=repo,
             path=path,

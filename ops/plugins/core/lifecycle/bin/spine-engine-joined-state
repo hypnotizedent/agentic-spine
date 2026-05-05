@@ -162,10 +162,11 @@ def hours_since(value: dt.datetime | None) -> float | None:
     return round(delta.total_seconds() / 3600.0, 2)
 
 
-def run_cmd(cmd: list[str], *, cwd: Path) -> tuple[int, str, str]:
+def run_cmd(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     proc = subprocess.run(
         cmd,
         cwd=str(cwd),
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -721,12 +722,16 @@ def collect_worktree_state(paths: dict[str, Path]) -> dict[str, Any]:
     }
 
 
-def collect_worktree_lifecycle_report(paths: dict[str, Path]) -> dict[str, Any]:
+def collect_worktree_lifecycle_report(paths: dict[str, Path], *, bounded_packet_status: bool = False) -> dict[str, Any]:
     script = paths["root"] / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "worktree-lifecycle-report"
     if not script.exists():
         return {"summary": {}, "blocked": [], "raw": {}}
 
-    rc, out, err = run_cmd([str(script), "--json"], cwd=paths["root"])
+    env = None
+    if bounded_packet_status:
+        env = os.environ.copy()
+        env.setdefault("SPINE_WORKTREE_LIFECYCLE_DISABLE_ROUTED_PACKET_STATUS", "1")
+    rc, out, err = run_cmd([str(script), "--json"], cwd=paths["root"], env=env)
     text = out.strip() or err.strip()
     if rc != 0 or not text:
         return {"summary": {}, "blocked": [], "raw": {"error": text}}
@@ -1722,7 +1727,10 @@ def synthesize_brief(root: Path) -> dict[str, Any]:
         scope_only_orphans = []
 
     gap_state = collect_gap_state(paths, {})
-    worktrees = collect_worktree_lifecycle_report(paths)
+    # The public brief should not spend its four-second budget proving
+    # cleanup-grade packet owner status. Full worktree.lifecycle.report keeps
+    # the canonical routed fallback for cleanup decisions.
+    worktrees = collect_worktree_lifecycle_report(paths, bounded_packet_status=True)
     latest_secondary_verify = collect_latest_secondary_verify(paths)
     latest_engine_verify = collect_latest_engine_verify(paths)
     latest_spine_verify = collect_latest_spine_verify(paths)
@@ -1764,6 +1772,7 @@ def synthesize_brief(root: Path) -> dict[str, Any]:
                 "cleanable_worktrees": int(worktree_summary.get("cleanable_worktrees") or 0),
                 "blocked_worktrees": int(worktree_summary.get("blocked_worktrees") or 0),
                 "dirty_blocked_worktrees": dirty_blocked,
+                "packet_owner_detail": "skipped_for_brief",
             },
         },
         "verify": {

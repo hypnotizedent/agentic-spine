@@ -391,7 +391,14 @@ def _render(payload, status_note=""):
     worktree_lifecycle = summary.get("worktree_lifecycle") if isinstance(summary.get("worktree_lifecycle"), dict) else {}
     cleanable_worktrees = int(worktree_lifecycle.get("cleanable_worktrees") or 0)
     dirty_blocked_worktrees = int(worktree_lifecycle.get("dirty_blocked_worktrees") or 0)
-    if cleanable_worktrees or dirty_blocked_worktrees:
+    packet_owner_detail = str(worktree_lifecycle.get("packet_owner_detail") or "")
+    if packet_owner_detail == "skipped_for_brief":
+        blocked_worktrees = int(worktree_lifecycle.get("blocked_worktrees") or 0)
+        if dirty_blocked_worktrees:
+            parts.append(f"Worktrees: {dirty_blocked_worktrees} dirty blocked")
+        elif blocked_worktrees:
+            parts.append(f"Worktrees: {blocked_worktrees} blocked")
+    elif cleanable_worktrees or dirty_blocked_worktrees:
         parts.append(f"Worktrees: {cleanable_worktrees} cleanable / {dirty_blocked_worktrees} dirty blocked")
     elif orphaned or owned_elsewhere:
         parts.append(f"Worktrees: {orphaned} orphaned / {owned_elsewhere} owned elsewhere")
