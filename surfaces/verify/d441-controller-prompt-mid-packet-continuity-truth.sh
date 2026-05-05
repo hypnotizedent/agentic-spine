@@ -36,6 +36,10 @@ grep -q 'commit.narrator.status' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail
 "$RESERVE_BIN" --self-check >/dev/null || fail "controller_prompt.reserve self-check failed"
 "$COMMIT_NARRATOR_BIN" --self-check >/dev/null || fail "commit.narrator.status self-check failed"
 
+SESSION_V3_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/session-v3-attach"
+[[ -f "$SESSION_V3_BIN" ]] || fail "session-v3-attach surface missing"
+grep -q 'Narrator:.*commit\.narrator\.status' "$SESSION_V3_BIN" || fail "session.v3.attach default banner must teach commit.narrator.status as normal orientation pointer"
+
 NARRATOR_PAYLOAD="$("$COMMIT_NARRATOR_BIN" --json --limit 2 --skip-input-readbacks)"
 python3 - "$NARRATOR_PAYLOAD" <<'PY'
 import json
@@ -503,5 +507,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0
