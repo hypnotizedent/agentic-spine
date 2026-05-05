@@ -225,6 +225,7 @@ caps_map = (caps_doc or {}).get("capabilities") or {}
 D3C_DB_BACKED_CAPS = {
     # Read-only DB-backed
     "completion.state.reconcile",
+    "controller_prompt.status",
     "delegation.status",
     "entry.compile",
     "friction.queue.status",

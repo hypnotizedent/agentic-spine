@@ -1179,7 +1179,7 @@ def collect_execution_pickup_status():
         result["error"] = f"missing execution pickup status surface: {pickup_bin}"
         return result
 
-    data = run_json_command([sys.executable, str(pickup_bin), "--json"], timeout=20)
+    data = run_json_command([sys.executable, str(pickup_bin), "--summary", "--json"], timeout=20)
     if data.get("status") == "error":
         result["error"] = data.get("error", "execution-pickup-status failed")
         return result

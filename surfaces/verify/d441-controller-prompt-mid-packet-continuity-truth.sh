@@ -8,13 +8,18 @@ set -euo pipefail
 SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 STATUS_BIN="$SPINE_CODE/ops/commands/status.sh"
 AMEND_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/controller-prompt-amend"
+STATUS_PACKET_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/controller-prompt-status"
 ENTRY_COMPILE_BIN="$SPINE_CODE/ops/plugins/core/lifecycle/bin/entry-compile"
 
 fail() { echo "D441 FAIL: $*" >&2; exit 1; }
 
 [[ -f "$AMEND_BIN" ]] || fail "controller-prompt-amend surface missing"
+[[ -f "$STATUS_PACKET_BIN" ]] || fail "controller-prompt-status surface missing"
 [[ -f "$ENTRY_COMPILE_BIN" ]] || fail "entry-compile surface missing"
 grep -q 'continuity_live' "$STATUS_BIN" || fail "ops status does not classify delegation activity through continuity_live"
+grep -q 'controller_prompt.status:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing controller_prompt.status"
+grep -q 'controller_prompt.status' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing controller_prompt.status"
+"$STATUS_PACKET_BIN" --self-check >/dev/null || fail "controller_prompt.status self-check failed"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/d441-mid-packet.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -130,6 +135,25 @@ if assignment.get("packet_next_action") != "Resume packet from continuity":
 if assignment.get("packet_continuity_summary") != "Checkpointed after packet birth":
     raise SystemExit("packet continuity summary not recovered")
 
+status_payload = json.loads(subprocess.check_output(
+    [
+        sys.executable,
+        str(repo / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "controller-prompt-status"),
+        "--packet-id",
+        "PACKET-01-D441-CONTINUITY",
+        "--json",
+    ],
+    env=os.environ.copy(),
+    text=True,
+))
+if status_payload.get("summary", {}).get("matching_packets") != 1:
+    raise SystemExit("controller_prompt.status did not find exact packet")
+status_row = status_payload["packets"][0]
+if status_row.get("next_action") != "Resume packet from continuity":
+    raise SystemExit("controller_prompt.status did not expose packet next_action")
+if status_row.get("continuity_summary") != "Checkpointed after packet birth":
+    raise SystemExit("controller_prompt.status did not expose continuity_summary")
+
 cconn = lsa.connect(state_root / "shared_authority.db")
 try:
     lsa.upsert_loop(cconn, stale_loop)
@@ -203,7 +227,21 @@ if row.get("disposition") != "superseded":
     raise SystemExit(f"unexpected terminal disposition: {row.get('disposition')}")
 if row.get("close_terminalized_by") != "controller_prompt.close":
     raise SystemExit("terminalization source missing from delegation row")
+
+closed_status = json.loads(subprocess.check_output(
+    [
+        sys.executable,
+        str(repo / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "controller-prompt-status"),
+        "--packet-id",
+        "PACKET-02-D441-STALE",
+        "--json",
+    ],
+    env=os.environ.copy(),
+    text=True,
+))
+if closed_status["packets"][0].get("status") != "closed":
+    raise SystemExit("controller_prompt.status did not expose closed packet state")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, entry-compile recovers packet continuity without tracker glue, and close paths terminalize unclaimed delegations instead of leaving stale residue"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet state, entry-compile recovers packet continuity without tracker glue, and close paths terminalize unclaimed delegations instead of leaving stale residue"
 exit 0

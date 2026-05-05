@@ -34,12 +34,14 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 
 tmp_status="$(mktemp)"
 tmp_json="$(mktemp)"
+tmp_summary="$(mktemp)"
 tmp_seven="$(mktemp)"
-trap 'rm -f "$tmp_status" "$tmp_json" "$tmp_seven"' EXIT
+trap 'rm -f "$tmp_status" "$tmp_json" "$tmp_summary" "$tmp_seven"' EXIT
 
 (cd "$ROOT" && "$OPS" status >"$tmp_status")
 (cd "$ROOT" && "$OPS" status --seven-questions --json >"$tmp_seven")
 "$STATUS_BIN" --json >"$tmp_json"
+"$STATUS_BIN" --summary --json >"$tmp_summary"
 
 grep -q "execution pickup:" "$tmp_status" || fail "ops status must expose execution pickup"
 grep -q "AI agent bridge:" "$tmp_status" || fail "ops status must expose AI agent bridge delivery truth"
@@ -344,6 +346,31 @@ for row in data.get("requests") or []:
             raise SystemExit("D452 FAIL: dispatch-only wave row must be not_claimed")
 PY
 
+python3 - "$tmp_summary" "$ROOT/ops/commands/status.sh" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+status_sh = Path(sys.argv[2]).read_text(encoding="utf-8")
+if data.get("output_mode") != "summary":
+    raise SystemExit("D452 FAIL: execution.pickup.status --summary must mark output_mode=summary")
+if data.get("full_readback") != "execution.pickup.status --json":
+    raise SystemExit("D452 FAIL: summary mode must point to full readback")
+limit = int(data.get("summary_limit") or 0)
+rows = data.get("requests") or []
+if not isinstance(rows, list) or len(rows) > limit:
+    raise SystemExit("D452 FAIL: summary mode must bound request rows")
+for row in rows:
+    if row.get("pickup_state") in {"done", "failed", "cancelled"}:
+        raise SystemExit("D452 FAIL: summary mode must be current-first and omit terminal history rows")
+    for noisy_key in ("payload", "bridge_proof", "receipt_refs"):
+        if noisy_key in row:
+            raise SystemExit(f"D452 FAIL: summary row must omit noisy deep field {noisy_key}")
+if "--summary" not in status_sh or "execution-pickup-status" not in status_sh:
+    raise SystemExit("D452 FAIL: ops status must consume bounded execution pickup summary mode")
+PY
+
 python3 - "$tmp_seven" <<'PY'
 import json
 import sys
@@ -627,6 +654,9 @@ pickup_status_text = pickup_status_path.read_text(encoding="utf-8")
 for required_token in ('"canonical_plane_access_role"', '"plane_access_source"', '"canonical_queue_source"', "canonical_plane_access_role()"):
     if required_token not in pickup_status_text:
         raise SystemExit(f"D452 FAIL: execution-pickup-status must emit canonical plane access metadata: missing {required_token} (PACKET-840 Stage 2 organ 2)")
+for required_token in ("terminal_without_bridge_proof", "masquerade as a proved"):
+    if required_token not in pickup_status_text:
+        raise SystemExit(f"D452 FAIL: execution-pickup-status must refuse unproved terminal agent_tool payloads as realized tool tiers: missing {required_token}")
 
 # PACKET-1225 task heartbeat staleness — contract carries the per-task
 # threshold and execution-pickup-status reads from it. Extension of D452

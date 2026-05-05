@@ -260,6 +260,12 @@ def safety_tier_for(row: dict[str, Any]) -> str:
         bridge_proof = row.get("bridge_proof") if isinstance(row.get("bridge_proof"), dict) else {}
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         bridge_scope = str(bridge_proof.get("scope") or "").strip()
+        terminal_without_bridge_proof = row.get("pickup_state") in TERMINAL_TASK_STATES and not bridge_proof
+        if terminal_without_bridge_proof:
+            # A terminal task with only an intended tool_set did not realize
+            # that bridge. Do not let stale envelopes masquerade as a proved
+            # tool-using safety tier.
+            return "capability"
         if (
             bridge_proof.get("scope") == "tool_using_agent_v2_5_patch_apply_sandbox"
             or str(payload.get("tool_set") or "").strip() == "patch_apply_sandbox"
@@ -857,6 +863,67 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _active_request_sort_key(row: dict[str, Any]) -> tuple[int, str, str]:
+    state = str(row.get("pickup_state") or "")
+    priority = {
+        "stale": 0,
+        "claimed": 1,
+        "not_claimed": 2,
+    }.get(state, 9)
+    return (priority, str(row.get("updated_at") or row.get("heartbeat_at") or ""), str(row.get("request_id") or ""))
+
+
+def _summarize_request(row: dict[str, Any]) -> dict[str, Any]:
+    """Small row for routine telemetry. Full task envelopes stay in --json."""
+    claim_state = row.get("claim_state") if isinstance(row.get("claim_state"), dict) else {}
+    heartbeat_state = row.get("heartbeat_state") if isinstance(row.get("heartbeat_state"), dict) else {}
+    outcome_state = row.get("outcome_state") if isinstance(row.get("outcome_state"), dict) else {}
+    compact = {
+        "request_id": row.get("request_id"),
+        "pickup_state": row.get("pickup_state"),
+        "source": row.get("source"),
+        "realization": row.get("realization"),
+        "loop_id": row.get("loop_id"),
+        "packet_id": row.get("packet_id"),
+        "worker": row.get("worker"),
+        "heartbeat_at": row.get("heartbeat_at"),
+        "heartbeat_age_seconds": row.get("heartbeat_age_seconds"),
+        "safety_tier": row.get("safety_tier"),
+        "route_capability": row.get("route_capability"),
+        "task": row.get("task"),
+        "claim_status": claim_state.get("status"),
+        "heartbeat_status": heartbeat_state.get("status"),
+        "outcome_status": outcome_state.get("status"),
+    }
+    return {key: value for key, value in compact.items() if value not in (None, "", [], {})}
+
+
+def routine_summary(data: dict[str, Any], *, limit: int = 12) -> dict[str, Any]:
+    """Bound execution pickup for routine operator/agent status paths."""
+    rows = data.get("requests") if isinstance(data.get("requests"), list) else []
+    active_rows = [
+        row for row in rows
+        if isinstance(row, dict) and row.get("pickup_state") not in TERMINAL_TASK_STATES
+    ]
+    active_rows.sort(key=_active_request_sort_key)
+    bounded = active_rows[: max(0, limit)]
+    return {
+        "capability": data.get("capability", "execution.pickup.status"),
+        "generated_at": data.get("generated_at"),
+        "output_mode": "summary",
+        "summary_limit": max(0, limit),
+        "canonical_plane_access_role": data.get("canonical_plane_access_role"),
+        "plane_access_source": data.get("plane_access_source"),
+        "canonical_queue_source": data.get("canonical_queue_source"),
+        "summary": data.get("summary") if isinstance(data.get("summary"), dict) else {},
+        "worker": data.get("worker") if isinstance(data.get("worker"), dict) else {},
+        "requests": [_summarize_request(row) for row in bounded],
+        "omitted_requests": max(0, len(active_rows) - len(bounded)),
+        "full_readback": "execution.pickup.status --json",
+        "subtraction": data.get("subtraction") if isinstance(data.get("subtraction"), dict) else {},
+    }
+
+
 def collect() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     collect_wave_dispatches(rows)
@@ -959,6 +1026,17 @@ def render_human(data: dict[str, Any]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only execution pickup status.")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Emit bounded current-first routine telemetry; use --json without --summary for full rows.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=12,
+        help="Maximum active request rows in --summary output (default: 12).",
+    )
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args()
 
@@ -975,10 +1053,12 @@ def main() -> int:
         print("execution.pickup.status self-check PASS")
         return 0
 
+    output = routine_summary(data, limit=args.limit) if args.summary else data
+
     if args.json:
-        print(json.dumps(data, indent=2, sort_keys=True))
+        print(json.dumps(output, indent=2, sort_keys=True))
     else:
-        render_human(data)
+        render_human(output)
     return 0
 
 
