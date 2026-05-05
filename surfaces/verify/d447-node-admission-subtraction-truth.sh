@@ -264,7 +264,6 @@ D3C_DB_BACKED_CAPS = {
     "wave.execute.land",
     "wave.execute.start",
     "wave.finish",
-    "worktree.lifecycle.rehydrate",
 }
 unannotated = []
 for cap_name in sorted(D3C_DB_BACKED_CAPS):
@@ -278,6 +277,29 @@ for cap_name in sorted(D3C_DB_BACKED_CAPS):
         unannotated.append(cap_name)
 if unannotated:
     fail("D.3c missing state_authority: shared_authority_db on " + ", ".join(unannotated))
+
+WORKTREE_LOCAL_RUNTIME_MUTATORS = {
+    "worktree.lease.heartbeat",
+    "worktree.lifecycle.cleanup",
+    "worktree.lifecycle.managed.sync",
+    "worktree.lifecycle.rehydrate",
+    "worktree.lifecycle.root.normalize",
+}
+bad_worktree_locality = []
+for cap_name in sorted(WORKTREE_LOCAL_RUNTIME_MUTATORS):
+    cap_def = caps_map.get(cap_name)
+    if cap_def is None:
+        bad_worktree_locality.append(f"{cap_name}:missing")
+        continue
+    if cap_def.get("state_authority") == "shared_authority_db":
+        bad_worktree_locality.append(f"{cap_name}:state_authority_shared_authority_db")
+    if ((cap_def.get("routing") or {}).get("db_authority")) != "skip":
+        bad_worktree_locality.append(f"{cap_name}:missing_routing_db_authority_skip")
+if bad_worktree_locality:
+    fail(
+        "worktree lifecycle runtime mutators must stay governed-local-substrate, not pve-routed DB authority: "
+        + ", ".join(bad_worktree_locality)
+    )
 
 # PACKET-616: runtime checkout deployment is a first-class deploy artery.
 # Host placement lives in ops/bindings/runtime.checkout.placement.yaml, drift
