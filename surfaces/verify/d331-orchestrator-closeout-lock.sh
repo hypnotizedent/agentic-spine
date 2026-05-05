@@ -13,9 +13,11 @@ CAPS="$ROOT/ops/capabilities.yaml"
 MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 CLOSEOUT_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-closeout"
 PUBLISH_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-publish"
+TARGET_PUBLISH_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-target-publish"
 REHYDRATE_SCRIPT="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-rehydrate"
 CLOSEOUT_CAP="coordinator.lane.closeout"
 PUBLISH_CAP="coordinator.lane.publish"
+TARGET_PUBLISH_CAP="coordinator.target.publish"
 WAVE_RESIDUE_CAP="wave.residue"
 FRICTION_RECONCILE_CAP="friction.reconcile"
 WAVE_CMD="$ROOT/ops/commands/wave.sh"
@@ -34,6 +36,7 @@ fail() {
 [[ -f "$MANIFEST" ]] || fail "missing plugin manifest: $MANIFEST"
 [[ -x "$CLOSEOUT_SCRIPT" ]] || fail "missing closeout script: $CLOSEOUT_SCRIPT"
 [[ -x "$PUBLISH_SCRIPT" ]] || fail "missing lane publish script: $PUBLISH_SCRIPT"
+[[ -x "$TARGET_PUBLISH_SCRIPT" ]] || fail "missing target publish script: $TARGET_PUBLISH_SCRIPT"
 [[ -x "$REHYDRATE_SCRIPT" ]] || fail "missing rehydrate script: $REHYDRATE_SCRIPT"
 [[ -f "$WAVE_CMD" ]] || fail "missing wave command: $WAVE_CMD"
 [[ -x "$WAVE_CLOSE_BIN" ]] || fail "missing wave close script: $WAVE_CLOSE_BIN"
@@ -49,12 +52,15 @@ rg -n "^[[:space:]]*${CLOSEOUT_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilit
 rg -n "${CLOSEOUT_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $CLOSEOUT_CAP"
 rg -n "^[[:space:]]*${PUBLISH_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilities.yaml missing $PUBLISH_CAP"
 rg -n "${PUBLISH_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $PUBLISH_CAP"
+rg -n "^[[:space:]]*${TARGET_PUBLISH_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilities.yaml missing $TARGET_PUBLISH_CAP"
+rg -n "${TARGET_PUBLISH_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $TARGET_PUBLISH_CAP"
 rg -n "^[[:space:]]*${WAVE_RESIDUE_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilities.yaml missing $WAVE_RESIDUE_CAP"
 rg -n "${WAVE_RESIDUE_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $WAVE_RESIDUE_CAP"
 rg -n "^[[:space:]]*${FRICTION_RECONCILE_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilities.yaml missing $FRICTION_RECONCILE_CAP"
 rg -n "${FRICTION_RECONCILE_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $FRICTION_RECONCILE_CAP"
 "$FRICTION_RECONCILE_BIN" --self-check >/dev/null || fail "friction.reconcile self-check failed"
 "$PUBLISH_SCRIPT" --self-check >/dev/null || fail "coordinator.lane.publish self-check failed"
+"$TARGET_PUBLISH_SCRIPT" --self-check >/dev/null || fail "coordinator.target.publish self-check failed"
 
 # Closeout chain markers remain deterministic/idempotent.
 for marker in \
@@ -76,8 +82,10 @@ for marker in \
   "ls-remote --heads" \
   "+refs/heads/\$LANE_BRANCH:refs/heads/\$LANE_BRANCH" \
   "lane_branch_pushed" \
+  "target_publish_command" \
   "missing lane branch" \
-  "coordinator.lane.publish"; do
+  "coordinator.lane.publish" \
+  "coordinator.target.publish"; do
   grep -qF -- "$marker" "$CLOSEOUT_SCRIPT" || fail "closeout script missing required chain marker: $marker"
 done
 

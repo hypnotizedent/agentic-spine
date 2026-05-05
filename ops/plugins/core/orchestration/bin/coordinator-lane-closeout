@@ -253,7 +253,7 @@ else
   git -C "$integration_worktree" merge --ff-only "$LANE_BRANCH" >/dev/null 2>&1 || fail "ff-only integration failed ($LANE_BRANCH -> $TARGET_BRANCH)"
   target_head_after="$(git -C "$integration_worktree" rev-parse HEAD)"
   if [[ "$NO_PUSH" -eq 0 ]]; then
-    push_output="$(git -C "$integration_worktree" push "$REMOTE" "HEAD:refs/heads/${TARGET_BRANCH}" 2>&1)" || fail "push failed: $REMOTE/$TARGET_BRANCH. Remote said: ${push_output:-<no output>}. If this routed host uses a read-only deploy key, rerun closeout with --no-push, then publish the target branch from an operator checkout."
+    push_output="$(git -C "$integration_worktree" push "$REMOTE" "HEAD:refs/heads/${TARGET_BRANCH}" 2>&1)" || fail "push failed: $REMOTE/$TARGET_BRANCH. Remote said: ${push_output:-<no output>}. If this routed host uses a read-only deploy key, rerun closeout with --no-push, then run: ./bin/ops cap run coordinator.target.publish -- --source-ref $LANE_BRANCH --target-branch $TARGET_BRANCH --expect-head $target_head_after --json"
     did_push=1
   fi
   target_sync_status="$(sync_target_branch_checkout "$target_branch_worktree" "$TARGET_BRANCH" "$target_head_after")"
@@ -347,6 +347,13 @@ if [[ "$step_failures" -gt 0 ]]; then
   final_status="failed"
 fi
 
+target_publish_required=0
+target_publish_command=""
+if [[ "$did_push" -eq 0 && "$target_head_after" != "${remote_target_head_before:-}" ]]; then
+  target_publish_required=1
+  target_publish_command="./bin/ops cap run coordinator.target.publish -- --source-ref $LANE_BRANCH --target-branch $TARGET_BRANCH --expect-head $target_head_after --json"
+fi
+
 if [[ "$JSON_MODE" -eq 1 ]]; then
   jq -n \
     --arg capability "coordinator.lane.closeout" \
@@ -365,9 +372,11 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg integration_strategy "$integration_strategy" \
     --arg target_branch_worktree "${target_branch_worktree:-}" \
     --arg target_sync_status "$target_sync_status" \
+    --arg target_publish_command "$target_publish_command" \
     --arg cleanup_mode "$CLEANUP_MODE" \
     --argjson pushed "$did_push" \
     --argjson lane_branch_pushed "$lane_branch_pushed" \
+    --argjson target_publish_required "$target_publish_required" \
     --argjson step_failures "$step_failures" \
     --argjson steps "$steps_json" \
     '{
@@ -387,6 +396,8 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       integration_strategy: $integration_strategy,
       target_branch_worktree: (if $target_branch_worktree == "" then null else $target_branch_worktree end),
       target_sync_status: $target_sync_status,
+      target_publish_required: ($target_publish_required == 1),
+      target_publish_command: (if $target_publish_command == "" then null else $target_publish_command end),
       cleanup_mode: $cleanup_mode,
       pushed: ($pushed == 1),
       lane_branch_pushed: ($lane_branch_pushed == 1),
@@ -410,6 +421,8 @@ else
   echo "integration_strategy: $integration_strategy"
   echo "target_branch_worktree: ${target_branch_worktree:-none}"
   echo "target_sync_status: $target_sync_status"
+  echo "target_publish_required: $target_publish_required"
+  echo "target_publish_command: ${target_publish_command:-none}"
   echo "cleanup_mode: $CLEANUP_MODE"
   echo "lane_branch_pushed: $lane_branch_pushed"
   echo "pushed: $did_push"

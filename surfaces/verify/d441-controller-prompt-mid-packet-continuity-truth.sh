@@ -331,6 +331,18 @@ reserved_packet = cpc.create_packet(
 )
 if not Path(reserved_packet["packet_path"]).is_file():
     raise SystemExit("controller_prompt.create did not birth exact reserved packet")
+reservation_status = json.loads(subprocess.check_output(
+    [
+        sys.executable,
+        str(repo / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "controller-prompt-reserve"),
+        "--status",
+        "--json",
+    ],
+    env=os.environ.copy(),
+    text=True,
+))
+if reservation_status.get("active_reservation_count") != 0:
+    raise SystemExit("controller_prompt.reserve status still counts born packet reservation as active")
 
 closed_residue_packet = cpc.create_packet(
     packet_id="PACKET-03-D441-CLOSED-RESIDUE",
@@ -391,5 +403,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet state, controller_prompt.reserve blocks parallel packet-number collision, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, and closed-loop delegation residue is terminal instead of stale work"
 exit 0

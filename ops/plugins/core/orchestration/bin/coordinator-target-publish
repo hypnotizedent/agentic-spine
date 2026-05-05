@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$ROOT" ]]; then
+  ROOT="${SPINE_TARGET_REPO:-${SPINE_ROOT:-${SPINE_CODE:-$(pwd)}}}"
+fi
+REMOTE="origin"
+TARGET_BRANCH="main"
+SOURCE_REF=""
+SOURCE_RESOLVED_REF=""
+SOURCE_HEAD=""
+EXPECT_HEAD=""
+DRY_RUN=0
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+coordinator-target-publish
+
+Usage:
+  coordinator-target-publish [--source-ref <ref>] [--target-branch main] [--remote origin] [--expect-head <sha>] [--dry-run] [--json]
+
+Publishes the verified target head after routed coordinator.lane.closeout ran
+with --no-push because the authority host cannot push the target branch.
+USAGE
+}
+
+fail() {
+  echo "coordinator.target.publish FAIL: $*" >&2
+  exit 1
+}
+
+resolve_source_head() {
+  local ref="$1"
+  local head=""
+  local remote_ref="$ref"
+
+  head="$(git -C "$ROOT" rev-parse --verify "${ref}^{commit}" 2>/dev/null || true)"
+  if [[ -n "$head" ]]; then
+    SOURCE_RESOLVED_REF="$ref"
+    SOURCE_HEAD="$head"
+    return 0
+  fi
+
+  if [[ "$remote_ref" == "$REMOTE/"* ]]; then
+    remote_ref="${remote_ref#"$REMOTE/"}"
+  fi
+  remote_ref="${remote_ref#refs/heads/}"
+
+  git -C "$ROOT" fetch "$REMOTE" "+refs/heads/${remote_ref}:refs/remotes/${REMOTE}/${remote_ref}" >/dev/null 2>&1 \
+    || true
+  head="$(git -C "$ROOT" rev-parse --verify "refs/remotes/${REMOTE}/${remote_ref}^{commit}" 2>/dev/null || true)"
+  if [[ -n "$head" ]]; then
+    SOURCE_RESOLVED_REF="refs/remotes/${REMOTE}/${remote_ref}"
+    SOURCE_HEAD="$head"
+    return 0
+  fi
+
+  return 1
+}
+
+if [[ "${1:-}" == "--self-check" ]]; then
+  grep -q "merge-base --is-ancestor" "$0" || fail "self-check missing fast-forward marker"
+  grep -q "refs/heads/" "$0" || fail "self-check missing target push marker"
+  grep -q "refs/remotes/" "$0" || fail "self-check missing remote source resolution marker"
+  grep -q -- "--expect-head" "$0" || fail "self-check missing expected-head marker"
+  echo "coordinator.target.publish self-check PASS"
+  exit 0
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --source-ref) SOURCE_REF="${2:-}"; shift 2 ;;
+    --target-branch) TARGET_BRANCH="${2:-}"; shift 2 ;;
+    --remote) REMOTE="${2:-}"; shift 2 ;;
+    --expect-head) EXPECT_HEAD="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not a git repository: $ROOT"
+[[ -n "$TARGET_BRANCH" && "$TARGET_BRANCH" != "HEAD" ]] || fail "invalid target branch: $TARGET_BRANCH"
+
+if [[ -z "$SOURCE_REF" ]]; then
+  SOURCE_REF="HEAD"
+  if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
+    fail "worktree must be clean when --source-ref is omitted"
+  fi
+fi
+
+resolve_source_head "$SOURCE_REF" \
+  || fail "source ref does not resolve to a commit: $SOURCE_REF"
+source_head="$SOURCE_HEAD"
+if [[ -n "$EXPECT_HEAD" && "$source_head" != "$EXPECT_HEAD" ]]; then
+  fail "source head mismatch for $SOURCE_REF (source=$source_head expected=$EXPECT_HEAD)"
+fi
+
+git -C "$ROOT" fetch "$REMOTE" "$TARGET_BRANCH" >/dev/null 2>&1 || true
+remote_target_head="$(git -C "$ROOT" ls-remote --heads "$REMOTE" "$TARGET_BRANCH" 2>/dev/null | awk '{print $1}' | head -1 || true)"
+[[ -n "$remote_target_head" ]] || fail "missing remote target branch: $REMOTE/$TARGET_BRANCH"
+
+git -C "$ROOT" cat-file -e "${remote_target_head}^{commit}" 2>/dev/null \
+  || git -C "$ROOT" fetch "$REMOTE" "$TARGET_BRANCH" >/dev/null 2>&1 \
+  || fail "cannot fetch remote target head object: $remote_target_head"
+
+git -C "$ROOT" merge-base --is-ancestor "$remote_target_head" "$source_head" >/dev/null 2>&1 \
+  || fail "non-fast-forward target publish refused: $REMOTE/$TARGET_BRANCH=$remote_target_head source=$source_head"
+
+publish_required=0
+publish_status="already_published"
+if [[ "$remote_target_head" != "$source_head" ]]; then
+  publish_required=1
+  publish_status="publish_required"
+fi
+
+publish_command="git -C $ROOT push $REMOTE $source_head:refs/heads/$TARGET_BRANCH"
+if [[ "$DRY_RUN" -eq 0 && "$publish_required" -eq 1 ]]; then
+  push_output="$(git -C "$ROOT" push "$REMOTE" "$source_head:refs/heads/$TARGET_BRANCH" 2>&1)" \
+    || fail "push failed: $REMOTE/$TARGET_BRANCH. Remote said: ${push_output:-<no output>}"
+  remote_target_head_after="$(git -C "$ROOT" ls-remote --heads "$REMOTE" "$TARGET_BRANCH" 2>/dev/null | awk '{print $1}' | head -1 || true)"
+  [[ "$remote_target_head_after" == "$source_head" ]] || fail "remote target head did not match after publish"
+  publish_status="published"
+else
+  remote_target_head_after="$remote_target_head"
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  publish_status="dry_run_${publish_status}"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  python3 - "$publish_status" "$ROOT" "$REMOTE" "$TARGET_BRANCH" "$SOURCE_REF" "$SOURCE_RESOLVED_REF" "$source_head" "$remote_target_head" "$remote_target_head_after" "$publish_required" "$publish_command" <<'PY'
+import json
+import sys
+
+(
+    status,
+    repo,
+    remote,
+    target_branch,
+    source_ref,
+    source_resolved_ref,
+    source_head,
+    remote_target_head_before,
+    remote_target_head_after,
+    publish_required,
+    publish_command,
+) = sys.argv[1:12]
+print(json.dumps(
+    {
+        "capability": "coordinator.target.publish",
+        "status": status,
+        "repo": repo,
+        "remote": remote,
+        "target_branch": target_branch,
+        "source_ref": source_ref,
+        "source_resolved_ref": source_resolved_ref,
+        "source_head": source_head,
+        "remote_target_head_before": remote_target_head_before,
+        "remote_target_head_after": remote_target_head_after,
+        "publish_required": publish_required == "1",
+        "publish_command": publish_command,
+    },
+    indent=2,
+    sort_keys=True,
+))
+PY
+else
+  echo "coordinator.target.publish"
+  echo "status: $publish_status"
+  echo "target_branch: $TARGET_BRANCH"
+  echo "source_ref: $SOURCE_REF"
+  echo "source_resolved_ref: $SOURCE_RESOLVED_REF"
+  echo "source_head: $source_head"
+  echo "remote_target_head_before: $remote_target_head"
+  echo "remote_target_head_after: $remote_target_head_after"
+  echo "publish_required: $publish_required"
+  echo "publish_command: $publish_command"
+fi

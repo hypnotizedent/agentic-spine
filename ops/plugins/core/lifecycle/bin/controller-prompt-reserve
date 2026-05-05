@@ -107,6 +107,25 @@ def reservation_rows(res_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def demote_consumed_reservations(
+    reservations: list[dict[str, Any]],
+    existing_packets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Treat reservations for already-born packets as inactive.
+
+    Reservation files are packet-number claims, not a second packet lifecycle.
+    `controller_prompt.create` remains a one-file write surface, so status does
+    the boring reconciliation: once the exact packet exists, its reservation is
+    consumed for readback and no longer blocks future packet-number status.
+    """
+    existing_packet_ids = {str(row.get("packet_id") or "").strip() for row in existing_packets}
+    for row in reservations:
+        if str(row.get("packet_id") or "").strip() in existing_packet_ids:
+            row["active"] = False
+            row["consumed_by_packet"] = True
+    return reservations
+
+
 def self_check() -> int:
     assert normalize_slug("packet reservation lane publish") == "PACKET-RESERVATION-LANE-PUBLISH"
     assert PACKET_ID_RE.match("PACKET-1300-PACKET-RESERVATION-LANE-PUBLISH")
@@ -139,7 +158,7 @@ def main() -> int:
     res_dir = cp_dir / "reservations"
 
     existing_packets = packet_rows(cp_dir)
-    reservations = reservation_rows(res_dir)
+    reservations = demote_consumed_reservations(reservation_rows(res_dir), existing_packets)
     active_reservations = [row for row in reservations if row.get("active")]
     max_number = max([0] + [int(row["packet_number"]) for row in existing_packets + reservations])
 
@@ -176,7 +195,7 @@ def main() -> int:
     with lock_path.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         existing_packets = packet_rows(cp_dir)
-        reservations = reservation_rows(res_dir)
+        reservations = demote_consumed_reservations(reservation_rows(res_dir), existing_packets)
         active_reservations = [row for row in reservations if row.get("active")]
         packet_numbers_in_use = {int(row["packet_number"]) for row in existing_packets}
         reserved_numbers = {int(row["packet_number"]) for row in active_reservations}
