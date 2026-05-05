@@ -105,6 +105,48 @@ for rel in [
     if "site.presence.status" not in text:
         fail(f"{rel} must name site.presence.status as replacement")
 
+# PACKET-1270: lock home.device.registry.yaml file-local authority scope.
+# Snapshot/master inventory already demote this registry to compatibility
+# evidence; the file itself must also carry the same first-class Site
+# Intelligence boundary so it cannot be read as current presence, profile,
+# admission, placement, role, or recovery authority.
+home_device_path = root / "ops/bindings/home.device.registry.yaml"
+home_device_doc = yaml.safe_load(home_device_path.read_text(encoding="utf-8")) or {}
+if home_device_doc.get("status") != "compatibility_evidence":
+    fail("home.device.registry.yaml status must remain compatibility_evidence (PACKET-1270)")
+if home_device_doc.get("superseded_for_site_presence_by") != "site.presence.status":
+    fail("home.device.registry.yaml must declare superseded_for_site_presence_by=site.presence.status (PACKET-1270)")
+if home_device_doc.get("subordinate_to") != "ops/bindings/site.profile.contract.yaml":
+    fail("home.device.registry.yaml must declare subordinate_to=ops/bindings/site.profile.contract.yaml (PACKET-1270)")
+home_device_scope = home_device_doc.get("authority_scope") or {}
+if not isinstance(home_device_scope, dict) or not home_device_scope:
+    fail("home.device.registry.yaml must declare authority_scope block (PACKET-1270)")
+HOME_DEVICE_REQUIRED_OWNS = {
+    "home_declared_device_intent",
+    "home_device_categorization_vocabulary",
+    "home_network_observed_clients_evidence",
+    "home_dhcp_reservation_intent",
+}
+home_device_owns = set(home_device_scope.get("owns") or [])
+missing_home_device_owns = HOME_DEVICE_REQUIRED_OWNS - home_device_owns
+if missing_home_device_owns:
+    fail(f"home.device.registry.yaml authority_scope.owns missing evidence entries: {sorted(missing_home_device_owns)} (PACKET-1270)")
+HOME_DEVICE_REQUIRED_DOES_NOT_DECIDE = {
+    "current_site_presence",
+    "site_profile_authority",
+    "physical_machine_identity",
+    "node_admission",
+    "node_activation",
+    "role_assignment",
+    "node_placement",
+    "node_recovery_readback",
+    "recovery_action_authority",
+}
+home_device_dnd = set(home_device_scope.get("does_not_decide") or [])
+missing_home_device_dnd = HOME_DEVICE_REQUIRED_DOES_NOT_DECIDE - home_device_dnd
+if missing_home_device_dnd:
+    fail(f"home.device.registry.yaml authority_scope.does_not_decide missing boundary entries: {sorted(missing_home_device_dnd)} (PACKET-1270)")
+
 proc = subprocess.run([str(site_presence), "--site", "home", "--json"], text=True, capture_output=True)
 if proc.returncode != 0:
     fail(proc.stderr.strip() or proc.stdout.strip() or "site.presence.status sample failed")
@@ -374,5 +416,5 @@ for phrase in required_teaching_phrases:
     if phrase not in proc_h.stdout:
         fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
 
-print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), and Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215)")
+print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215), and home.device.registry.yaml authority_scope is bounded to compatibility evidence (PACKET-1270)")
 PY
