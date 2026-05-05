@@ -743,13 +743,15 @@ for phrase in required_teaching_phrases:
 drilldown_levers_payload = all_payload.get("drilldown_levers")
 if not isinstance(drilldown_levers_payload, list) or not drilldown_levers_payload:
     fail("site.presence.status JSON must emit non-empty drilldown_levers list (PACKET-1329)")
-# PACKET-1341: branch-framework lever model replaces the seven-entry list
-# from PACKET-1329. The four UniFi/DHCP producer caps are now hidden behind
-# network.presence.status as private producers; site.presence.status drilldown
-# levers must be exactly the closed set of branch readbacks (Network, Node
-# lifecycle, Storage, Backup). Hardware branch joins under PACKET-1342.
+# PACKET-1341/1342: branch-framework lever model replaces the seven-entry
+# PACKET-1329 list. UniFi/DHCP producer caps are hidden behind
+# network.presence.status (PACKET-1341); scattered hardware trails are
+# fused behind hardware.inventory.status (PACKET-1342). site.presence.status
+# drilldown levers must be exactly the closed five-branch set: Network,
+# Hardware, Node lifecycle, Storage, Backup.
 required_levers = {
     "network.presence.status",
+    "hardware.inventory.status",
     "node.admission.status",
     "payload.custody.status",
     "backup.estate.readback.status",
@@ -856,6 +858,71 @@ for producer_cap_name in forbidden_levers:
         fail(f"{producer_cap_name} description must teach 'Private network branch producer' under network.presence.status (PACKET-1341)")
     if "operator-facing Site Intelligence drilldown lever" not in desc:
         fail(f"{producer_cap_name} description must explicitly reject operator-facing Site Intelligence drilldown lever framing (PACKET-1341)")
+
+# PACKET-1342: hardware.inventory.status JSON must be valid, declare
+# branch_role=hardware_branch_readback, refuse admission/promotion/lifecycle
+# authority, and name host.operator-hardware.* caps as transition mutation
+# tools (not Hardware read authority). The cap registration must exist in
+# ops/capabilities.yaml.
+hardware_inventory_script = root / "ops/plugins/infra/bin/hardware-inventory-status"
+if not hardware_inventory_script.exists():
+    fail("missing ops/plugins/infra/bin/hardware-inventory-status (PACKET-1342)")
+hw_proc = subprocess.run(
+    [str(hardware_inventory_script), "--json"], text=True, capture_output=True
+)
+if hw_proc.returncode != 0:
+    fail(f"hardware.inventory.status --json must succeed: {hw_proc.stderr.strip()[:200]}")
+hw_payload = json.loads(hw_proc.stdout)
+if hw_payload.get("canonical_authority") != "hardware.inventory.status":
+    fail("hardware.inventory.status payload missing canonical_authority")
+if hw_payload.get("branch_role") != "hardware_branch_readback":
+    fail("hardware.inventory.status branch_role must be hardware_branch_readback (PACKET-1342)")
+if hw_payload.get("operator_label") != "Hardware":
+    fail("hardware.inventory.status operator_label must be 'Hardware' (PACKET-1342)")
+hw_boundary = hw_payload.get("boundary") or {}
+hw_required_dnd = {
+    "node_admission",
+    "node_promotion",
+    "node_lifecycle_state",
+    "storage_custody",
+    "backup_posture",
+    "network_visibility",
+}
+hw_dnd = set(hw_boundary.get("does_not_decide") or [])
+hw_missing_dnd = hw_required_dnd - hw_dnd
+if hw_missing_dnd:
+    fail(f"hardware.inventory.status boundary.does_not_decide missing {sorted(hw_missing_dnd)} (PACKET-1342)")
+if hw_boundary.get("admission_authority") != "node.admission.status":
+    fail("hardware.inventory.status must defer admission_authority to node.admission.status (PACKET-1342)")
+hw_transition_caps = hw_payload.get("transition_caps") or []
+hw_transition_names = {row.get("capability") for row in hw_transition_caps if isinstance(row, dict)}
+hw_required_transition = {
+    "host.operator-hardware.bootstrap-kit.render",
+    "host.operator-hardware.post-boot.normalize",
+    "host.operator-hardware.firstboot.claim",
+}
+hw_missing_transition = hw_required_transition - hw_transition_names
+if hw_missing_transition:
+    fail(f"hardware.inventory.status transition_caps must enumerate {sorted(hw_missing_transition)} (PACKET-1342)")
+for row in hw_transition_caps:
+    if not isinstance(row, dict):
+        continue
+    if row.get("kind") != "transition_mutation_cap":
+        fail(f"hardware.inventory.status transition_caps entry kind must be transition_mutation_cap, got {row.get('kind')!r} (PACKET-1342)")
+hw_rows = hw_payload.get("rows") or []
+if not hw_rows:
+    fail("hardware.inventory.status emitted no rows (PACKET-1342)")
+for row in hw_rows[:5]:
+    if (row.get("actions_allowed") or {}).get("may_admit_node") is not False:
+        fail(f"hardware.inventory.status row {row.get('subject_id')!r} must not allow node admission (PACKET-1342)")
+
+hardware_inventory_cap = caps_map.get("hardware.inventory.status")
+if not isinstance(hardware_inventory_cap, dict):
+    fail("hardware.inventory.status missing from ops/capabilities.yaml (PACKET-1342)")
+if hardware_inventory_cap.get("safety") != "read-only":
+    fail("hardware.inventory.status must be read-only (PACKET-1342)")
+if hardware_inventory_cap.get("script_path") != "./ops/plugins/infra/bin/hardware-inventory-status":
+    fail("hardware.inventory.status script_path must point at hardware-inventory-status (PACKET-1342)")
 
 # PACKET-1317: lock coverage reconciliation behavior in place.
 # (x) freshness_summary must always emit canonical state keys (fresh, stale,
@@ -999,6 +1066,10 @@ print(
     "the next governed packet hint; network.presence.status is the single "
     "Network branch readback fusing all four private UniFi/DHCP producers "
     "behind it, and the four producer caps no longer appear as operator "
-    "drilldown levers."
+    "drilldown levers; hardware.inventory.status is the single Hardware "
+    "branch readback fusing node.admission.status hardware fields with "
+    "hardware.inventory.yaml + operator.hardware.inventory.yaml, refuses "
+    "admission/promotion/lifecycle authority, and names host.operator-hardware.* "
+    "caps as transition mutation tools rather than Hardware read authority."
 )
 PY
