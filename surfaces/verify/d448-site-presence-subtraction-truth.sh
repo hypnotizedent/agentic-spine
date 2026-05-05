@@ -147,15 +147,18 @@ missing_home_device_dnd = HOME_DEVICE_REQUIRED_DOES_NOT_DECIDE - home_device_dnd
 if missing_home_device_dnd:
     fail(f"home.device.registry.yaml authority_scope.does_not_decide missing boundary entries: {sorted(missing_home_device_dnd)} (PACKET-1270)")
 
-proc = subprocess.run([str(site_presence), "--site", "home", "--json"], text=True, capture_output=True)
-if proc.returncode != 0:
-    fail(proc.stderr.strip() or proc.stdout.strip() or "site.presence.status sample failed")
-payload = json.loads(proc.stdout)
-if payload.get("canonical_authority") != "site.presence.status":
+# One all-sites JSON sample feeds both the home-row assertions and the
+# site-profile assertions below. This keeps the first-class readback intact
+# while avoiding duplicate site.presence.status subprocess rebuilds.
+proc_all = subprocess.run([str(site_presence), "--json"], text=True, capture_output=True)
+if proc_all.returncode != 0:
+    fail(f"site.presence.status --json (all sites) must succeed: {proc_all.stderr.strip()[:200]}")
+all_payload = json.loads(proc_all.stdout)
+if all_payload.get("canonical_authority") != "site.presence.status":
     fail("site.presence.status payload missing canonical authority")
-rows = payload.get("rows") or []
+rows = [row for row in (all_payload.get("rows") or []) if isinstance(row, dict) and row.get("site") == "home"]
 if not rows:
-    fail("site.presence.status --site home emitted no rows")
+    fail("site.presence.status --json emitted no home-site rows")
 required = [
     "presence_id",
     "site",
@@ -324,10 +327,6 @@ for prow in profile_rows:
             fail(f"site.profile row {sid!r} field {field}: value=unverified but field not declared in unverified_fields (PACKET-1115; two-direction rule)")
 
 # (h)+(i) site.presence.status all-sites JSON emits site_profiles matching contract
-proc_all = subprocess.run([str(site_presence), "--json"], text=True, capture_output=True)
-if proc_all.returncode != 0:
-    fail(f"site.presence.status --json (all sites) must succeed: {proc_all.stderr.strip()[:200]} (PACKET-1115)")
-all_payload = json.loads(proc_all.stdout)
 emitted_profiles = all_payload.get("site_profiles")
 if not isinstance(emitted_profiles, dict) or not emitted_profiles:
     fail("site.presence.status must emit non-empty top-level site_profiles block (PACKET-1115)")
