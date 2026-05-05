@@ -1341,11 +1341,14 @@ _route_to_db_authority_if_needed() {
     # so the commit-msg hook's explicit bypass reaches packet.label.validate
     # on the authority host.
     local override_prefix=""
-    if [[ -n "${SPINE_ROLE_POLICY_OVERRIDE_REF:-}" ]]; then
-        override_prefix+="export SPINE_ROLE_POLICY_OVERRIDE_REF=$(printf %q "$SPINE_ROLE_POLICY_OVERRIDE_REF") && "
+    local _role_policy_override_ref _role_policy_override_reason
+    _role_policy_override_ref="${SPINE_ROLE_POLICY_OVERRIDE_REF:-${CAP_ROLE_POLICY_OVERRIDE_REF:-}}"
+    _role_policy_override_reason="${SPINE_ROLE_POLICY_OVERRIDE_REASON:-${CAP_ROLE_POLICY_OVERRIDE_REASON:-}}"
+    if [[ -n "$_role_policy_override_ref" && "$_role_policy_override_ref" != "none" ]]; then
+        override_prefix+="export SPINE_ROLE_POLICY_OVERRIDE_REF=$(printf %q "$_role_policy_override_ref") && "
     fi
-    if [[ -n "${SPINE_ROLE_POLICY_OVERRIDE_REASON:-}" ]]; then
-        override_prefix+="export SPINE_ROLE_POLICY_OVERRIDE_REASON=$(printf %q "$SPINE_ROLE_POLICY_OVERRIDE_REASON") && "
+    if [[ -n "$_role_policy_override_reason" && "$_role_policy_override_reason" != "none" ]]; then
+        override_prefix+="export SPINE_ROLE_POLICY_OVERRIDE_REASON=$(printf %q "$_role_policy_override_reason") && "
     fi
     if [[ -n "${SPINE_PACKET_LABEL_OVERRIDE_REASON:-}" ]]; then
         override_prefix+="export SPINE_PACKET_LABEL_OVERRIDE_REASON=$(printf %q "$SPINE_PACKET_LABEL_OVERRIDE_REASON") && "
@@ -1539,39 +1542,30 @@ run_cap() {
 
     validate_cap_target "$name" "$cmd" "$script_path" "$cwd"
 
-    # Phase D.3a: DB authority routing (INERT BY DEFAULT). When db_authority.enabled
-    # is true and the local host is not the authority and the cap is mutating, this
-    # call SSH-routes the cap to the authority host and returns the routed exit
-    # code. Otherwise returns 126 (sentinel) and we fall through to local execution.
-    set +e
-    _route_to_db_authority_if_needed "$name" "${args[@]}"
-    local _route_rc=$?
-    set -e
-    if [[ "$_route_rc" != "126" ]]; then
-        return "$_route_rc"
-    fi
-
     local ts rand run_key
     ts="$(date +%Y%m%d-%H%M%S)"
     rand="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 4 || echo "$$")"
     run_key="CAP-${ts}__${name}__R${rand}"
     local start_time end_time output_file receipt_path output_path
     start_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    output_file="$(mktemp "${TMPDIR:-/tmp}/cap_${run_key}.XXXXXX")"
 
-    echo "════════════════════════════════════════"
-    echo "CAPABILITY: $name"
-    echo "════════════════════════════════════════"
-    echo "Description: $desc"
-    echo "Safety:      $safety"
-    echo "Approval:    $approval"
-    echo "Arg Protocol:$arg_protocol"
-    echo "Run Key:     $run_key"
-    echo "Command:     $cmd ${args[*]:-}"
-    echo "CWD:         $cwd"
-    echo ""
-
+    # Admission must fail before DB-authority routing. A forbidden caller should
+    # get one local STOP receipt, not a remote pve-side failure after SSH.
     if ! evaluate_role_policy "$name" "$safety"; then
+        output_file="$(mktemp "${TMPDIR:-/tmp}/cap_${run_key}.XXXXXX")"
+
+        echo "════════════════════════════════════════"
+        echo "CAPABILITY: $name"
+        echo "════════════════════════════════════════"
+        echo "Description: $desc"
+        echo "Safety:      $safety"
+        echo "Approval:    $approval"
+        echo "Arg Protocol:$arg_protocol"
+        echo "Run Key:     $run_key"
+        echo "Command:     $cmd ${args[*]:-}"
+        echo "CWD:         $cwd"
+        echo ""
+
         rc=3
         emit_role_policy_stop "$name" "$safety" | tee "$output_file"
         end_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1597,6 +1591,32 @@ run_cap() {
 
         return "$rc"
     fi
+
+    # Phase D.3a: DB authority routing (INERT BY DEFAULT). When db_authority.enabled
+    # is true and the local host is not the authority and the cap is mutating, this
+    # call SSH-routes the cap to the authority host and returns the routed exit
+    # code. Otherwise returns 126 (sentinel) and we fall through to local execution.
+    set +e
+    _route_to_db_authority_if_needed "$name" "${args[@]}"
+    local _route_rc=$?
+    set -e
+    if [[ "$_route_rc" != "126" ]]; then
+        return "$_route_rc"
+    fi
+
+    output_file="$(mktemp "${TMPDIR:-/tmp}/cap_${run_key}.XXXXXX")"
+
+    echo "════════════════════════════════════════"
+    echo "CAPABILITY: $name"
+    echo "════════════════════════════════════════"
+    echo "Description: $desc"
+    echo "Safety:      $safety"
+    echo "Approval:    $approval"
+    echo "Arg Protocol:$arg_protocol"
+    echo "Run Key:     $run_key"
+    echo "Command:     $cmd ${args[*]:-}"
+    echo "CWD:         $cwd"
+    echo ""
 
     local previous_stack="${OPS_CAP_STACK:-}"
     local cycle_stack=",${previous_stack},${name},"

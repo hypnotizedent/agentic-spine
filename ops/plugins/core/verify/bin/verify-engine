@@ -515,20 +515,39 @@ if failures:
 PY
 '
 
-# E13: cap.sh must not silently widen to worker on missing SPINE_RUNTIME_ROLE
-check E13 "cap.sh no silent widen-by-fallback to worker" bash -c '
-    cap_sh="'"$ROOT"'/ops/commands/cap.sh"
-    if [ ! -f "$cap_sh" ]; then
-        echo "SKIP: cap.sh not found"
-        exit 0
-    fi
-    widen_count=$(grep -c "SPINE_RUNTIME_ROLE:-worker" "$cap_sh" 2>/dev/null || echo 0)
-    if [ "$widen_count" -gt 0 ]; then
-        echo "cap.sh has $widen_count instance(s) of SPINE_RUNTIME_ROLE:-worker (silent widen to mutating role)"
-        grep -n "SPINE_RUNTIME_ROLE:-worker" "$cap_sh"
-        exit 1
-    fi
-'
+# E13: cap.sh must not silently widen authority or route before local admission.
+check E13 "cap.sh local admission before routing" python3 - "$ROOT" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+cap_sh = root / "ops" / "commands" / "cap.sh"
+if not cap_sh.is_file():
+    sys.exit(0)
+
+src = cap_sh.read_text(encoding="utf-8")
+if re.search(r"SPINE_RUNTIME_ROLE[^\n]*:-\s*worker\b", src):
+    print("cap.sh contains a silent fallback to SPINE_RUNTIME_ROLE=worker")
+    raise SystemExit(1)
+
+policy = 'if ! evaluate_role_policy "$name" "$safety"; then'
+route = '_route_to_db_authority_if_needed "$name" "${args[@]}"'
+try:
+    policy_idx = src.index(policy)
+    route_idx = src.index(route)
+except ValueError as exc:
+    print(f"cap.sh missing expected admission/routing marker: {exc}")
+    raise SystemExit(1)
+
+if policy_idx > route_idx:
+    print("cap.sh routes to DB authority before local admission policy")
+    raise SystemExit(1)
+
+if "CAP_ROLE_POLICY_OVERRIDE_REF" not in src or "CAP_ROLE_POLICY_OVERRIDE_REASON" not in src:
+    print("cap.sh must forward local policy auto-overrides across routed dispatch")
+    raise SystemExit(1)
+PY
 
 # E14 is warning-only. Runtime custody can be proven by delegation/packet/handoff
 # or by current wave/worktree/heartbeat evidence.

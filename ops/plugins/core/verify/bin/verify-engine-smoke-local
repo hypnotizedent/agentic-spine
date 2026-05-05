@@ -330,26 +330,40 @@ if errs:
 PY
 '
 
-# E13: cap.sh no silent widen-by-fallback to worker on missing
-# SPINE_RUNTIME_ROLE. Source-level grep — no execution, no routing.
-# (Disease class retired in PACKET-588; this guards against regression.)
-check E13 "cap.sh no silent widen-by-fallback to worker" python3 -c "
+# E13: cap.sh no silent widen-by-fallback and no routed dispatch before local
+# admission. Source-level check only — no execution, no routing.
+check E13 "cap.sh local admission before routing" python3 - "$ROOT" <<'PY'
+import re
 import sys
 from pathlib import Path
-cap_sh = Path('$ROOT') / 'ops' / 'cap.sh'
+
+root = Path(sys.argv[1])
+cap_sh = root / "ops" / "commands" / "cap.sh"
 if not cap_sh.is_file():
     sys.exit(0)
-src = cap_sh.read_text(encoding='utf-8')
-# Pattern: SPINE_RUNTIME_ROLE assignment that defaults to 'worker' silently.
-# Pre-PACKET-588 disease was 'SPINE_RUNTIME_ROLE=\${SPINE_RUNTIME_ROLE:-worker}'
-# or similar parameter expansion that widened authority on missing var.
-import re
-patt = re.compile(r'SPINE_RUNTIME_ROLE[^\n]*:-\s*worker\b')
-if patt.search(src):
-    print('cap.sh contains a silent fallback to SPINE_RUNTIME_ROLE=worker — verify-engine E13 disease class regression')
-    sys.exit(1)
-sys.exit(0)
-"
+
+src = cap_sh.read_text(encoding="utf-8")
+if re.search(r"SPINE_RUNTIME_ROLE[^\n]*:-\s*worker\b", src):
+    print("cap.sh contains a silent fallback to SPINE_RUNTIME_ROLE=worker")
+    raise SystemExit(1)
+
+policy = 'if ! evaluate_role_policy "$name" "$safety"; then'
+route = '_route_to_db_authority_if_needed "$name" "${args[@]}"'
+try:
+    policy_idx = src.index(policy)
+    route_idx = src.index(route)
+except ValueError as exc:
+    print(f"cap.sh missing expected admission/routing marker: {exc}")
+    raise SystemExit(1)
+
+if policy_idx > route_idx:
+    print("cap.sh routes to DB authority before local admission policy")
+    raise SystemExit(1)
+
+if "CAP_ROLE_POLICY_OVERRIDE_REF" not in src or "CAP_ROLE_POLICY_OVERRIDE_REASON" not in src:
+    print("cap.sh must forward local policy auto-overrides across routed dispatch")
+    raise SystemExit(1)
+PY
 
 # Summary
 [[ "$json_mode" -eq 1 ]] || echo ""
