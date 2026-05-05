@@ -7,6 +7,7 @@ REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
 TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
 AGENT_PROFILES="$ROOT/ops/bindings/gate.agent.profiles.yaml"
+BUDGET="$ROOT/ops/bindings/gate.budget.add_one_retire_one.contract.yaml"
 
 fail() {
   echo "D127 FAIL: $*" >&2
@@ -25,11 +26,12 @@ need_file "$REGISTRY"
 need_file "$TOPOLOGY"
 need_file "$DOMAIN_PROFILES"
 need_file "$AGENT_PROFILES"
+need_file "$BUDGET"
 need_cmd yq
 need_cmd jq
 
 # Schema sanity
-for file in "$REGISTRY" "$TOPOLOGY" "$DOMAIN_PROFILES" "$AGENT_PROFILES"; do
+for file in "$REGISTRY" "$TOPOLOGY" "$DOMAIN_PROFILES" "$AGENT_PROFILES" "$BUDGET"; do
   yq e '.' "$file" >/dev/null 2>&1 || fail "invalid YAML: $file"
 done
 
@@ -57,6 +59,22 @@ domain_defined() {
 # Active gates
 mapfile -t active_gate_ids < <(yq e -r '.gates[] | select((.retired // false) != true) | .id' "$REGISTRY")
 [[ "${#active_gate_ids[@]}" -gt 0 ]] || fail "no active gates found in registry"
+
+# Aggregate subtraction budget. This promotes the add-one-retire-one rule out
+# of tool-local memory into committed enforcement without adding a new D-gate.
+budget_mode="$(yq e -r '.mode // ""' "$BUDGET")"
+[[ "$budget_mode" == "enforce" ]] || fail "gate budget contract must be mode: enforce"
+budget_active_limit="$(yq e -r '.budget.active_gate_count_limit // ""' "$BUDGET")"
+budget_script_limit="$(yq e -r '.budget.d_gate_script_count_limit // ""' "$BUDGET")"
+[[ "$budget_active_limit" =~ ^[0-9]+$ ]] || fail "gate budget missing numeric budget.active_gate_count_limit"
+[[ "$budget_script_limit" =~ ^[0-9]+$ ]] || fail "gate budget missing numeric budget.d_gate_script_count_limit"
+d_gate_script_count="$(find "$ROOT/surfaces/verify" -maxdepth 1 -type f -name 'd*.sh' | wc -l | tr -d ' ')"
+if [[ "${#active_gate_ids[@]}" -ne "$budget_active_limit" ]]; then
+  fail "active gate budget drift: contract=$budget_active_limit actual=${#active_gate_ids[@]} (retire/fold gates and ratchet the budget; do not grow the aggregate)"
+fi
+if [[ "$d_gate_script_count" -ne "$budget_script_limit" ]]; then
+  fail "D-gate script budget drift: contract=$budget_script_limit actual=$d_gate_script_count (delete/fold scripts and ratchet the budget; do not grow the aggregate)"
+fi
 
 # Build assignment lookup — single yq call with TSV output (avoids per-row jq)
 declare -A assign_count=()
@@ -141,4 +159,4 @@ if [[ "$require_primary" != "true" ]]; then
   exit 0
 fi
 
-echo "D127 PASS: domain assignment drift lock enforced (active_gates=${#active_gate_ids[@]}, domains=${#defined_domains[@]}, core=${#core_gate_ids[@]})"
+echo "D127 PASS: domain assignment and aggregate gate budget enforced (active_gates=${#active_gate_ids[@]}, d_gate_scripts=${d_gate_script_count}, domains=${#defined_domains[@]}, core=${#core_gate_ids[@]})"

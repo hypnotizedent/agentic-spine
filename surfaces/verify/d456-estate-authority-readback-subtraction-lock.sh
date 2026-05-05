@@ -9,7 +9,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_PLACEMENT="$ROOT/ops/plugins/infra/bin/infra-vm-runtime-placement-status"
 SCHEDULER_HEALTH="$ROOT/ops/plugins/infra/host/bin/launchd-scheduler-health-status"
+CONTROL_BASELINE="$ROOT/ops/plugins/infra/bin/node-control-baseline-status"
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
+MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 SCHEDULER_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
 GATE_TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 GATE_REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
@@ -25,7 +27,9 @@ fail() { echo "D456 FAIL: $*" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -x "$RUNTIME_PLACEMENT" ]] || fail "missing executable infra-vm-runtime-placement-status"
 [[ -f "$SCHEDULER_HEALTH" ]] || fail "missing launchd-scheduler-health-status"
+[[ -x "$CONTROL_BASELINE" ]] || fail "missing executable node-control-baseline-status"
 [[ -f "$CAPABILITIES" ]] || fail "missing ops/capabilities.yaml"
+[[ -f "$MANIFEST" ]] || fail "missing ops/plugins/MANIFEST.yaml"
 [[ -f "$SCHEDULER_REGISTRY" ]] || fail "missing launchd.scheduler.registry.yaml"
 [[ -f "$GATE_TOPOLOGY" ]] || fail "missing gate.execution.topology.yaml"
 [[ -f "$GATE_REGISTRY" ]] || fail "missing gate.registry.yaml"
@@ -37,10 +41,12 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -d "$BINDINGS_DIR" ]] || fail "missing ops/bindings directory"
 
 bash -n "$RUNTIME_PLACEMENT"
+bash -n "$CONTROL_BASELINE"
 python3 -m py_compile "$SCHEDULER_HEALTH"
 
-python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CAPABILITIES" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$GATE_REGISTRY" "$GATE_PROFILES" "$VERIFY_TOPOLOGY" "$OPS_VERIFY" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" "$BINDINGS_DIR" <<'PY'
+python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CONTROL_BASELINE" "$CAPABILITIES" "$MANIFEST" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$GATE_REGISTRY" "$GATE_PROFILES" "$VERIFY_TOPOLOGY" "$OPS_VERIFY" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" "$BINDINGS_DIR" <<'PY'
 import sys
+import os
 import json
 import subprocess
 from pathlib import Path
@@ -60,17 +66,19 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
-runtime_path, scheduler_path, caps_path, scheduler_registry_path, topology_path, gate_registry_path, gate_profiles_path, verify_topology_path, ops_verify_path, lifecycle_path, placement_path, bindings_dir = map(Path, sys.argv[1:])
+runtime_path, scheduler_path, control_baseline_path, caps_path, manifest_path, scheduler_registry_path, topology_path, gate_registry_path, gate_profiles_path, verify_topology_path, ops_verify_path, lifecycle_path, placement_path, bindings_dir = map(Path, sys.argv[1:])
+root_dir = bindings_dir.parent.parent
 runtime_text = runtime_path.read_text(encoding="utf-8")
 scheduler_text = scheduler_path.read_text(encoding="utf-8")
+control_baseline_text = control_baseline_path.read_text(encoding="utf-8")
 caps_text = caps_path.read_text(encoding="utf-8")
+manifest_text = manifest_path.read_text(encoding="utf-8")
 scheduler_registry = load_yaml(scheduler_registry_path)
 topology = load_yaml(topology_path)
 gate_registry = load_yaml(gate_registry_path)
 gate_profiles = load_yaml(gate_profiles_path)
 lifecycle = load_yaml(lifecycle_path)
 placement = load_yaml(placement_path)
-root_dir = bindings_dir.parent.parent
 root_authority_path = root_dir / "ops/bindings/root.authority.contract.yaml"
 root_authority_text = root_authority_path.read_text(encoding="utf-8")
 root_authority = load_yaml(root_authority_path)
@@ -141,6 +149,66 @@ for phrase in [
     if phrase not in caps_text:
         fail(f"capability text must demote runtime placement to diagnostic evidence: missing {phrase!r}")
 
+caps = load_yaml(caps_path)
+control_cap = (caps.get("capabilities") or {}).get("node.control-baseline.status")
+if not control_cap:
+    fail("node.control-baseline.status must be registered in ops/capabilities.yaml")
+if control_cap.get("safety") != "read-only":
+    fail("node.control-baseline.status must be read-only")
+if control_cap.get("layer") != "L2_shared_infrastructure":
+    fail("node.control-baseline.status must remain L2 shared infrastructure")
+if control_cap.get("script_path") != "./ops/plugins/infra/bin/node-control-baseline-status":
+    fail("node.control-baseline.status must point at node-control-baseline-status")
+for needle in ["bin/node-control-baseline-status", "node.control-baseline.status"]:
+    if needle not in manifest_text:
+        fail(f"plugin manifest must include {needle}")
+for required in [
+    "sudo -n true",
+    "NumberOfPasswordPrompts=0",
+    "node.admission.status",
+    "node.recovery.status",
+    "lab_or_k3s_facts",
+    "generic_baseline_requirement:\"not_required\"",
+]:
+    if required not in control_baseline_text:
+        fail(f"control baseline script missing boundary/probe phrase: {required!r}")
+for forbidden in [
+    "printf '%q'",
+    "/tmp/node-control-baseline",
+    "sudo -S",
+    "passwd ",
+    "usermod ",
+    "tee /etc/sudoers",
+    "PermitRootLogin yes",
+    "kubectl ",
+    "systemctl status k3s",
+    "k3s kubectl",
+]:
+    if forbidden in control_baseline_text:
+        fail(f"control baseline script must not contain mutating/lab-specific phrase: {forbidden!r}")
+control_self_check = subprocess.run(
+    [str(control_baseline_path), "--self-check", "--json"],
+    text=True,
+    capture_output=True,
+    check=False,
+    env={**os.environ, "SPINE_ROOT": str(root_dir)},
+)
+if control_self_check.returncode != 0:
+    fail(f"node-control-baseline-status --self-check failed: {control_self_check.stderr.strip() or control_self_check.stdout.strip()}")
+try:
+    control_payload = json.loads(control_self_check.stdout)
+except Exception as exc:
+    fail(f"node-control-baseline-status --self-check did not emit JSON: {exc}")
+boundary = control_payload.get("boundary") or {}
+if (
+    control_payload.get("capability") != "node.control-baseline.status"
+    or control_payload.get("status") != "ok"
+    or boundary.get("admission_authority") != "node.admission.status"
+    or boundary.get("recovery_authority") != "node.recovery.status"
+    or boundary.get("mutation") != "none"
+):
+    fail("node.control-baseline.status self-check must prove read-only admission/recovery boundary")
+
 if "verify.infra.run:" not in caps_text:
     fail("verify.infra.run capability missing")
 for phrase in [
@@ -159,8 +227,8 @@ actual_retired = len([row for row in gates if isinstance(row, dict) and row.get(
 actual_active = actual_total - actual_retired
 if gate_count.get("total") != actual_total or gate_count.get("active") != actual_active or gate_count.get("retired") != actual_retired:
     fail(f"gate registry counts must match live rows, got {gate_count!r} expected total={actual_total} active={actual_active} retired={actual_retired}")
-if "D1-D459" not in str(gate_registry.get("description") or ""):
-    fail("gate registry description must name current D range through D459")
+if "D1-D458" not in str(gate_registry.get("description") or ""):
+    fail("gate registry description must name current D range through D458")
 d_rows = [row for row in gates if isinstance(row, dict) and str(row.get("id") or "").startswith("D")]
 missing_retired_field = [row.get("id") for row in d_rows if "retired" not in row]
 if missing_retired_field:
