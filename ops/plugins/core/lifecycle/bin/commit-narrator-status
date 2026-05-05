@@ -388,6 +388,139 @@ def collect_commit_diff(
     return block
 
 
+_ARTIFACT_REL = "domain-state/narrator/per-commit"
+
+
+def _resolve_state_root() -> Path | None:
+    env = os.environ.get("SPINE_STATE")
+    if env:
+        return Path(env)
+    return None
+
+
+def load_commit_artifact(sha: str, state_root: Path | None = None) -> dict | None:
+    """Read a per-commit narrator artifact yaml. Returns None when absent."""
+    root = state_root or _resolve_state_root()
+    if root is None:
+        return None
+    target = root / _ARTIFACT_REL / f"{sha}.yaml"
+    if not target.is_file():
+        return None
+    try:
+        import yaml  # local import to avoid hard dep at module top
+        return yaml.safe_load(target.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def commits_from_artifacts(
+    ref: str,
+    limit: int,
+    since: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Slice E: load commits from existing per-commit artifacts.
+
+    Iterates SHAs in the requested window via git log (cheap), then loads each
+    SHA's artifact yaml from canonical state. Missing artifacts produce an
+    explicit disclosure row instead of silent recomputation.
+    """
+    log_args = ["log", ref, "--date=iso-strict",
+                "--format=%H%x1f%aI%x1f%an%x1f%ae%x1f%s"]
+    if since:
+        log_args.append(f"--since={normalize_since(since)}")
+    log_args.append(f"--max-count={limit}")
+    proc = git(*log_args)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "git log failed")
+    state_root = _resolve_state_root()
+    rows: list[dict[str, Any]] = []
+    summary = {"attempted": 0, "from_artifact": 0, "artifact_missing": 0, "parse_errors": 0}
+    for line in proc.stdout.splitlines():
+        parts = line.split("\x1f", 4)
+        if len(parts) != 5:
+            continue
+        sha, author_date, author_name, author_email, subject = parts
+        summary["attempted"] += 1
+        artifact = load_commit_artifact(sha, state_root)
+        if artifact is None:
+            rows.append({
+                "sha": sha,
+                "short_sha": sha[:8],
+                "author_date": author_date,
+                "author_name": author_name,
+                "author_email_class": classify_author_email(author_email),
+                "subject": subject,
+                "from_artifact": False,
+                "artifact_source": "missing",
+                "disclosure": "artifact_not_found_run_write_artifacts",
+                "paths": [],
+                "status_counts": {},
+                "shortstat": {},
+                "diff_body": {"status": "skipped_disabled", "truncated": False},
+                "direction_signal": "unknown_artifact_absent",
+                "plain_verdict": "unknown_artifact_absent",
+                "confidence": "low",
+                "confidence_boundary": "no_artifact_loaded",
+                "operator_eye": False,
+                "reason": "artifact missing for SHA",
+                "touched_surfaces": [],
+            })
+            summary["artifact_missing"] += 1
+            continue
+        if not isinstance(artifact, dict):
+            rows.append({
+                "sha": sha,
+                "short_sha": sha[:8],
+                "author_date": author_date,
+                "author_name": author_name,
+                "author_email_class": classify_author_email(author_email),
+                "subject": subject,
+                "from_artifact": False,
+                "artifact_source": "parse_error",
+                "disclosure": "artifact_yaml_did_not_parse_as_dict",
+                "paths": [],
+                "status_counts": {},
+                "shortstat": {},
+                "diff_body": {"status": "skipped_disabled", "truncated": False},
+                "direction_signal": "unknown_artifact_unreadable",
+                "plain_verdict": "unknown_artifact_unreadable",
+                "confidence": "low",
+                "confidence_boundary": "artifact_parse_failed",
+                "operator_eye": False,
+                "reason": "artifact present but did not parse as dict",
+                "touched_surfaces": [],
+            })
+            summary["parse_errors"] += 1
+            continue
+        fact_layer = artifact.get("fact_layer") or {}
+        artifact_path = (state_root / _ARTIFACT_REL / f"{sha}.yaml") if state_root else None
+        rows.append({
+            "sha": sha,
+            "short_sha": sha[:8],
+            "author_date": fact_layer.get("author_date") or author_date,
+            "author_name": fact_layer.get("author_name") or author_name,
+            "author_email_class": fact_layer.get("author_email_class") or classify_author_email(author_email),
+            "subject": fact_layer.get("subject") or subject,
+            "from_artifact": True,
+            "artifact_source": str(artifact_path) if artifact_path else "<state_root_unset>",
+            "paths": list(fact_layer.get("paths") or []),
+            "status_counts": dict(fact_layer.get("status_counts") or {}),
+            "shortstat": dict(fact_layer.get("shortstat") or {}),
+            "diff_body": fact_layer.get("diff_body") or {"status": "skipped_disabled", "truncated": False},
+            "direction_signal": artifact.get("direction_signal") or "unknown_no_signal_in_artifact",
+            "plain_verdict": artifact.get("plain_verdict") or "unknown_no_verdict_in_artifact",
+            "confidence": artifact.get("confidence") or "low",
+            "confidence_boundary": artifact.get("confidence_boundary") or "from_artifact_replay",
+            "operator_eye": bool(artifact.get("operator_eye")),
+            "reason": artifact.get("reason") or "loaded from per-commit artifact",
+            "touched_surfaces": list(artifact.get("touched_surfaces") or []),
+            "rule_layer": artifact.get("rule_layer"),
+            "narrative_layer": artifact.get("narrative_layer"),
+        })
+        summary["from_artifact"] += 1
+    return rows, summary
+
+
 def recent_commits(
     ref: str,
     limit: int,
@@ -542,23 +675,32 @@ def input_readbacks(nodes: list[str]) -> dict[str, Any]:
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     since = getattr(args, "since", None)
     include_diff = getattr(args, "include_diff", False)
-    commits = recent_commits(
-        args.ref,
-        args.limit,
-        since=since,
-        include_diff=include_diff,
-        diff_max_per_file=getattr(args, "diff_max_lines_per_file", 500),
-        diff_max_per_commit=getattr(args, "diff_max_lines_per_commit", 5000),
-        diff_max_files=getattr(args, "diff_max_files_per_commit", 100),
-    )
+    from_artifacts = getattr(args, "from_artifacts", False)
+    artifact_reads_summary: dict[str, Any] | None = None
+    if from_artifacts:
+        commits, artifact_reads_summary = commits_from_artifacts(
+            args.ref,
+            args.limit,
+            since=since,
+        )
+    else:
+        commits = recent_commits(
+            args.ref,
+            args.limit,
+            since=since,
+            include_diff=include_diff,
+            diff_max_per_file=getattr(args, "diff_max_lines_per_file", 500),
+            diff_max_per_commit=getattr(args, "diff_max_lines_per_commit", 5000),
+            diff_max_files=getattr(args, "diff_max_files_per_commit", 100),
+        )
     scope: dict[str, Any] = {
         "class": "witness",
         "subject": "commit_class_estate_narrative",
         "ref": args.ref,
         "limit": args.limit,
         "read_depth": (
-            "commit_metadata_changed_paths_shortstat_and_bounded_full_diff"
-            if include_diff
+            "per_commit_artifact_yaml_replay" if from_artifacts
+            else "commit_metadata_changed_paths_shortstat_and_bounded_full_diff" if include_diff
             else READ_BOUNDARY
         ),
     }
@@ -635,6 +777,8 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
             "node admission and site intelligence are consumed only as readback inputs",
         ],
     }
+    if artifact_reads_summary is not None:
+        payload["artifact_reads"] = artifact_reads_summary
     return payload
 
 
@@ -702,6 +846,15 @@ def print_markdown(payload: dict[str, Any]) -> None:
     print(f"**authority:** witness signal only; mutation_access=none; decision_authority=none")
     if since:
         print(f"**since:** {since} → {scope.get('since_normalized')}")
+    artifact_reads = payload.get("artifact_reads")
+    if artifact_reads:
+        print(
+            f"**artifact replay:** {artifact_reads.get('from_artifact', 0)} from artifact, "
+            f"{artifact_reads.get('artifact_missing', 0)} missing, "
+            f"{artifact_reads.get('parse_errors', 0)} parse error(s)"
+        )
+        if artifact_reads.get("artifact_missing"):
+            print("**recommendation:** rerun narrator with --write-artifacts to populate missing per-commit yamls")
     print()
     print("## Direction signals")
     for signal, count in (summary.get("by_direction_signal") or {}).items():
@@ -747,6 +900,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--include-diff", action="store_true", help="Include bounded full-diff body per commit (size-capped, with skipped-diff disclosure). Default off; preserves slice-A payload shape when absent.")
     parser.add_argument("--write-artifacts", action="store_true", help="Persist each commit row to canonical state via commit.narrator.artifact.write (Slice C). Default off.")
     parser.add_argument("--evaluate-rules", action="store_true", help="Run the deterministic rule engine (Slice D) over each commit and populate rule_layer with verdict, citations, and honest unknown when no rule applies. Reads committed governance only. Default off.")
+    parser.add_argument("--from-artifacts", action="store_true", help="Slice E rollup mode: load commits from per-commit artifact yaml under \\$SPINE_STATE/domain-state/narrator/per-commit/ instead of recomputing classify+rules. Missing artifacts produce explicit disclosure rows (no silent recompute). Default off.")
     parser.add_argument("--diff-max-lines-per-file", type=int, default=500, help="Max diff lines included per file when --include-diff (default 500); excess truncated with disclosure.")
     parser.add_argument("--diff-max-lines-per-commit", type=int, default=5000, help="Max diff lines collected per commit when --include-diff (default 5000); excess truncated with disclosure.")
     parser.add_argument("--diff-max-files-per-commit", type=int, default=100, help="Max files emitted per commit when --include-diff (default 100); excess truncated with disclosure.")

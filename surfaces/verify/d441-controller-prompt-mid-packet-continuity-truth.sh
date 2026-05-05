@@ -266,6 +266,78 @@ for row in payload.get("commits") or []:
         raise SystemExit("commit narrator without --evaluate-rules must NOT populate row.rule_layer")
 PY
 
+NARRATOR_ROLLUP_TMP="$(mktemp -d "${TMPDIR:-/tmp}/d441-narrator-rollup.XXXXXX")"
+HEAD_SHA="$(cd "$SPINE_CODE" && git rev-parse HEAD)"
+mkdir -p "$NARRATOR_ROLLUP_TMP/domain-state/narrator/per-commit"
+ROLLUP_PAYLOAD_JSON='{"fact_layer":{"subject":"d441 rollup fixture","paths":["nope.txt"],"shortstat":{"files_changed":1,"insertions":1,"deletions":0}},"direction_signal":"d441_rollup_signal","plain_verdict":"d441_rollup_verdict","confidence":"low","confidence_boundary":"d441_rollup_only","reason":"d441 rollup fixture","operator_eye":false,"touched_surfaces":[],"rule_layer":{"status":"evaluated","verdict":"good_direction","confidence":"high","rules_evaluated":1,"rules_matched":1,"rules_inapplicable":0,"rules_honest_unknown":0,"rule_outcomes":[{"rule_id":"d441_fixture","outcome":"matched","verdict_signal":"good_direction","confidence":"high","reason":"fixture","citations":[{"source":"d441","anchor":"fixture"}]}],"honest_unknown_reason":null}}'
+SPINE_STATE="$NARRATOR_ROLLUP_TMP" "$COMMIT_NARRATOR_ARTIFACT_WRITE_BIN" --sha "$HEAD_SHA" --payload-inline --json <<<"$ROLLUP_PAYLOAD_JSON" >/dev/null
+ROLLUP_OUT="$(SPINE_STATE="$NARRATOR_ROLLUP_TMP" "$COMMIT_NARRATOR_BIN" --from-artifacts --limit 1 --skip-input-readbacks --json --ref "$HEAD_SHA")"
+python3 - "$ROLLUP_OUT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+ar = payload.get("artifact_reads") or {}
+if not ar:
+    raise SystemExit("commit narrator --from-artifacts must publish artifact_reads summary")
+if ar.get("from_artifact") != 1:
+    raise SystemExit(f"commit narrator --from-artifacts expected 1 from_artifact row, got {ar.get('from_artifact')}")
+if ar.get("artifact_missing"):
+    raise SystemExit("commit narrator --from-artifacts unexpectedly reported artifact_missing on planted fixture")
+commits = payload.get("commits") or []
+if not commits or len(commits) != 1:
+    raise SystemExit("commit narrator --from-artifacts expected exactly 1 commit row from fixture")
+row = commits[0]
+if row.get("from_artifact") is not True:
+    raise SystemExit("rollup row must carry from_artifact=True")
+if not row.get("artifact_source"):
+    raise SystemExit("rollup row must carry artifact_source path")
+if row.get("direction_signal") != "d441_rollup_signal":
+    raise SystemExit("rollup row must carry artifact's direction_signal")
+rl = row.get("rule_layer") or {}
+if rl.get("verdict") != "good_direction":
+    raise SystemExit("rollup row must carry artifact's rule_layer.verdict")
+boundary = payload.get("authority_boundary") or {}
+if boundary.get("mutation_access") != "none" or boundary.get("decision_authority") != "none":
+    raise SystemExit("--from-artifacts must not widen narrator authority bounds")
+PY
+
+ROLLUP_MISSING_OUT="$(SPINE_STATE="$NARRATOR_ROLLUP_TMP" "$COMMIT_NARRATOR_BIN" --from-artifacts --limit 5 --skip-input-readbacks --json)"
+python3 - "$ROLLUP_MISSING_OUT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+ar = payload.get("artifact_reads") or {}
+if (ar.get("artifact_missing") or 0) < 1:
+    raise SystemExit("commit narrator --from-artifacts must surface artifact_missing for unwritten SHAs")
+saw_missing_disclosure = False
+for row in payload.get("commits") or []:
+    if row.get("from_artifact") is False and row.get("artifact_source") == "missing":
+        if row.get("disclosure") != "artifact_not_found_run_write_artifacts":
+            raise SystemExit("missing-artifact rollup row must carry explicit disclosure (no silent recompute)")
+        if row.get("direction_signal") != "unknown_artifact_absent":
+            raise SystemExit("missing-artifact rollup row must mark direction_signal as unknown_artifact_absent")
+        saw_missing_disclosure = True
+if not saw_missing_disclosure:
+    raise SystemExit("commit narrator --from-artifacts produced no recognizable missing-artifact disclosure rows under cap probe")
+PY
+
+NARRATOR_ROLLUP_DEFAULT="$("$COMMIT_NARRATOR_BIN" --json --limit 1 --skip-input-readbacks)"
+python3 - "$NARRATOR_ROLLUP_DEFAULT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+if "artifact_reads" in payload:
+    raise SystemExit("commit narrator without --from-artifacts must NOT publish artifact_reads")
+for row in payload.get("commits") or []:
+    if "from_artifact" in row:
+        raise SystemExit("commit narrator without --from-artifacts must NOT populate row.from_artifact")
+PY
+
+rm -rf "$NARRATOR_ROLLUP_TMP"
+
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/d441-mid-packet.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT" "${NARRATOR_ARTIFACT_TMP:-}"' EXIT
 STATE_ROOT="$TMP_ROOT/state"
@@ -774,5 +846,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, commit.narrator.status --evaluate-rules runs the deterministic rule engine over committed governance and emits a rule_layer with verdict (good_direction|regression_risk|unknown_*) confidence rule_outcomes citations and honest_unknown_reason while preserving witness-only authority bounds, default narrator runs without --evaluate-rules MUST NOT publish rule_evaluation or row.rule_layer, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, deferred closed packets can be forward-corrected only with fresh evidence, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, commit.narrator.status --evaluate-rules runs the deterministic rule engine over committed governance and emits a rule_layer with verdict (good_direction|regression_risk|unknown_*) confidence rule_outcomes citations and honest_unknown_reason while preserving witness-only authority bounds, default narrator runs without --evaluate-rules MUST NOT publish rule_evaluation or row.rule_layer, commit.narrator.status --from-artifacts replays per-commit yamls into the rollup payload with artifact_reads summary and from_artifact rows pulling direction_signal/rule_layer from canonical state while missing artifacts produce explicit disclosure rows (no silent recompute) and default runs without --from-artifacts MUST NOT publish artifact_reads or row.from_artifact, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, deferred closed packets can be forward-corrected only with fresh evidence, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0
