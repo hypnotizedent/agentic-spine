@@ -50,6 +50,7 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | `backup.calendar.generate` |
 | `backup.estate.readback.status` |
 | `backup.posture.snapshot.build` |
+| `backup.shopfiles.archive.create` |
 | `backup.status` |
 | `backup.vzdump.mail.policy.set` |
 | `backup.vzdump.prune` |

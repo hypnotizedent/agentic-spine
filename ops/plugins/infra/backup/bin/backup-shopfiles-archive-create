@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# backup-shopfiles-archive-create - Archive MintPrints shop-files data to MD1400.
+#
+# Default is dry-run. Use --execute --reason to write the tarball + sha256.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/ops/lib/ssh-resolve.sh"
+
+TARGET_ID="pve"
+SOURCE_DIR="/tank/shop-files"
+DEST_DIR="/md1400/backups/business/shop-files"
+EXECUTE=0
+REASON=""
+
+usage() {
+  cat <<'EOF'
+backup-shopfiles-archive-create
+
+Usage:
+  backup-shopfiles-archive-create [--target pve] [--source /tank/shop-files] [--dest /md1400/backups/business/shop-files] [--execute --reason <text>]
+
+Writes:
+  /md1400/backups/business/shop-files/shop-files-data-<UTC>.tar.gz
+  /md1400/backups/business/shop-files/shop-files-data-<UTC>.tar.gz.sha256
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target) TARGET_ID="${2:?--target requires a value}"; shift 2 ;;
+    --source) SOURCE_DIR="${2:?--source requires a value}"; shift 2 ;;
+    --dest) DEST_DIR="${2:?--dest requires a value}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    --dry-run) EXECUTE=0; shift ;;
+    --reason) REASON="${2:?--reason requires a value}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "STOP: unknown arg: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ "$EXECUTE" == "1" && -z "$REASON" ]]; then
+  echo "STOP: --execute requires --reason" >&2
+  exit 2
+fi
+
+resolved="$(ssh_resolve_ssh_host_with_fallback "$TARGET_ID" 8 2>/dev/null || true)"
+target_host="$(awk '{print $1}' <<<"$resolved")"
+target_path="$(awk '{print $2}' <<<"$resolved")"
+target_user="$(ssh_resolve_user "$TARGET_ID" root)"
+
+[[ -n "$target_host" && "$target_path" != "unreachable" ]] || {
+  echo "STOP: cannot resolve SSH target $TARGET_ID" >&2
+  exit 2
+}
+[[ -n "$target_user" && "$target_user" != "null" ]] || target_user=root
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+echo "backup.shopfiles.archive.create"
+echo "target: ${TARGET_ID} (${target_user}@${target_host}, path=${target_path})"
+echo "source: $SOURCE_DIR"
+echo "destination: $DEST_DIR"
+echo "execute: $EXECUTE"
+if [[ -n "$REASON" ]]; then
+  echo "reason: $REASON"
+fi
+
+ssh "${target_user}@${target_host}" "bash -s -- $(printf '%q' "$SOURCE_DIR") $(printf '%q' "$DEST_DIR") $(printf '%q' "$stamp") $(printf '%q' "$EXECUTE")" <<'REMOTE'
+set -euo pipefail
+
+SOURCE_DIR="$1"
+DEST_DIR="$2"
+STAMP="$3"
+EXECUTE="$4"
+
+[[ -d "$SOURCE_DIR" ]] || { echo "status: STOP"; echo "reason: source_dir_missing"; exit 2; }
+
+artifact="shop-files-data-${STAMP}.tar.gz"
+artifact_path="${DEST_DIR}/${artifact}"
+sha_path="${artifact_path}.sha256"
+tmp_path="${DEST_DIR}/.${artifact}.tmp"
+source_parent="$(dirname "$SOURCE_DIR")"
+source_leaf="$(basename "$SOURCE_DIR")"
+source_size="$(du -sh "$SOURCE_DIR" 2>/dev/null | awk '{print $1}')"
+
+echo "source_size: ${source_size:-unknown}"
+echo "artifact: $artifact_path"
+
+if [[ "$EXECUTE" != "1" ]]; then
+  echo "status: DRY_RUN"
+  exit 0
+fi
+
+mkdir -p "$DEST_DIR"
+rm -f "$tmp_path"
+tar -C "$source_parent" --warning=no-file-changed -czf "$tmp_path" "$source_leaf"
+mv "$tmp_path" "$artifact_path"
+(cd "$DEST_DIR" && sha256sum "$artifact" > "${artifact}.sha256")
+
+bytes="$(stat -c %s "$artifact_path" 2>/dev/null || stat -f %z "$artifact_path")"
+sha="$(cut -d' ' -f1 "$sha_path")"
+mtime="$(stat -c %y "$artifact_path" 2>/dev/null || stat -f "%Sm" "$artifact_path")"
+
+echo "bytes: $bytes"
+echo "sha256: $sha"
+echo "mtime: $mtime"
+echo "status: OK"
+REMOTE

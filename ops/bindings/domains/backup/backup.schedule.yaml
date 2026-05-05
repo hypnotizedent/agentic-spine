@@ -3,7 +3,7 @@
 
 status: authoritative
 version: 1
-updated_at: "2026-04-29"
+updated_at: "2026-05-05"
 owner: "@ronny"
 scope: backup-schedule-v1
 timezone: "America/New_York"
@@ -21,10 +21,25 @@ jobs:
       - vm-204-infra-core-primary
       - vm-211-finance-stack-primary
       - vm-212-mint-data-primary
-      - app-shop-files-md1400
     retention: keep-last=2
     evidence_ref: /etc/pve/jobs.cfg
-    note: "PVE generates tier1 vzdump artifacts on data-backups, then allowlist sync promotes admitted VMIDs to /md1400/backups/vm-images/pve. Backup readiness authority is the MD1400 copy, not the generator path."
+    note: "PVE generates tier1 VM vzdump artifacts on data-backups, then allowlist sync promotes admitted VMIDs to /md1400/backups/vm-images/pve. Backup readiness authority is the MD1400 copy, not the generator path. app-shop-files-md1400 is file-archive data and is handled by shop-files-md1400-archive-daily."
+
+  - id: shop-files-md1400-archive-daily
+    enabled: true
+    kind: filesystem-tar
+    job_execution_mode: spine_capability
+    stack: backup
+    host: pve
+    schedule_cron: "10 1 * * *"
+    schedule_class: daily-primary-est
+    inventory_target: app-shop-files-md1400
+    capability_ref: backup.shopfiles.archive.create
+    source_path: /tank/shop-files
+    output_dir: /md1400/backups/business/shop-files
+    file_pattern: shop-files-data-<UTC>.tar.gz
+    retention: governed-by-md1400-plane
+    note: "Shop-files business data is an LXC bind-mount payload, not a VM vzdump artifact. This job replaces the stale pve-vzdump-tier1-daily membership claim for app-shop-files-md1400."
 
   - id: pve-vzdump-daily
     enabled: true
