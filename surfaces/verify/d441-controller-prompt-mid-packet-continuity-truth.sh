@@ -36,6 +36,11 @@ export SPINE_RUNTIME_ROLE="researcher"
 export OPS_TERMINAL_ROLE="researcher"
 export SPINE_CAP_RUN_KEY="D441-TEST-RUN"
 
+SPINE_REPO="$TMP_ROOT/not-agentic-spine" \
+SPINE_TARGET_REPO="" \
+SPINE_CODE="$SPINE_CODE" \
+  "$STATUS_BIN" --brief >/dev/null || fail "ops status depends on ambient SPINE_REPO instead of its control checkout"
+
 python3 - "$SPINE_CODE" "$STATE_ROOT" <<'PY'
 import json
 import os
@@ -84,6 +89,22 @@ stale_loop = {
     "objective": "verify stale delegation classification",
     "blocked_by": [],
     "next_action": "close loop after delegation birth",
+    "evidence_refs": [],
+    "linked_gaps": [],
+}
+closed_residue_loop = {
+    "loop_id": "LOOP-D441-CLOSED-RESIDUE",
+    "status": "active",
+    "owner": "@test",
+    "created": "20260426",
+    "scope": "verify",
+    "priority": "medium",
+    "horizon": "now",
+    "execution_readiness": "runnable",
+    "execution_mode": "single_worker",
+    "objective": "verify closed loop delegation residue classification",
+    "blocked_by": [],
+    "next_action": "prove closed loop residue is terminal, not stale work",
     "evidence_refs": [],
     "linked_gaps": [],
 }
@@ -157,6 +178,7 @@ if status_row.get("continuity_summary") != "Checkpointed after packet birth":
 cconn = lsa.connect(state_root / "shared_authority.db")
 try:
     lsa.upsert_loop(cconn, stale_loop)
+    lsa.upsert_loop(cconn, closed_residue_loop)
     cconn.commit()
 finally:
     cconn.close()
@@ -241,7 +263,65 @@ closed_status = json.loads(subprocess.check_output(
 ))
 if closed_status["packets"][0].get("status") != "closed":
     raise SystemExit("controller_prompt.status did not expose closed packet state")
+
+closed_residue_packet = cpc.create_packet(
+    packet_id="PACKET-03-D441-CLOSED-RESIDUE",
+    loop_id="LOOP-D441-CLOSED-RESIDUE",
+    concern="verify closed-loop delegation residue classification",
+    state_root=str(state_root),
+    owner="@test",
+)
+closed_residue_delegation_id = "DEL-D441-CLOSED"
+(state_root / "delegations" / f"{closed_residue_delegation_id}.yaml").write_text(
+    yaml.safe_dump(
+        {
+            "delegation_id": closed_residue_delegation_id,
+            "loop_id": "LOOP-D441-CLOSED-RESIDUE",
+            "packet_id": "PACKET-03-D441-CLOSED-RESIDUE",
+            "packet_path": closed_residue_packet["packet_path"],
+            "packet_kind": "controller_prompt",
+            "objective": "closed loop residue specimen",
+            "delegation_state": "picked_up",
+            "delegated_at_utc": "2026-04-26T00:00:00Z",
+            "delegator_terminal": "TEST-CONTROL-01",
+            "target_role": "worker",
+            "picked_up_by": "TEST-WORKER-01",
+            "picked_up_at_utc": "2026-04-26T00:01:00Z",
+            "wave_id": None,
+            "disposition": None,
+            "completed_at_utc": None,
+        },
+        sort_keys=False,
+    ),
+    encoding="utf-8",
+)
+closed_residue_terminal_loop = dict(closed_residue_loop)
+closed_residue_terminal_loop.update(
+    {
+        "status": "closed",
+        "disposition": "superseded",
+        "completion_level": "superseded",
+        "closed_at": "2026-04-26T00:30:00Z",
+    }
+)
+closed_conn = lsa.connect(state_root / "shared_authority.db")
+try:
+    lsa.upsert_loop(closed_conn, closed_residue_terminal_loop)
+    closed_conn.commit()
+finally:
+    closed_conn.close()
+closed_residue_doc = db.status(
+    str(state_root),
+    delegation_id=closed_residue_delegation_id,
+)
+closed_residue_row = closed_residue_doc["delegations"][0]
+if closed_residue_row.get("continuity_live") is not False:
+    raise SystemExit("closed-loop delegation residue still marked continuity_live")
+if closed_residue_row.get("effective_state") != "closed_loop_terminal":
+    raise SystemExit(f"unexpected closed-loop effective_state: {closed_residue_row.get('effective_state')}")
+if closed_residue_row.get("continuity_reason") != "linked loop is terminal (status=closed)":
+    raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet state, entry-compile recovers packet continuity without tracker glue, and close paths terminalize unclaimed delegations instead of leaving stale residue"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet state, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, and closed-loop delegation residue is terminal instead of stale work"
 exit 0

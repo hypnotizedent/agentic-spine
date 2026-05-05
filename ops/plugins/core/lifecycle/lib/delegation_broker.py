@@ -246,11 +246,11 @@ def _classify_delegation_continuity(data: dict[str, Any], state_root: str) -> di
     if continuity_live:
         if loop_status and loop_status not in ACTIVE_LOOP_STATUSES:
             continuity_live = False
-            effective_state = "stale"
-            reason = f"linked loop not active (status={loop_status})"
+            effective_state = "closed_loop_terminal"
+            reason = f"linked loop is terminal (status={loop_status})"
         elif packet_status == "closed":
             continuity_live = False
-            effective_state = "stale"
+            effective_state = "closed_packet_terminal"
             reason = "linked packet is already closed"
 
     enriched["loop_status"] = loop_status or "unknown"

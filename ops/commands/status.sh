@@ -18,9 +18,10 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-source "$SPINE_REPO/ops/lib/runtime-paths.sh"
+STATUS_CONTROL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$STATUS_CONTROL_ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
+STATUS_CODE_ROOT="$STATUS_CONTROL_ROOT"
 
 usage() {
   cat <<'EOF'
@@ -90,7 +91,7 @@ export OPS_STATUS_SEVEN_JSON="$SEVEN_JSON"
 # and per-wave cmd_status in wave.sh. Local-only, bounded, sub-second.
 # Contract: ops/plugins/core/lifecycle/lib/control_loop_status.py
 if [[ "$MODE" == "--control-loop" ]]; then
-  exec python3 - "$SPINE_REPO" "${SPINE_RUNTIME_ROOT:-}" "${SPINE_STATE:-}" <<'PYTHON'
+  exec python3 - "$STATUS_CODE_ROOT" "${SPINE_RUNTIME_ROOT:-}" "${SPINE_STATE:-}" <<'PYTHON'
 import json
 import os
 import sys
@@ -113,7 +114,7 @@ fi
 
 # ── Context mode (L1 visibility surface) ─────────────────────────────────
 if [[ "$MODE" == "--context" ]]; then
-  JOINED_STATE_BIN="$SPINE_REPO/ops/plugins/core/lifecycle/bin/spine-engine-joined-state"
+  JOINED_STATE_BIN="$STATUS_CODE_ROOT/ops/plugins/core/lifecycle/bin/spine-engine-joined-state"
 
   TERMINAL_ID="${SPINE_TERMINAL_ID:-${OPS_TERMINAL_ID:-${OPS_TERMINAL_ROLE:-<none>}}}"
   EXECUTION_CLASS="${SPINE_EXECUTION_CLASS:-${SPINE_RUNTIME_ROLE:-<none>}}"
@@ -273,7 +274,7 @@ PY
 fi
 
 if [[ "$MODE" == "--brief" && "${OPS_STATUS_FULL_BRIEF:-0}" != "1" ]]; then
-  exec python3 - "$SPINE_REPO" "$STRICT" <<'PYTHON'
+  exec python3 - "$STATUS_CODE_ROOT" "$STRICT" <<'PYTHON'
 import json
 import subprocess
 import sys
@@ -348,7 +349,7 @@ sys.exit(1 if strict_mode and anomalies else 0)
 PYTHON
 fi
 
-exec python3 - "$SPINE_REPO" "$MODE" "$STRICT" "$SPINE_STATE" "$SPINE_INBOX" "$SPINE_OUTBOX" <<'PYTHON'
+exec python3 - "$STATUS_CODE_ROOT" "$MODE" "$STRICT" "$SPINE_STATE" "$SPINE_INBOX" "$SPINE_OUTBOX" <<'PYTHON'
 import json
 import os
 import re
@@ -1144,9 +1145,10 @@ def collect_delegation_summary():
         raw_state = str(item.get("delegation_state") or "").strip()
         if raw_state not in ("delegated", "picked_up", "executing"):
             continue
+        effective_state = str(item.get("effective_state") or "").strip()
         if bool(item.get("continuity_live", True)):
             active += 1
-        else:
+        elif effective_state == "stale":
             stale += 1
     result.update({
         "status": "ok",
