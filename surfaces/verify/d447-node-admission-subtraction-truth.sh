@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 try:
@@ -332,9 +333,110 @@ for marker in [
     'item["is_primary"] = idx == 0',
     'primary_entry = next((wt for wt in worktree_entries if wt.get("is_primary")), None)',
     'if not path.exists() or wt.get("is_primary"):',
+    '"owner_id": owner_id or None',
+    '"ownership_status": "unclaimed_dirty_residue"',
+    '"ownership_status": "active_lease"',
+    '"cleanup_class": "blocked_dirty_residue_reclaim_or_clean"',
+    '"cleanup_class": "blocked_active_lease"',
+    'def owner_id_from_branch',
+    'def classify_ownership',
+    'worktree.lifecycle.rehydrate',
+    'worktree.lease.heartbeat',
 ]:
     if marker not in worktree_reconcile_text:
-        fail(f"worktree lifecycle reconcile must classify Git's primary checkout independently of invocation worktree: missing {marker!r}")
+        fail(f"worktree lifecycle reconcile missing required lifecycle ownership marker: {marker!r}")
+
+with tempfile.TemporaryDirectory(prefix="d447-worktree-ownership.") as td:
+    tmp = Path(td)
+    repo = tmp / "repo"
+    state = tmp / "state"
+    worktree_root = tmp / "worktrees"
+    repo.mkdir()
+    state.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "README.md").write_text("d447\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=D447", "-c", "user.email=d447@example.invalid", "commit", "-m", "initial"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    branch = "codex/PACKET-D447-GHOST-READBACK-20260505"
+    lane = "PACKET-D447-GHOST-READBACK-20260505"
+    worktree = worktree_root / "repo" / lane
+    worktree.parent.mkdir(parents=True)
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree)], cwd=repo, check=True, capture_output=True, text=True)
+    (worktree / "ghost.tmp").write_text("dirty\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "SPINE_TARGET_REPO": str(repo),
+        "SPINE_STATE": str(state),
+        "SPINE_TMP": str(tmp),
+        "SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT": str(worktree_root),
+        "SPINE_WORKTREE_LIFECYCLE_MAIN_REF": "main",
+    }
+    ghost_proc = subprocess.run(
+        [str(worktree_reconcile), "--json"],
+        env=env,
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    ghost_payload = json.loads(ghost_proc.stdout)
+    ghost_row = next((row for row in ghost_payload.get("worktrees", []) if row.get("branch") == branch), None)
+    if not ghost_row:
+        fail("worktree.lifecycle.report ownership synthetic missing dirty packet worktree row")
+    if ghost_row.get("owner_id") != lane:
+        fail(f"dirty packet worktree owner_id not derived from branch: {ghost_row.get('owner_id')}")
+    if ghost_row.get("owner_type") != "packet" or ghost_row.get("owner_state") != "unresolved":
+        fail("dirty packet worktree must read as unresolved packet ownership when no active lease/projection proves custody")
+    if ghost_row.get("ownership_status") != "unclaimed_dirty_residue":
+        fail(f"dirty unleased packet worktree must be unclaimed_dirty_residue, got {ghost_row.get('ownership_status')}")
+    if ghost_row.get("cleanup_class") != "blocked_dirty_residue_reclaim_or_clean":
+        fail("dirty unleased packet worktree must expose blocked_dirty_residue_reclaim_or_clean cleanup_class")
+    if "worktree.lifecycle.rehydrate" not in str(ghost_row.get("next_action") or ""):
+        fail("dirty unleased packet worktree next_action must point to worktree.lifecycle.rehydrate")
+
+    lease_path = worktree / ".spine-lane-lease.yaml"
+    lease_path.write_text(
+        "\n".join(
+            [
+                "---",
+                "version: 1",
+                "status: active",
+                'owner: "SPINE-CONTROL-01"',
+                f'loop_or_wave_id: "{lane}"',
+                f'repo: "{repo}"',
+                f'worktree: "{worktree}"',
+                f'branch: "{branch}"',
+                "created_at: \"2026-05-05T00:00:00Z\"",
+                "heartbeat_at: \"2999-01-01T00:00:00Z\"",
+                "ttl_hours: 24",
+                "---",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    active_proc = subprocess.run(
+        [str(worktree_reconcile), "--json"],
+        env=env,
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    active_payload = json.loads(active_proc.stdout)
+    active_row = next((row for row in active_payload.get("worktrees", []) if row.get("branch") == branch), None)
+    if active_row.get("ownership_status") != "active_lease":
+        fail("active lease packet worktree must expose ownership_status=active_lease")
+    if active_row.get("cleanup_class") != "blocked_active_lease":
+        fail("active lease packet worktree must expose cleanup_class=blocked_active_lease")
+    if "worktree.lease.heartbeat" not in str(active_row.get("next_action") or ""):
+        fail("active lease packet worktree next_action must point to worktree.lease.heartbeat --status")
 
 # PACKET-616: runtime checkout deployment is a first-class deploy artery.
 # Host placement lives in ops/bindings/runtime.checkout.placement.yaml, drift
@@ -1914,5 +2016,5 @@ if missing_shop_dnd:
 if shop_registry_doc.get("superseded_for_node_admission_by") != "node.admission.status":
     fail("shop.device.registry.yaml must declare superseded_for_node_admission_by=node.admission.status (Wave 2)")
 
-print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted or folded, machine specs stay inside admission, active role runtime truth is composed, candidate evidence cannot promote itself, canonical_plane_access is locked from contract through cap (PACKET-840 Stage 2 organ 5 / PACKET-1045), per-row subject_class + access_class are first-class with object_kind preserved (PACKET-985), operator.hardware.inventory.yaml authority_scope admission boundary is locked (PACKET-1185), and shop.device.registry.yaml is folded into Site Intelligence/node admission with its admission boundary locked (PACKET-1301)")
+print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted or folded, machine specs stay inside admission, active role runtime truth is composed, candidate evidence cannot promote itself, canonical_plane_access is locked from contract through cap (PACKET-840 Stage 2 organ 5 / PACKET-1045), per-row subject_class + access_class are first-class with object_kind preserved (PACKET-985), worktree ownership readback distinguishes active leases from dirty ghost residue, operator.hardware.inventory.yaml authority_scope admission boundary is locked (PACKET-1185), and shop.device.registry.yaml is folded into Site Intelligence/node admission with its admission boundary locked (PACKET-1301)")
 PY

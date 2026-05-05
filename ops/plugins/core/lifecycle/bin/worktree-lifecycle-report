@@ -117,6 +117,19 @@ def lease_only_dirty(row):
 blocked = []
 delete_candidates = []
 root_violations = []
+
+
+def candidate_row(row):
+    return {
+        "path": row.get("path"),
+        "branch": row.get("branch"),
+        "owner_id": row.get("owner_id"),
+        "ownership_status": row.get("ownership_status"),
+        "cleanup_class": row.get("cleanup_class"),
+        "next_action": row.get("next_action"),
+    }
+
+
 for row in rows:
     reasons = []
     lease = row.get("lease") or {}
@@ -135,9 +148,9 @@ for row in rows:
         if not row["cleanup_lease_only_residue"]:
             reasons.append("dirty_worktree")
     if reasons:
-        blocked.append({"path": row.get("path"), "branch": row.get("branch"), "reasons": reasons})
+        blocked.append({**candidate_row(row), "reasons": reasons})
     else:
-        delete_candidates.append({"path": row.get("path"), "branch": row.get("branch")})
+        delete_candidates.append(candidate_row(row))
 
 clone_blocked = []
 clone_delete_candidates = []
@@ -247,9 +260,16 @@ else:
     if delete_candidates:
         print("delete_candidates:")
         for item in delete_candidates:
-            print(f"  - {item.get('path')} | {item.get('branch')}")
+            print(
+                f"  - {item.get('path')} | {item.get('branch')} | "
+                f"{item.get('ownership_status') or 'unknown'} | {item.get('next_action') or ''}"
+            )
     if blocked:
         print("blocked:")
         for item in blocked:
-            print(f"  - {item.get('path')} | {item.get('branch')} | {','.join(item.get('reasons') or [])}")
+            print(
+                f"  - {item.get('path')} | {item.get('branch')} | "
+                f"{','.join(item.get('reasons') or [])} | "
+                f"{item.get('ownership_status') or 'unknown'} | {item.get('next_action') or ''}"
+            )
 PY

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -102,6 +103,29 @@ def load_lease(path: Path) -> dict[str, Any]:
     return lease
 
 
+def packet_status(state_root: Path, packet_id: str) -> str | None:
+    prompts_dir = state_root / "controller-prompts"
+    if not prompts_dir.exists():
+        return None
+    matches = sorted(prompts_dir.glob(f"CONTROLLER-{packet_id}-*.md"))
+    if not matches:
+        matches = sorted(prompts_dir.glob(f"{packet_id}-*.md"))
+    if not matches:
+        return None
+    status = "present"
+    try:
+        for raw in matches[0].read_text(encoding="utf-8", errors="replace").splitlines()[:40]:
+            if raw.strip() == "---" and status != "present":
+                break
+            if raw.startswith("status:"):
+                value = raw.split(":", 1)[1].strip().strip("'\"")
+                status = value or status
+                break
+    except Exception:
+        return "unknown"
+    return status
+
+
 def classify_owner(state_root: Path, identity: str | None) -> tuple[str | None, str | None]:
     if not identity:
         return None, None
@@ -118,7 +142,107 @@ def classify_owner(state_root: Path, identity: str | None) -> tuple[str | None, 
             return "wave", str(data.get("status") or data.get("lifecycle") or "unknown")
         except Exception:
             return "wave", "unknown"
+    if identity.startswith("PACKET-"):
+        status = packet_status(state_root, identity)
+        return "packet", status or "unresolved"
     return None, None
+
+
+def owner_id_from_branch(branch: str | None) -> str | None:
+    if not branch or branch == "<detached>":
+        return None
+    if branch.startswith("codex/"):
+        return branch.split("/", 1)[1]
+    if branch.startswith("orchestration/"):
+        return branch.split("/", 1)[1]
+    if "PACKET-" in branch:
+        owner = "PACKET-" + branch.split("PACKET-", 1)[1]
+        return re.sub(r"-20[0-9]{6}$", "", owner)
+    return branch
+
+
+def rehydrate_command(branch: str | None, owner_id: str | None, repo: Path) -> str:
+    lane = owner_id or "<LANE_ID>"
+    branch_arg = branch or "<BRANCH>"
+    return (
+        "./bin/ops cap run worktree.lifecycle.rehydrate -- "
+        f"--branch {branch_arg} --lane {lane} --repo {repo}"
+    )
+
+
+def cleanup_command() -> str:
+    return "./bin/ops cap run worktree.lifecycle.cleanup -- --mode archive --json"
+
+
+def classify_ownership(
+    *,
+    repo: Path,
+    path: Path,
+    branch: str | None,
+    owner_id: str | None,
+    owner_type: str | None,
+    owner_state: str | None,
+    lease: dict[str, Any],
+    merged: bool,
+    dirty: bool,
+) -> dict[str, Any]:
+    evidence: list[str] = []
+    if lease.get("present"):
+        lease_status = str(lease.get("status") or "unknown")
+        lease_owner = str(lease.get("owner") or "unknown")
+        evidence.append(f"lease:{lease_status}:owner={lease_owner}")
+        if lease.get("heartbeat_at"):
+            evidence.append(f"lease_heartbeat_at:{lease.get('heartbeat_at')}")
+    else:
+        evidence.append("lease:missing")
+
+    if owner_type:
+        evidence.append(f"owner:{owner_type}:{owner_state or 'unknown'}")
+    elif owner_id:
+        evidence.append(f"owner:{owner_id}:not_found_in_local_projection")
+    else:
+        evidence.append("owner:unknown")
+
+    if lease.get("active"):
+        return {
+            "ownership_status": "active_lease",
+            "ownership_evidence": evidence,
+            "cleanup_class": "blocked_active_lease",
+            "next_action": f"./bin/ops cap run worktree.lease.heartbeat -- --status --worktree {path}",
+        }
+
+    active_owner = owner_type in {"loop", "wave"} and owner_state == "active"
+    if active_owner:
+        return {
+            "ownership_status": "active_owner_missing_active_lease",
+            "ownership_evidence": evidence,
+            "cleanup_class": "blocked_active_owner_missing_lease",
+            "next_action": rehydrate_command(branch, owner_id, repo),
+        }
+
+    if dirty:
+        return {
+            "ownership_status": "unclaimed_dirty_residue",
+            "ownership_evidence": evidence,
+            "cleanup_class": "blocked_dirty_residue_reclaim_or_clean",
+            "next_action": rehydrate_command(branch, owner_id, repo),
+        }
+
+    if not merged:
+        status = "open_packet_missing_active_lease" if owner_type == "packet" else "unclaimed_unmerged_branch"
+        return {
+            "ownership_status": status,
+            "ownership_evidence": evidence,
+            "cleanup_class": "blocked_unmerged_branch",
+            "next_action": rehydrate_command(branch, owner_id, repo),
+        }
+
+    return {
+        "ownership_status": "cleanable_landed_residue",
+        "ownership_evidence": evidence,
+        "cleanup_class": "cleanable_after_archive",
+        "next_action": cleanup_command(),
+    }
 
 
 def stash_rows(repo: Path) -> list[dict[str, Any]]:
@@ -213,8 +337,21 @@ def main() -> int:
         branch_ref = wt.get("branch_ref")
         branch = wt.get("branch")
         lease = load_lease(path)
-        owner_id = lease.get("loop_or_wave_id") or branch
+        owner_id = str(lease.get("loop_or_wave_id") or owner_id_from_branch(branch) or "")
         owner_type, owner_state = classify_owner(state_root, str(owner_id) if owner_id else None)
+        merged = merged_into(repo, branch_ref, main_ref)
+        dirty = is_dirty(path)
+        ownership = classify_ownership(
+            repo=repo,
+            path=path,
+            branch=branch,
+            owner_id=owner_id or None,
+            owner_type=owner_type,
+            owner_state=owner_state,
+            lease=lease,
+            merged=merged,
+            dirty=dirty,
+        )
         rows.append(
             {
                 "path": str(path),
@@ -224,10 +361,12 @@ def main() -> int:
                 "managed_worktree": False,
                 "canonical_root_ok": str(path).startswith(str(worktree_root / repo_name) + os.sep),
                 "lease": lease,
+                "owner_id": owner_id or None,
                 "owner_type": owner_type,
                 "owner_state": owner_state,
-                "merged_into_main": merged_into(repo, branch_ref, main_ref),
-                "dirty": is_dirty(path),
+                "merged_into_main": merged,
+                "dirty": dirty,
+                **ownership,
             }
         )
 

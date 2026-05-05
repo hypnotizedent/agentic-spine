@@ -170,6 +170,17 @@ stash_delete_candidates = []
 root_normalization = {"candidate": None, "blocked": None}
 
 
+def candidate_row(row):
+    return {
+        "path": row["path"],
+        "branch": row["branch"],
+        "owner_id": row.get("owner_id"),
+        "ownership_status": row.get("ownership_status"),
+        "cleanup_class": row.get("cleanup_class"),
+        "next_action": row.get("next_action"),
+    }
+
+
 def lease_only_dirty(row):
     lease = row.get("lease") or {}
     if lease.get("active"):
@@ -208,9 +219,9 @@ for row in rows:
             reasons.append("dirty_worktree")
 
     if reasons:
-        blocked.append({"path": row["path"], "branch": row["branch"], "reasons": reasons})
+        blocked.append({**candidate_row(row), "reasons": reasons})
     else:
-        delete_candidates.append({"path": row["path"], "branch": row["branch"]})
+        delete_candidates.append(candidate_row(row))
 
 for row in clone_rows:
     reasons = []
@@ -303,7 +314,7 @@ with md.open("w", encoding="utf-8") as f:
     f.write(f"- root_violations: {summary['root_violation_count']}\n\n")
     f.write("## Delete Candidates\n")
     for item in delete_candidates:
-      f.write(f"- {item['path']} | {item['branch']}\n")
+      f.write(f"- {item['path']} | {item['branch']} | {item.get('ownership_status') or 'unknown'} | {item.get('next_action') or ''}\n")
     if not delete_candidates:
       f.write("- none\n")
     f.write("\n## Temp Clone Delete Candidates\n")
@@ -318,7 +329,7 @@ with md.open("w", encoding="utf-8") as f:
       f.write("- none\n")
     f.write("\n## Blocked\n")
     for item in blocked:
-      f.write(f"- {item['path']} | {item['branch']} | {','.join(item['reasons'])}\n")
+      f.write(f"- {item['path']} | {item['branch']} | {','.join(item['reasons'])} | {item.get('ownership_status') or 'unknown'} | {item.get('next_action') or ''}\n")
     if not blocked:
       f.write("- none\n")
     f.write("\n## Temp Clone Blocked\n")
