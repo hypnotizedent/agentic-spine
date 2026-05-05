@@ -272,6 +272,82 @@ PY
   exit 0
 fi
 
+if [[ "$MODE" == "--brief" && "${OPS_STATUS_FULL_BRIEF:-0}" != "1" ]]; then
+  exec python3 - "$SPINE_REPO" "$STRICT" <<'PYTHON'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+spine = Path(sys.argv[1])
+strict_mode = (sys.argv[2] if len(sys.argv) > 2 else "0") == "1"
+joined_bin = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-engine-joined-state"
+
+try:
+    proc = subprocess.run(
+        ["python3", str(joined_bin), "--json", "--no-write"],
+        capture_output=True,
+        text=True,
+        timeout=8,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}")
+    payload = json.loads(proc.stdout)
+except Exception as exc:
+    print(f"Loops: unknown | Gaps: unknown | Engine: unknown | Spine: unknown | Secondary: unknown | Status: degraded ({exc}) | Anomalies: 1")
+    sys.exit(1 if strict_mode else 0)
+
+summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+open_loops = int(summary.get("open_loops") or 0)
+loops_source = str(summary.get("open_loops_source") or "")
+if loops_source == "canonical_routed":
+    loop_part = f"Loops: {open_loops} open (routed)"
+else:
+    loop_part = f"Loops: {open_loops} open"
+
+gap_status = str(summary.get("gap_authority_status") or "unknown")
+open_gaps = summary.get("open_gaps")
+if gap_status == "routed":
+    gap_part = "Gaps: routed"
+elif open_gaps is None:
+    gap_part = f"Gaps: {gap_status}"
+else:
+    gap_part = f"Gaps: {open_gaps} open"
+
+parts = [
+    loop_part,
+    gap_part,
+    f"Engine: {summary.get('engine_verify_status', 'unknown')}",
+    f"Spine: {summary.get('spine_verify_status', 'unknown')}",
+    f"Secondary: {summary.get('secondary_verify_status', 'unknown')}",
+]
+
+projection_residue = int(summary.get("projection_residue") or 0)
+scope_orphans = int(summary.get("scope_only_orphans") or 0)
+if projection_residue:
+    parts.append(f"Residue: {projection_residue} stale scope file(s)")
+if scope_orphans:
+    parts.append(f"Scope orphans: {scope_orphans}")
+
+completion = summary.get("completion_state") if isinstance(summary.get("completion_state"), dict) else {}
+orphaned = int(completion.get("orphaned") or 0)
+owned_elsewhere = int(completion.get("owned_elsewhere") or 0)
+if orphaned or owned_elsewhere:
+    parts.append(f"Worktrees: {orphaned} orphaned / {owned_elsewhere} owned elsewhere")
+
+coherence_attention = bool(summary.get("engine_coherence_needs_attention"))
+parts.append("Coherence: attention" if coherence_attention else "Coherence: ok")
+parts.append("Code drift: skipped")
+parts.append("Authority: skipped")
+parts.append("Clerk: skipped")
+anomalies = 1 if coherence_attention else 0
+parts.append(f"Anomalies: {anomalies}")
+print(" | ".join(parts))
+sys.exit(1 if strict_mode and anomalies else 0)
+PYTHON
+fi
+
 exec python3 - "$SPINE_REPO" "$MODE" "$STRICT" "$SPINE_STATE" "$SPINE_INBOX" "$SPINE_OUTBOX" <<'PYTHON'
 import json
 import os
@@ -2081,11 +2157,12 @@ if mode == "--brief":
     _drift_bin = spine / "ops/plugins/infra/host/bin/host-code-drift-status"
     if _drift_bin.is_file() and os.access(str(_drift_bin), os.X_OK):
         try:
+            _drift_timeout = int(os.environ.get("OPS_STATUS_CODE_DRIFT_TIMEOUT_SECONDS", "5") or "5")
             _drift_proc = subprocess.run(
                 [str(_drift_bin), "--json"],
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=max(1, _drift_timeout),
             )
             if _drift_proc.returncode == 0 and _drift_proc.stdout.strip():
                 _drift_payload = json.loads(_drift_proc.stdout)
@@ -2102,7 +2179,7 @@ if mode == "--brief":
                         parts.append(f"Code drift: {_drift_overall} ({', '.join(_problem_hosts)})")
                     else:
                         parts.append(f"Code drift: {_drift_overall}")
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, ValueError):
             parts.append("Code drift: unknown")
     # PACKET-592 immediate item 1: authority reachability classifier.
     # Surfaces "spine failed" hidden conditions like "pve LAN unreachable
@@ -2110,11 +2187,12 @@ if mode == "--brief":
     _reach_bin = spine / "ops/plugins/infra/host/bin/host-authority-reachability-status"
     if _reach_bin.is_file() and os.access(str(_reach_bin), os.X_OK):
         try:
+            _reach_timeout = int(os.environ.get("OPS_STATUS_AUTHORITY_REACH_TIMEOUT_SECONDS", "6") or "6")
             _reach_proc = subprocess.run(
                 [str(_reach_bin), "--json"],
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=max(1, _reach_timeout),
             )
             if _reach_proc.returncode == 0 and _reach_proc.stdout.strip():
                 _reach_payload = json.loads(_reach_proc.stdout)
@@ -2137,7 +2215,7 @@ if mode == "--brief":
                             continue
                         _degraded_summary.append(f"{h.get('name', '?')}={cls}")
                     parts.append(f"Authority: degraded ({', '.join(_degraded_summary)})")
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, ValueError):
             parts.append("Authority: unknown")
     # PACKET-592 Phase 2: clerk rollup. Read clerk's classification of the
     # current symptoms and compress to a single actionable line:
@@ -2169,9 +2247,10 @@ if mode == "--brief":
                 _clerk_env["CLERK_REACH_JSON"] = json.dumps(_reach_payload) if "_reach_payload" in dir() and _reach_payload else ""
             except Exception:
                 _clerk_env["CLERK_REACH_JSON"] = ""
+            _clerk_timeout = int(os.environ.get("OPS_STATUS_CLERK_TIMEOUT_SECONDS", "6") or "6")
             _clerk_proc = subprocess.run(
                 [str(_clerk_bin), "--json"],
-                capture_output=True, text=True, timeout=20, env=_clerk_env,
+                capture_output=True, text=True, timeout=max(1, _clerk_timeout), env=_clerk_env,
             )
             if _clerk_proc.returncode == 0 and _clerk_proc.stdout.strip():
                 _clerk_payload = json.loads(_clerk_proc.stdout)
@@ -2184,7 +2263,7 @@ if mode == "--brief":
                     parts.append(f"Clerk: filed ({_total} classified, 0 need operator)")
                 else:
                     parts.append(f"Clerk: action ({_need_op} of {_total} need operator)")
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, ValueError):
             parts.append("Clerk: unknown")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))

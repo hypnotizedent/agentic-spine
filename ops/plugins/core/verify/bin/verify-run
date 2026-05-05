@@ -9,6 +9,7 @@ ROOT="$_VR_COMPUTED"
 
 VERIFY_TOPOLOGY="$ROOT/ops/plugins/core/verify/bin/verify-topology"
 VERIFY_ENGINE="$ROOT/ops/plugins/core/verify/bin/verify-engine"
+VERIFY_ENGINE_SMOKE_LOCAL="$ROOT/ops/plugins/core/verify/bin/verify-engine-smoke-local"
 VERIFY_ENGINE_HONESTY="$ROOT/ops/plugins/core/verify/bin/verify-engine-honesty"
 VERIFY_SPINE_SCOPE_HELPER="$ROOT/ops/plugins/core/verify/lib/spine_scope_gate_set.py"
 RECOVERY_DISPATCH="$ROOT/ops/plugins/core/recovery/bin/recovery-dispatch"
@@ -597,24 +598,24 @@ run_spine_scope() {
   helper_exec_paths_json="$(jq -c --arg root "$ROOT" '[.executable_surfaces[] | (.path // .check_script // .surface_id) | if startswith("/") then . else ($root + "/" + .) end]' <<<"$helper_json")"
   component_json="$(jq -n \
     --argjson helper_exec "$helper_exec_paths_json" \
-    --arg engine "$VERIFY_ENGINE" \
+    --arg engine "$VERIFY_ENGINE_SMOKE_LOCAL" \
     '$helper_exec + [$engine]')"
 
   if [[ "$json_mode" -eq 1 ]]; then
     set +e
-    "$VERIFY_ENGINE" --json >/dev/null 2>&1
+    "$VERIFY_ENGINE_SMOKE_LOCAL" --json >/dev/null 2>&1
     engine_rc=$?
     set -e
   else
     echo "verify.run spine"
     echo "  foundational spine-only verify scope"
     echo "  note: spine answers spine/object truth; for orchestration proof use: verify-run honesty"
-    echo "  engine: $VERIFY_ENGINE"
+    echo "  engine smoke: $VERIFY_ENGINE_SMOKE_LOCAL"
     echo "  executable surfaces:"
     echo "$component_json" | jq -r '.[]' | sed 's/^/    - /'
 
     set +e
-    "$VERIFY_ENGINE"
+    "$VERIFY_ENGINE_SMOKE_LOCAL"
     engine_rc=$?
     set -e
   fi

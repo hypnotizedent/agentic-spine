@@ -201,6 +201,20 @@ if "verify.drift_gates.certify" in ops_verify_text:
 core_ids = (((topology.get("core_mode") or {}).get("core_gate_ids")) or [])
 if any(str(gid).startswith("G") for gid in core_ids):
     fail("core_mode.core_gate_ids must not include G estate-health gates")
+routine_heavy_readbacks = {"D447", "D448", "D449", "D452", "D454", "D455", "D458"}
+core_id_set = {str(gid) for gid in core_ids}
+heavy_in_core = sorted(routine_heavy_readbacks & core_id_set)
+if heavy_in_core:
+    fail(f"routine spine.verify core must keep deep readback suites targeted, not default: {heavy_in_core}")
+core_readback_suites = {
+    str(gid)
+    for gid in (((topology.get("core_mode") or {}).get("core_readback_suites")) or [])
+}
+missing_targeted = sorted(routine_heavy_readbacks - core_readback_suites)
+if missing_targeted:
+    fail(f"core_mode.core_readback_suites must retain targeted first-class readbacks: {missing_targeted}")
+if (topology.get("core_mode") or {}).get("core_readback_policy") != "targeted_first_class_proofs_not_routine_spine_verify":
+    fail("core_mode.core_readback_policy must keep deep readbacks targeted outside routine spine.verify")
 assignments = topology.get("gate_assignments") or []
 if any(str((row or {}).get("gate_id") or "").startswith("G") for row in assignments if isinstance(row, dict)):
     fail("gate_assignments must not include G estate-health gates")

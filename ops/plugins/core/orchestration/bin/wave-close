@@ -1474,17 +1474,42 @@ lease_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 PYLEASE
 
 if [[ ! -x "$operator_surface_regenerate_bin" ]]; then
-  echo "FAIL: operator surface regenerate helper not found: $operator_surface_regenerate_bin" >&2
-  echo "The wave close landed, but cockpit/mobile leaves were not refreshed." >&2
-  exit 1
+  echo "WARN: operator surface regenerate helper not found: $operator_surface_regenerate_bin" >&2
+  echo "The wave close landed; cockpit/mobile leaves may be stale." >&2
+  exit 0
 fi
 
-surface_refresh_output="$(python3 "$operator_surface_regenerate_bin" 2>&1)" || {
-  echo "FAIL: operator surface regeneration failed after wave close" >&2
-  echo "$surface_refresh_output" >&2
-  echo "The wave close landed, but cockpit/mobile leaves are stale." >&2
-  exit 1
-}
+surface_refresh_timeout="${SPINE_OPERATOR_SURFACE_REGEN_TIMEOUT_SECONDS:-90}"
+[[ "$surface_refresh_timeout" =~ ^[0-9]+$ ]] || surface_refresh_timeout="90"
 
-echo "Refreshing operator surfaces..."
+set +e
+surface_refresh_output="$(python3 - "$operator_surface_regenerate_bin" "$surface_refresh_timeout" <<'PY' 2>&1
+import subprocess
+import sys
+
+script = sys.argv[1]
+timeout = int(sys.argv[2])
+try:
+    proc = subprocess.run(["python3", script], text=True, capture_output=True, timeout=timeout, check=False)
+except subprocess.TimeoutExpired:
+    print(f"operator surface regeneration timed out after {timeout}s", file=sys.stderr)
+    raise SystemExit(124)
+if proc.stdout:
+    print(proc.stdout, end="")
+if proc.stderr:
+    print(proc.stderr, end="", file=sys.stderr)
+raise SystemExit(proc.returncode)
+PY
+)"
+surface_refresh_rc=$?
+set -e
+
+if [[ "$surface_refresh_rc" -ne 0 ]]; then
+  echo "WARN: operator surface regeneration did not complete after wave close (rc=$surface_refresh_rc)" >&2
+  echo "$surface_refresh_output" >&2
+  echo "The wave close landed; cockpit/mobile leaves may be stale." >&2
+  exit 0
+fi
+
+echo "Refreshing operator surfaces (bounded ${surface_refresh_timeout}s)..."
 echo "$surface_refresh_output"

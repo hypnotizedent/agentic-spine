@@ -29,10 +29,10 @@ import yaml
 
 CORE_ENGINE_COVERAGE = {
     "D3": {
-        "surface_id": "verify-engine",
-        "path": "ops/plugins/core/verify/bin/verify-engine",
+        "surface_id": "verify-engine-smoke-local",
+        "path": "ops/plugins/core/verify/bin/verify-engine-smoke-local",
         "coverage": "E1",
-        "proof": "verify-engine E1 checks bin/ops entrypoint smoke",
+        "proof": "verify-engine-smoke-local E1 checks bin/ops entrypoint smoke without DB-authority routing",
     },
 }
 

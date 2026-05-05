@@ -164,6 +164,7 @@ try:
         f"{routed_doc['human_intent']['intent_id']}.\n",
         encoding="utf-8",
     )
+    iur.db_path(tmp).touch()
     db = iur.connect(iur.db_path(tmp))
     try:
         iur.ensure_schema(db)

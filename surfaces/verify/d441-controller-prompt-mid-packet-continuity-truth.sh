@@ -20,6 +20,7 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/d441-mid-packet.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 STATE_ROOT="$TMP_ROOT/state"
 mkdir -p "$STATE_ROOT/controller-prompts" "$STATE_ROOT/delegations"
+touch "$STATE_ROOT/shared_authority.db"
 
 export SPINE_STATE="$STATE_ROOT"
 export LOOPS_DB_PATH="$STATE_ROOT/shared_authority.db"
