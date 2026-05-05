@@ -401,6 +401,23 @@ if "required_command_strings" not in baseline_capture_path.read_text(encoding="u
     fail("friction-baseline-capture must derive command list from contract required_commands")
 if "artifact commands do not match contract required_commands" not in baseline_verify_path.read_text(encoding="utf-8"):
     fail("friction-baseline-verify must reject artifact command drift from contract required_commands")
+baseline_capture_text = baseline_capture_path.read_text(encoding="utf-8")
+baseline_verify_text = baseline_verify_path.read_text(encoding="utf-8")
+for retired_command in ("verify.pack.run loop_gap", "verify.route.recommend"):
+    if retired_command in yaml.safe_dump(baseline_contract.get("required_commands") or []):
+        fail(f"friction baseline contract must not require retired command {retired_command!r}")
+if "failed_commands" not in baseline_capture_text or "required command failure" not in baseline_capture_text:
+    fail("friction-baseline-capture must fail closed when a required command exits nonzero")
+if "artifact contains unsuccessful command rows" not in baseline_verify_text:
+    fail("friction-baseline-verify must reject artifacts with failed/unknown command rows")
+verify_run_text = verify_topology_path.with_name("verify-run").read_text(encoding="utf-8")
+verify_topology_text = verify_topology_path.read_text(encoding="utf-8")
+for required_token in ("ids <gate_id...>", "target_gate_ids", "ids-run"):
+    if required_token not in verify_run_text:
+        fail(f"verify-run must expose routed explicit gate-id proof scope: missing {required_token!r}")
+for required_token in ("gate_registry_row_json", "gate_exists", "gate_warn_only", "gate:*"):
+    if required_token not in verify_topology_text:
+        fail(f"verify-topology must route explicit current gate ids through gate.registry.yaml: missing {required_token!r}")
 
 
 def baseline_payload(commands: list[str]) -> dict:
@@ -506,6 +523,58 @@ try:
         )
         if drift.returncode == 0 or "required_commands" not in f"{drift.stdout} {drift.stderr}":
             fail("friction-baseline-verify must fail closed on command-list drift")
+
+        fail_contract_path = tmp_path / "friction.baseline.fail.contract.yaml"
+        fail_contract_path.write_text(
+            yaml.safe_dump(
+                {
+                    "artifact": {
+                        "path": "$SPINE_STATE/friction-baseline-fail.yaml",
+                        "checksum_algorithm": "sha256",
+                        "checksum_field": "checksum_sha256",
+                    },
+                    "required_fields": [
+                        "version",
+                        "contract_id",
+                        "generated_at_utc",
+                        "timezone_human",
+                        "loop_id",
+                        "commands",
+                        "baseline_failing_gate_ids",
+                        "checksum_sha256",
+                    ],
+                    "required_commands": ["python3 -c 'import sys; sys.exit(7)'"],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        failed_capture = subprocess.run(
+            ["python3", str(baseline_capture_path), "--contract", str(fail_contract_path), "--json"],
+            cwd=str(root_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if failed_capture.returncode == 0 or "required command failure" not in f"{failed_capture.stdout} {failed_capture.stderr}":
+            fail("friction-baseline-capture must fail closed on failed required commands")
+
+        ids_run = subprocess.run(
+            [str(verify_topology_path), "ids-run", "D127", "D150", "--json"],
+            cwd=str(root_dir),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if ids_run.returncode != 0:
+            fail(f"verify-topology ids-run must execute current D gate ids: rc={ids_run.returncode} stderr={ids_run.stderr.strip()}")
+        try:
+            ids_payload = json.loads(ids_run.stdout)
+        except json.JSONDecodeError as exc:
+            fail(f"verify-topology ids-run D127/D150 did not emit JSON: {exc}")
+        if ids_payload.get("pass") != 2 or ids_payload.get("fail") != 0:
+            fail(f"verify-topology ids-run D127/D150 must prove both pass on current surfaces: {ids_payload!r}")
 finally:
     if not literal_residue_preexisting and literal_residue_dir.exists():
         shutil.rmtree(literal_residue_dir)

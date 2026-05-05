@@ -14,10 +14,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[5]
 CONTRACT = ROOT / "ops/bindings/friction.baseline.contract.yaml"
 DEFAULT_REQUIRED_COMMANDS = [
+    "./bin/ops cap run verify.engine.run",
+    "./bin/ops cap run spine.verify",
     "./bin/ops cap run verify.infra.run",
-    "./bin/ops cap run verify.pack.run loop_gap",
-    "./bin/ops cap run verify.route.recommend",
 ]
+SUCCESS_STATUSES = {"done", "ok", "pass", "passed", "success"}
 
 
 def fail(msg: str) -> int:
@@ -114,16 +115,22 @@ def main() -> int:
 
     results = []
     baseline_ids: list[str] = []
+    failed_commands = []
     for command in commands:
         argv = shlex.split(command)
         rc, output = run_cmd(argv)
         failing = extract_failing_ids(output)
         baseline_ids.extend(failing)
+        parsed_status = extract_status(output)
+        status = parsed_status if rc == 0 and parsed_status != "unknown" else ("done" if rc == 0 else "failed")
+        if rc != 0 or status not in SUCCESS_STATUSES:
+            failed_commands.append({"command": command, "exit_code": rc, "status": status})
         results.append(
             {
                 "command": command,
                 "run_key": extract_run_key(output),
-                "status": extract_status(output) if rc == 0 else "failed",
+                "status": status,
+                "exit_code": rc,
                 "failing_gate_ids": failing,
             }
         )
@@ -159,6 +166,10 @@ def main() -> int:
 
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text(rendered, encoding="utf-8")
+
+    if failed_commands:
+        detail = ", ".join(f"{row['command']} exit={row['exit_code']} status={row['status']}" for row in failed_commands)
+        return fail(f"required command failure(s): {detail}; artifact written for inspection only: {artifact}")
 
     if args.json:
         print(json.dumps({

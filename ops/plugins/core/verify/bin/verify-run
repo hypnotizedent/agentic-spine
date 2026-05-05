@@ -40,6 +40,7 @@ Usage:
   verify-run engine [--json]                  Fast platform engine smoke (spine truth)
   verify-run honesty [--json]                 Engine orchestration proof (spine truth)
   verify-run spine [--json]                   Honest spine-only verify scope (spine truth)
+  verify-run ids <gate_id...> [--json]        Explicit gate-id proof run
   verify-run infra [--json] [--shadow]        Preferred estate/workload health scope
   verify-run domain <domain_id> [--json]      Domain-scoped infrastructure gates (estate health)
   verify-run release [--json] [--shadow]      Full infrastructure gate set (estate health)
@@ -48,6 +49,7 @@ Scopes:
   engine  => platform engine smoke test; answers spine/object truth
   honesty => engine orchestration proof; answers spine/object truth
   spine   => curated spine-only executable set + engine/honesty surfaces
+  ids     => explicit gate-id proof surface; routed by verify.run cap custody
   infra   => infrastructure workload baseline; answers estate/workload health only
   domain  => estate/workload health gates for one domain
   release => full estate/workload health gate set
@@ -73,17 +75,24 @@ scope="${1:-}"
 shift || true
 
 case "$scope" in
-  engine|honesty|spine|infra|domain|release) ;;
+  engine|honesty|spine|ids|infra|domain|release) ;;
   -h|--help|"") usage; exit 0 ;;
   fast) fail "scope 'fast' has been removed; use 'infra' instead" ;;
-  *) fail "unknown scope '$scope' (expected engine|honesty|spine|infra|domain|release)" ;;
+  *) fail "unknown scope '$scope' (expected engine|honesty|spine|ids|infra|domain|release)" ;;
 esac
 
 target_domain=""
+target_gate_ids=()
 if [[ "$scope" == "domain" ]]; then
   [[ $# -ge 1 ]] || fail "domain scope requires <domain_id>"
   target_domain="$1"
   shift
+elif [[ "$scope" == "ids" ]]; then
+  while [[ $# -gt 0 && "${1:-}" != --* ]]; do
+    target_gate_ids+=("$1")
+    shift
+  done
+  ((${#target_gate_ids[@]} > 0)) || fail "ids scope requires at least one <gate_id>"
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -124,7 +133,7 @@ scope_truth_plane() {
   local mode="$1"
   case "$mode" in
     engine|honesty|spine) echo "spine_truth" ;;
-    infra|release|domain:*) echo "estate_health" ;;
+    ids|infra|release|domain:*) echo "estate_health" ;;
     *) echo "unknown" ;;
   esac
 }
@@ -134,6 +143,9 @@ scope_reading() {
   case "$mode" in
     engine|honesty|spine)
       echo "Spine/object truth surface. Reads engine, governance, entry, orchestration, and spine-only execution truth."
+      ;;
+    ids)
+      echo "Explicit gate-id proof surface. Produces receipt-grade pass/fail for named current gate ids; does not imply autonomous drain."
       ;;
     infra|release|domain:*)
       echo "Estate/workload health surface. Reads runtime host, workload, service, backup, and network state; does not answer packet, loop, or governance truth."
@@ -148,7 +160,7 @@ scope_may_block_spine_truth() {
   local mode="$1"
   case "$mode" in
     engine|honesty|spine) echo true ;;
-    infra|release|domain:*) echo false ;;
+    ids|infra|release|domain:*) echo false ;;
     *) echo false ;;
   esac
 }
@@ -179,6 +191,9 @@ emit_scope_note() {
       ;;
     infra|release|domain:*)
       echo "verify.run note: $mode answers estate/workload health only; do not treat it as packet/loop/governance truth." >&2
+      ;;
+    ids)
+      echo "verify.run note: ids answers explicit gate-id proof only; do not treat it as autonomous drain authority." >&2
       ;;
   esac
 }
@@ -703,6 +718,10 @@ case "$scope" in
   engine)  run_scope "engine" "$VERIFY_ENGINE" ;;
   honesty) run_scope "honesty" "$VERIFY_ENGINE_HONESTY" ;;
   spine)   run_spine_scope ;;
+  ids)
+    [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
+    run_scope "ids" "$VERIFY_TOPOLOGY" ids-run "${target_gate_ids[@]}"
+    ;;
   infra)
     [[ "$shadow_mode" -eq 0 ]] || echo "verify.run: --shadow ignored in spine-lite"
     run_estate_health_scope

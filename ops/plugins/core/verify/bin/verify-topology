@@ -161,13 +161,30 @@ governed_fast_gate_rows() {
   printf '%s\n' "$GOVERNED_FAST_GATE_ROWS_SNAPSHOT"
 }
 
+gate_registry_row_json() {
+  local gate_id="$1"
+  load_gate_registry_snapshot
+  printf '%s\n' "$GATE_REGISTRY_SNAPSHOT" \
+  | jq -c --arg gate_id "$gate_id" '
+      map(select(type == "object"))
+      | map(select(((.id // "") | tostring) == $gate_id))
+      | .[0] // empty
+    '
+}
+
 all_gate_ids() {
   governed_fast_gate_rows | awk -F'\t' '{print $1}' | unique_lines
 }
 
 gate_script_rel() {
   local gate_id="$1"
-  governed_fast_gate_rows | awk -F'\t' -v gate_id="$gate_id" '$1 == gate_id {print $2; exit}'
+  local script_rel
+  script_rel="$(governed_fast_gate_rows | awk -F'\t' -v gate_id="$gate_id" '$1 == gate_id {print $2; exit}')"
+  if [[ -n "$script_rel" ]]; then
+    printf '%s\n' "$script_rel"
+    return 0
+  fi
+  gate_registry_row_json "$gate_id" | jq -r '.check_script // ""'
 }
 
 gate_is_retired() {
@@ -179,6 +196,16 @@ gate_is_retired() {
       | .[0]
       | ((.retired // false) == true)
     ' >/dev/null 2>&1
+}
+
+gate_warn_only() {
+  local gate_id="$1"
+  gate_registry_row_json "$gate_id" | jq -e '(.warn_only // false) == true or ((.mode // "") == "report")' >/dev/null 2>&1
+}
+
+gate_exists() {
+  local gate_id="$1"
+  [[ -n "$(gate_registry_row_json "$gate_id")" ]]
 }
 
 domain_gate_ids() {
@@ -291,6 +318,18 @@ run_gate_ids() {
   fi
 
   for gate_id in "${unique_gate_ids[@]}"; do
+    if ! gate_exists "$gate_id"; then
+      fail_count=$((fail_count + 1))
+      failing_ids+=("$gate_id")
+      blocking_fail_ids+=("$gate_id")
+      if [[ "$json_mode" -eq 0 ]]; then
+        echo "==> $gate_id"
+        echo "unknown gate id"
+        echo
+      fi
+      continue
+    fi
+
     if gate_is_retired "$gate_id"; then
       skipped_retired=$((skipped_retired + 1))
       retired_ids+=("$gate_id")
@@ -336,9 +375,14 @@ run_gate_ids() {
     if [[ "$rc" -eq 0 ]]; then
       pass_count=$((pass_count + 1))
     else
-      fail_count=$((fail_count + 1))
-      failing_ids+=("$gate_id")
-      blocking_fail_ids+=("$gate_id")
+      if gate_warn_only "$gate_id"; then
+        warning_count=$((warning_count + 1))
+        warning_ids+=("$gate_id")
+      else
+        fail_count=$((fail_count + 1))
+        failing_ids+=("$gate_id")
+        blocking_fail_ids+=("$gate_id")
+      fi
     fi
   done
 
@@ -521,6 +565,7 @@ resolve_pack_target() {
   local target="${1:-infra}"
   target="$(normalize_domain "$target")"
   case "$target" in
+    D[0-9]*|G[0-9]*) printf 'gate:%s\n' "$target"; return 0 ;;
     *-agent) target="${target%-agent}" ;;
   esac
   domain_exists "$target" || fail "unknown runtime pack target: $target"
@@ -570,6 +615,11 @@ pack_run() {
   done
 
   target="$(resolve_pack_target "${target:-infra}")"
+
+  if [[ "$target" == gate:* ]]; then
+    run_gate_ids "pack:$target" "$json_mode" "${target#gate:}"
+    return $?
+  fi
 
   local gate_ids=()
   while IFS= read -r gate_id; do

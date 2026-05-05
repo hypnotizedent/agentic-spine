@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[5]
 CONTRACT = ROOT / "ops/bindings/friction.baseline.contract.yaml"
+SUCCESS_STATUSES = {"done", "ok", "pass", "passed", "success"}
 
 
 def fail(msg: str) -> int:
@@ -103,6 +104,22 @@ def main() -> int:
                 "artifact commands do not match contract required_commands: "
                 f"expected={expected_commands} actual={actual_commands}"
             )
+        failed_rows = []
+        for row in artifact_commands:
+            if not isinstance(row, dict):
+                failed_rows.append({"command": str(row), "status": "invalid_row", "exit_code": None})
+                continue
+            command = str(row.get("command") or "")
+            status = str(row.get("status") or "").strip().lower()
+            exit_code_raw = row.get("exit_code")
+            try:
+                exit_code = int(exit_code_raw) if exit_code_raw is not None else 0
+            except (TypeError, ValueError):
+                exit_code = 1
+            if exit_code != 0 or status not in SUCCESS_STATUSES:
+                failed_rows.append({"command": command, "status": status or "missing", "exit_code": exit_code})
+        if failed_rows:
+            return fail(f"artifact contains unsuccessful command rows: {failed_rows}")
 
     checksum_field = str(((contract.get("artifact") or {}).get("checksum_field") or "checksum_sha256")).strip()
     declared = str(data.get(checksum_field, "")).strip()
