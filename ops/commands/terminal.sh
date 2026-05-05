@@ -399,7 +399,10 @@ build_entry_cmd() {
     parts+=("cd $(printf '%q' "$launch_cwd")")
 
     # Unset stale old-model env and inherited loop identity so birth state is explicit.
-    parts+=("unset SPINE_ENTRY_PACKET_PATH SPINE_ENTRY_PACKET_HASH SPINE_POLICY_PRESET SPINE_TERMINAL_NAME SPINE_LOOP_ID OPS_WORKTREE_IDENTITY 2>/dev/null; true")
+    # Also clear repo-root env so a previous tool's snapshot of SPINE_TARGET_REPO /
+    # SPINE_REPO / SPINE_CODE / SPINE_ROOT / SPINE_FOUNDATION_ROOT cannot poison the
+    # new terminal's cap.sh resolution (PACKET-1327 split-root contamination repair).
+    parts+=("unset SPINE_ENTRY_PACKET_PATH SPINE_ENTRY_PACKET_HASH SPINE_POLICY_PRESET SPINE_TERMINAL_NAME SPINE_LOOP_ID OPS_WORKTREE_IDENTITY SPINE_TARGET_REPO SPINE_REPO SPINE_CODE SPINE_ROOT SPINE_FOUNDATION_ROOT 2>/dev/null; true")
 
     # Set terminal birth identity and compatibility aliases.
     if [[ -n "$terminal_name" ]]; then

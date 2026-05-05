@@ -316,7 +316,11 @@ spine_runtime_resolve_paths() {
 
   SPINE_CODE="$control_root"
   SPINE_TARGET_REPO="$target_repo"
-  SPINE_REPO="$target_repo"
+  # SPINE_REPO is the spine control root, not the user's target repo. Setting
+  # it to target_repo here would undo cap.sh's split-root contamination fix
+  # (PACKET-1327) and let an ambient SPINE_TARGET_REPO=workbench redirect L1
+  # capabilities that source files via $SPINE_REPO/ops/...
+  SPINE_REPO="$control_root"
 
   local authority_contract="${control_root:+$control_root/ops/bindings/root.authority.contract.yaml}"
   [[ -f "$authority_contract" ]] || authority_contract=""

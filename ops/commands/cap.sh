@@ -27,7 +27,11 @@ if [[ -n "$ACTIVE_CODE_ROOT" ]]; then
 else
     SPINE_CODE="${SPINE_CODE:-$SCRIPT_CODE_ROOT}"
 fi
-SPINE_REPO="$SPINE_TARGET_REPO"
+# SPINE_REPO is the spine control root, not the user's target repo. A
+# valid-but-wrong ambient SPINE_TARGET_REPO must not silently override the
+# active checkout for L1/control-root capabilities — that was the split-root
+# contamination class fixed by PACKET-1327.
+SPINE_REPO="$SPINE_CODE"
 
 _SP_LIB_DIR="${BASH_SOURCE%/*}"
 [[ "$_SP_LIB_DIR" == "${BASH_SOURCE}" ]] && _SP_LIB_DIR="$(pwd)"

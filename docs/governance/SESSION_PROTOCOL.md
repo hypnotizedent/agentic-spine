@@ -707,20 +707,27 @@ When a script needs a repo path, do not collapse control-root and target-root
 meaning:
 
 - `SPINE_CODE` — spine control checkout: contracts, capabilities, bindings,
-  gates, governed helpers, and authority logic.
+  gates, governed helpers, and authority logic. Active code root, cwd-detected
+  git toplevel containing `ops/capabilities.yaml`.
 - `SPINE_TARGET_REPO` — target checkout: the repo/worktree the current
-  operation is about, such as a workbench or packet lane.
-- `SPINE_REPO` — compatibility alias that may equal the target repo after
-  `cap.sh` resolution. Treat unclassified `SPINE_REPO` use as suspect in new
-  code; classify whether the call site needs `SPINE_CODE` or
+  operation is about, such as a workbench or packet lane. May differ from the
+  control root when an explicit ambient `SPINE_TARGET_REPO` names a valid
+  sibling git checkout.
+- `SPINE_REPO` — control-root alias; equals `SPINE_CODE` after `cap.sh`
+  resolution. Most consumers that source files via `$SPINE_REPO/ops/...` want
+  the control root. Treat unclassified `SPINE_REPO` use in new code as
+  suspect; classify whether the call site needs `SPINE_CODE` or
   `SPINE_TARGET_REPO`.
-- `SPINE_ROOT` — generic fallback used by libs that do not import `runtime-paths.sh`
+- `SPINE_ROOT` — generic fallback used by libs that do not import
+  `runtime-paths.sh`; resolved from script location and equal to the control
+  root.
 
 Resolution chain (`ops/commands/cap.sh:24`):
 
 ```
 SPINE_TARGET_REPO ← VALID_AMBIENT_TARGET_REPO || ACTIVE_CODE_ROOT || SPINE_REPO || SPINE_CODE || SCRIPT_CODE_ROOT
-SPINE_REPO ← SPINE_TARGET_REPO (after cap.sh resolution)
+SPINE_CODE        ← ACTIVE_CODE_ROOT || SPINE_CODE || SCRIPT_CODE_ROOT
+SPINE_REPO        ← SPINE_CODE   (control root, never the target — PACKET-1327)
 ```
 
 New code that reads spine contracts, bindings, capabilities, gates, secrets
@@ -728,6 +735,12 @@ binding, runtime-path helpers, or authority logic should resolve from
 `SPINE_CODE` or a `BASH_SOURCE`-relative control root. New code that operates on
 the repo being patched, verified, published, or closed out should use
 `SPINE_TARGET_REPO`.
+
+A valid-but-wrong ambient `SPINE_TARGET_REPO=/path/to/workbench` does not
+redirect `SPINE_REPO` away from the active spine checkout, so caps that read
+`$SPINE_REPO/ops/bindings/...` or `$SPINE_REPO/ops/commands/...` continue to
+resolve against the spine control root. This is locked by engine smoke check
+E18 in `verify-engine` and `verify-engine-smoke-local`.
 
 For workbench paths, use `SPINE_WORKBENCH_ROOT` (PACKET-597 canonical name).
 `SPINE_FOUNDATION_ROOT` is retained as a one-release compatibility alias

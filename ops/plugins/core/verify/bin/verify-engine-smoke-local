@@ -368,6 +368,28 @@ PY
 
 check E17 "surface read-only audit" "$ROOT/ops/plugins/core/surface/bin/surface-readonly-audit"
 
+# E18: cap.sh resolves SPINE_REPO to the active spine control root, not to a
+# valid-but-wrong ambient SPINE_TARGET_REPO. Locks the PACKET-1327 split-root
+# contamination repair so a polluted Workbench env cannot redirect L1 caps that
+# resolve files via $SPINE_REPO/ops/... Uses orchestration-wave as a specimen
+# because that script (line 11) sources $SPINE_REPO/ops/commands/wave.sh
+# without the secrets-root self-correction, so it directly exercises cap.sh
+# resolution semantics rather than a downstream rebind.
+check E18 "cap.sh control-root resolution under polluted ambient env" bash -c '
+    bad_target=""
+    for cand in "$HOME/code/workbench" "/tmp"; do
+        if [[ -d "$cand" && "$cand" != "'"$ROOT"'" ]]; then bad_target="$cand"; break; fi
+    done
+    [[ -n "$bad_target" ]] || exit 0
+    out="$(cd "'"$ROOT"'" && env -u SPINE_CODE -u SPINE_ROOT -u SPINE_FOUNDATION_ROOT \
+        SPINE_TARGET_REPO="$bad_target" SPINE_REPO="$bad_target" \
+        ./bin/ops cap run orchestration.wave.status -- --wave NONEXISTENT 2>&1 || true)"
+    if printf %s "$out" | grep -q "$bad_target/ops/commands/wave.sh: No such file"; then
+        echo "$out" >&2
+        exit 1
+    fi
+'
+
 # Summary
 [[ "$json_mode" -eq 1 ]] || echo ""
 [[ "$json_mode" -eq 1 ]] || echo "  Results: $PASS pass, $FAIL fail (of $TOTAL checks)"
