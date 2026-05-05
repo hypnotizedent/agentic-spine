@@ -276,32 +276,24 @@ fi
 if [[ "$MODE" == "--brief" && "${OPS_STATUS_FULL_BRIEF:-0}" != "1" ]]; then
   exec python3 - "$STATUS_CODE_ROOT" "$STRICT" <<'PYTHON'
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+import yaml
 
 spine = Path(sys.argv[1])
 strict_mode = (sys.argv[2] if len(sys.argv) > 2 else "0") == "1"
 joined_bin = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-engine-joined-state"
 
-try:
-    proc = subprocess.run(
-        ["python3", str(joined_bin), "--json", "--no-write"],
-        capture_output=True,
-        text=True,
-        timeout=8,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}")
-    payload = json.loads(proc.stdout)
-except Exception as exc:
-    print(f"Loops: unknown | Gaps: unknown | Engine: unknown | Spine: unknown | Secondary: unknown | Status: degraded ({exc}) | Anomalies: 1")
-    sys.exit(1 if strict_mode else 0)
-
-summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-verify_payload = payload.get("verify") if isinstance(payload.get("verify"), dict) else {}
-secondary_payload = verify_payload.get("secondary") if isinstance(verify_payload.get("secondary"), dict) else {}
+def _int_env(name, default):
+    try:
+        value = int(os.environ.get(name, str(default)) or default)
+    except Exception:
+        value = default
+    return max(1, value)
 
 def _age_text(minutes):
     try:
@@ -314,64 +306,142 @@ def _age_text(minutes):
         return f"{minutes // 60}h{minutes % 60}m old"
     return f"{minutes}m old"
 
-def secondary_brief_text():
-    status = str(summary.get("secondary_verify_status") or "unknown")
-    if status != "stale":
-        return f"Secondary: {status}"
-    stale_status = str(secondary_payload.get("stale_status") or "unknown")
-    age = _age_text(secondary_payload.get("age_minutes"))
+def _seconds_age_text(seconds):
+    try:
+        seconds = int(seconds)
+    except Exception:
+        return "unknown age"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60}m old"
+    if seconds >= 60:
+        return f"{seconds // 60}m old"
+    return f"{seconds}s old"
+
+def _cache_path():
+    explicit = (os.environ.get("SPINE_ENGINE_JOINED_STATE_PATH") or "").strip()
+    if explicit:
+        return Path(explicit)
+    state_root = (os.environ.get("SPINE_STATE") or "").strip()
+    if state_root:
+        return Path(state_root) / "domain-state" / "spine" / "SPINE_ENGINE_JOINED_STATE.yaml"
+    return spine.parent / ".runtime" / "spine" / "state" / "domain-state" / "spine" / "SPINE_ENGINE_JOINED_STATE.yaml"
+
+def _load_cached_payload():
+    path = _cache_path()
+    try:
+        stat = path.stat()
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None, None, path
+    if not isinstance(payload, dict):
+        return None, None, path
+    return payload, max(0, int(time.time() - stat.st_mtime)), path
+
+def _render(payload, status_note=""):
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    verify_payload = payload.get("verify") if isinstance(payload.get("verify"), dict) else {}
+    secondary_payload = verify_payload.get("secondary") if isinstance(verify_payload.get("secondary"), dict) else {}
+
+    def secondary_brief_text():
+        status = str(summary.get("secondary_verify_status") or "unknown")
+        if status != "stale":
+            return f"Secondary: {status}"
+        stale_status = str(secondary_payload.get("stale_status") or summary.get("secondary_verify_stale_status") or "unknown")
+        age = _age_text(secondary_payload.get("age_minutes"))
+        return (
+            "Secondary: stale "
+            f"(verify.infra.run {stale_status}, {age}; "
+            "run ./bin/ops cap run verify.infra.run -- --json)"
+        )
+
+    open_loops = int(summary.get("open_loops") or 0)
+    loops_source = str(summary.get("open_loops_source") or "")
+    if loops_source == "canonical_routed":
+        loop_part = f"Loops: {open_loops} open (routed)"
+    else:
+        loop_part = f"Loops: {open_loops} open"
+
+    gap_status = str(summary.get("gap_authority_status") or "unknown")
+    open_gaps = summary.get("open_gaps")
+    if gap_status == "routed":
+        gap_part = "Gaps: routed"
+    elif open_gaps is None:
+        gap_part = f"Gaps: {gap_status}"
+    else:
+        gap_part = f"Gaps: {open_gaps} open"
+
+    parts = [
+        loop_part,
+        gap_part,
+        f"Engine: {summary.get('engine_verify_status', 'unknown')}",
+        f"Spine: {summary.get('spine_verify_status', 'unknown')}",
+        secondary_brief_text(),
+    ]
+
+    projection_residue = int(summary.get("projection_residue") or 0)
+    scope_orphans = int(summary.get("scope_only_orphans") or 0)
+    if projection_residue:
+        parts.append(f"Residue: {projection_residue} stale scope file(s)")
+    if scope_orphans:
+        parts.append(f"Scope orphans: {scope_orphans}")
+
+    completion = summary.get("completion_state") if isinstance(summary.get("completion_state"), dict) else {}
+    orphaned = int(completion.get("orphaned") or 0)
+    owned_elsewhere = int(completion.get("owned_elsewhere") or 0)
+    if orphaned or owned_elsewhere:
+        parts.append(f"Worktrees: {orphaned} orphaned / {owned_elsewhere} owned elsewhere")
+
+    coherence_attention = bool(summary.get("engine_coherence_needs_attention"))
+    parts.append("Coherence: attention" if coherence_attention else "Coherence: ok")
+    parts.append("Code drift: skipped")
+    parts.append("Authority: skipped")
+    parts.append("Clerk: skipped")
+    if status_note:
+        parts.append(status_note)
+    anomalies = 1 if coherence_attention else 0
+    parts.append(f"Anomalies: {anomalies}")
+    return " | ".join(parts), anomalies
+
+def _degraded_line(reason):
     return (
-        "Secondary: stale "
-        f"(verify.infra.run {stale_status}, {age}; "
-        "run ./bin/ops cap run verify.infra.run -- --json)"
+        "Loops: unknown | Gaps: unknown | Engine: unknown | Spine: unknown | "
+        "Secondary: unknown | Coherence: unknown | Code drift: skipped | "
+        "Authority: skipped | Clerk: skipped | "
+        f"Status: degraded ({reason}; owner spine-engine-joined-state; "
+        "next run OPS_STATUS_FULL_BRIEF=1 ./bin/ops status --brief) | Anomalies: 1"
     )
 
-open_loops = int(summary.get("open_loops") or 0)
-loops_source = str(summary.get("open_loops_source") or "")
-if loops_source == "canonical_routed":
-    loop_part = f"Loops: {open_loops} open (routed)"
-else:
-    loop_part = f"Loops: {open_loops} open"
+timeout_seconds = _int_env("OPS_STATUS_BRIEF_JOINED_TIMEOUT_SECONDS", 4)
+cache_max_age = _int_env("OPS_STATUS_BRIEF_CACHE_MAX_AGE_SECONDS", 3600)
 
-gap_status = str(summary.get("gap_authority_status") or "unknown")
-open_gaps = summary.get("open_gaps")
-if gap_status == "routed":
-    gap_part = "Gaps: routed"
-elif open_gaps is None:
-    gap_part = f"Gaps: {gap_status}"
-else:
-    gap_part = f"Gaps: {open_gaps} open"
-
-parts = [
-    loop_part,
-    gap_part,
-    f"Engine: {summary.get('engine_verify_status', 'unknown')}",
-    f"Spine: {summary.get('spine_verify_status', 'unknown')}",
-    secondary_brief_text(),
-]
-
-projection_residue = int(summary.get("projection_residue") or 0)
-scope_orphans = int(summary.get("scope_only_orphans") or 0)
-if projection_residue:
-    parts.append(f"Residue: {projection_residue} stale scope file(s)")
-if scope_orphans:
-    parts.append(f"Scope orphans: {scope_orphans}")
-
-completion = summary.get("completion_state") if isinstance(summary.get("completion_state"), dict) else {}
-orphaned = int(completion.get("orphaned") or 0)
-owned_elsewhere = int(completion.get("owned_elsewhere") or 0)
-if orphaned or owned_elsewhere:
-    parts.append(f"Worktrees: {orphaned} orphaned / {owned_elsewhere} owned elsewhere")
-
-coherence_attention = bool(summary.get("engine_coherence_needs_attention"))
-parts.append("Coherence: attention" if coherence_attention else "Coherence: ok")
-parts.append("Code drift: skipped")
-parts.append("Authority: skipped")
-parts.append("Clerk: skipped")
-anomalies = 1 if coherence_attention else 0
-parts.append(f"Anomalies: {anomalies}")
-print(" | ".join(parts))
-sys.exit(1 if strict_mode and anomalies else 0)
+try:
+    if os.environ.get("OPS_STATUS_BRIEF_FORCE_CACHE_FALLBACK") == "1":
+        raise TimeoutError("forced cache fallback")
+    proc = subprocess.run(
+        ["python3", str(joined_bin), "--json", "--no-write"],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}")
+    line, anomalies = _render(json.loads(proc.stdout))
+    print(line)
+    sys.exit(1 if strict_mode and anomalies else 0)
+except Exception as exc:
+    cached, cache_age, cache_path = _load_cached_payload()
+    if cached and cache_age is not None and cache_age <= cache_max_age:
+        line, anomalies = _render(
+            cached,
+            "Status: cached "
+            f"({_seconds_age_text(cache_age)}; joined-state unavailable: {exc}; "
+            "next run OPS_STATUS_FULL_BRIEF=1 ./bin/ops status --brief)",
+        )
+        print(line)
+        sys.exit(1 if strict_mode else 0)
+    print(_degraded_line(str(exc)))
+    sys.exit(1 if strict_mode else 0)
 PYTHON
 fi
 

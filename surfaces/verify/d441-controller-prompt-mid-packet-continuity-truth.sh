@@ -22,6 +22,8 @@ grep -q 'continuity_live' "$STATUS_BIN" || fail "ops status does not classify de
 grep -q 'secondary_verify_readback' "$STATUS_BIN" || fail "ops status JSON must expose actionable secondary verify readback"
 grep -q 'verify.infra.run (scoped estate/workload health, not foundational spine truth)' "$STATUS_BIN" || fail "ops status must name secondary verify owner without promoting it to foundational truth"
 grep -q './bin/ops cap run verify.infra.run -- --json' "$STATUS_BIN" || fail "ops status must name the one secondary verify next command"
+grep -q 'OPS_STATUS_BRIEF_FORCE_CACHE_FALLBACK' "$STATUS_BIN" || fail "ops status brief must expose deterministic cache fallback proof hook"
+grep -q 'Status: cached' "$STATUS_BIN" || fail "ops status brief must render cached fallback instead of all-unknown degradation"
 grep -q 'controller_prompt.status:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing controller_prompt.status"
 grep -q 'controller_prompt.reserve:' "$SPINE_CODE/ops/capabilities.yaml" || fail "capability registry missing controller_prompt.reserve"
 grep -q 'controller_prompt.status' "$SPINE_CODE/ops/plugins/MANIFEST.yaml" || fail "plugin manifest missing controller_prompt.status"
@@ -48,6 +50,40 @@ SPINE_REPO="$TMP_ROOT/not-agentic-spine" \
 SPINE_TARGET_REPO="" \
 SPINE_CODE="$SPINE_CODE" \
   "$STATUS_BIN" --brief >/dev/null || fail "ops status depends on ambient SPINE_REPO instead of its control checkout"
+
+mkdir -p "$STATE_ROOT/domain-state/spine"
+python3 - "$STATE_ROOT/domain-state/spine/SPINE_ENGINE_JOINED_STATE.yaml" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+Path(sys.argv[1]).write_text(
+    yaml.safe_dump(
+        {
+            "summary": {
+                "open_loops": 7,
+                "open_loops_source": "canonical_routed",
+                "gap_authority_status": "routed",
+                "engine_verify_status": "pass",
+                "spine_verify_status": "pass",
+                "secondary_verify_status": "stale",
+                "secondary_verify_stale_status": "pass",
+                "engine_coherence_needs_attention": False,
+                "completion_state": {"orphaned": 0, "owned_elsewhere": 0},
+            },
+            "verify": {"secondary": {"stale_status": "pass", "age_minutes": 90}},
+        },
+        sort_keys=False,
+    ),
+    encoding="utf-8",
+)
+PY
+_cache_path="$STATE_ROOT/domain-state/spine/SPINE_ENGINE_JOINED_STATE.yaml"
+_cache_brief="$(SPINE_ENGINE_JOINED_STATE_PATH="$_cache_path" OPS_STATUS_BRIEF_FORCE_CACHE_FALLBACK=1 "$STATUS_BIN" --brief)"
+[[ "$_cache_brief" == *"Loops: 7 open (routed)"* ]] || fail "ops status brief cache fallback did not preserve cached loop count"
+[[ "$_cache_brief" == *"Status: cached"* ]] || fail "ops status brief cache fallback did not disclose cached fallback"
+[[ "$_cache_brief" != *"Loops: unknown"* ]] || fail "ops status brief cache fallback still collapses to all-unknown"
 
 python3 - "$SPINE_CODE" "$STATE_ROOT" <<'PY'
 import json
@@ -325,6 +361,21 @@ except cpc.ControllerPromptCreateError as exc:
 else:
     raise SystemExit("controller_prompt.create ignored active packet-number reservation")
 
+readonly_reservation_status = json.loads(subprocess.check_output(
+    [
+        sys.executable,
+        str(repo / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "controller-prompt-status"),
+        "--reservations",
+        "--json",
+    ],
+    env=os.environ.copy(),
+    text=True,
+))
+if readonly_reservation_status.get("reservation_summary", {}).get("active_reservation_count") != 1:
+    raise SystemExit("controller_prompt.status does not expose active packet-number reservation readback")
+if readonly_reservation_status.get("reservations", [{}])[0].get("packet_id") != "PACKET-04-D441-OTHER":
+    raise SystemExit("controller_prompt.status reservation readback did not name the active packet id")
+
 reserved_packet = cpc.create_packet(
     packet_id="PACKET-04-D441-OTHER",
     loop_id="LOOP-D441-RESERVATION",
@@ -334,6 +385,18 @@ reserved_packet = cpc.create_packet(
 )
 if not Path(reserved_packet["packet_path"]).is_file():
     raise SystemExit("controller_prompt.create did not birth exact reserved packet")
+readonly_reservation_status_after_birth = json.loads(subprocess.check_output(
+    [
+        sys.executable,
+        str(repo / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "controller-prompt-status"),
+        "--reservations",
+        "--json",
+    ],
+    env=os.environ.copy(),
+    text=True,
+))
+if readonly_reservation_status_after_birth.get("reservation_summary", {}).get("active_reservation_count") != 0:
+    raise SystemExit("controller_prompt.status still counts born packet reservation as active")
 reservation_status = json.loads(subprocess.check_output(
     [
         sys.executable,
@@ -406,5 +469,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0
