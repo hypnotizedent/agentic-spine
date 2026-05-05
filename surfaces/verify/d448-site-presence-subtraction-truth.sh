@@ -10,6 +10,8 @@ CAPS="$ROOT/ops/capabilities.yaml"
 SNAPSHOT="$ROOT/ops/bindings/snapshot.surface.contract.yaml"
 MASTER="$ROOT/ops/bindings/master.inventory.registry.yaml"
 SITE_PRESENCE="$ROOT/ops/plugins/infra/bin/site-presence-status"
+CATALOG="$ROOT/ops/bindings/capability.domain.catalog.yaml"
+MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 
 fail() { echo "D448 FAIL: $*" >&2; exit 1; }
 
@@ -17,7 +19,7 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 
 [[ -x "$SITE_PRESENCE" ]] || fail "missing executable site-presence-status"
 
-python3 - "$ROOT" "$CAPS" "$SNAPSHOT" "$MASTER" "$SITE_PRESENCE" <<'PY'
+python3 - "$ROOT" "$CAPS" "$SNAPSHOT" "$MASTER" "$SITE_PRESENCE" "$CATALOG" "$MANIFEST" <<'PY'
 import json
 import subprocess
 import sys
@@ -30,6 +32,8 @@ caps_path = Path(sys.argv[2])
 snapshot_path = Path(sys.argv[3])
 master_path = Path(sys.argv[4])
 site_presence = Path(sys.argv[5])
+catalog_path = Path(sys.argv[6])
+manifest_path = Path(sys.argv[7])
 
 
 def fail(message: str) -> None:
@@ -78,6 +82,13 @@ for surface_id in [
     text = f"{row.get('consumer_policy', '')} {row.get('subtraction_disposition', '')}"
     if "site_presence" not in text and "site.presence.status" not in text:
         fail(f"{surface_id} demotion must name site presence replacement")
+
+home_registry_surface = by_id.get("home.device.registry") or {}
+if home_registry_surface.get("refresh_binding") != "site.presence.status":
+    fail("home.device.registry refresh_binding must point at site.presence.status, not stale registry reconcile (PACKET-1275)")
+proof = home_registry_surface.get("heartbeat", {}).get("proof_channel", {})
+if proof.get("ref") != "site.presence.status":
+    fail("home.device.registry heartbeat proof must point at replacement site.presence.status readback (PACKET-1275)")
 
 master = load_yaml(master_path)
 rows = master.get("rows") or []
@@ -179,6 +190,54 @@ for cap_name, phrase in snapshot_caps.items():
         fail(f"{cap_name} description must point current site presence authority at site.presence.status (PACKET-1274)")
     if "visibility cannot create node admission" not in desc:
         fail(f"{cap_name} description must subtract visibility-implies-admission grammar (PACKET-1274)")
+
+# PACKET-1275: telemetry-proven dead cap families must not remain as
+# current catalog, capability, manifest, wrapper-script, refresh-binding, or
+# governance-doc authority. The receipt audit behind the packet showed these
+# names were either never live/never ran or stale historical wrappers replaced
+# by first-class site.presence.status and bounded DHCP/readback caps.
+dead_cap_names = {
+    "network.home.device.registry.reconcile",
+    "network.home.dhcp.dns.set",
+    "network.home.dhcp.reservation.create",
+    "network.home.wifi.create",
+    "network.shop.audit.canonical",
+    "network.shop.audit.status",
+    "network.shop.dhcp.reservation.create",
+    "network.shop.pihole.normalize",
+}
+allowed_current_texts = {
+    "ops/bindings/capability.domain.catalog.yaml": catalog_path.read_text(encoding="utf-8"),
+    "ops/capabilities.yaml": caps_path.read_text(encoding="utf-8"),
+    "ops/plugins/MANIFEST.yaml": manifest_path.read_text(encoding="utf-8"),
+    "ops/bindings/snapshot.surface.contract.yaml": snapshot_path.read_text(encoding="utf-8"),
+    "docs/governance/SHOP_SERVER_SSOT.md": (root / "docs/governance/SHOP_SERVER_SSOT.md").read_text(encoding="utf-8"),
+}
+for rel, text in allowed_current_texts.items():
+    present = sorted(name for name in dead_cap_names if name in text)
+    if present:
+        fail(f"{rel} still carries telemetry-subtracted cap names {present} (PACKET-1275)")
+for name in dead_cap_names:
+    if name in dhcp_caps:
+        fail(f"{name} must not be live in ops/capabilities.yaml after Site Intelligence subtraction (PACKET-1275)")
+
+dead_wrapper_paths = [
+    "ops/plugins/infra/network/bin/network-home-dhcp-dns-set",
+    "ops/plugins/infra/network/bin/network-home-dhcp-reservation-create",
+    "ops/plugins/infra/network/bin/network-home-wifi-create",
+    "ops/plugins/infra/network/bin/network-shop-audit-canonical",
+    "ops/plugins/infra/network/bin/network-shop-audit-status",
+    "ops/plugins/infra/network/bin/network-shop-dhcp-reservation-create",
+    "ops/plugins/infra/network/bin/network-shop-pihole-normalize",
+]
+existing_dead_wrappers = [rel for rel in dead_wrapper_paths if (root / rel).exists()]
+if existing_dead_wrappers:
+    fail(f"dead unregistered Site Intelligence/network wrapper scripts still tracked: {existing_dead_wrappers} (PACKET-1275)")
+
+shop_ssot_text = allowed_current_texts["docs/governance/SHOP_SERVER_SSOT.md"]
+for phrase in ["site.presence.status", "node.admission.status", "network.shop.dhcp.audit"]:
+    if phrase not in shop_ssot_text:
+        fail(f"SHOP_SERVER_SSOT.md verification must teach current first-class readback {phrase} (PACKET-1275)")
 
 dhcp_script_expectations = [
     (
@@ -513,5 +572,5 @@ for phrase in required_teaching_phrases:
     if phrase not in proc_h.stdout:
         fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
 
-print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215), home.device.registry.yaml authority_scope is bounded to compatibility evidence (PACKET-1270), DHCP audit/status registry reads are bounded to DHCP intent evidence under site.presence.status presence authority (PACKET-1272), and UniFi snapshot caps are bounded to observed-client compatibility projection evidence (PACKET-1274)")
+print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215), home.device.registry.yaml authority_scope is bounded to compatibility evidence (PACKET-1270), DHCP audit/status registry reads are bounded to DHCP intent evidence under site.presence.status presence authority (PACKET-1272), UniFi snapshot caps are bounded to observed-client compatibility projection evidence (PACKET-1274), and telemetry-proven dead network cap families/wrappers are subtracted from current Site Intelligence surfaces (PACKET-1275)")
 PY

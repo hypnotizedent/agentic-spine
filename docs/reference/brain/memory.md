@@ -32,7 +32,7 @@ scope: agent-memory
 | Gap | Severity | Blocker |
 |-----|----------|---------|
 | **GAP-OP-037** — MD1400 SAS shelf invisible (PM8072 PCI ID mismatch) | critical | Maintenance window + cold power cycle required (all 10 VMs down) |
-| **D54** — SSOT IP parity lock | medium | `network.shop.audit.status` enforces bindings ↔ SSOT parity + coverage for shop LAN identity |
+| **D54** — SSOT IP parity lock | medium | Historical parity lock retired; current shop/site readback uses first-class site presence, node admission, and shop DHCP readback |
 
 ## Health Receipts (anchor truth)
 

@@ -1,8 +1,8 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-04-27
-verification_method: device-identity parity + shop routing audit
+last_verified: 2026-05-05
+verification_method: first-class site presence, node admission, and shop DHCP readback
 scope: shop-control-plane-summary
 ---
 
@@ -50,7 +50,9 @@ Output: `$SPINE_STATE/domain-state/infra.shop.readmodel.md` (runtime only, not c
 ## Verification
 
 ```bash
-./bin/ops cap run network.shop.audit.status
+./bin/ops cap run site.presence.status
+./bin/ops cap run node.admission.status
+./bin/ops cap run network.shop.dhcp.audit
 ./bin/ops cap run spine.ripple.check -- switch-shop
 ./bin/ops cap run spine.ripple.check -- communications-stack
 ```
