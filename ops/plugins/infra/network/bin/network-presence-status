@@ -188,7 +188,7 @@ def site_block(
     }
 
 
-def build_payload() -> dict[str, Any]:
+def build_payload(expert: bool = False) -> dict[str, Any]:
     home_observed = load_yaml(PATHS["home_observed"])
     shop_observed = load_yaml(PATHS["shop_observed"])
     home_dhcp = load_yaml(PATHS["home_dhcp_audit"])
@@ -201,6 +201,15 @@ def build_payload() -> dict[str, Any]:
         "shop", shop_observed, shop_dhcp, PATHS["shop_observed"], PATHS["shop_dhcp_audit"]
     )
 
+    # PACKET-1371: default operator payload omits source_refs (which name old
+    # carrier paths) and per-site dhcp.classification_summary detail; --expert
+    # restores them for provenance debugging. The summary scalars on the site
+    # block (counts) stay so operators can still read the branch state.
+    if not expert:
+        for s in (home, shop):
+            s.pop("source_refs", None)
+            dhcp = s.get("dhcp") or {}
+            dhcp.pop("classification_summary", None)
     return {
         "canonical_authority": "network.presence.status",
         "capability": "network.presence.status",
@@ -225,7 +234,9 @@ def build_payload() -> dict[str, Any]:
             ],
             "admission_authority": "node.admission.status",
         },
-        "private_producers": PRIVATE_PRODUCERS,
+        # PACKET-1371: private producer enumeration is gated under --expert
+        # so the default operator payload no longer names producer caps.
+        **({"private_producers": PRIVATE_PRODUCERS} if expert else {}),
         "sites": {"home": home, "shop": shop},
         "summary": {
             "sites": 2,
@@ -245,7 +256,7 @@ def build_payload() -> dict[str, Any]:
     }
 
 
-def render_human(payload: dict[str, Any]) -> None:
+def render_human(payload: dict[str, Any], expert: bool = False) -> None:
     print("network.presence.status")
     print(f"branch: {payload['branch_role']} (operator label: {payload['operator_label']})")
     summary = payload["summary"]
@@ -257,10 +268,13 @@ def render_human(payload: dict[str, Any]) -> None:
         f"{summary['stale_snapshot_artifacts_total']}"
     )
     print("")
-    print("Private producers (not operator drilldowns):")
-    for prod in payload["private_producers"]:
-        print(f"  {prod['capability']:<40} writes {prod['writes']}")
-    print("")
+    # PACKET-1371: private producer enumeration gated under --expert so the
+    # default operator readback no longer names producer caps.
+    if expert:
+        print("Private producers (not operator drilldowns):")
+        for prod in payload.get("private_producers") or []:
+            print(f"  {prod['capability']:<40} writes {prod['writes']}")
+        print("")
     print("Per-site summary:")
     for site_id, site in payload["sites"].items():
         vis = site["visibility"]
@@ -283,13 +297,20 @@ def render_human(payload: dict[str, Any]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Site Intelligence Network branch readback")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
+    # PACKET-1371: --expert restores private_producers enumeration and
+    # per-site source_refs/classification_summary for provenance debugging.
+    parser.add_argument(
+        "--expert",
+        action="store_true",
+        help="Include private producer enumeration and source provenance — gated under PACKET-1371",
+    )
     args = parser.parse_args()
 
-    payload = build_payload()
+    payload = build_payload(expert=args.expert)
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
-    render_human(payload)
+    render_human(payload, expert=args.expert)
 
 
 if __name__ == "__main__":
