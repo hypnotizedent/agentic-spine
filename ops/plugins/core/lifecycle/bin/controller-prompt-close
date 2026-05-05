@@ -5,7 +5,7 @@ Closes a controller-prompt packet with governed receipt via packet_receipt_write
 When the packet is terminal for its loop, auto-chains loop.closeout.finalize.
 
 Exit codes:
-  0  success (or already closed)
+  0  success (or already closed / corrected)
   1  close failed
   2  invalid arguments
 """
@@ -138,6 +138,8 @@ def main() -> int:
 
         if status == "already_closed":
             print(f"OK: {packet_id} already closed")
+            if result.get("correction_reason"):
+                print(f"  correction: not applicable ({result.get('correction_reason', '')})")
         elif status == "closed":
             print(f"CLOSED: {packet_id}")
             print(f"  receipt: {receipt_path}")
@@ -158,6 +160,16 @@ def main() -> int:
                 print(f"  loop closeout: FAILED — {loop_closeout.get('error', '')}")
             elif loop_closeout_status == "not_attempted":
                 print(f"  loop closeout: skipped ({loop_closeout.get('reason', '')})")
+        elif status == "corrected":
+            print(f"CORRECTED: {packet_id}")
+            print(f"  receipt: {receipt_path}")
+            print(f"  disposition: {result.get('disposition', '')}")
+            correction = result.get("correction", {}) if isinstance(result.get("correction"), dict) else {}
+            if correction:
+                print(
+                    "  correction: "
+                    f"{correction.get('from_disposition', '')} -> {correction.get('to_disposition', '')}"
+                )
         elif status == "partial_failure":
             print(f"PARTIAL: {packet_id}")
             print(f"  receipt: {receipt_path} (written)")
@@ -169,7 +181,7 @@ def main() -> int:
 
     if loop_closeout_status == "failed":
         return 1
-    return 0 if result.get("status") in ("closed", "already_closed") else 1
+    return 0 if result.get("status") in ("closed", "already_closed", "corrected") else 1
 
 
 if __name__ == "__main__":

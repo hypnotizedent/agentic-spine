@@ -343,6 +343,22 @@ reservation_loop = {
     "evidence_refs": [],
     "linked_gaps": [],
 }
+correction_loop = {
+    "loop_id": "LOOP-D441-CORRECTION",
+    "status": "active",
+    "owner": "@test",
+    "created": "20260426",
+    "scope": "verify",
+    "priority": "medium",
+    "horizon": "now",
+    "execution_readiness": "runnable",
+    "execution_mode": "single_worker",
+    "objective": "verify deferred closed packet can be forward-corrected with evidence",
+    "blocked_by": [],
+    "next_action": "prove bounded correction",
+    "evidence_refs": [],
+    "linked_gaps": [],
+}
 
 conn = lsa.connect(state_root / "shared_authority.db")
 try:
@@ -415,6 +431,7 @@ try:
     lsa.upsert_loop(cconn, stale_loop)
     lsa.upsert_loop(cconn, closed_residue_loop)
     lsa.upsert_loop(cconn, reservation_loop)
+    lsa.upsert_loop(cconn, correction_loop)
     cconn.commit()
 finally:
     cconn.close()
@@ -499,6 +516,59 @@ closed_status = json.loads(subprocess.check_output(
 ))
 if closed_status["packets"][0].get("status") != "closed":
     raise SystemExit("controller_prompt.status did not expose closed packet state")
+
+correction_packet = cpc.create_packet(
+    packet_id="PACKET-05-D441-CORRECTION",
+    loop_id="LOOP-D441-CORRECTION",
+    concern="verify deferred close forward correction",
+    state_root=str(state_root),
+    owner="@test",
+)
+deferred_result = cpc_close.close_packet(
+    correction_packet["packet_path"],
+    "deferred",
+    "verify initial deferred close",
+    str(repo),
+    starting_head=head,
+    ending_head=head,
+    verify_result="skip",
+    completion_level="scoped_deferral",
+    auto_close_loop=False,
+)
+if deferred_result.get("status") != "closed":
+    raise SystemExit("controller_prompt.close did not create initial deferred specimen")
+corrected_result = cpc_close.close_packet(
+    correction_packet["packet_path"],
+    "delivered",
+    "verify landed evidence can forward-correct deferred packet close",
+    str(repo),
+    starting_head=head,
+    ending_head=head,
+    evidence_refs=["CAP-D441-CORRECTION-PROOF"],
+    verify_result="pass",
+    completion_level="slice_complete",
+    auto_close_loop=False,
+)
+if corrected_result.get("status") != "corrected":
+    raise SystemExit(f"controller_prompt.close did not forward-correct deferred packet: {corrected_result}")
+if not Path(corrected_result.get("receipt_path", "")).is_file():
+    raise SystemExit("controller_prompt.close forward correction did not write receipt")
+corrected_status = json.loads(subprocess.check_output(
+    [
+        sys.executable,
+        str(repo / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "controller-prompt-status"),
+        "--packet-id",
+        "PACKET-05-D441-CORRECTION",
+        "--json",
+    ],
+    env=os.environ.copy(),
+    text=True,
+))
+corrected_row = corrected_status["packets"][0]
+if corrected_row.get("disposition") != "delivered":
+    raise SystemExit("controller_prompt.status did not expose corrected delivered disposition")
+if corrected_row.get("evidence_ref_count") != 1:
+    raise SystemExit("controller_prompt.status did not expose forward-correction evidence ref")
 
 reservations_dir = state_root / "controller-prompts" / "reservations"
 reservations_dir.mkdir(parents=True, exist_ok=True)
@@ -643,5 +713,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, commit.narrator.artifact.write produces a schema_version=1 yaml with witness_bound declaration and rule_layer + narrative_layer slots and is idempotent across re-runs, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, deferred closed packets can be forward-corrected only with fresh evidence, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0

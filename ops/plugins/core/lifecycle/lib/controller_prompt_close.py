@@ -32,6 +32,9 @@ import delegation_broker as db
 
 
 LEGAL_DISPOSITIONS = frozenset({"delivered", "deferred", "abandoned", "superseded"})
+FORWARD_CORRECTABLE_CLOSED_DISPOSITIONS = {
+    "deferred": frozenset({"delivered"}),
+}
 LOOP_DISPOSITION_BY_PACKET_DISPOSITION = {
     "delivered": "landed",
     "deferred": "deferred",
@@ -242,6 +245,215 @@ def _update_frontmatter(
     new_fm = yaml.safe_dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
     body = text[end:]
     return "---\n" + new_fm + "---" + body
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                out.append(text)
+        return out
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _merge_string_lists(existing: Any, additions: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*_normalize_string_list(existing), *_normalize_string_list(additions)]:
+        if item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    return merged
+
+
+def _closed_packet_forward_correction_reason(
+    *,
+    current_disposition: str,
+    requested_disposition: str,
+    evidence_refs: list[str] | None,
+    verify_result: str,
+    blockers: list[str] | None,
+) -> str:
+    if requested_disposition == current_disposition:
+        return "requested disposition matches closed packet disposition"
+    allowed = FORWARD_CORRECTABLE_CLOSED_DISPOSITIONS.get(current_disposition, frozenset())
+    if requested_disposition not in allowed:
+        return f"closed packet disposition cannot be forward-corrected from {current_disposition or 'unknown'} to {requested_disposition}"
+    if blockers:
+        return "forward correction requires no residual blockers"
+    if (verify_result or "").strip().lower() == "fail":
+        return "forward correction refused because verify_result=fail"
+    if not _normalize_string_list(evidence_refs):
+        return "forward correction requires at least one fresh evidence ref"
+    return ""
+
+
+def _update_closed_frontmatter_correction(
+    *,
+    text: str,
+    corrected_at_utc: str,
+    from_disposition: str,
+    to_disposition: str,
+    receipt_path: str,
+    evidence_refs: list[str] | None,
+    completion_level: str,
+    summary: str,
+) -> str:
+    fm, _, end = _parse_frontmatter(text)
+    fm["disposition"] = to_disposition
+    fm["last_close_correction_at_utc"] = corrected_at_utc
+    fm["last_close_correction_by"] = "controller_prompt.close"
+    fm["last_close_correction_receipt"] = receipt_path
+    fm["last_close_correction_summary"] = summary
+    if completion_level:
+        fm["completion_level"] = completion_level
+    merged_evidence = _merge_string_lists(fm.get("evidence_refs"), evidence_refs)
+    if merged_evidence:
+        fm["evidence_refs"] = merged_evidence
+    if "materialization_status" in fm:
+        current = str(fm.get("materialization_status") or "")
+        new_value, did = _normalize_materialization_status(current, to_disposition)
+        if did:
+            fm["materialization_status"] = new_value
+            fm["materialization_status_prior_at_close_correction"] = current
+
+    history = fm.get("close_correction_history")
+    if not isinstance(history, list):
+        history = []
+    history.append(
+        {
+            "from_disposition": from_disposition,
+            "to_disposition": to_disposition,
+            "corrected_at_utc": corrected_at_utc,
+            "receipt_path": receipt_path,
+            "evidence_refs": _normalize_string_list(evidence_refs),
+        }
+    )
+    fm["close_correction_history"] = history
+
+    new_fm = yaml.safe_dump(fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    body = text[end:]
+    return "---\n" + new_fm + "---" + body
+
+
+def _write_closed_packet_forward_correction(
+    *,
+    packet_path: str,
+    text: str,
+    fm: dict[str, Any],
+    disposition: str,
+    operator_summary: str,
+    spine_repo: str,
+    starting_head: str,
+    ending_head: str,
+    evidence_refs: list[str] | None,
+    completion_level: str,
+    verify_result: str,
+    handoff_refs: list[str] | None,
+) -> dict[str, Any]:
+    packet_id = str(fm.get("packet_id", "")).strip()
+    loop_id = str(fm.get("loop_id", "")).strip()
+    current_disposition = str(fm.get("disposition", "")).strip().lower()
+
+    if not ending_head:
+        ending_head = _resolve_ending_head(spine_repo)
+    if not starting_head:
+        starting_head = ending_head
+
+    spine_state = os.environ.get("SPINE_STATE", "")
+    if not spine_state:
+        raise ControllerPromptCloseError("SPINE_STATE not set; call spine_runtime_resolve_paths first")
+
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    utc_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_packet_id = re.sub(r"[^a-zA-Z0-9_-]", "-", packet_id)
+    receipt_path = os.path.join(
+        spine_state,
+        "domain-state",
+        f"EXEC_RECEIPT-CONTROLLER-PROMPT-{safe_packet_id}-CORRECTION-{utc_stamp}.yaml",
+    )
+
+    receipt_fields: dict[str, Any] = {
+        "wave_id": f"controller-prompt-close-correction-{safe_packet_id}",
+        "starting_head": starting_head,
+        "ending_head": ending_head,
+        "lanes": [
+            {
+                "name": "controller-prompt-close-correction",
+                "status": disposition,
+                "packet_id": packet_id,
+            }
+        ],
+        "final_verify": {"result": verify_result or "not_checked"},
+        "blockers": [],
+        "packet_id": packet_id,
+        "loop_id": loop_id,
+        "packet_path": packet_path,
+        "disposition": disposition,
+        "operator_summary": operator_summary,
+        "closed_at_utc": str(fm.get("closed_at_utc") or fm.get("closed_at") or ""),
+        "corrected_at_utc": now_utc,
+        "source": "controller_prompt.close.forward_correction",
+        "correction": {
+            "from_status": "closed",
+            "from_disposition": current_disposition,
+            "to_disposition": disposition,
+            "authority_effect": "evidence_backfill_and_terminal_disposition_correction_only",
+        },
+    }
+    normalized_evidence = _normalize_string_list(evidence_refs)
+    if normalized_evidence:
+        receipt_fields["evidence_refs"] = normalized_evidence
+    if completion_level:
+        receipt_fields["completion_level"] = completion_level
+    if handoff_refs:
+        receipt_fields["handoff_refs"] = handoff_refs
+
+    try:
+        prw.write_packet_receipt(receipt_path, receipt_fields, spine_repo)
+    except prw.PacketReceiptError as exc:
+        raise ControllerPromptCloseError(f"correction receipt write failed (fail-closed): {exc}") from exc
+
+    updated_text = _update_closed_frontmatter_correction(
+        text=text,
+        corrected_at_utc=now_utc,
+        from_disposition=current_disposition,
+        to_disposition=disposition,
+        receipt_path=receipt_path,
+        evidence_refs=normalized_evidence,
+        completion_level=completion_level,
+        summary=operator_summary,
+    )
+    Path(packet_path).write_text(updated_text, encoding="utf-8")
+
+    return {
+        "status": "corrected",
+        "packet_path": packet_path,
+        "packet_id": packet_id,
+        "loop_id": loop_id,
+        "receipt_path": receipt_path,
+        "disposition": disposition,
+        "corrected_at_utc": now_utc,
+        "correction": {
+            "from_status": "closed",
+            "from_disposition": current_disposition,
+            "to_disposition": disposition,
+            "authority_effect": "evidence_backfill_and_terminal_disposition_correction_only",
+        },
+        "loop_closeout": {
+            "status": "not_attempted",
+            "reason": "packet forward correction does not retry loop closeout",
+        },
+        "message": "closed packet forward-corrected with fresh evidence",
+    }
 
 
 def _load_yaml_file(path: Path) -> dict[str, Any]:
@@ -862,14 +1074,40 @@ def close_packet(
     if not packet_id:
         raise ControllerPromptCloseError("packet frontmatter missing packet_id")
 
-    # Idempotency: already closed → report and succeed
+    # Idempotency: already closed packets remain terminal except for the
+    # bounded deferred->delivered evidence correction path.
     if current_status == "closed":
+        current_disposition = str(fm.get("disposition", "")).strip().lower()
+        correction_reason = _closed_packet_forward_correction_reason(
+            current_disposition=current_disposition,
+            requested_disposition=disposition,
+            evidence_refs=evidence_refs,
+            verify_result=verify_result,
+            blockers=blockers,
+        )
+        if not correction_reason:
+            return _write_closed_packet_forward_correction(
+                packet_path=packet_path,
+                text=text,
+                fm=fm,
+                disposition=disposition,
+                operator_summary=operator_summary,
+                spine_repo=spine_repo,
+                starting_head=starting_head,
+                ending_head=ending_head,
+                evidence_refs=evidence_refs,
+                completion_level=completion_level,
+                verify_result=verify_result,
+                handoff_refs=handoff_refs,
+            )
         return {
             "status": "already_closed",
             "packet_path": packet_path,
             "packet_id": packet_id,
             "loop_id": loop_id,
             "receipt_path": "",
+            "correction_status": "not_applicable",
+            "correction_reason": correction_reason,
             "loop_closeout": {
                 "status": "not_attempted",
                 "reason": "packet already closed; auto close not retried",
