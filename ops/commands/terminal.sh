@@ -450,12 +450,17 @@ POSTURE_EOF
     #   ./bin/ops cap run session.v3.attach -- --expert
     parts+=("{ $(printf '%q' "$SPINE_ROOT/ops/plugins/core/lifecycle/bin/session-v3-attach") --public || true; }")
 
+    # V2.1 Slice 1A: tool exec routed through spine-terminal-session-runner.
+    # Runner is admission's child — terminal.sh keeps identity/posture/loop env
+    # and orientation; runner only supervises the tool process. Passthrough mode
+    # in 1A; bounded buffer + clerk hand-off + heartbeat land in 1C.
     case "$tool" in
-        claude)  parts+=("claude --dangerously-skip-permissions") ;;
-        codex)   parts+=("codex --dangerously-bypass-approvals-and-sandbox") ;;
-        opencode) parts+=("opencode") ;;
-        verify)  parts+=("./bin/ops cap run spine.verify") ;;
-        *)       fail "unknown tool '$tool' (expected: claude|codex|opencode|verify)" ;;
+        claude|codex|opencode|verify)
+            parts+=("$(printf '%q' "$SPINE_ROOT/ops/plugins/core/lifecycle/bin/spine-terminal-session-runner") --tool $(printf '%q' "$tool") --terminal $(printf '%q' "${terminal_name:-}") --loop $(printf '%q' "${loop_id:-}")")
+            ;;
+        *)
+            fail "unknown tool '$tool' (expected: claude|codex|opencode|verify)"
+            ;;
     esac
 
     local result="${parts[0]}"

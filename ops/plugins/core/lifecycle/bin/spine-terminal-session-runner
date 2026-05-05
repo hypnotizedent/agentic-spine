@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""V2.1 Slice 1A passthrough runner — internal terminal plumbing.
+
+Replaces the per-tool exec block in ops/commands/terminal.sh with a single
+uniform supervisor entry point so future slices can wire bounded buffer +
+clerk hand-off + heartbeat without re-touching terminal.sh. Slice 1A scope
+is passthrough only; identity env / orientation stay in terminal.sh.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+
+TOOL_COMMANDS = {
+    "claude":   ["claude", "--dangerously-skip-permissions"],
+    "codex":    ["codex", "--dangerously-bypass-approvals-and-sandbox"],
+    "opencode": ["opencode"],
+    "verify":   ["./bin/ops", "cap", "run", "spine.verify"],
+}
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(
+        description="V2.1 Slice 1A passthrough runner. Internal terminal plumbing.",
+    )
+    p.add_argument("--tool", required=True, choices=sorted(TOOL_COMMANDS.keys()))
+    p.add_argument("--terminal", default="")
+    p.add_argument("--loop", default="")
+    args = p.parse_args(argv)
+
+    cmd = TOOL_COMMANDS[args.tool]
+    os.execvp(cmd[0], cmd)
+    print(
+        f"spine-terminal-session-runner: exec {cmd[0]} failed",
+        file=sys.stderr,
+    )
+    return 127
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
