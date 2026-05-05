@@ -2465,10 +2465,13 @@ if mode == "--brief":
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, ValueError):
             parts.append("Authority: unknown")
     # PACKET-592 Phase 2: clerk rollup. Read clerk's classification of the
-    # current symptoms and compress to a single actionable line:
-    #   Clerk: ok                       (no symptoms classified)
-    #   Clerk: filed (N, 0 need operator)   (all classified, none need action)
-    #   Clerk: action (M of N need operator) (operator should look)
+    # current symptoms and compress to a single actionable line. The default
+    # clerk invocation below is diagnostic/dry-run; only an explicit file mode
+    # may claim filed work.
+    #   Clerk: ok                             (no symptoms classified)
+    #   Clerk: classified (N, 0 need operator) (dry-run classified, none need action)
+    #   Clerk: filed (M filed, N classified)   (explicit file mode filed work)
+    #   Clerk: action (M of N need operator)   (operator should look)
     # The clerk's own dry-run runs in CLERK_SKIP_BRIEF_READ mode to avoid
     # recursing into ops status --brief. Drift + reachability classification
     # is still produced; brief-derived symptoms (Spine/Secondary/Coherence)
@@ -2504,12 +2507,26 @@ if mode == "--brief":
                 _classified = _clerk_payload.get("classified", []) or []
                 _need_op = sum(1 for r in _classified if r.get("autonomy") == "stop_and_ask")
                 _total = len(_classified)
+                _mode = str(_clerk_payload.get("mode") or "")
+                _filings = _clerk_payload.get("filings") or []
                 if _total == 0:
                     parts.append("Clerk: ok")
-                elif _need_op == 0:
-                    parts.append(f"Clerk: filed ({_total} classified, 0 need operator)")
-                else:
+                elif _need_op > 0:
                     parts.append(f"Clerk: action ({_need_op} of {_total} need operator)")
+                elif _mode == "file" and isinstance(_filings, list) and _filings:
+                    _filed = 0
+                    for _filing in _filings:
+                        if not isinstance(_filing, dict):
+                            continue
+                        _result = _filing.get("result") or {}
+                        if isinstance(_result, dict) and _result.get("filed"):
+                            _filed += 1
+                    if _filed > 0:
+                        parts.append(f"Clerk: filed ({_filed} filed, {_total} classified, 0 need operator)")
+                    else:
+                        parts.append(f"Clerk: classified ({_total} classified, 0 need operator)")
+                else:
+                    parts.append(f"Clerk: classified ({_total} classified, 0 need operator)")
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, ValueError):
             parts.append("Clerk: unknown")
     parts.append(f"Anomalies: {len(anomalies)}")

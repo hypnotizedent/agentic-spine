@@ -22,6 +22,7 @@ import yaml
 ROOT = Path(os.environ.get("SPINE_ROOT", Path(__file__).resolve().parents[5]))
 CAPABILITIES_PATH = ROOT / "ops" / "capabilities.yaml"
 WORKER_CONTRACT_PATH = ROOT / "ops" / "bindings" / "mailroom.task.worker.contract.yaml"
+FRICTION_DRAIN_CAPS = ("friction.reconcile", "friction.dispose")
 
 
 BUCKET_ORDER = [
@@ -149,6 +150,20 @@ def build_readback() -> dict[str, Any]:
         and str(meta.get("approval") or "").strip() == "auto"
         and capability_id not in worker_allowlist
     )
+    friction_drain_allowlisted = sorted(
+        capability_id
+        for capability_id in FRICTION_DRAIN_CAPS
+        if capability_id in worker_allowlist
+    )
+    friction_drain_missing = sorted(
+        capability_id
+        for capability_id in FRICTION_DRAIN_CAPS
+        if capability_id not in worker_allowlist
+    )
+    friction_drain_worker_owned = not friction_drain_missing
+    friction_drain_caps_present = {
+        capability_id: capability_id in capabilities for capability_id in FRICTION_DRAIN_CAPS
+    }
 
     bucket_counts = {bucket: len(buckets.get(bucket, [])) for bucket in BUCKET_ORDER}
     return {
@@ -167,6 +182,18 @@ def build_readback() -> dict[str, Any]:
         },
         "worker_allowlist": sorted(worker_allowlist),
         "missing_worker_allowlist_entries": missing_allowlist_entries,
+        "friction_drain": {
+            "status": "worker_owned" if friction_drain_worker_owned else "not_worker_owned",
+            "worker_owned": friction_drain_worker_owned,
+            "required_caps": sorted(FRICTION_DRAIN_CAPS),
+            "capabilities_present": friction_drain_caps_present,
+            "allowlisted_caps": friction_drain_allowlisted,
+            "missing_caps": friction_drain_missing,
+            "readback": (
+                "friction is not autonomously drained by the mailroom worker unless "
+                "every required friction drain cap is in the worker allowlist"
+            ),
+        },
         "counts": {
             "total_capabilities": len(capabilities),
             "retired": raw_counts.get("retired", 0),
@@ -200,6 +227,15 @@ def emit_human(payload: dict[str, Any], list_bucket: str | None) -> None:
         print("missing_worker_allowlist_entries:")
         for item in payload["missing_worker_allowlist_entries"]:
             print(f"  - {item}")
+    print()
+    friction_drain = payload["friction_drain"]
+    print("friction_drain:")
+    print(f"  status: {friction_drain['status']}")
+    print(f"  worker_owned: {friction_drain['worker_owned']}")
+    print(f"  required_caps: {', '.join(friction_drain['required_caps'])}")
+    print(f"  allowlisted_caps: {', '.join(friction_drain['allowlisted_caps']) or '(none)'}")
+    print(f"  missing_caps: {', '.join(friction_drain['missing_caps']) or '(none)'}")
+    print(f"  readback: {friction_drain['readback']}")
     print()
     print("bucket_counts:")
     for bucket in BUCKET_ORDER:

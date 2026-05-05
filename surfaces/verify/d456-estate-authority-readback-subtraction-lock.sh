@@ -286,9 +286,14 @@ if not str(placement_consumes.get("evidence_plane_path") or "").startswith("/md1
     fail("runtime.checkout.placement.yaml consumes_canonical_plane_access.evidence_plane_path must point at canonical /md1400/spine/state/ (PACKET-840 Stage 2 organ 3)")
 
 friction_queue_text = (root_dir / "ops/plugins/core/lifecycle/bin/friction-queue-status").read_text(encoding="utf-8")
-for required_token in ('"canonical_plane_access_role"', '"plane_access_source"', '"evidence_refs_classification"', "_classify_evidence_ref"):
+for required_token in ('"canonical_plane_access_role"', '"plane_access_source"', '"evidence_refs_classification"', '"drain_lifecycle"', '"worker_drain"', "_classify_evidence_ref"):
     if required_token not in friction_queue_text:
         fail(f"friction-queue-status must emit {required_token} (PACKET-840 Stage 2 organ 4)")
+
+capability_autonomy_text = (root_dir / "ops/plugins/core/authority/bin/capability-autonomy-status").read_text(encoding="utf-8")
+for required_token in ('FRICTION_DRAIN_CAPS', '"friction_drain"', '"worker_owned"', '"missing_caps"'):
+    if required_token not in capability_autonomy_text:
+        fail(f"capability-autonomy-status must expose friction drain worker ownership: missing {required_token} (PACKET-1307)")
 
 clerk_text = (root_dir / "ops/plugins/infra/host/bin/clerk-symptom-classify-and-file").read_text(encoding="utf-8")
 for required_token in ('"canonical_plane_access_role"', '"plane_access_source"', '"output_disposition"', '"canonical_filing_path"', "local_diagnostic_not_canonical_friction_state"):

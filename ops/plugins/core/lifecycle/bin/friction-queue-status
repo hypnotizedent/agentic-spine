@@ -11,6 +11,11 @@ import socket
 import sys
 from pathlib import Path
 
+try:
+    import yaml
+except Exception:  # pragma: no cover - runtime readback degrades explicitly below.
+    yaml = None
+
 ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 
@@ -19,6 +24,8 @@ import gaps_sql_authority as authority  # noqa: E402
 CANONICAL_PLANE_ACCESS_BINDING = (
     "ops/bindings/node.role.contract.yaml#canonical_plane_access.by_role"
 )
+WORKER_CONTRACT_PATH = ROOT / "ops" / "bindings" / "mailroom.task.worker.contract.yaml"
+FRICTION_DRAIN_CAPS = ("friction.reconcile", "friction.dispose")
 
 
 def _local_hostname() -> str:
@@ -117,6 +124,154 @@ def _by_disposition(conn) -> dict[str, int]:
     return counts
 
 
+def _count(conn, sql: str) -> int:
+    row = conn.execute(sql).fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row["c"])
+    except (KeyError, TypeError, ValueError):
+        return int(row[0])
+
+
+def _rows_to_counts(conn, sql: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in conn.execute(sql).fetchall():
+        try:
+            key = str(row["k"] or "unknown")
+            count = int(row["c"])
+        except (KeyError, TypeError, ValueError):
+            key = str(row[0] or "unknown")
+            count = int(row[1])
+        counts[key] = count
+    return counts
+
+
+def _drain_lifecycle_summary(conn, by_disposition: dict[str, int]) -> dict[str, object]:
+    """Expose whether filed/closed friction is connected to live gap truth."""
+    filed_total = _count(conn, "SELECT COUNT(*) AS c FROM friction WHERE status = 'filed'")
+    filed_with_gap_id = _count(
+        conn,
+        """
+        SELECT COUNT(*) AS c
+        FROM friction
+        WHERE status = 'filed'
+          AND filed_gap_id IS NOT NULL
+          AND TRIM(filed_gap_id) != ''
+        """,
+    )
+    filed_without_gap_id = max(0, filed_total - filed_with_gap_id)
+    filed_gap_join_present = _count(
+        conn,
+        """
+        SELECT COUNT(*) AS c
+        FROM friction f
+        JOIN gaps g ON g.gap_id = f.filed_gap_id
+        WHERE f.status = 'filed'
+          AND f.filed_gap_id IS NOT NULL
+          AND TRIM(f.filed_gap_id) != ''
+        """,
+    )
+    filed_gap_join_missing = max(0, filed_with_gap_id - filed_gap_join_present)
+
+    all_with_gap_id = _count(
+        conn,
+        """
+        SELECT COUNT(*) AS c
+        FROM friction
+        WHERE filed_gap_id IS NOT NULL
+          AND TRIM(filed_gap_id) != ''
+        """,
+    )
+    all_gap_join_present = _count(
+        conn,
+        """
+        SELECT COUNT(*) AS c
+        FROM friction f
+        JOIN gaps g ON g.gap_id = f.filed_gap_id
+        WHERE f.filed_gap_id IS NOT NULL
+          AND TRIM(f.filed_gap_id) != ''
+        """,
+    )
+    all_gap_join_missing = max(0, all_with_gap_id - all_gap_join_present)
+
+    filed_current_gap_statuses = _rows_to_counts(
+        conn,
+        """
+        SELECT
+          CASE
+            WHEN g.gap_id IS NULL THEN 'missing_gap'
+            ELSE COALESCE(NULLIF(TRIM(g.status), ''), 'unknown')
+          END AS k,
+          COUNT(*) AS c
+        FROM friction f
+        LEFT JOIN gaps g ON g.gap_id = f.filed_gap_id
+        WHERE f.status = 'filed'
+          AND f.filed_gap_id IS NOT NULL
+          AND TRIM(f.filed_gap_id) != ''
+        GROUP BY k
+        ORDER BY k
+        """,
+    )
+
+    closed_total = sum(by_disposition.values())
+    closed_unstructured_legacy = by_disposition.get("unstructured_legacy", 0)
+    return {
+        "filed_total": filed_total,
+        "filed_with_gap_id": filed_with_gap_id,
+        "filed_without_gap_id": filed_without_gap_id,
+        "filed_gap_join_present": filed_gap_join_present,
+        "filed_gap_join_missing": filed_gap_join_missing,
+        "filed_current_gap_statuses": filed_current_gap_statuses,
+        "all_rows_with_gap_id": all_with_gap_id,
+        "all_rows_gap_join_present": all_gap_join_present,
+        "all_rows_gap_join_missing": all_gap_join_missing,
+        "closed_total": closed_total,
+        "closed_structured_disposition_count": max(
+            0, closed_total - closed_unstructured_legacy
+        ),
+        "closed_unstructured_legacy_count": closed_unstructured_legacy,
+    }
+
+
+def _worker_allowlist() -> tuple[set[str], str]:
+    if yaml is None:
+        return set(), "unavailable:pyyaml_not_importable"
+    try:
+        loaded = yaml.safe_load(WORKER_CONTRACT_PATH.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        return set(), f"unavailable:{exc.__class__.__name__}"
+    task_execution = loaded.get("task_execution") or {}
+    if not isinstance(task_execution, dict):
+        return set(), "unavailable:task_execution_not_mapping"
+    return {
+        str(item).strip()
+        for item in task_execution.get("capability_allowlist", [])
+        if str(item).strip()
+    }, "ok"
+
+
+def _worker_drain_summary() -> dict[str, object]:
+    worker_allowlist, source_status = _worker_allowlist()
+    required = set(FRICTION_DRAIN_CAPS)
+    allowlisted = sorted(required.intersection(worker_allowlist))
+    missing = sorted(required.difference(worker_allowlist))
+    worker_owned = source_status == "ok" and not missing
+    return {
+        "status": "worker_owned" if worker_owned else "not_worker_owned",
+        "worker_owned": worker_owned,
+        "required_caps": sorted(required),
+        "allowlisted_caps": allowlisted,
+        "missing_caps": missing,
+        "worker_contract": str(WORKER_CONTRACT_PATH.relative_to(ROOT)),
+        "worker_contract_read": source_status,
+        "boundary": (
+            "friction drain requires explicit capability custody; "
+            "approval:auto is not unattended worker ownership"
+        ),
+    }
+
+
 def main() -> int:
     db_path, _ = authority.resolve_paths(ROOT)
     conn = authority.connect(db_path)
@@ -126,6 +281,8 @@ def main() -> int:
     total = authority.friction_count(conn)
     by_disposition = _by_disposition(conn)
     evidence_refs_classification = _evidence_refs_summary(conn)
+    drain_lifecycle = _drain_lifecycle_summary(conn, by_disposition)
+    worker_drain = _worker_drain_summary()
 
     status_counts = stats.get("by_status", {})
     open_count = sum(
@@ -149,6 +306,8 @@ def main() -> int:
         "by_severity": stats.get("by_severity", {}),
         "by_disposition": by_disposition,
         "evidence_refs_classification": evidence_refs_classification,
+        "drain_lifecycle": drain_lifecycle,
+        "worker_drain": worker_drain,
     }
 
     conn.close()
@@ -174,6 +333,21 @@ def main() -> int:
             print("evidence_refs_classification (closed):")
             for cls, count in sorted(evidence_refs_classification.items()):
                 print(f"  {cls}: {count}")
+        print("drain_lifecycle:")
+        for key, value in drain_lifecycle.items():
+            if isinstance(value, dict):
+                print(f"  {key}:")
+                for inner_key, inner_value in sorted(value.items()):
+                    print(f"    {inner_key}: {inner_value}")
+            else:
+                print(f"  {key}: {value}")
+        print("worker_drain:")
+        print(f"  status: {worker_drain['status']}")
+        print(f"  worker_owned: {worker_drain['worker_owned']}")
+        print(f"  required_caps: {', '.join(worker_drain['required_caps'])}")
+        print(f"  allowlisted_caps: {', '.join(worker_drain['allowlisted_caps']) or '(none)'}")
+        print(f"  missing_caps: {', '.join(worker_drain['missing_caps']) or '(none)'}")
+        print(f"  boundary: {worker_drain['boundary']}")
         print(f"db_path: {db_path}")
     return 0
 
