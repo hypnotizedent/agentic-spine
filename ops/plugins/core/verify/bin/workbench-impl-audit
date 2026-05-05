@@ -139,9 +139,17 @@ def resolve_repo_ref(ref: str, repo_refs: dict[str, Path]) -> Path:
     return repo_refs.get(ref, expand(ref))
 
 
-def build_allowed_locations(boundary: dict[str, Any]) -> tuple[AllowedLocation, list[dict[str, Any]], dict[str, Path]]:
-    spine_repo = expand(require_string(boundary.get("spine", {}).get("canonical_repo"), "spine.canonical_repo"))
-    workbench_repo = expand(require_string(boundary.get("workbench", {}).get("canonical_repo"), "workbench.canonical_repo"))
+def build_allowed_locations(boundary: dict[str, Any], target_root: Path) -> tuple[AllowedLocation, list[dict[str, Any]], dict[str, Path]]:
+    # The fabric contract stores the canonical authoring-path shape, but this
+    # audit may run from a managed runtime checkout such as /opt/agentic-spine.
+    # The `spine` repo ref must mean the audited checkout, not a MacBook path
+    # serialized into the contract.
+    _spine_repo_declared = expand(require_string(boundary.get("spine", {}).get("canonical_repo"), "spine.canonical_repo"))
+    spine_repo = target_root.resolve()
+    workbench_repo = expand(
+        os.environ.get("SPINE_WORKBENCH_ROOT")
+        or require_string(boundary.get("workbench", {}).get("canonical_repo"), "workbench.canonical_repo")
+    )
     repo_refs = {"spine": spine_repo, "workbench": workbench_repo}
 
     policy = boundary.get("domain_external_implementation_boundary")
@@ -210,7 +218,7 @@ def main() -> int:
         fail(f"expected capabilities mapping in {caps_path}")
 
     boundary = load_yaml(boundary_path)
-    default_location, override_rules_raw, repo_refs = build_allowed_locations(boundary)
+    default_location, override_rules_raw, repo_refs = build_allowed_locations(boundary, root)
 
     all_rules: list[AllowedLocation] = [default_location]
     for raw in override_rules_raw:
@@ -218,13 +226,15 @@ def main() -> int:
             fail("domain_external_implementation_boundary.allowed_location_overrides contains a non-mapping entry")
         all_rules.append(build_override(raw, repo_refs))
 
-    total = ok = missing = metadata_errors = repo_errors = 0
+    total = ok = missing = host_unavailable = metadata_errors = repo_errors = 0
     domain_total: dict[str, int] = {}
     domain_ok: dict[str, int] = {}
     domain_missing: dict[str, int] = {}
+    domain_host_unavailable: dict[str, int] = {}
     metadata_entries: list[str] = []
     repo_entries: list[str] = []
     missing_entries: list[str] = []
+    host_unavailable_entries: list[str] = []
     list_entries: list[str] = []
 
     for capability_id, payload in capabilities.items():
@@ -291,6 +301,12 @@ def main() -> int:
             domain_ok[domain] = domain_ok.get(domain, 0) + 1
             if args.list:
                 list_entries.append(f"{capability_id}|{domain}|ok|{chosen_rule.rule_id}|{target}")
+        elif not chosen_rule.repo.exists():
+            host_unavailable += 1
+            domain_host_unavailable[domain] = domain_host_unavailable.get(domain, 0) + 1
+            host_unavailable_entries.append(f"{capability_id}|{domain}|{chosen_rule.rule_id}|{target}")
+            if args.list:
+                list_entries.append(f"{capability_id}|{domain}|host_unavailable|{chosen_rule.rule_id}|{target}")
         else:
             missing += 1
             domain_missing[domain] = domain_missing.get(domain, 0) + 1
@@ -307,6 +323,7 @@ def main() -> int:
     print(f"domain_external_capabilities: {total}")
     print(f"resolved_paths_exist: {ok}")
     print(f"missing_paths: {missing}")
+    print(f"host_unavailable_paths: {host_unavailable}")
     print(f"metadata_errors: {metadata_errors}")
     print(f"repo_errors: {repo_errors}")
     print()
@@ -322,7 +339,7 @@ def main() -> int:
     else:
         for domain in sorted(domain_total):
             print(
-                f"  - {domain}: total={domain_total.get(domain, 0)} ok={domain_ok.get(domain, 0)} missing={domain_missing.get(domain, 0)}"
+                f"  - {domain}: total={domain_total.get(domain, 0)} ok={domain_ok.get(domain, 0)} missing={domain_missing.get(domain, 0)} host_unavailable={domain_host_unavailable.get(domain, 0)}"
             )
 
     if metadata_entries:
@@ -343,6 +360,13 @@ def main() -> int:
         print()
         print("missing_paths_detail:")
         for row in missing_entries:
+            capability_id, domain, authority, target = row.split("|", 3)
+            print(f"  - {capability_id} (domain={domain}, authority={authority}): {target}")
+
+    if host_unavailable_entries:
+        print()
+        print("host_unavailable_paths_detail:")
+        for row in host_unavailable_entries:
             capability_id, domain, authority, target = row.split("|", 3)
             print(f"  - {capability_id} (domain={domain}, authority={authority}): {target}")
 
