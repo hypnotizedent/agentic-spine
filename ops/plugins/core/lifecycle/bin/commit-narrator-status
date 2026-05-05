@@ -256,14 +256,40 @@ def classify_commit(commit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def recent_commits(ref: str, limit: int) -> list[dict[str, Any]]:
-    proc = git(
-        "log",
-        ref,
-        f"--max-count={limit}",
-        "--date=iso-strict",
-        "--format=%H%x1f%aI%x1f%an%x1f%ae%x1f%s",
-    )
+_SINCE_COMPACT_RE = re.compile(
+    r"^(\d+)\s*\.?\s*(d|day|days|w|week|weeks|h|hour|hours|m|month|months)$",
+    re.IGNORECASE,
+)
+_SINCE_UNIT_MAP = {
+    "d": "days", "day": "days", "days": "days",
+    "w": "weeks", "week": "weeks", "weeks": "weeks",
+    "h": "hours", "hour": "hours", "hours": "hours",
+    "m": "months", "month": "months", "months": "months",
+}
+
+
+def normalize_since(value: str) -> str:
+    """Translate compact forms like '14.days' into git's '14 days ago' shape.
+
+    ISO dates and any other free-form value are passed through verbatim so
+    git --since can interpret them (git accepts many natural-language forms).
+    """
+    text = value.strip()
+    match = _SINCE_COMPACT_RE.match(text)
+    if not match:
+        return text
+    n = match.group(1)
+    unit = _SINCE_UNIT_MAP[match.group(2).lower()]
+    return f"{n} {unit} ago"
+
+
+def recent_commits(ref: str, limit: int, since: str | None = None) -> list[dict[str, Any]]:
+    log_args = ["log", ref, "--date=iso-strict",
+                "--format=%H%x1f%aI%x1f%an%x1f%ae%x1f%s"]
+    if since:
+        log_args.append(f"--since={normalize_since(since)}")
+    log_args.append(f"--max-count={limit}")
+    proc = git(*log_args)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "git log failed")
     rows: list[dict[str, Any]] = []
@@ -388,19 +414,24 @@ def input_readbacks(nodes: list[str]) -> dict[str, Any]:
 
 
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
-    commits = recent_commits(args.ref, args.limit)
+    since = getattr(args, "since", None)
+    commits = recent_commits(args.ref, args.limit, since=since)
+    scope: dict[str, Any] = {
+        "class": "witness",
+        "subject": "commit_class_estate_narrative",
+        "ref": args.ref,
+        "limit": args.limit,
+        "read_depth": READ_BOUNDARY,
+    }
+    if since:
+        scope["since"] = since
+        scope["since_normalized"] = normalize_since(since)
     payload: dict[str, Any] = {
         "canonical_authority": CAPABILITY,
         "capability": CAPABILITY,
         "status": "ok",
         "generated_at": datetime.now(UTC).isoformat(),
-        "scope": {
-            "class": "witness",
-            "subject": "commit_class_estate_narrative",
-            "ref": args.ref,
-            "limit": args.limit,
-            "read_depth": READ_BOUNDARY,
-        },
+        "scope": scope,
         "authority_boundary": {
             "mutation_access": "none",
             "decision_authority": "none",
@@ -496,17 +527,62 @@ def print_human(payload: dict[str, Any]) -> None:
         print(f"  paths: {shown}{suffix}")
 
 
+def print_markdown(payload: dict[str, Any]) -> None:
+    scope = payload.get("scope") or {}
+    summary = payload.get("direction_signals") or {}
+    since = scope.get("since")
+    print(f"# Commit Narrator — {scope.get('ref')}" + (f" since {since}" if since else ""))
+    print()
+    print(f"**generated:** {payload.get('generated_at')}")
+    print(f"**inspected:** {summary.get('count_inspected')} commit(s)")
+    print(f"**operator_eye:** {summary.get('operator_eye_count')}")
+    print(f"**authority:** witness signal only; mutation_access=none; decision_authority=none")
+    if since:
+        print(f"**since:** {since} → {scope.get('since_normalized')}")
+    print()
+    print("## Direction signals")
+    for signal, count in (summary.get("by_direction_signal") or {}).items():
+        print(f"- `{signal}`: {count}")
+    print()
+    eye = summary.get("operator_eye") or []
+    if eye:
+        print("## Operator-eye flagged")
+        for row in eye:
+            print(f"- `{row.get('sha')}` — {row.get('subject')}")
+            print(f"  - signal: `{row.get('direction_signal')}`")
+            print(f"  - reason: {row.get('reason')}")
+        print()
+    commits = payload.get("commits") or []
+    print(f"## All commits ({len(commits)})")
+    for row in commits:
+        print(
+            f"- `{row.get('short_sha')}` {row.get('direction_signal')} "
+            f"conf={row.get('confidence')} — {row.get('subject')}"
+        )
+        paths = row.get("paths") or []
+        shown = ", ".join(paths[:5])
+        suffix = f" (+{len(paths) - 5} more)" if len(paths) > 5 else ""
+        if paths:
+            print(f"  - paths: {shown}{suffix}")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Read-only commit-class narrative witness")
     parser.add_argument("--ref", default="HEAD", help="Git ref to inspect")
-    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Recent commit count")
+    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Recent commit count (or safety cap when --since is supplied)")
+    parser.add_argument("--since", default=None, help="Filter to commits within window. Accepts compact forms like 14.days, 7d, 2w, 24h, 2.months, or git-readable forms (ISO date, '2 weeks ago').")
+    parser.add_argument("--format", dest="format", choices=("line", "markdown", "json"), default="line", help="Output format (default: line). --json is a compat alias for --format json.")
     parser.add_argument("--input-node", action="append", default=[], help="Node id to summarize via node.admission.status")
     parser.add_argument("--skip-input-readbacks", action="store_true", help="Do not invoke node/site input readbacks")
-    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    parser.add_argument("--json", action="store_true", help="Compat alias for --format json")
     parser.add_argument("--self-check", action="store_true", help="Run a lightweight self-check")
     args = parser.parse_args(argv)
-    if args.limit < 1 or args.limit > 100:
-        parser.error("--limit must be between 1 and 100")
+    if args.json:
+        args.format = "json"
+    if args.since is not None and args.limit == DEFAULT_LIMIT:
+        args.limit = 200
+    if args.limit < 1 or args.limit > 500:
+        parser.error("--limit must be between 1 and 500")
     if not args.input_node:
         args.input_node = list(DEFAULT_INPUT_NODES)
     return args
@@ -523,8 +599,10 @@ def main(argv: list[str]) -> int:
     except Exception as exc:
         print(f"{CAPABILITY} FAIL: {exc}", file=sys.stderr)
         return 1
-    if args.json:
+    if args.format == "json":
         print(json.dumps(payload, indent=2, sort_keys=True))
+    elif args.format == "markdown":
+        print_markdown(payload)
     else:
         print_human(payload)
     return 0

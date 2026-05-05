@@ -69,6 +69,39 @@ if (payload.get("input_readbacks") or {}).get("status") != "skipped":
     raise SystemExit("commit narrator --skip-input-readbacks did not report skipped input readbacks")
 PY
 
+NARRATOR_SINCE_PAYLOAD="$("$COMMIT_NARRATOR_BIN" --since 30.days --format json --limit 5 --skip-input-readbacks)"
+python3 - "$NARRATOR_SINCE_PAYLOAD" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+scope = payload.get("scope") or {}
+if scope.get("since") != "30.days":
+    raise SystemExit("commit narrator --since did not record raw since value in scope")
+if scope.get("since_normalized") != "30 days ago":
+    raise SystemExit("commit narrator --since did not normalize compact form to git-readable string")
+PY
+
+NARRATOR_MARKDOWN_OUT="$("$COMMIT_NARRATOR_BIN" --limit 2 --format markdown --skip-input-readbacks)"
+[[ "$NARRATOR_MARKDOWN_OUT" == "# Commit Narrator"* ]] || fail "commit.narrator.status --format markdown must emit a Commit Narrator header"
+[[ "$NARRATOR_MARKDOWN_OUT" == *"## Direction signals"* ]] || fail "commit.narrator.status --format markdown must include the Direction signals section"
+[[ "$NARRATOR_MARKDOWN_OUT" == *"## All commits"* ]] || fail "commit.narrator.status --format markdown must include the All commits section"
+[[ "$NARRATOR_MARKDOWN_OUT" == *"witness signal only"* ]] || fail "commit.narrator.status --format markdown must teach witness-only authority bound"
+
+NARRATOR_FORMAT_JSON="$("$COMMIT_NARRATOR_BIN" --limit 2 --format json --skip-input-readbacks)"
+python3 - "$NARRATOR_PAYLOAD" "$NARRATOR_FORMAT_JSON" <<'PY'
+import json
+import sys
+
+a = json.loads(sys.argv[1])
+b = json.loads(sys.argv[2])
+for key in ("generated_at",):
+    a.pop(key, None)
+    b.pop(key, None)
+if a != b:
+    raise SystemExit("--json compat alias must produce same payload as --format json")
+PY
+
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/d441-mid-packet.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 STATE_ROOT="$TMP_ROOT/state"
@@ -507,5 +540,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0
