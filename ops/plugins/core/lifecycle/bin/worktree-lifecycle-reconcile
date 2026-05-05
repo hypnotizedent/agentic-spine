@@ -126,6 +126,43 @@ def packet_status(state_root: Path, packet_id: str) -> str | None:
     return status
 
 
+def routed_packet_status(repo: Path, packet_id: str) -> str | None:
+    if os.environ.get("SPINE_WORKTREE_LIFECYCLE_DISABLE_ROUTED_PACKET_STATUS"):
+        return None
+    bin_ops = repo / "bin" / "ops"
+    if not bin_ops.exists():
+        return None
+    proc = run(
+        [
+            str(bin_ops),
+            "cap",
+            "run",
+            "controller_prompt.status",
+            "--",
+            "--packet-id",
+            packet_id,
+            "--json",
+        ],
+        cwd=repo,
+    )
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(proc.stdout or ""):
+        if ch != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(proc.stdout[idx:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("capability") != "controller_prompt.status":
+            continue
+        packets = payload.get("packets")
+        if isinstance(packets, list) and packets:
+            status = str((packets[0] or {}).get("status") or "").strip().lower()
+            return status or None
+        return None
+    return None
+
+
 def classify_owner(state_root: Path, identity: str | None) -> tuple[str | None, str | None]:
     if not identity:
         return None, None
@@ -148,16 +185,22 @@ def classify_owner(state_root: Path, identity: str | None) -> tuple[str | None, 
     return None, None
 
 
+def canonical_owner_id(owner: str) -> str:
+    if owner.startswith("PACKET-"):
+        return re.sub(r"-20[0-9]{6}$", "", owner)
+    return owner
+
+
 def owner_id_from_branch(branch: str | None) -> str | None:
     if not branch or branch == "<detached>":
         return None
     if branch.startswith("codex/"):
-        return branch.split("/", 1)[1]
+        return canonical_owner_id(branch.split("/", 1)[1])
     if branch.startswith("orchestration/"):
-        return branch.split("/", 1)[1]
+        return canonical_owner_id(branch.split("/", 1)[1])
     if "PACKET-" in branch:
         owner = "PACKET-" + branch.split("PACKET-", 1)[1]
-        return re.sub(r"-20[0-9]{6}$", "", owner)
+        return canonical_owner_id(owner)
     return branch
 
 
@@ -345,10 +388,19 @@ def main() -> int:
         branch_ref = wt.get("branch_ref")
         branch = wt.get("branch")
         lease = load_lease(path)
-        owner_id = str(lease.get("loop_or_wave_id") or owner_id_from_branch(branch) or "")
-        owner_type, owner_state = classify_owner(state_root, str(owner_id) if owner_id else None)
+        owner_id = canonical_owner_id(str(lease.get("loop_or_wave_id") or owner_id_from_branch(branch) or ""))
         merged = merged_into(repo, branch_ref, main_ref)
         dirty = is_dirty(path)
+        owner_type, owner_state = classify_owner(state_root, str(owner_id) if owner_id else None)
+        if (
+            owner_type == "packet"
+            and owner_state in {"unresolved", "present", "unknown", None}
+            and owner_id
+            and not lease.get("active")
+            and merged
+            and not dirty
+        ):
+            owner_state = routed_packet_status(repo, owner_id) or owner_state
         ownership = classify_ownership(
             repo=repo,
             path=path,
