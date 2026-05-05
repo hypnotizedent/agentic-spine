@@ -161,6 +161,25 @@ for cap_name in ["network.home.dhcp.audit", "network.shop.dhcp.audit"]:
     if "against home.device.registry.yaml" in desc or "against shop.device.registry.yaml" in desc:
         fail(f"{cap_name} description must not teach registry-as-audit-authority grammar (PACKET-1272)")
 
+reservation_status_desc = (dhcp_caps.get("network.home.dhcp.reservation.status") or {}).get("description") or ""
+if "DHCP reservation truth" in reservation_status_desc:
+    fail("network.home.dhcp.reservation.status description must not claim generic DHCP truth (PACKET-1274)")
+if "declared DHCP intent" not in reservation_status_desc or "site.presence.status remains current site presence authority" not in reservation_status_desc:
+    fail("network.home.dhcp.reservation.status description must bind to declared DHCP intent under site.presence.status (PACKET-1274)")
+
+snapshot_caps = {
+    "network.home.unifi.clients.snapshot": "home UniFi observed-client compatibility projection evidence",
+    "network.unifi.clients.snapshot": "shop UniFi observed-client compatibility projection evidence",
+}
+for cap_name, phrase in snapshot_caps.items():
+    desc = (dhcp_caps.get(cap_name) or {}).get("description") or ""
+    if phrase not in desc:
+        fail(f"{cap_name} description must identify observed-client compatibility projection evidence (PACKET-1274)")
+    if "site.presence.status remains current site presence authority" not in desc:
+        fail(f"{cap_name} description must point current site presence authority at site.presence.status (PACKET-1274)")
+    if "visibility cannot create node admission" not in desc:
+        fail(f"{cap_name} description must subtract visibility-implies-admission grammar (PACKET-1274)")
+
 dhcp_script_expectations = [
     (
         "ops/plugins/infra/network/bin/network-home-dhcp-audit",
@@ -186,6 +205,24 @@ dhcp_script_expectations = [
             "device not found in declared DHCP intent sources",
         ],
     ),
+    (
+        "ops/plugins/infra/network/bin/network-home-unifi-clients-snapshot",
+        [
+            "compatibility projection evidence",
+            "SITE_PRESENCE_AUTHORITY=\"site.presence.status\"",
+            "EVIDENCE_ROLE=\"observed_client_compatibility_projection\"",
+            ".canonical_site_presence",
+        ],
+    ),
+    (
+        "ops/plugins/infra/network/bin/network-unifi-clients-snapshot",
+        [
+            "compatibility projection evidence",
+            "SITE_PRESENCE_AUTHORITY=\"site.presence.status\"",
+            "EVIDENCE_ROLE=\"observed_client_compatibility_projection\"",
+            ".canonical_site_presence",
+        ],
+    ),
 ]
 for rel, required_fragments in dhcp_script_expectations:
     text = (root / rel).read_text(encoding="utf-8")
@@ -194,6 +231,19 @@ for rel, required_fragments in dhcp_script_expectations:
     for fragment in required_fragments:
         if fragment not in text:
             fail(f"{rel} missing DHCP/Site Intelligence boundary fragment {fragment!r} (PACKET-1272)")
+
+projection_contract = yaml.safe_load((root / "ops/bindings/domain.projection.contract.yaml").read_text(encoding="utf-8")) or {}
+projection_rows = projection_contract.get("projections") or projection_contract.get("rows") or []
+projection_by_id = {row.get("id"): row for row in projection_rows if isinstance(row, dict)}
+for projection_id in [
+    "projection.network.unifi.home.clients.observed",
+    "projection.network.unifi.shop.clients.observed",
+]:
+    projection = projection_by_id.get(projection_id) or {}
+    markers = projection.get("required_markers") or []
+    marker_pairs = {(m.get("key"), m.get("equals")) for m in markers if isinstance(m, dict)}
+    if ("superseded_for_site_presence_by", "site.presence.status") not in marker_pairs:
+        fail(f"{projection_id} must require superseded_for_site_presence_by=site.presence.status (PACKET-1274)")
 
 # One all-sites JSON sample feeds both the home-row assertions and the
 # site-profile assertions below. This keeps the first-class readback intact
@@ -463,5 +513,5 @@ for phrase in required_teaching_phrases:
     if phrase not in proc_h.stdout:
         fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
 
-print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215), home.device.registry.yaml authority_scope is bounded to compatibility evidence (PACKET-1270), and DHCP audit/status registry reads are bounded to DHCP intent evidence under site.presence.status presence authority (PACKET-1272)")
+print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215), home.device.registry.yaml authority_scope is bounded to compatibility evidence (PACKET-1270), DHCP audit/status registry reads are bounded to DHCP intent evidence under site.presence.status presence authority (PACKET-1272), and UniFi snapshot caps are bounded to observed-client compatibility projection evidence (PACKET-1274)")
 PY

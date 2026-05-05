@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# network-unifi-clients-snapshot — Snapshot UniFi client list (MAC/IP/name)
+# network-unifi-clients-snapshot — refresh shop UniFi observed-client evidence
 #
 # Thin wrapper around unifi-agent.sh clients.
 # Registered as capability: network.unifi.clients.snapshot
+# Generated output is compatibility projection evidence only; current site
+# presence authority is site.presence.status.
 #
 # Exit:
 #   0  OK
@@ -21,6 +23,8 @@ spine_paths_init >/dev/null 2>&1 || true
 OBSERVED_REL="ops/bindings/network.unifi.shop.clients.observed.yaml"
 OBSERVED_BINDING="$TARGET_ROOT/$OBSERVED_REL"
 AGENT="${UNIFI_SHOP_AGENT_BIN:-$TARGET_ROOT/ops/plugins/providers/bin/unifi-agent.sh}"
+SITE_PRESENCE_AUTHORITY="site.presence.status"
+EVIDENCE_ROLE="observed_client_compatibility_projection"
 MODE="check"
 OUTPUT_PATH=""
 AGENT_ARGS=()
@@ -92,7 +96,7 @@ TODAY_UTC="$(date -u +%Y-%m-%d)"
 STAGED_OUTPUT="$TMPDIR_WORK/network.unifi.shop.clients.observed.yaml"
 cp "$OBSERVED_BINDING" "$STAGED_OUTPUT"
 yq -i \
-  ".generated_at = \"$NOW_UTC\" | .updated_at = \"$TODAY_UTC\" | .last_verified = \"$TODAY_UTC\"" \
+  ".generated_at = \"$NOW_UTC\" | .updated_at = \"$TODAY_UTC\" | .last_verified = \"$TODAY_UTC\" | .canonical_site_presence = \"$SITE_PRESENCE_AUTHORITY\" | .authority_boundary.evidence_role = \"$EVIDENCE_ROLE\" | .authority_boundary.does_not_decide = [\"current_site_presence\", \"site_profile_authority\", \"node_admission\", \"role_assignment\"]" \
   "$STAGED_OUTPUT"
 
 cp "$STAGED_OUTPUT" "$OUTPUT_PATH"
@@ -107,4 +111,6 @@ fi
 echo "mode: $MODE"
 echo "tracked_binding: $OBSERVED_BINDING"
 echo "output_path: $OUTPUT_PATH"
+echo "canonical_site_presence: $SITE_PRESENCE_AUTHORITY"
+echo "evidence_role: $EVIDENCE_ROLE"
 echo "final_action: wrote"

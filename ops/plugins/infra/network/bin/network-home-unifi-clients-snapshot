@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# network.home.unifi.clients.snapshot — wrapper for unifi-home-agent.sh clients
+# network.home.unifi.clients.snapshot — refresh home UniFi observed-client evidence
 # Read-only by default: write runtime snapshot freshness only; tracked binding
-# promotion remains explicit via --apply.
+# promotion remains explicit via --apply. The generated surface is
+# compatibility projection evidence; current site presence authority is
+# site.presence.status.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTROL_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
@@ -15,6 +17,8 @@ spine_paths_init >/dev/null 2>&1 || true
 OBSERVED_REL="ops/bindings/network.unifi.home.clients.observed.yaml"
 OBSERVED_BINDING="$TARGET_ROOT/$OBSERVED_REL"
 AGENT="${UNIFI_HOME_AGENT_BIN:-$TARGET_ROOT/ops/plugins/providers/bin/unifi-home-agent.sh}"
+SITE_PRESENCE_AUTHORITY="site.presence.status"
+EVIDENCE_ROLE="observed_client_compatibility_projection"
 MODE="check"
 OUTPUT_PATH=""
 AGENT_ARGS=()
@@ -84,7 +88,7 @@ NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TODAY_UTC="$(date -u +%Y-%m-%d)"
 STAGED_OUTPUT="$TMPDIR_WORK/network.unifi.home.clients.observed.yaml"
 yq eval \
-  ".generated_at = \"$NOW_UTC\" | .updated_at = \"$TODAY_UTC\" | .last_verified = \"$TODAY_UTC\"" \
+  ".generated_at = \"$NOW_UTC\" | .updated_at = \"$TODAY_UTC\" | .last_verified = \"$TODAY_UTC\" | .canonical_site_presence = \"$SITE_PRESENCE_AUTHORITY\" | .authority_boundary.evidence_role = \"$EVIDENCE_ROLE\" | .authority_boundary.does_not_decide = [\"current_site_presence\", \"site_profile_authority\", \"node_admission\", \"role_assignment\"]" \
   "$OBSERVED_BINDING" > "$STAGED_OUTPUT"
 
 cp "$STAGED_OUTPUT" "$OUTPUT_PATH"
@@ -99,4 +103,6 @@ fi
 echo "mode: $MODE"
 echo "tracked_binding: $OBSERVED_BINDING"
 echo "output_path: $OUTPUT_PATH"
+echo "canonical_site_presence: $SITE_PRESENCE_AUTHORITY"
+echo "evidence_role: $EVIDENCE_ROLE"
 echo "final_action: wrote"
