@@ -6,13 +6,14 @@ REMOTE="origin"
 LANE_BRANCH=""
 DRY_RUN=0
 JSON_MODE=0
+FORCE_WITH_LEASE=0
 
 usage() {
   cat <<'USAGE'
 coordinator-lane-publish
 
 Usage:
-  coordinator-lane-publish [--lane-branch <branch>] [--remote origin] [--dry-run] [--json]
+  coordinator-lane-publish [--lane-branch <branch>] [--remote origin] [--force-with-lease] [--dry-run] [--json]
 
 Publishes the current clean lane branch before routed coordinator.lane.closeout.
 It does not integrate or mutate the target branch.
@@ -26,6 +27,7 @@ fail() {
 
 if [[ "${1:-}" == "--self-check" ]]; then
   grep -q "push -u" "$0" || fail "self-check missing push marker"
+  grep -q "force-with-lease" "$0" || fail "self-check missing lease-protected publish marker"
   grep -q "closeout_command" "$0" || fail "self-check missing closeout command marker"
   echo "coordinator.lane.publish self-check PASS"
   exit 0
@@ -36,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     --) shift ;;
     --lane-branch) LANE_BRANCH="${2:-}"; shift 2 ;;
     --remote) REMOTE="${2:-}"; shift 2 ;;
+    --force-with-lease) FORCE_WITH_LEASE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --json) JSON_MODE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -65,10 +68,17 @@ if [[ "$lane_head" != "${remote_lane_head:-}" ]]; then
 fi
 
 publish_command="git -C $ROOT push -u $REMOTE $LANE_BRANCH:$LANE_BRANCH"
+if [[ "$FORCE_WITH_LEASE" -eq 1 ]]; then
+  publish_command="git -C $ROOT push --force-with-lease -u $REMOTE $LANE_BRANCH:$LANE_BRANCH"
+fi
 closeout_command="./bin/ops cap run coordinator.lane.closeout -- --loop-id <LOOP-ID> --lane-branch $LANE_BRANCH --cleanup-mode report-only --json"
 
 if [[ "$DRY_RUN" -eq 0 && "$publish_required" -eq 1 ]]; then
-  git -C "$ROOT" push -u "$REMOTE" "$LANE_BRANCH:$LANE_BRANCH" >/dev/null
+  if [[ "$FORCE_WITH_LEASE" -eq 1 ]]; then
+    git -C "$ROOT" push --force-with-lease -u "$REMOTE" "$LANE_BRANCH:$LANE_BRANCH" >/dev/null
+  else
+    git -C "$ROOT" push -u "$REMOTE" "$LANE_BRANCH:$LANE_BRANCH" >/dev/null
+  fi
   git -C "$ROOT" fetch "$REMOTE" "$LANE_BRANCH" >/dev/null 2>&1 || true
   remote_lane_head="$(git -C "$ROOT" ls-remote --heads "$REMOTE" "$LANE_BRANCH" 2>/dev/null | awk '{print $1}' | head -1 || true)"
   [[ "$remote_lane_head" == "$lane_head" ]] || fail "remote lane head did not match after publish"
@@ -80,11 +90,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 if [[ "$JSON_MODE" -eq 1 ]]; then
-  python3 - "$publish_status" "$ROOT" "$REMOTE" "$LANE_BRANCH" "$lane_head" "${remote_lane_head:-}" "$publish_required" "$publish_command" "$closeout_command" <<'PY'
+  python3 - "$publish_status" "$ROOT" "$REMOTE" "$LANE_BRANCH" "$lane_head" "${remote_lane_head:-}" "$publish_required" "$FORCE_WITH_LEASE" "$publish_command" "$closeout_command" <<'PY'
 import json
 import sys
 
-status, repo, remote, lane_branch, lane_head, remote_lane_head, publish_required, publish_command, closeout_command = sys.argv[1:10]
+status, repo, remote, lane_branch, lane_head, remote_lane_head, publish_required, force_with_lease, publish_command, closeout_command = sys.argv[1:11]
 print(json.dumps(
     {
         "capability": "coordinator.lane.publish",
@@ -95,6 +105,7 @@ print(json.dumps(
         "lane_head": lane_head,
         "remote_lane_head": remote_lane_head or None,
         "publish_required": publish_required == "1",
+        "force_with_lease": force_with_lease == "1",
         "publish_command": publish_command,
         "next_command": closeout_command,
     },
@@ -109,6 +120,7 @@ else
   echo "lane_head: $lane_head"
   echo "remote_lane_head: ${remote_lane_head:-missing}"
   echo "publish_required: $publish_required"
+  echo "force_with_lease: $FORCE_WITH_LEASE"
   echo "publish_command: $publish_command"
   echo "next_command: $closeout_command"
 fi

@@ -152,14 +152,13 @@ if git -C "$ROOT" rev-parse --verify "$LANE_BRANCH" >/dev/null 2>&1; then
 fi
 
 remote_lane_head_ls="$(git -C "$ROOT" ls-remote --heads "$REMOTE" "$LANE_BRANCH" 2>/dev/null | awk '{print $1}' | head -1 || true)"
-if [[ "$lane_local_present" -eq 0 ]]; then
-  if [[ -n "$remote_lane_head_ls" ]]; then
-    if [[ "$DRY_RUN" -eq 0 ]]; then
-      git -C "$ROOT" fetch "$REMOTE" "$LANE_BRANCH:$LANE_BRANCH" >/dev/null 2>&1 \
-        || fail "failed to fetch lane branch $REMOTE/$LANE_BRANCH into local branch $LANE_BRANCH"
-      lane_local_present=1
-    fi
-  else
+lane_branch_worktree="$(branch_worktree_path "$LANE_BRANCH")"
+if [[ -n "$remote_lane_head_ls" && "$DRY_RUN" -eq 0 && -z "$lane_branch_worktree" ]]; then
+  git -C "$ROOT" fetch "$REMOTE" "+refs/heads/$LANE_BRANCH:refs/heads/$LANE_BRANCH" >/dev/null 2>&1 \
+    || fail "failed to fetch published lane branch $REMOTE/$LANE_BRANCH into local branch $LANE_BRANCH"
+  lane_local_present=1
+elif [[ "$lane_local_present" -eq 0 ]]; then
+  if [[ -z "$remote_lane_head_ls" ]]; then
     fail "missing lane branch '$LANE_BRANCH' locally and at $REMOTE. Run the local pre-closeout publish step first from the lane worktree: ./bin/ops cap run coordinator.lane.publish -- --lane-branch $LANE_BRANCH --json"
   fi
 fi
@@ -172,11 +171,11 @@ fi
 target_head_before="$(git -C "$ROOT" rev-parse "$TARGET_BRANCH")"
 remote_lane_ref="refs/remotes/${REMOTE}/${LANE_BRANCH}"
 remote_target_ref="refs/remotes/${REMOTE}/${TARGET_BRANCH}"
-remote_lane_head="$(git -C "$ROOT" show-ref --verify --hash "$remote_lane_ref" 2>/dev/null || true)"
-remote_target_head_before="$(git -C "$ROOT" show-ref --verify --hash "$remote_target_ref" 2>/dev/null || true)"
-if [[ -z "$remote_lane_head" && -n "$remote_lane_head_ls" ]]; then
-  remote_lane_head="$remote_lane_head_ls"
+remote_lane_head="$remote_lane_head_ls"
+if [[ -z "$remote_lane_head" ]]; then
+  remote_lane_head="$(git -C "$ROOT" show-ref --verify --hash "$remote_lane_ref" 2>/dev/null || true)"
 fi
+remote_target_head_before="$(git -C "$ROOT" show-ref --verify --hash "$remote_target_ref" 2>/dev/null || true)"
 lane_branch_pushed=0
 
 if [[ "$lane_head" != "$remote_lane_head" ]]; then
@@ -254,7 +253,7 @@ else
   git -C "$integration_worktree" merge --ff-only "$LANE_BRANCH" >/dev/null 2>&1 || fail "ff-only integration failed ($LANE_BRANCH -> $TARGET_BRANCH)"
   target_head_after="$(git -C "$integration_worktree" rev-parse HEAD)"
   if [[ "$NO_PUSH" -eq 0 ]]; then
-    git -C "$integration_worktree" push "$REMOTE" "HEAD:refs/heads/${TARGET_BRANCH}" >/dev/null 2>&1 || fail "push failed: $REMOTE/$TARGET_BRANCH"
+    push_output="$(git -C "$integration_worktree" push "$REMOTE" "HEAD:refs/heads/${TARGET_BRANCH}" 2>&1)" || fail "push failed: $REMOTE/$TARGET_BRANCH. Remote said: ${push_output:-<no output>}. If this routed host uses a read-only deploy key, rerun closeout with --no-push, then publish the target branch from an operator checkout."
     did_push=1
   fi
   target_sync_status="$(sync_target_branch_checkout "$target_branch_worktree" "$TARGET_BRANCH" "$target_head_after")"

@@ -74,6 +74,7 @@ for marker in \
   "worktree.lifecycle.cleanup -- --mode" \
   "--no-lane-push" \
   "ls-remote --heads" \
+  "+refs/heads/\$LANE_BRANCH:refs/heads/\$LANE_BRANCH" \
   "lane_branch_pushed" \
   "missing lane branch" \
   "coordinator.lane.publish"; do
