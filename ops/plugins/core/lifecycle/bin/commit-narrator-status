@@ -24,6 +24,15 @@ ROOT = Path(__file__).resolve().parents[5]
 NODE_ADMISSION = ROOT / "ops/plugins/infra/bin/node-admission-status"
 SITE_PRESENCE = ROOT / "ops/plugins/infra/bin/site-presence-status"
 
+# Slice D: rule engine module (Python path import)
+_LIFECYCLE_LIB = ROOT / "ops/plugins/core/lifecycle/lib"
+if str(_LIFECYCLE_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIFECYCLE_LIB))
+try:  # pragma: no cover - optional at import time
+    import narrator_rules as _narrator_rules  # type: ignore
+except Exception:  # pragma: no cover
+    _narrator_rules = None  # type: ignore
+
 CAPABILITY = "commit.narrator.status"
 READ_BOUNDARY = "commit_metadata_changed_paths_shortstat_only_not_full_diff"
 DEFAULT_LIMIT = 12
@@ -124,14 +133,15 @@ def parse_shortstat(text: str) -> dict[str, int]:
     return stats
 
 
-def changed_paths_for_commit(sha: str) -> tuple[list[str], dict[str, int]]:
+def changed_paths_for_commit(sha: str) -> tuple[list[str], dict[str, int], dict[str, str]]:
     # diff-tree with -m keeps merge commits honest; `git show --name-status`
     # can emit no paths for a merge even when shortstat shows real changes.
     proc = git("diff-tree", "--no-commit-id", "--name-status", "-r", "-m", sha)
     if proc.returncode != 0:
-        return [], {}
+        return [], {}, {}
     paths: list[str] = []
     statuses: Counter[str] = Counter()
+    path_status: dict[str, str] = {}
     for raw in proc.stdout.splitlines():
         line = raw.strip()
         if not line:
@@ -143,7 +153,13 @@ def changed_paths_for_commit(sha: str) -> tuple[list[str], dict[str, int]]:
             continue
         paths.append(path)
         statuses[status[:1]] += 1
-    return sorted(dict.fromkeys(paths)), dict(statuses)
+        # Per-path status preserved for fine-grained rule evaluation. For
+        # rename rows (R<score>\told\tnew), the new path receives the rename
+        # marker; downstream rules that need the rename source can consult
+        # diff_body.
+        if path not in path_status:
+            path_status[path] = status[:1]
+    return sorted(dict.fromkeys(paths)), dict(statuses), path_status
 
 
 def commit_shortstat(sha: str) -> dict[str, int]:
@@ -396,7 +412,7 @@ def recent_commits(
         if len(parts) != 5:
             continue
         sha, author_date, author_name, author_email, subject = parts
-        paths, status_counts = changed_paths_for_commit(sha)
+        paths, status_counts, path_status = changed_paths_for_commit(sha)
         shortstat = commit_shortstat(sha)
         row: dict[str, Any] = {
             "sha": sha,
@@ -407,6 +423,7 @@ def recent_commits(
             "subject": subject,
             "paths": paths,
             "status_counts": status_counts,
+            "path_status": path_status,
             "shortstat": shortstat,
         }
         if include_diff:
@@ -729,6 +746,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--format", dest="format", choices=("line", "markdown", "json"), default="line", help="Output format (default: line). --json is a compat alias for --format json.")
     parser.add_argument("--include-diff", action="store_true", help="Include bounded full-diff body per commit (size-capped, with skipped-diff disclosure). Default off; preserves slice-A payload shape when absent.")
     parser.add_argument("--write-artifacts", action="store_true", help="Persist each commit row to canonical state via commit.narrator.artifact.write (Slice C). Default off.")
+    parser.add_argument("--evaluate-rules", action="store_true", help="Run the deterministic rule engine (Slice D) over each commit and populate rule_layer with verdict, citations, and honest unknown when no rule applies. Reads committed governance only. Default off.")
     parser.add_argument("--diff-max-lines-per-file", type=int, default=500, help="Max diff lines included per file when --include-diff (default 500); excess truncated with disclosure.")
     parser.add_argument("--diff-max-lines-per-commit", type=int, default=5000, help="Max diff lines collected per commit when --include-diff (default 5000); excess truncated with disclosure.")
     parser.add_argument("--diff-max-files-per-commit", type=int, default=100, help="Max files emitted per commit when --include-diff (default 100); excess truncated with disclosure.")
@@ -767,7 +785,7 @@ def _row_to_artifact_payload(row: dict[str, Any]) -> dict[str, Any]:
     diff_body = row.get("diff_body")
     if diff_body and diff_body.get("status") != "skipped_disabled":
         fact_layer["diff_body"] = diff_body
-    return {
+    payload = {
         "fact_layer": fact_layer,
         "direction_signal": row.get("direction_signal"),
         "plain_verdict": row.get("plain_verdict"),
@@ -777,6 +795,9 @@ def _row_to_artifact_payload(row: dict[str, Any]) -> dict[str, Any]:
         "operator_eye": row.get("operator_eye"),
         "touched_surfaces": row.get("touched_surfaces") or [],
     }
+    if row.get("rule_layer"):
+        payload["rule_layer"] = row["rule_layer"]
+    return payload
 
 
 def write_artifacts(commits: list[dict[str, Any]]) -> dict[str, Any]:
@@ -849,6 +870,55 @@ def write_artifacts(commits: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def evaluate_rules_into_rows(commits: list[dict[str, Any]]) -> dict[str, Any]:
+    """Slice D: run the rule engine over each commit row, populating
+    row['rule_layer'] in place. Returns a small summary block for the payload.
+    Witness-only: this function reads committed governance and emits structured
+    classifications; it does not mutate state, decide closure, or gate verify.
+    """
+    summary: dict[str, Any] = {
+        "module": "narrator_rules",
+        "evaluated": 0,
+        "skipped_unavailable": 0,
+        "verdict_counts": {},
+    }
+    if _narrator_rules is None:
+        for row in commits:
+            row["rule_layer"] = {
+                "status": "unavailable",
+                "verdict": "unknown_no_rule_applies",
+                "confidence": "low",
+                "rules_evaluated": 0,
+                "rule_outcomes": [],
+                "honest_unknown_reason": "narrator_rules module did not import",
+            }
+            summary["skipped_unavailable"] += 1
+        return summary
+    try:
+        bundle = _narrator_rules.load_governance_bundle(ROOT)
+    except Exception as exc:  # pragma: no cover - defensive
+        for row in commits:
+            row["rule_layer"] = {
+                "status": "unavailable",
+                "verdict": "unknown_no_rule_applies",
+                "confidence": "low",
+                "rules_evaluated": 0,
+                "rule_outcomes": [],
+                "honest_unknown_reason": f"governance bundle load error: {exc!r}",
+            }
+            summary["skipped_unavailable"] += 1
+        return summary
+    counts: dict[str, int] = {}
+    for row in commits:
+        rl = _narrator_rules.evaluate_commit(row, bundle)
+        row["rule_layer"] = rl
+        verdict = rl.get("verdict") or "unknown_no_rule_applies"
+        counts[verdict] = counts.get(verdict, 0) + 1
+        summary["evaluated"] += 1
+    summary["verdict_counts"] = counts
+    return summary
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     if args.self_check:
@@ -860,6 +930,8 @@ def main(argv: list[str]) -> int:
     except Exception as exc:
         print(f"{CAPABILITY} FAIL: {exc}", file=sys.stderr)
         return 1
+    if getattr(args, "evaluate_rules", False):
+        payload["rule_evaluation"] = evaluate_rules_into_rows(payload.get("commits") or [])
     if getattr(args, "write_artifacts", False):
         payload["artifact_writes"] = write_artifacts(payload.get("commits") or [])
     if args.format == "json":
