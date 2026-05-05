@@ -1,14 +1,14 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-04-30
+last_verified: 2026-05-05
 scope: shop-rack-scorecard
 source_binding: ops/bindings/shop.storage.map.yaml
 ---
 
 # Shop Rack Scorecard
 
-- Generated: `2026-04-30T19:32:23Z`
+- Generated: `2026-05-05T19:24:17Z`
 - Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`
 - Active runtimes: `12`
 - Tombstones: `3`
@@ -19,7 +19,7 @@ source_binding: ops/bindings/shop.storage.map.yaml
 | Plane | Canonical surface | Current truth |
 | --- | --- | --- |
 | Hypervisor | `ops/bindings/hardware.inventory.yaml` | `pve` is the only shop hypervisor. |
-| Storage map | `ops/bindings/shop.storage.map.yaml` | Runtime, backup, and tombstone storage truth are projected from authoritative bindings. |
+| Folded storage map | `ops/bindings/shop.storage.map.yaml` | Folded input subordinate to `payload.custody.status`; not an operator-facing storage authority. |
 | Ingress | `ops/bindings/shop.ingress.map.yaml` + `ops/bindings/services.health.yaml` | Public reachability is derived from the runtime ingress authority plus active health surfaces. |
 
 ## Storage Tiers
