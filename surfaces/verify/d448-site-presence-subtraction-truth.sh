@@ -724,13 +724,53 @@ required_teaching_phrases = [
     "node_admission",
     "bootstrap",
     "provisioning",
-    "Folded legacy inputs (not operator-facing subsystems):",
+    # PACKET-1329: header demoted from "(not operator-facing subsystems)" to
+    # "(implementation detail, not operator first-read)" so a fresh agent
+    # reads folded inputs as private/folded, never as a peer dashboard knob.
+    "Folded legacy inputs (implementation detail, not operator first-read):",
+    "Drilldown levers (only):",
     "ops/bindings/site.profile.contract.yaml",
     "ops/bindings/topology.sites.yaml",
 ]
 for phrase in required_teaching_phrases:
     if phrase not in proc_h.stdout:
         fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
+
+# PACKET-1329: minimal-lever model lock. site.presence.status must emit a
+# closed set of authorized drilldown levers (branch_authority + bounded
+# producers) so a fresh agent does not chase old peer dashboard knobs.
+# Both JSON payload and human readback must agree on the closed set.
+drilldown_levers_payload = all_payload.get("drilldown_levers")
+if not isinstance(drilldown_levers_payload, list) or not drilldown_levers_payload:
+    fail("site.presence.status JSON must emit non-empty drilldown_levers list (PACKET-1329)")
+required_levers = {
+    "node.admission.status",
+    "payload.custody.status",
+    "backup.estate.readback.status",
+    "network.home.unifi.clients.snapshot",
+    "network.unifi.clients.snapshot",
+    "network.home.dhcp.audit",
+    "network.shop.dhcp.audit",
+}
+emitted_levers = {row.get("lever") for row in drilldown_levers_payload if isinstance(row, dict)}
+missing_levers = required_levers - emitted_levers
+if missing_levers:
+    fail(f"site.presence.status drilldown_levers missing {sorted(missing_levers)} (PACKET-1329)")
+extra_levers = emitted_levers - required_levers
+if extra_levers:
+    fail(f"site.presence.status drilldown_levers must remain closed set; unexpected entries {sorted(extra_levers)} (PACKET-1329)")
+for row in drilldown_levers_payload:
+    kind = (row or {}).get("kind")
+    if kind not in {"branch_authority", "bounded_producer"}:
+        fail(f"site.presence.status drilldown_levers entry must declare kind in {{branch_authority, bounded_producer}}, got {kind!r} (PACKET-1329)")
+fcs_block = all_payload.get("first_class_system") or {}
+if fcs_block.get("operator_first_read") != "site.presence.status":
+    fail("site.presence.status first_class_system.operator_first_read must be 'site.presence.status' (PACKET-1329)")
+if fcs_block.get("drilldown_levers_policy") != "closed_set":
+    fail("site.presence.status first_class_system.drilldown_levers_policy must be 'closed_set' (PACKET-1329)")
+for lever in required_levers:
+    if lever not in proc_h.stdout:
+        fail(f"site.presence.status human readback must teach drilldown lever {lever!r} (PACKET-1329)")
 
 # PACKET-1317: lock coverage reconciliation behavior in place.
 # (x) freshness_summary must always emit canonical state keys (fresh, stale,
@@ -806,16 +846,18 @@ for fragment in [
         fail(f"network-shop-dhcp-audit must declare classification bucket {fragment!r} (PACKET-1317)")
 
 print(
-    "D448 PASS: site.presence.status is the single first-class Site Intelligence "
-    "readback; site profile, topology, presence, node admission, bootstrap, and "
-    "provisioning boundaries hold; row fields network_visibility_proof, "
+    "D448 PASS: site.presence.status is the single operator first-read for Site "
+    "Intelligence; site profile, topology, presence, node admission, bootstrap, "
+    "and provisioning boundaries hold; row fields network_visibility_proof, "
     "identity_state, hardware_class, bootstrap_state, storage_custody_state, and "
     "backup_posture compose without inferring node admission from network "
-    "visibility; remaining registries, UniFi observed snapshots, storage maps, "
-    "and DHCP audits are non-authoritative folded/generated inputs with explicit "
-    "producer or canonical consumer; retired cap names and wrappers stay absent "
-    "from live grammar; freshness state is resolved from declared policy "
-    "max_age_hours and the summary always emits canonical state keys; shop "
-    "unregistered clients are classified into bounded folded-input buckets."
+    "visibility; the drilldown lever set is closed (branch authorities and "
+    "bounded producers only); remaining registries, UniFi observed snapshots, "
+    "storage maps, and DHCP audits are non-authoritative folded/generated inputs "
+    "with explicit producer or canonical consumer; retired cap names and "
+    "wrappers stay absent from live grammar; freshness state is resolved from "
+    "declared policy max_age_hours and the summary always emits canonical state "
+    "keys; shop unregistered clients are classified into bounded folded-input "
+    "buckets."
 )
 PY
