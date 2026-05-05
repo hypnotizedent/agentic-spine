@@ -411,6 +411,33 @@ the new canonical model. Do not leave "future cleanup/backfill" as a separate
 system unless the human steward explicitly promotes that system and names what
 it retires. Use the new canonical authority to reconcile old items.
 
+### Surface Expansion Discipline
+
+Surface expansion is engine-lane work.
+
+A new gate, capability, command, readback field, alias, wrapper, status surface,
+or operator-facing vocabulary is legal only when the same slice names what it
+retires, folds, hides, or demotes.
+
+- No new D-gate without subtraction. Add gate coverage by folding into the
+  existing owning gate when possible. If a new gate is unavoidable, retire or
+  delete another gate in the same slice and ratchet the gate budget down.
+- Canonical means one surviving path, not a menu of better-named paths. A new
+  "boring" path is incomplete until the older path stops reading back as peer
+  truth.
+- Alias without subtraction is a bandage. Rename or promotion work must prove:
+  old name found, new home chosen, compatibility bounded, old grammar hidden or
+  retired, normal readback teaches the new name, and verify prevents relapse.
+- New readback behavior must land with its lock. If agents can see or rely on a
+  new status, result, or summary field, the same patch must update the existing
+  owning verifier or explain why no verifier is needed.
+- Prefer canonical readers over new watchers. When the concern is visibility,
+  first ask which existing status, receipt, or verifier owns the concern. Add
+  sibling watchers only after proving no existing reader can own it.
+
+If the slice cannot name the retired or folded surface, stop and file friction.
+Do not ship expansion under subtraction language.
+
 For node, appliance, service, or VM promotion work, do the cross-plane readback
 before mutation. The first read is the existing L1/L2 home and its related
 identity, runtime, storage, backup, watcher/observability, projection, and

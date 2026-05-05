@@ -121,6 +121,11 @@ If the answer is "nothing was replaced," the change must say why. If the
 answer is "old work needs catchup," the catchup must use the new canonical
 authority rather than create a second migration plane.
 
+Surface expansion also follows
+[`SESSION_PROTOCOL.md#surface-expansion-discipline`](SESSION_PROTOCOL.md#surface-expansion-discipline):
+new first-class surfaces must retire, fold, hide, or demote an old peer path in
+the same slice.
+
 ## Layer Framing
 
 Persist this distinction or the shell will grow back:

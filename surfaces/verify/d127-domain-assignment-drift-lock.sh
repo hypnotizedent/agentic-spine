@@ -8,6 +8,7 @@ TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
 AGENT_PROFILES="$ROOT/ops/bindings/gate.agent.profiles.yaml"
 BUDGET="$ROOT/ops/bindings/gate.budget.add_one_retire_one.contract.yaml"
+SESSION_DOC="$ROOT/docs/governance/SESSION_PROTOCOL.md"
 
 fail() {
   echo "D127 FAIL: $*" >&2
@@ -27,6 +28,7 @@ need_file "$TOPOLOGY"
 need_file "$DOMAIN_PROFILES"
 need_file "$AGENT_PROFILES"
 need_file "$BUDGET"
+need_file "$SESSION_DOC"
 need_cmd yq
 need_cmd jq
 
@@ -75,6 +77,11 @@ fi
 if [[ "$d_gate_script_count" -ne "$budget_script_limit" ]]; then
   fail "D-gate script budget drift: contract=$budget_script_limit actual=$d_gate_script_count (delete/fold scripts and ratchet the budget; do not grow the aggregate)"
 fi
+
+grep -q "No new D-gate without subtraction" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missing no-new-D-gate-without-subtraction rule"
+grep -q "folding into the" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missing fold-into-existing-gate guidance"
+grep -q "ratchet the gate budget down" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missing gate budget ratchet rule"
+grep -q "Do not ship expansion under subtraction language" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missing expansion-under-subtraction tripwire"
 
 # Build assignment lookup — single yq call with TSV output (avoids per-row jq)
 declare -A assign_count=()

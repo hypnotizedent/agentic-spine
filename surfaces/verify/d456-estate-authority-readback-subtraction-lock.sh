@@ -21,6 +21,7 @@ OPS_VERIFY="$ROOT/ops/commands/verify.sh"
 VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
 PLACEMENT_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
 BINDINGS_DIR="$ROOT/ops/bindings"
+SESSION_DOC="$ROOT/docs/governance/SESSION_PROTOCOL.md"
 
 fail() { echo "D456 FAIL: $*" >&2; exit 1; }
 
@@ -39,12 +40,13 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -f "$VM_LIFECYCLE" ]] || fail "missing vm.lifecycle.yaml"
 [[ -f "$PLACEMENT_POLICY" ]] || fail "missing infra.storage.placement.policy.yaml"
 [[ -d "$BINDINGS_DIR" ]] || fail "missing ops/bindings directory"
+[[ -f "$SESSION_DOC" ]] || fail "missing SESSION_PROTOCOL.md"
 
 bash -n "$RUNTIME_PLACEMENT"
 bash -n "$CONTROL_BASELINE"
 python3 -m py_compile "$SCHEDULER_HEALTH"
 
-python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CONTROL_BASELINE" "$CAPABILITIES" "$MANIFEST" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$GATE_REGISTRY" "$GATE_PROFILES" "$VERIFY_TOPOLOGY" "$OPS_VERIFY" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" "$BINDINGS_DIR" <<'PY'
+python3 - "$RUNTIME_PLACEMENT" "$SCHEDULER_HEALTH" "$CONTROL_BASELINE" "$CAPABILITIES" "$MANIFEST" "$SCHEDULER_REGISTRY" "$GATE_TOPOLOGY" "$GATE_REGISTRY" "$GATE_PROFILES" "$VERIFY_TOPOLOGY" "$OPS_VERIFY" "$VM_LIFECYCLE" "$PLACEMENT_POLICY" "$BINDINGS_DIR" "$SESSION_DOC" <<'PY'
 import sys
 import os
 import json
@@ -69,13 +71,14 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
-runtime_path, scheduler_path, control_baseline_path, caps_path, manifest_path, scheduler_registry_path, topology_path, gate_registry_path, gate_profiles_path, verify_topology_path, ops_verify_path, lifecycle_path, placement_path, bindings_dir = map(Path, sys.argv[1:])
+runtime_path, scheduler_path, control_baseline_path, caps_path, manifest_path, scheduler_registry_path, topology_path, gate_registry_path, gate_profiles_path, verify_topology_path, ops_verify_path, lifecycle_path, placement_path, bindings_dir, session_doc_path = map(Path, sys.argv[1:])
 root_dir = bindings_dir.parent.parent
 runtime_text = runtime_path.read_text(encoding="utf-8")
 scheduler_text = scheduler_path.read_text(encoding="utf-8")
 control_baseline_text = control_baseline_path.read_text(encoding="utf-8")
 caps_text = caps_path.read_text(encoding="utf-8")
 manifest_text = manifest_path.read_text(encoding="utf-8")
+session_text = session_doc_path.read_text(encoding="utf-8")
 scheduler_registry = load_yaml(scheduler_registry_path)
 topology = load_yaml(topology_path)
 gate_registry = load_yaml(gate_registry_path)
@@ -88,6 +91,14 @@ root_authority = load_yaml(root_authority_path)
 
 if "All versioned repos, runtime state, and evidence live under this root." in root_authority_text:
     fail("root.authority.contract.yaml platform note still teaches Darwin root as state/evidence authority")
+
+for phrase in [
+    "Prefer canonical readers over new watchers",
+    "first ask which existing status, receipt, or verifier owns the concern",
+    "sibling watchers only after proving no existing reader can own it",
+]:
+    if phrase not in session_text:
+        fail(f"SESSION_PROTOCOL.md missing canonical-reader-over-new-watcher discipline: {phrase!r}")
 
 platform_note = str((((root_authority.get("taxonomy") or {}).get("platform") or {}).get("note") or ""))
 for required_phrase in ("projection/cache", "storage_evidence_node", "/md1400/spine"):
