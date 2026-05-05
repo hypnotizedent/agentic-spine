@@ -1072,8 +1072,8 @@ internet_asset = by_id.get("internet.asset.registry")
 node_admission_surface = by_id.get("node.admission.readback")
 # PACKET-1235: extend snapshot.surface.contract enforcement to include
 # home.proxmox.inventory (compute_nodes evidence superseded by node.admission)
-# and home.unifi.network.inventory (network-equipment evidence superseded by
-# site.profile authority + site.presence readback per PACKET-1145).
+# and home.unifi.network.inventory (network-equipment folded input superseded
+# by site.profile authority + site.presence readback per PACKET-1145/1301).
 home_proxmox = by_id.get("home.proxmox.inventory")
 home_unifi_net = by_id.get("home.unifi.network.inventory")
 
@@ -1110,9 +1110,9 @@ for surface_id in ["home.hardware.inventory", "home.proxmox.inventory"]:
     if proof.get("type") != "replacement_readback" or proof.get("ref") != "node.admission.status":
         fail(f"{surface_id} heartbeat proof must use replacement_readback node.admission.status (PACKET-1282)")
 
-# PACKET-1235: home.unifi.network.inventory demoted by site.profile authority +
-# site.presence readback per PACKET-1145; replacement chain is named there
-# rather than node_admission.
+# PACKET-1235/PACKET-1301: home.unifi.network.inventory folded by site.profile
+# authority + site.presence readback; replacement chain is named there rather
+# than node_admission.
 if not isinstance(home_unifi_net, dict):
     fail("missing home.unifi.network.inventory in snapshot surface contract (PACKET-1235; completes PACKET-1145 demotion)")
 if home_unifi_net.get("authority_layer") in {"L1_authority", "L2_authority"}:
@@ -1175,7 +1175,7 @@ for phrase in [
     "Canonical readbacks:",
     "node.recovery.status",
     "appliance.health.status",
-    "Admission evidence inputs (not admission / activation authority):",
+    "Folded source inputs (not admission / activation / provisioning authority):",
     "ops/bindings/ssh.targets.yaml",
     "ops/bindings/operator.hardware.inventory.yaml",
     "ops/bindings/hardware.inventory.yaml",
@@ -1187,7 +1187,7 @@ for phrase in [
     "ops/bindings/fleet.admission.classification.yaml",
 ]:
     if phrase not in list_text:
-        fail(f"node.admission.status --list must surface demoted evidence header: missing {phrase!r}")
+        fail(f"node.admission.status --list must surface folded source input header: missing {phrase!r}")
 listed_ids = [line.strip() for line in list_text.splitlines() if line.strip() and not line.startswith("#")]
 for node_id in ["pve-r620", "shuttle-xpc-xc60j-002", "sandisk-cruzer-stage0-bootstrap-16gb-01"]:
     if node_id not in listed_ids:
@@ -1239,7 +1239,7 @@ expected_subtracted = {
     "ops/bindings/fleet.admission.classification.yaml",
 }
 if set(payload.get("subtracted_peer_authority") or []) != expected_subtracted:
-    fail("node.admission.status JSON subtracted_peer_authority must enumerate all demoted evidence surfaces")
+    fail("node.admission.status JSON subtracted_peer_authority must enumerate all folded/admission-subtracted input surfaces")
 rows = payload.get("rows") or []
 if len(rows) != 1:
     fail("node.admission.status --node pve-r620 must emit exactly one row")
@@ -1881,6 +1881,11 @@ if op_hw_inventory_doc.get("superseded_for_node_admission_by") != "node.admissio
 # pointer make those bounds structural. D447 owns admission-side; D455 owns
 # physical-machine-authority-side.
 shop_registry_doc = yaml.safe_load((root / "ops/bindings/shop.device.registry.yaml").read_text(encoding="utf-8")) or {}
+if shop_registry_doc.get("status") != "folded_l3_source_input":
+    fail("shop.device.registry.yaml status must be folded_l3_source_input (PACKET-1301)")
+folded_into = shop_registry_doc.get("folded_into_first_class_system") or []
+if not {"site.presence.status", "node.admission.status"}.issubset(set(folded_into)):
+    fail("shop.device.registry.yaml must declare folded_into_first_class_system includes site.presence.status and node.admission.status (PACKET-1301)")
 shop_authority_scope = shop_registry_doc.get("authority_scope") or {}
 if not isinstance(shop_authority_scope, dict) or not shop_authority_scope:
     fail("shop.device.registry.yaml must declare authority_scope block (Wave 2)")
@@ -1909,5 +1914,5 @@ if missing_shop_dnd:
 if shop_registry_doc.get("superseded_for_node_admission_by") != "node.admission.status":
     fail("shop.device.registry.yaml must declare superseded_for_node_admission_by=node.admission.status (Wave 2)")
 
-print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted, machine specs stay inside admission, active role runtime truth is composed, candidate evidence cannot promote itself, canonical_plane_access is locked from contract through cap (PACKET-840 Stage 2 organ 5 / PACKET-1045), per-row subject_class + access_class are first-class with object_kind preserved (PACKET-985), operator.hardware.inventory.yaml authority_scope admission boundary is locked (PACKET-1185), and shop.device.registry.yaml authority_scope admission boundary is locked (Wave 2 PACKET-1265)")
+print("D447 PASS: node admission readback exists, old hardware/asset authority is demoted or folded, machine specs stay inside admission, active role runtime truth is composed, candidate evidence cannot promote itself, canonical_plane_access is locked from contract through cap (PACKET-840 Stage 2 organ 5 / PACKET-1045), per-row subject_class + access_class are first-class with object_kind preserved (PACKET-985), operator.hardware.inventory.yaml authority_scope admission boundary is locked (PACKET-1185), and shop.device.registry.yaml is folded into Site Intelligence/node admission with its admission boundary locked (PACKET-1301)")
 PY

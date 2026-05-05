@@ -25,8 +25,11 @@ This is the spine-facing summary for the shop rack and shop-managed endpoints.
 
 ## First-Class Readbacks
 
-The old shop summary read model has been retired. Current shop/site truth is read
-through the canonical surfaces listed below, not a generated shop adapter.
+The old shop summary read model and shop/device registry grammar have been
+retired as operator-facing systems. Current shop/site truth is read through the
+canonical surfaces listed below, not a generated shop adapter and not a
+standalone registry. `shop.device.registry.yaml` is folded L3 input consumed by
+`site.presence.status` and `node.admission.status`.
 
 ## Generated Projections
 

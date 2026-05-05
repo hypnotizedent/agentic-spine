@@ -123,20 +123,22 @@ for rel in [
 # admission, placement, role, or recovery authority.
 home_device_path = root / "ops/bindings/home.device.registry.yaml"
 home_device_doc = yaml.safe_load(home_device_path.read_text(encoding="utf-8")) or {}
-if home_device_doc.get("status") != "compatibility_evidence":
-    fail("home.device.registry.yaml status must remain compatibility_evidence (PACKET-1270)")
+if home_device_doc.get("status") != "folded_legacy_input":
+    fail("home.device.registry.yaml status must be folded_legacy_input (PACKET-1301)")
 if home_device_doc.get("superseded_for_site_presence_by") != "site.presence.status":
     fail("home.device.registry.yaml must declare superseded_for_site_presence_by=site.presence.status (PACKET-1270)")
+if home_device_doc.get("folded_into_first_class_system") != "site.presence.status":
+    fail("home.device.registry.yaml must declare folded_into_first_class_system=site.presence.status (PACKET-1301)")
 if home_device_doc.get("subordinate_to") != "ops/bindings/site.profile.contract.yaml":
     fail("home.device.registry.yaml must declare subordinate_to=ops/bindings/site.profile.contract.yaml (PACKET-1270)")
 home_device_scope = home_device_doc.get("authority_scope") or {}
 if not isinstance(home_device_scope, dict) or not home_device_scope:
     fail("home.device.registry.yaml must declare authority_scope block (PACKET-1270)")
 HOME_DEVICE_REQUIRED_OWNS = {
-    "home_declared_device_intent",
+    "home_declared_device_folded_input",
     "home_device_categorization_vocabulary",
-    "home_network_observed_clients_evidence",
-    "home_dhcp_reservation_intent",
+    "home_network_observed_clients_folded_input",
+    "home_dhcp_reservation_folded_input",
 }
 home_device_owns = set(home_device_scope.get("owns") or [])
 missing_home_device_owns = HOME_DEVICE_REQUIRED_OWNS - home_device_owns
@@ -165,31 +167,34 @@ dhcp_caps = caps.get("capabilities") or {}
 for cap_name in ["network.home.dhcp.audit", "network.shop.dhcp.audit"]:
     cap_doc = dhcp_caps.get(cap_name) or {}
     desc = cap_doc.get("description") or ""
-    if "declared DHCP reservation intent" not in desc:
-        fail(f"{cap_name} description must name declared DHCP reservation intent (PACKET-1272)")
-    if "site.presence.status remains current site presence authority" not in desc:
-        fail(f"{cap_name} description must point current site presence authority at site.presence.status (PACKET-1272)")
+    if "folded DHCP reservation intent" not in desc:
+        fail(f"{cap_name} description must name folded DHCP reservation intent (PACKET-1301)")
+    if "site.presence.status remains current Site Intelligence authority" not in desc:
+        fail(f"{cap_name} description must point current Site Intelligence authority at site.presence.status (PACKET-1301)")
     if "against home.device.registry.yaml" in desc or "against shop.device.registry.yaml" in desc:
         fail(f"{cap_name} description must not teach registry-as-audit-authority grammar (PACKET-1272)")
 
 reservation_status_desc = (dhcp_caps.get("network.home.dhcp.reservation.status") or {}).get("description") or ""
 if "DHCP reservation truth" in reservation_status_desc:
     fail("network.home.dhcp.reservation.status description must not claim generic DHCP truth (PACKET-1274)")
-if "declared DHCP intent" not in reservation_status_desc or "site.presence.status remains current site presence authority" not in reservation_status_desc:
-    fail("network.home.dhcp.reservation.status description must bind to declared DHCP intent under site.presence.status (PACKET-1274)")
+if "folded DHCP intent" not in reservation_status_desc or "site.presence.status remains current Site Intelligence authority" not in reservation_status_desc:
+    fail("network.home.dhcp.reservation.status description must bind to folded DHCP intent under site.presence.status (PACKET-1301)")
 
 snapshot_caps = {
-    "network.home.unifi.clients.snapshot": "home UniFi observed-client compatibility projection evidence",
-    "network.unifi.clients.snapshot": "shop UniFi observed-client compatibility projection evidence",
+    "network.home.unifi.clients.snapshot": "home UniFi observed-client folded input",
+    "network.unifi.clients.snapshot": "shop UniFi observed-client folded input",
 }
 for cap_name, phrase in snapshot_caps.items():
     desc = (dhcp_caps.get(cap_name) or {}).get("description") or ""
     if phrase not in desc:
-        fail(f"{cap_name} description must identify observed-client compatibility projection evidence (PACKET-1274)")
-    if "site.presence.status remains current site presence authority" not in desc:
-        fail(f"{cap_name} description must point current site presence authority at site.presence.status (PACKET-1274)")
+        fail(f"{cap_name} description must identify observed-client folded input (PACKET-1301)")
+    if "site.presence.status remains current Site Intelligence authority" not in desc:
+        fail(f"{cap_name} description must point current Site Intelligence authority at site.presence.status (PACKET-1301)")
     if "visibility cannot create node admission" not in desc:
         fail(f"{cap_name} description must subtract visibility-implies-admission grammar (PACKET-1274)")
+    for forbidden in ["compatibility projection evidence", "evidence only"]:
+        if forbidden in desc:
+            fail(f"{cap_name} description must not teach old evidence-only subsystem grammar: {forbidden!r} (PACKET-1301)")
 
 # PACKET-1275: telemetry-proven dead cap families must not remain as
 # current catalog, capability, manifest, wrapper-script, refresh-binding, or
@@ -263,43 +268,47 @@ dhcp_script_expectations = [
     (
         "ops/plugins/infra/network/bin/network-home-dhcp-audit",
         [
-            "declared DHCP intent",
+            "folded DHCP intent",
             "canonical_site_presence: $SITE_PRESENCE_AUTHORITY",
             "intent_source: ops/bindings/home.device.registry.yaml",
+            "folded_into_first_class_system",
         ],
     ),
     (
         "ops/plugins/infra/network/bin/network-shop-dhcp-audit",
         [
-            "DHCP intent evidence",
+            "folded DHCP intent",
             "canonical_site_presence: $SITE_PRESENCE_AUTHORITY",
             "intent_source: ops/bindings/shop.device.registry.yaml",
+            "folded_into_first_class_system",
         ],
     ),
     (
         "ops/plugins/infra/network/bin/network-home-dhcp-reservation-status",
         [
-            "declared DHCP reservation intent",
+            "folded DHCP reservation intent",
             'SITE_PRESENCE_AUTHORITY = "site.presence.status"',
-            "device not found in declared DHCP intent sources",
+            "device not found in folded DHCP intent sources",
         ],
     ),
     (
         "ops/plugins/infra/network/bin/network-home-unifi-clients-snapshot",
         [
-            "compatibility projection evidence",
+            "folded observation input",
             "SITE_PRESENCE_AUTHORITY=\"site.presence.status\"",
-            "EVIDENCE_ROLE=\"observed_client_compatibility_projection\"",
+            "FOLDED_ROLE=\"folded_observation_input\"",
             ".canonical_site_presence",
+            ".folded_into_first_class_system",
         ],
     ),
     (
         "ops/plugins/infra/network/bin/network-unifi-clients-snapshot",
         [
-            "compatibility projection evidence",
+            "folded observation input",
             "SITE_PRESENCE_AUTHORITY=\"site.presence.status\"",
-            "EVIDENCE_ROLE=\"observed_client_compatibility_projection\"",
+            "FOLDED_ROLE=\"folded_observation_input\"",
             ".canonical_site_presence",
+            ".folded_into_first_class_system",
         ],
     ),
 ]
@@ -333,6 +342,33 @@ if proc_all.returncode != 0:
 all_payload = json.loads(proc_all.stdout)
 if all_payload.get("canonical_authority") != "site.presence.status":
     fail("site.presence.status payload missing canonical authority")
+system = all_payload.get("first_class_system") or {}
+if system.get("name") != "first_class_site_intelligence":
+    fail("site.presence.status payload must emit first_class_system.name=first_class_site_intelligence (PACKET-1301)")
+stages = {row.get("stage") for row in (system.get("lifecycle") or []) if isinstance(row, dict)}
+for required_stage in ["site_profile", "topology", "presence", "node_admission", "bootstrap", "provisioning"]:
+    if required_stage not in stages:
+        fail(f"site.presence.status first_class_system.lifecycle missing stage {required_stage!r} (PACKET-1301)")
+folded_inputs = all_payload.get("folded_legacy_inputs") or []
+folded_paths = {row.get("path") for row in folded_inputs if isinstance(row, dict)}
+for required_path in [
+    "ops/bindings/home.device.registry.yaml",
+    "ops/bindings/network.unifi.home.clients.observed.yaml",
+    "ops/bindings/network.unifi.shop.clients.observed.yaml",
+    "ops/bindings/home.unifi.network.inventory.yaml",
+    "ops/bindings/shop.device.registry.yaml",
+]:
+    if required_path not in folded_paths:
+        fail(f"site.presence.status folded_legacy_inputs missing {required_path} (PACKET-1301)")
+for item in folded_inputs:
+    if isinstance(item, dict) and item.get("standalone_operator_surface") is not False:
+        fail(f"folded legacy input must not remain standalone operator surface: {item} (PACKET-1301)")
+freshness_summary = all_payload.get("freshness_summary") or {}
+if "stale" not in freshness_summary:
+    fail("site.presence.status must emit freshness_summary with stale input count (PACKET-1301 honesty)")
+profile_summary = all_payload.get("profile_summary") or {}
+if not isinstance(profile_summary.get("unverified_fields_by_site"), dict):
+    fail("site.presence.status must emit profile_summary.unverified_fields_by_site (PACKET-1301 honesty)")
 rows = [row for row in (all_payload.get("rows") or []) if isinstance(row, dict) and row.get("site") == "home"]
 if not rows:
     fail("site.presence.status --json emitted no home-site rows")
@@ -357,6 +393,9 @@ for row in rows:
     presence_id = row.get("presence_id") or "<unknown>"
     if row.get("actions_allowed", {}).get("may_create_node") is not False:
         fail(f"{presence_id}: site.presence.status must not allow node creation")
+    for action in ["may_admit_node", "may_bootstrap_subject", "may_provision_subject"]:
+        if row.get("actions_allowed", {}).get(action) is not False:
+            fail(f"{presence_id}: site.presence.status must not allow {action} (PACKET-1301)")
     subject = row.get("subject") or {}
     admission_state = subject.get("node_admission_state", "not_node")
     subject_kind = subject.get("subject_kind")
@@ -538,12 +577,12 @@ if "Site Profiles:" not in proc_h.stdout:
     fail("site.presence.status human readback must teach 'Site Profiles:' section (PACKET-1115)")
 
 # PACKET-1145: lock both authority carriers for home.unifi.network.inventory.yaml.
-# (t) Leaf carrier — file demoted from authoritative to compatibility_projection,
+# (t) Leaf carrier — file folded from authoritative/compatibility projection
 #     declares subordinate_to site.profile.contract.yaml, must NOT carry an
 #     unqualified `authority` field (use evidence_lineage instead).
 # (u) Parent carrier — home.authority.contract.yaml row redirects to site.profile
 #     via subordinate_to AND to site.presence.status via replacement_readback,
-#     scope ends in _compatibility_evidence. Three-field lock on the parent.
+#     scope names folded_legacy_projection. Three-field lock on the parent.
 # Subtracts authority, not evidence; UDR API readback content preserved.
 
 home_unifi_path = root / "ops/bindings/home.unifi.network.inventory.yaml"
@@ -566,8 +605,8 @@ if home_auth_path.exists():
     )
     if unifi_entry is not None:
         scope_value = unifi_entry.get("scope") or ""
-        if not scope_value.endswith("_compatibility_evidence"):
-            fail(f"home.authority.contract.yaml inventories[home.unifi.network.inventory.yaml] scope must end in _compatibility_evidence, got {scope_value!r} (PACKET-1145)")
+        if "folded_legacy_projection" not in scope_value:
+            fail(f"home.authority.contract.yaml inventories[home.unifi.network.inventory.yaml] scope must name folded_legacy_projection, got {scope_value!r} (PACKET-1301)")
         if unifi_entry.get("subordinate_to") != "ops/bindings/site.profile.contract.yaml":
             fail("home.authority.contract.yaml inventories[home.unifi.network.inventory.yaml] must declare subordinate_to=ops/bindings/site.profile.contract.yaml (PACKET-1145)")
         if unifi_entry.get("replacement_readback") != "site.presence.status":
@@ -576,21 +615,24 @@ if home_auth_path.exists():
 # PACKET-1215: lock Site Intelligence canonical-authority + evidence-boundary teaching.
 # (v) JSON subtracted_peer_authority must enumerate home.unifi.network.inventory.yaml
 #     (PACKET-1145 demoted it; cap-side enumeration must reflect that demotion).
-# (w) Human readback must teach the canonical authority chain (Site Intelligence is
-#     authority; topology stays separate; subordinate evidence is named).
+# (w) Human readback must teach the first-class lifecycle (Site Intelligence is
+#     authority; topology stays separate; legacy inputs are folded).
 
 if "ops/bindings/home.unifi.network.inventory.yaml" not in (all_payload.get("subtracted_peer_authority") or []):
     fail("site.presence.status JSON subtracted_peer_authority must enumerate ops/bindings/home.unifi.network.inventory.yaml (PACKET-1215; PACKET-1145 demoted it)")
 
 required_teaching_phrases = [
-    "Canonical authority chain:",
+    "First-Class Site Intelligence Lifecycle:",
+    "node_admission",
+    "bootstrap",
+    "provisioning",
+    "Folded legacy inputs (not operator-facing subsystems):",
     "ops/bindings/site.profile.contract.yaml",
     "ops/bindings/topology.sites.yaml",
-    "Subordinate evidence (does not teach site-profile authority):",
 ]
 for phrase in required_teaching_phrases:
     if phrase not in proc_h.stdout:
         fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
 
-print("D448 PASS: site presence readback exists, old network/device authority is demoted, presence cannot create node admission, site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115), home.unifi.network.inventory.yaml authority claims subtracted at both leaf and parent (PACKET-1145), Site Intelligence canonical-authority + evidence-boundary teaching is locked (PACKET-1215), home.device.registry.yaml authority_scope is bounded to compatibility evidence (PACKET-1270), DHCP audit/status registry reads are bounded to DHCP intent evidence under site.presence.status presence authority (PACKET-1272), UniFi snapshot caps are bounded to observed-client compatibility projection evidence (PACKET-1274), telemetry-proven dead network cap families/wrappers are subtracted from current Site Intelligence surfaces (PACKET-1275), and the zero-receipt shop readmodel generator stays retired under first-class Site Intelligence readbacks (PACKET-1284)")
+print("D448 PASS: first-class Site Intelligence lifecycle is locked; old network/device registries are folded inputs rather than evidence-only subsystems; site.presence.status reports profile/topology/presence plus node admission, bootstrap, and provisioning boundaries; visibility cannot create node admission; site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115); home.unifi.network.inventory.yaml authority claims are folded at both leaf and parent; DHCP audit/status reads are bounded to folded DHCP intent under site.presence.status; UniFi snapshot caps are bounded to folded observed-client input; telemetry-proven dead network cap families/wrappers stay subtracted; and the zero-receipt shop readmodel generator stays retired under first-class Site Intelligence readbacks (PACKET-1301)")
 PY

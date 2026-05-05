@@ -24,6 +24,88 @@ PATHS = {
     "site_profile": ROOT / "ops/bindings/site.profile.contract.yaml",
 }
 
+FOLDED_LEGACY_INPUTS = [
+    {
+        "path": "ops/bindings/home.device.registry.yaml",
+        "folded_role": "declared_home_device_and_dhcp_intent",
+        "folded_into": "site.presence.status",
+        "standalone_operator_surface": False,
+        "subtraction_state": "folded_source_input",
+    },
+    {
+        "path": "ops/bindings/network.unifi.home.clients.observed.yaml",
+        "folded_role": "home_observed_client_snapshot",
+        "folded_into": "site.presence.status",
+        "standalone_operator_surface": False,
+        "subtraction_state": "folded_observation_input",
+    },
+    {
+        "path": "ops/bindings/network.unifi.shop.clients.observed.yaml",
+        "folded_role": "shop_observed_client_snapshot",
+        "folded_into": "site.presence.status",
+        "standalone_operator_surface": False,
+        "subtraction_state": "folded_observation_input",
+    },
+    {
+        "path": "ops/bindings/home.unifi.network.inventory.yaml",
+        "folded_role": "home_network_equipment_snapshot",
+        "folded_into": "site.profile.contract.yaml + site.presence.status",
+        "standalone_operator_surface": False,
+        "subtraction_state": "folded_legacy_projection",
+    },
+    {
+        "path": "ops/bindings/shop.device.registry.yaml",
+        "folded_role": "shop_l3_function_and_dhcp_intent",
+        "folded_into": "site.presence.status + node.admission.status",
+        "standalone_operator_surface": False,
+        "subtraction_state": "folded_l3_source_input",
+    },
+]
+
+FIRST_CLASS_LIFECYCLE = [
+    {
+        "stage": "site_profile",
+        "authority": "ops/bindings/site.profile.contract.yaml",
+        "boundary": "Owns per-site HI profile meaning only; topology remains separate.",
+    },
+    {
+        "stage": "topology",
+        "authority": "ops/bindings/topology.sites.yaml",
+        "boundary": "Owns site ids and network scopes; does not classify devices or admit nodes.",
+    },
+    {
+        "stage": "presence",
+        "authority": "site.presence.status",
+        "boundary": "Folds declared and observed inputs into current site presence rows.",
+    },
+    {
+        "stage": "node_admission",
+        "authority": "node.admission.status",
+        "boundary": "Network visibility and registry rows cannot create, admit, activate, place, or promote nodes.",
+    },
+    {
+        "stage": "bootstrap",
+        "authority": "node.admission.status + ops/bindings/fleet.admission.contract.yaml + ops/bindings/operator.hardware.bootstrap.handoff.contract.yaml",
+        "transition_caps": [
+            "host.operator-hardware.bootstrap-kit.render",
+            "host.operator-hardware.post-boot.normalize",
+            "host.operator-hardware.firstboot.claim",
+        ],
+        "boundary": "Bootstrap emits first-touch claims and admission inputs; it does not assign runtime roles.",
+    },
+    {
+        "stage": "provisioning",
+        "authority": "explicit governed mutation caps plus node.admission.status readback",
+        "transition_caps": [
+            "infra.vm.provision",
+            "infra.vm.bootstrap",
+            "provision.ssh-target.create",
+            "provision.ssh-target.update",
+        ],
+        "boundary": "Provisioning mutates only through explicit caps; site presence is read-only and reports the resulting state.",
+    },
+]
+
 
 def load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
@@ -286,12 +368,15 @@ def make_row(
         "actions_allowed": {
             "may_inform_operator": True,
             "may_create_node": False,
+            "may_admit_node": False,
+            "may_bootstrap_subject": False,
+            "may_provision_subject": False,
             "may_mutate_network": False,
             "may_refresh_legacy_snapshot": False,
         },
         "subtraction_caption": (
-            "network.unifi.*.clients.observed and home.device.registry are evidence/projections only; "
-            "current site presence truth comes from site.presence.status."
+            "legacy network/device registries are folded source inputs inside first-class Site Intelligence; "
+            "site.presence.status is the public readback, and node.admission.status owns admission/bootstrap/provisioning truth."
         ),
     }
 
@@ -337,7 +422,7 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
         if site_filter and site != site_filter:
             continue
         source_roles = [
-            {"path": str(PATHS["home_device"].relative_to(ROOT)), "role": "declared_device_intent", "proof_ref": "updated_at"},
+            {"path": str(PATHS["home_device"].relative_to(ROOT)), "role": "folded_declared_device_input", "proof_ref": "updated_at"},
         ]
         freshness = {
             "state": "declared_only",
@@ -350,7 +435,7 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
             source_roles.append(
                 {
                     "path": str(observed_path.relative_to(ROOT)),
-                    "role": "unifi_observed_snapshot",
+                    "role": "folded_unifi_observation_input",
                     "capability": observed_cap,
                     "proof_ref": "generated_at",
                     "observed_at": surface.get("generated_at"),
@@ -382,7 +467,7 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
                     [
                         {
                             "path": str(path.relative_to(ROOT)),
-                            "role": "unifi_observed_snapshot",
+                            "role": "folded_unifi_observation_input",
                             "capability": capability,
                             "proof_ref": "generated_at",
                             "observed_at": surface.get("generated_at"),
@@ -431,6 +516,28 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, int]:
     return summary
 
 
+def summarize_freshness(rows: list[dict[str, Any]]) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for row in rows:
+        state = str((row.get("freshness") or {}).get("state") or "unknown")
+        summary[state] = summary.get(state, 0) + 1
+    return summary
+
+
+def summarize_profiles(profiles: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    unverified: dict[str, list[str]] = {}
+    for site_id, profile in profiles.items():
+        fields = [str(field) for field in (profile.get("unverified_fields") or [])]
+        if fields:
+            unverified[site_id] = fields
+    return {
+        "profile_count": len(profiles),
+        "unverified_sites": sorted(unverified),
+        "unverified_field_count": sum(len(fields) for fields in unverified.values()),
+        "unverified_fields_by_site": unverified,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Canonical site presence readback")
     parser.add_argument("--site", help="Limit to a site id")
@@ -450,6 +557,18 @@ def main() -> None:
         "rows": rows,
         "site_profiles": site_profiles,
         "summary": summarize(rows),
+        "freshness_summary": summarize_freshness(rows),
+        "profile_summary": summarize_profiles(site_profiles),
+        "first_class_system": {
+            "name": "first_class_site_intelligence",
+            "public_readback": "site.presence.status",
+            "admission_readback": "node.admission.status",
+            "lifecycle": FIRST_CLASS_LIFECYCLE,
+            "legacy_input_policy": "folded_source_inputs_not_operator_surfaces",
+        },
+        "folded_legacy_inputs": FOLDED_LEGACY_INPUTS,
+        # Backward-compatible key retained for older consumers. The canonical
+        # interpretation is folded_legacy_inputs above, not peer evidence.
         "subtracted_peer_authority": [
             "ops/bindings/network.unifi.home.clients.observed.yaml",
             "ops/bindings/network.unifi.shop.clients.observed.yaml",
@@ -463,19 +582,19 @@ def main() -> None:
     print("site.presence.status")
     print(f"rows: {len(rows)}")
     print(f"summary: {json.dumps(payload['summary'], sort_keys=True)}")
-    # PACKET-1215: teach the canonical-authority + evidence-boundary structure
-    # explicitly before site profiles. Site Intelligence (F1 HI plane) is the
-    # authority for site/profile meaning; topology stays in topology.sites.yaml;
-    # UniFi/clients-observed/device-registry are subordinate evidence.
+    print(f"freshness: {json.dumps(payload['freshness_summary'], sort_keys=True)}")
+    print(f"profile_gaps: {json.dumps(payload['profile_summary'], sort_keys=True)}")
     print("")
-    print("Canonical authority chain:")
-    print("  ops/bindings/site.profile.contract.yaml         <- HI Site profile authority (canonical site/profile meaning)")
-    print("  ops/bindings/topology.sites.yaml                <- platform-site-topology-ssot (network topology — NOT site-profile authority)")
-    print("  site.presence.status                            <- public readback (this cap)")
+    print("First-Class Site Intelligence Lifecycle:")
+    for stage in FIRST_CLASS_LIFECYCLE:
+        caps = stage.get("transition_caps") or []
+        suffix = f" caps={','.join(caps)}" if caps else ""
+        print(f"  {stage['stage']:<14} {stage['authority']}{suffix}")
+        print(f"    boundary: {stage['boundary']}")
     print("")
-    print("Subordinate evidence (does not teach site-profile authority):")
-    for path in payload["subtracted_peer_authority"]:
-        print(f"  {path}")
+    print("Folded legacy inputs (not operator-facing subsystems):")
+    for item in FOLDED_LEGACY_INPUTS:
+        print(f"  {item['path']} -> {item['folded_into']} [{item['subtraction_state']}]")
     # PACKET-1115: human readback teaches Site Profiles before per-row presence.
     print("")
     print("Site Profiles:")

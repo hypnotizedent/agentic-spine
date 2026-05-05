@@ -608,7 +608,7 @@ def source_surfaces_for_row(recovery: dict[str, Any]) -> list[dict[str, str]]:
     if sources.get("appliance_identity"):
         refs.append(source_ref("ops/bindings/appliance.identity.contract.yaml", "appliance_identity_evidence"))
     if sources.get("shop_device"):
-        refs.append(source_ref("ops/bindings/shop.device.registry.yaml", "l3_shop_function_projection_evidence"))
+        refs.append(source_ref("ops/bindings/shop.device.registry.yaml", "folded_l3_shop_source_input"))
     if sources.get("ssh_target"):
         refs.append(source_ref("ops/bindings/ssh.targets.yaml", "access_path_evidence"))
     if sources.get("placement_host") or sources.get("required_vm_targets"):
@@ -645,8 +645,8 @@ def subtraction_caption(recovery: dict[str, Any]) -> str:
         )
     if sources.get("shop_device"):
         return (
-            "shop.device.registry supplies L3 shop function evidence only; "
-            "physical-machine truth resolves through node admission."
+            "shop.device.registry is folded L3 source input; physical-machine, "
+            "bootstrap, provisioning, and recovery truth resolve through node admission."
         )
     if kind == "ssh_target_only":
         return "ssh.targets supplies access evidence only; reachability is not node admission."
@@ -1565,7 +1565,7 @@ def machine_facts_from_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         "appliance_identity": "ops/bindings/appliance.identity.contract.yaml",
         "appliance_media_type": "ops/bindings/appliance.identity.contract.yaml#appliances[].hardware_identity.media_type",
         "access_path": "ops/bindings/ssh.targets.yaml",
-        "shop_function_projection": "ops/bindings/shop.device.registry.yaml",
+        "folded_shop_l3_source_input": "ops/bindings/shop.device.registry.yaml",
     }
     if claim_path:
         source_ownership["firstboot_claim"] = claim_path
@@ -1787,7 +1787,7 @@ def kind_separation(recovery: dict[str, Any], row: dict[str, Any]) -> dict[str, 
     if kind == "shop_physical_machine":
         return {
             "category": "shop_physical_machine",
-            "rule": "L3 shop function machine; shop.device.registry is evidence; admission resolves through this readback if a first-touch is completed",
+            "rule": "L3 shop function machine; shop.device.registry is folded source input; admission resolves through this readback if a first-touch is completed",
         }
     return None
 
@@ -2120,8 +2120,8 @@ DEMOTED_EVIDENCE_HEADER = [
     ("ops/bindings/ssh.targets.yaml",                "access evidence only; reachability is not admission"),
     ("ops/bindings/operator.hardware.inventory.yaml", "bounded inventory/candidacy authority; evidence only for admission"),
     ("ops/bindings/hardware.inventory.yaml",         "infra hardware evidence"),
-    ("ops/bindings/home.device.registry.yaml",       "compatibility and site evidence only"),
-    ("ops/bindings/shop.device.registry.yaml",       "L3 shop function evidence only"),
+    ("ops/bindings/home.device.registry.yaml",       "folded site input; not a registry subsystem"),
+    ("ops/bindings/shop.device.registry.yaml",       "folded L3 shop input; not machine/admission authority"),
     ("ops/bindings/home.hardware.inventory.yaml",    "demoted compatibility evidence"),
     ("ops/bindings/internet.asset.registry.yaml",    "demoted compatibility evidence"),
     ("ops/bindings/master.inventory.registry.yaml",  "registry-of-authorities; not physical-object truth"),
@@ -2136,7 +2136,7 @@ def emit_list_header() -> None:
     for cap, role in CANONICAL_READBACK_HEADER:
         print(f"#   {cap:<26} {role}")
     print("#")
-    print("# Admission evidence inputs (not admission / activation authority):")
+    print("# Folded source inputs (not admission / activation / provisioning authority):")
     for path, role in DEMOTED_EVIDENCE_HEADER:
         print(f"#   {path:<48} {role}")
     print("#")
@@ -2150,8 +2150,9 @@ def main() -> None:
             "Canonical node admission readback. Composes governed identity, site, "
             "candidacy, promotion, placement, access, recovery evidence, and machine "
             "facts. Read-only; does not promote nodes, assign roles, or admit hardware. "
-            "Inventory and registry bindings are subordinate evidence; this readback is "
-            "the authority for current machine truth."
+            "Inventory and registry bindings are folded source inputs; this readback is "
+            "the authority for current machine truth, first-touch state, bootstrap claim, "
+            "and provisioning boundary."
         )
     )
     parser.add_argument(
@@ -2176,7 +2177,7 @@ def main() -> None:
         action="store_true",
         help=(
             "List governed subject ids with a header naming the canonical readbacks "
-            "and the subordinate evidence bindings demoted by this surface."
+            "and the folded source inputs demoted by this surface."
         ),
     )
     parser.add_argument(

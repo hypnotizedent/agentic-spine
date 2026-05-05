@@ -89,7 +89,7 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 | Service endpoints | `ops/bindings/probe.registry.yaml` | Service-level health, ports, URLs |
 | Stack registry | `docs/governance/STACK_REGISTRY.yaml` | Stack-to-host inventory |
 | Minilab read model | `./bin/ops cap run infra.minilab.readmodel.generate` | Home site generated summary |
-| Shop/site presence | `./bin/ops cap run site.presence.status` + `./bin/ops cap run node.admission.status` | First-class shop/site presence and node admission readbacks |
+| Site Intelligence lifecycle | `./bin/ops cap run site.presence.status` + `./bin/ops cap run node.admission.status` | First-class site/profile/presence readback joined to node admission, first-touch/bootstrap, and provisioning boundaries |
 | Device identity read model | `./bin/ops cap run device.identity.readmodel.generate` | Estate-wide generated summary |
 
 ---
@@ -99,8 +99,8 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 ### Adding a New Device
 
 1. Choose name following Naming Rules above
-2. Add entry to appropriate binding (`ssh.targets.yaml`, `vm.lifecycle.yaml`)
-3. Run `./bin/ops cap run device.identity.readmodel.generate` to verify it appears
+2. Use the first-class lifecycle: site/profile/presence belongs in `site.presence.status`; node admission/bootstrap belongs in `node.admission.status`; VM provisioning belongs in `infra.vm.provision` / `infra.vm.bootstrap`; SSH access-path creation belongs in `provision.ssh-target.create`
+3. Run `./bin/ops cap run site.presence.status`, `./bin/ops cap run node.admission.status`, and `./bin/ops cap run device.identity.readmodel.generate` to verify it appears
 4. Commit binding changes
 
 ### Updating an IP

@@ -77,9 +77,11 @@ shop_text = shop_path.read_text(encoding="utf-8")
 for phrase in ["authoritative for access paths only", "not physical-machine identity", "node.admission.status", "node.recovery.status"]:
     if phrase not in ssh_text:
         fail(f"ssh.targets.yaml header must demote SSH targets to access evidence: missing {phrase!r}")
-for phrase in ["authoritative for shop function projection only", "not physical-machine identity", "node.admission.status", "node.recovery.status"]:
+for phrase in ["Status: folded_l3_source_input", "not a standalone shop registry subsystem", "node.admission.status", "node.recovery.status"]:
     if phrase not in shop_text:
-        fail(f"shop.device.registry.yaml header must demote shop registry to L3 projection evidence: missing {phrase!r}")
+        fail(f"shop.device.registry.yaml header must fold shop registry into Site Intelligence/node admission: missing {phrase!r}")
+if shop.get("status") != "folded_l3_source_input":
+    fail("shop.device.registry.yaml status must be folded_l3_source_input")
 
 shop_authority_scope = shop.get("authority_scope") or {}
 shop_owns = set(shop_authority_scope.get("owns") or [])
@@ -196,8 +198,8 @@ for machine_id, payload in admissions.items():
         if known.get("platform") != "windows":
             fail(f"{machine_id} must resolve as Windows platform evidence")
         caption = str(row.get("subtraction_caption") or "")
-        if "shop.device.registry supplies L3 shop function evidence only" not in caption:
-            fail(f"{machine_id} must explicitly demote shop.device.registry in subtraction caption")
+        if "shop.device.registry is folded L3 source input" not in caption:
+            fail(f"{machine_id} must explicitly fold shop.device.registry in subtraction caption")
     if machine_id == "windows-mint" and row.get("object_kind") != "operator_hardware":
         fail("windows-mint must remain distinct operator hardware, not collapsed with shop production machines")
     if machine_id == "windows-mint":
@@ -233,5 +235,5 @@ for machine_id, recovery in recoveries.items():
         if recovery.get("node_kind") != "shop_physical_machine":
             fail(f"{machine_id} must not remain generic ssh_target_only")
 
-print("D455 PASS: physical machine fragments resolve through node admission; old SSH/shop/fleet/operator surfaces are subordinate evidence")
+print("D455 PASS: physical machine fragments resolve through node admission; old SSH/shop/fleet/operator surfaces are folded or subordinate inputs, not standalone machine truth")
 PY
