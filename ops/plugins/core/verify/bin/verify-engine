@@ -1093,6 +1093,30 @@ if violations:
 PY
 '
 
+# E19: narrative receipt class retired (PACKET-1368, 2026-05-05). Active
+# $SPINE_STATE/domain-state/spine/*-RECEIPT-*.md production is forbidden;
+# pre-cutover instances are preserved under _archive/ as frozen historical
+# material. See SESSION_PROTOCOL.md §"Receipt Classes" closure paragraph
+# and KERNEL_PRIMITIVE_CANON.md §6 RECEIPT.
+check E19 "narrative receipt class retired (no active *-RECEIPT-*.md)" bash -c '
+    state_root="${SPINE_STATE:-}"
+    if [[ -z "$state_root" ]]; then
+        for cand in "$HOME/code/.runtime/spine/state" "/md1400/spine/state"; do
+            if [[ -d "$cand/domain-state/spine" ]]; then state_root="$cand"; break; fi
+        done
+    fi
+    target="$state_root/domain-state/spine"
+    [[ -d "$target" ]] || exit 0
+    offenders=$(find "$target" -maxdepth 1 -type f -name "*-RECEIPT-*.md" 2>/dev/null)
+    if [[ -n "$offenders" ]]; then
+        echo "narrative receipt class retired (PACKET-1368); active path must be empty" >&2
+        echo "offenders found in $target:" >&2
+        echo "$offenders" >&2
+        echo "remediation: move to $target/_archive/ (preserve as historical) and route research bodies through controller_prompt.{create --body-source, amend, close}" >&2
+        exit 1
+    fi
+'
+
 if [[ "$json_mode" -eq 1 ]]; then
     # Build JSON arrays
     fail_json="[]"

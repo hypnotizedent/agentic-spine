@@ -301,7 +301,9 @@ distinction between terminal failure and recoverable blocked is explicit.
 ### 6. RECEIPT
 
 **Realization status:** Collapsed — four governed receipt classes with a shared
-outcome vocabulary. Narrative receipts demoted to compatibility residue.
+outcome vocabulary. The previously-named narrative-receipt class was retired
+2026-05-05 (PACKET-1368); research bodies route through controller-prompt packet
+body markdown via `controller_prompt.{create --body-source, amend, close}`.
 
 | Aspect | Current State |
 |--------|---------------|
@@ -310,7 +312,7 @@ outcome vocabulary. Narrative receipts demoted to compatibility residue.
 | **Birth paths** | (1) `cap.sh write_cap_receipt()`; (2) `packet_receipt_writer.py` via `wave.finish`; (3) `packet_receipt_writer.py` via `controller_prompt.close`; (4) `loop-closeout-finalize` |
 | **Read/query paths** | Cap receipt: direct file read; EXEC_RECEIPT: `wave.finish` output, `completion.state.reconcile`; Loop closeout: direct file read. Outcome: read native field per class, map via `outcome_vocabulary.class_mappings`. |
 | **Verify gates** | Wave closeout requires run_key evidence; loop closeout requires acceptance + run_keys; cap receipts auto-generated |
-| **Classification** | **Collapsed** — four governed classes serve different lifecycle scopes but share a canonical outcome vocabulary. Narrative demoted to compatibility residue. |
+| **Classification** | **Collapsed** — four governed classes serve different lifecycle scopes but share a canonical outcome vocabulary. Narrative-receipt class retired 2026-05-05 (PACKET-1368); see SESSION_PROTOCOL §"Receipt Classes". |
 
 **Canon decision (LOOP-RECEIPT-RESULT-FAILURE-COLLAPSE-20260426):** The four
 governed receipt classes are legitimately different — they represent different
@@ -322,7 +324,11 @@ The collapse is:
 - One outcome vocabulary (`success`/`failure`/`blocked`) in
   `closeout.disposition.contract.yaml`
 - Class mappings from each class's native encoding to that vocabulary
-- Narrative receipts demoted from "fifth receipt class" to compatibility residue
+- Narrative-receipt class retired 2026-05-05 (PACKET-1368); research bodies
+  route through controller-prompt packet body markdown via
+  `controller_prompt.{create --body-source, amend, close}`. Pre-cutover
+  narrative receipts preserved under `$SPINE_STATE/domain-state/spine/_archive/`
+  as frozen, non-authoritative historical material.
 
 **What is canonical:**
 - Capability receipt → `cap.sh` (automatic, per cap run, outcome via `status`)
@@ -336,9 +342,11 @@ receipt existence/absence), `ops status` receipt summary, delegation disposition
 (derived from wave close hook, or controller-prompt close hook for picked-up
 non-wave packet realization).
 
-**What is compatibility residue:** Narrative receipts (`*-RECEIPT-*.md` in
-domain-state). Session memory only. If they disagree with a governed receipt,
-the governed receipt wins.
+**What is compatibility residue:** None active. The previously-named
+narrative-receipt class (`*-RECEIPT-*.md` in `$SPINE_STATE/domain-state/spine/`)
+was retired 2026-05-05 (PACKET-1368). Pre-cutover instances are preserved
+under the `_archive/` subdirectory as historical material, non-authoritative.
+Engine smoke check E19 fails when new instances appear in the active path.
 
 **What is resolved:** The question "should the five classes share a common
 envelope schema" is answered NO. The classes are different scopes. What they

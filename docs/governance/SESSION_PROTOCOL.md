@@ -593,9 +593,8 @@ This section is the canonical authority home for the RECEIPT primitive in the
 kernel coordination protocol (see
 [`KERNEL_PRIMITIVE_CANON.md`](KERNEL_PRIMITIVE_CANON.md) for the full matrix).
 
-The word "receipt" appears across the spine but names five distinct object
-classes with different write paths, governance levels, and authority roles.
-They are not interchangeable.
+The word "receipt" names four governed object classes with different write
+paths, governance levels, and authority roles. They are not interchangeable.
 
 | Class | Location Pattern | Writer | Governed | Authority Role |
 |---|---|---|---|---|
@@ -603,21 +602,37 @@ They are not interchangeable.
 | **Wave-close EXEC_RECEIPT** | `$SPINE_STATE/domain-state/EXEC_RECEIPT-WAVE-CLOSE-*.yaml` | `packet_receipt_writer.py` via `wave.finish` | yes — fingerprinted YAML, git-truth validated | Delivery evidence: proves a wave closed with head ancestry, lane outcomes, verify results, and disposition. Canonical per wave. |
 | **Controller-prompt EXEC_RECEIPT** | `$SPINE_STATE/domain-state/EXEC_RECEIPT-CONTROLLER-PROMPT-*.yaml` | `packet_receipt_writer.py` via `controller_prompt.close` | yes — same fingerprinted writer as wave-close | Packet-close evidence: proves a controller-prompt packet reached a terminal disposition with operator summary. Canonical per packet. |
 | **Loop closeout receipt** | `.evidence/spine/loop-closeouts/LOOP-*.closeout.md` | `loop-closeout-finalize` (typically chained by `wave.finish`; may also be reached via `orchestration.loop.close`) | partial — governed script, markdown output | Lifecycle evidence: proves a loop closed with disposition, completion level, and scope archive ref. One per loop. |
-| **Narrative receipt** | `$SPINE_STATE/domain-state/spine/*-RECEIPT-*.md` | Agent (convention) | no — convention only, no governed writer | Session evidence: human-readable summary of a slice (what changed, what was proved, what is next). Not canonical authority — if it disagrees with a governed receipt, the governed receipt wins. |
 
 When you see "receipt" in the spine, determine which class is meant before
-acting on it. The governed classes (capability, wave-close, controller-prompt,
-loop closeout) are authoritative. Narrative receipts are **compatibility
-residue** — session memory only, not canonical evidence.
+acting on it. All four classes are authoritative within their lifecycle scope.
 
-On consumer hosts post-D.3b v4 cutover (2026-05-02T21:43Z), narrative receipts
-written by direct local file IO under `$SPINE_STATE/domain-state/` are
-projection/cache per `root.authority.contract.yaml`
-`storage_evidence_node_canonical.file_plane_policy`. There is no governed
-writer today for non-authoritative durable research or derived-conclusion
-notes that future agents on other hosts can reliably find; the seam is named,
-not yet filled. Until a governed writer exists, such notes remain
-session-local — do not infer durability from the file existing on disk.
+### Research bodies live in packet body markdown (PACKET-1368, 2026-05-05)
+
+A previously-named fifth class — narrative receipts under
+`$SPINE_STATE/domain-state/spine/*-RECEIPT-*.md`, written by agent
+convention — is **retired**. Pre-cutover narrative receipts are preserved
+under `$SPINE_STATE/domain-state/spine/_archive/` as frozen,
+non-authoritative historical material; see `_archive/README.md`. New
+narrative receipts in the active path are forbidden and fail engine smoke
+check E19.
+
+The previously-named "the seam is named, not yet filled" gap (research
+bodies needing a durable governed surface) is **closed** by routing
+research bodies through the controller-prompt packet body itself, which is
+already governed at canonical `storage_evidence_node`:
+
+- **At packet birth:** `controller_prompt.create --body-source <path>`
+  inlines a research/audit body into the packet markdown. Packet markdown
+  lives at `$SPINE_STATE/controller-prompts/CONTROLLER-PACKET-*.md` on
+  canonical pve.
+- **Mid-packet checkpoints:** `controller_prompt.amend --summary <text>
+  --evidence-ref <path>` writes a continuity checkpoint (governed).
+- **Final body:** `controller_prompt.close --summary <text>` lands the
+  closing summary in a fingerprinted EXEC_RECEIPT YAML (class 3 above).
+
+EXEC_RECEIPT close summary is the durable proof. Packet body markdown is
+the durable narrative. Together they replace the retired narrative receipt
+class with zero new caps and zero new write surfaces.
 
 ### Receipt Outcome Semantics
 
