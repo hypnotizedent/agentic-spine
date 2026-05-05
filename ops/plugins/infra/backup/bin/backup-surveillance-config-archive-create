@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# backup.surveillance.config.archive.create - Archive non-secret surveillance config.
+#
+# Default is dry-run. Use --execute --reason to write the tarball, manifest,
+# and sha256 receipt to the canonical MD1400 configs backup plane.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/ops/lib/ssh-resolve.sh"
+
+SOURCE_TARGET="surveillance-stack"
+DEST_TARGET="pve"
+SOURCE_DIR="/srv/config/surveillance"
+DEST_DIR="/md1400/backups/configs/surveillance"
+EXECUTE=0
+REASON=""
+
+INCLUDE_FILES=(
+  ".env.template"
+  "config.yml"
+  "docker-compose.yml"
+  "go2rtc.yaml"
+)
+
+usage() {
+  cat <<'EOF'
+backup-surveillance-config-archive-create
+
+Usage:
+  backup-surveillance-config-archive-create [--source-target surveillance-stack] [--dest-target pve] [--source /srv/config/surveillance] [--dest /md1400/backups/configs/surveillance] [--execute --reason <text>]
+
+Writes:
+  /md1400/backups/configs/surveillance/surveillance-config-<UTC>.tar.gz
+  /md1400/backups/configs/surveillance/surveillance-config-<UTC>.tar.gz.sha256
+  /md1400/backups/configs/surveillance/surveillance-config-<UTC>.txt
+
+Includes only non-secret live config:
+  - .env.template
+  - config.yml
+  - docker-compose.yml
+  - go2rtc.yaml
+
+Explicitly excludes:
+  - .env
+  - RTSP/NVR credential values
+  - /srv/data/surveillance
+  - /srv/runtime/surveillance
+  - clips, recordings, snapshots, and Frigate caches
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --source-target) SOURCE_TARGET="${2:?--source-target requires a value}"; shift 2 ;;
+    --dest-target) DEST_TARGET="${2:?--dest-target requires a value}"; shift 2 ;;
+    --source) SOURCE_DIR="${2:?--source requires a value}"; shift 2 ;;
+    --dest) DEST_DIR="${2:?--dest requires a value}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    --dry-run) EXECUTE=0; shift ;;
+    --reason) REASON="${2:?--reason requires a value}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "STOP: unknown arg: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ "$EXECUTE" == "1" && -z "$REASON" ]]; then
+  echo "STOP: --execute requires --reason" >&2
+  exit 2
+fi
+
+source_resolved="$(ssh_resolve_ssh_host_with_fallback "$SOURCE_TARGET" 8 2>/dev/null || true)"
+source_host="$(awk '{print $1}' <<<"$source_resolved")"
+source_path="$(awk '{print $2}' <<<"$source_resolved")"
+source_user="$(ssh_resolve_user "$SOURCE_TARGET" ubuntu)"
+
+dest_resolved="$(ssh_resolve_ssh_host_with_fallback "$DEST_TARGET" 8 2>/dev/null || true)"
+dest_host="$(awk '{print $1}' <<<"$dest_resolved")"
+dest_path="$(awk '{print $2}' <<<"$dest_resolved")"
+dest_user="$(ssh_resolve_user "$DEST_TARGET" root)"
+
+[[ -n "$source_host" && "$source_path" != "unreachable" ]] || {
+  echo "STOP: cannot resolve SSH source target $SOURCE_TARGET" >&2
+  exit 2
+}
+[[ -n "$dest_host" && "$dest_path" != "unreachable" ]] || {
+  echo "STOP: cannot resolve SSH destination target $DEST_TARGET" >&2
+  exit 2
+}
+[[ -n "$source_user" && "$source_user" != "null" ]] || source_user=ubuntu
+[[ -n "$dest_user" && "$dest_user" != "null" ]] || dest_user=root
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+artifact="surveillance-config-${stamp}.tar.gz"
+manifest="surveillance-config-${stamp}.txt"
+
+tmp_dir="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT INT TERM
+
+mkdir -p "$tmp_dir/live-config"
+
+echo "backup.surveillance.config.archive.create"
+echo "source: ${SOURCE_TARGET}:${SOURCE_DIR} (${source_user}@${source_host}, path=${source_path})"
+echo "destination: ${DEST_TARGET}:${DEST_DIR} (${dest_user}@${dest_host}, path=${dest_path})"
+echo "artifact: ${DEST_DIR}/${artifact}"
+echo "manifest: ${DEST_DIR}/${manifest}"
+echo "execute: $EXECUTE"
+if [[ -n "$REASON" ]]; then
+  echo "reason: $REASON"
+fi
+
+remote_file_args=()
+for rel in "${INCLUDE_FILES[@]}"; do
+  remote_file_args+=("$(printf '%q' "$rel")")
+done
+
+ssh "${source_user}@${source_host}" \
+  "cd $(printf '%q' "$SOURCE_DIR") && tar -czf - ${remote_file_args[*]}" \
+  | tar -C "$tmp_dir/live-config" -xzf -
+
+if [[ -e "$tmp_dir/live-config/.env" ]]; then
+  echo "STOP: refused to archive .env" >&2
+  exit 3
+fi
+
+missing=()
+for rel in "${INCLUDE_FILES[@]}"; do
+  [[ -f "$tmp_dir/live-config/$rel" ]] || missing+=("$rel")
+done
+if [[ "${#missing[@]}" -gt 0 ]]; then
+  echo "STOP: missing expected config file(s): ${missing[*]}" >&2
+  exit 3
+fi
+
+{
+  echo "backup.surveillance.config.archive.create"
+  echo "generated_utc: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "source: ${SOURCE_TARGET}:${SOURCE_DIR}"
+  echo "destination: ${DEST_TARGET}:${DEST_DIR}"
+  echo "artifact: ${artifact}"
+  echo "included:"
+  for rel in "${INCLUDE_FILES[@]}"; do
+    echo "  - live-config/${rel}"
+  done
+  echo "excluded:"
+  echo "  - .env"
+  echo "  - RTSP/NVR credential values"
+  echo "  - /srv/data/surveillance"
+  echo "  - /srv/runtime/surveillance"
+  echo "  - clips, recordings, snapshots, Frigate caches"
+  echo "sha256:"
+  (cd "$tmp_dir" && find live-config -type f -print0 | sort -z | xargs -0 sha256sum | sed 's/^/  /')
+} > "$tmp_dir/$manifest"
+
+if command -v xattr >/dev/null 2>&1; then
+  xattr -cr "$tmp_dir" 2>/dev/null || true
+fi
+
+tar_create=(tar)
+if command -v bsdtar >/dev/null 2>&1; then
+  tar_create=(bsdtar --no-xattrs)
+fi
+COPYFILE_DISABLE=1 "${tar_create[@]}" -C "$tmp_dir" -czf "$tmp_dir/$artifact" live-config "$manifest"
+(cd "$tmp_dir" && sha256sum "$artifact" > "${artifact}.sha256")
+
+bytes="$(stat -f %z "$tmp_dir/$artifact" 2>/dev/null || stat -c %s "$tmp_dir/$artifact")"
+sha="$(cut -d' ' -f1 "$tmp_dir/${artifact}.sha256")"
+
+echo "bytes: $bytes"
+echo "sha256: $sha"
+
+if [[ "$EXECUTE" != "1" ]]; then
+  echo "status: DRY_RUN"
+  exit 0
+fi
+
+ssh "${dest_user}@${dest_host}" "mkdir -p $(printf '%q' "$DEST_DIR")"
+scp -q "$tmp_dir/$artifact" "$tmp_dir/${artifact}.sha256" "$tmp_dir/$manifest" "${dest_user}@${dest_host}:${DEST_DIR}/"
+
+ssh "${dest_user}@${dest_host}" "test -s $(printf '%q' "$DEST_DIR/$artifact") && test -s $(printf '%q' "$DEST_DIR/${artifact}.sha256") && test -s $(printf '%q' "$DEST_DIR/$manifest")"
+echo "status: OK"

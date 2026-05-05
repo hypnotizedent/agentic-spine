@@ -13,6 +13,7 @@ CAPS="$ROOT/ops/capabilities.yaml"
 READBACK="$ROOT/ops/plugins/core/bin/backup-readback-admission-status"
 FIRSTBOOT="$ROOT/ops/plugins/infra/host/bin/host-operator-hardware-firstboot-claim"
 NORMALIZE="$ROOT/ops/plugins/infra/host/bin/host-operator-hardware-post-boot-normalize"
+SURVEILLANCE_BACKUP="$ROOT/ops/plugins/infra/backup/bin/backup-surveillance-config-archive-create"
 
 fail() { echo "D451 FAIL: $*" >&2; exit 1; }
 
@@ -24,8 +25,9 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -x "$READBACK" ]] || fail "missing legacy backup readback drilldown"
 [[ -x "$FIRSTBOOT" ]] || fail "missing firstboot claim script"
 [[ -x "$NORMALIZE" ]] || fail "missing post-boot normalize script"
+[[ -x "$SURVEILLANCE_BACKUP" ]] || fail "missing surveillance config backup script"
 
-python3 - "$INVENTORY" "$SCHEDULE" "$DOC" "$CAPS" "$READBACK" "$FIRSTBOOT" "$NORMALIZE" <<'PY'
+python3 - "$INVENTORY" "$SCHEDULE" "$DOC" "$CAPS" "$READBACK" "$FIRSTBOOT" "$NORMALIZE" "$SURVEILLANCE_BACKUP" <<'PY'
 import sys
 from pathlib import Path
 
@@ -38,6 +40,7 @@ caps_path = Path(sys.argv[4])
 readback_path = Path(sys.argv[5])
 firstboot_path = Path(sys.argv[6])
 normalize_path = Path(sys.argv[7])
+surveillance_backup_path = Path(sys.argv[8])
 
 RULE = (
     "If the backup plane covers the workload, old app-local backups are debt "
@@ -137,6 +140,59 @@ for job in RETIRED_JOBS:
         fail(f"retired schedule job missing: {job}")
     if row.get("enabled") is not False:
         fail(f"{job} must remain disabled in declared schedule authority")
+
+surveillance_config_targets = {
+    "app-surveillance-config": "surveillance-config-*.tar.gz",
+    "app-surveillance-config-manifest": "surveillance-config-*.txt",
+}
+for target, glob in surveillance_config_targets.items():
+    row = targets_by_name.get(target)
+    if not isinstance(row, dict):
+        fail(f"surveillance config target missing from inventory: {target}")
+    if row.get("enabled") is not True:
+        fail(f"{target} must be enabled")
+    if row.get("host") != "pve":
+        fail(f"{target} must land on pve")
+    if row.get("base_path") != "/md1400/backups/configs/surveillance":
+        fail(f"{target} must land under /md1400/backups/configs/surveillance")
+    if row.get("glob") != glob:
+        fail(f"{target} glob drifted")
+    if not str(row.get("unique_data_reason") or "").strip():
+        fail(f"{target} must name unique_data_reason")
+
+vm215_target = targets_by_name.get("vm-215-surveillance-stack-primary")
+if not isinstance(vm215_target, dict):
+    fail("vm-215-surveillance-stack-primary target missing")
+if vm215_target.get("enabled") is not False:
+    fail("vm-215-surveillance-stack-primary must remain disabled for config-only posture")
+if sorted(vm215_target.get("recovery_alternative") or []) != sorted(surveillance_config_targets):
+    fail("vm-215-surveillance-stack-primary must point at surveillance config recovery alternatives")
+
+surveillance_job = jobs_by_id.get("surveillance-config-manual")
+if not isinstance(surveillance_job, dict):
+    fail("surveillance-config-manual schedule job missing")
+if surveillance_job.get("enabled") is not True:
+    fail("surveillance-config-manual must be enabled")
+if surveillance_job.get("capability_ref") != "backup.surveillance.config.archive.create":
+    fail("surveillance-config-manual must use backup.surveillance.config.archive.create")
+if sorted(surveillance_job.get("inventory_targets") or []) != sorted(surveillance_config_targets):
+    fail("surveillance-config-manual inventory_targets must match surveillance config targets")
+
+surveillance_cap = capabilities.get("backup.surveillance.config.archive.create") or {}
+if surveillance_cap.get("safety") != "mutating":
+    fail("backup.surveillance.config.archive.create must be mutating")
+if surveillance_cap.get("command") != "./ops/plugins/infra/backup/bin/backup-surveillance-config-archive-create":
+    fail("backup.surveillance.config.archive.create command drifted")
+
+surveillance_script = surveillance_backup_path.read_text(encoding="utf-8")
+for required in [
+    ".env",
+    "/srv/data/surveillance",
+    "/srv/runtime/surveillance",
+    "RTSP/NVR credential values",
+]:
+    if required not in surveillance_script:
+        fail(f"surveillance config backup script must explicitly exclude {required}")
 
 missing_unique_reason = []
 for row in targets:

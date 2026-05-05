@@ -429,6 +429,7 @@ for host, doc in host_docs.items():
         policy_name = policy_by_vmid.get(vmid, "")
         scheduled_jobs = doc["scheduled"].get(vmid, [])
         target_readback = target_status_for(backup_target)
+        unit_mode = target_unit_mode.get(backup_target, "")
         classification = "subject"
         status = "ok"
         reason = "covered_by_inventory_and_readback"
@@ -446,9 +447,18 @@ for host, doc in host_docs.items():
             status = "gap"
             reason = "live_runtime_contradicts_lifecycle_status"
         elif policy_name == "no_recurring_vzdump":
-            classification = "exclusion"
-            status = "ok"
-            reason = "policy_excludes_recurring_vzdump"
+            if (
+                backup_target
+                and target_readback["status"] == "ok"
+                and unit_mode in {"governed_capability", "host_governed_script", "file_archive"}
+            ):
+                classification = "subject"
+                status = "ok"
+                reason = "covered_by_non_vm_backup_no_recurring_vzdump"
+            else:
+                classification = "exclusion"
+                status = "ok"
+                reason = "policy_excludes_recurring_vzdump"
         elif target_readback["status"] in {"stale", "missing", "error", "blocked", "not_reported", "missing_inventory"}:
             classification = "subject"
             status = "degraded"
@@ -458,7 +468,6 @@ for host, doc in host_docs.items():
             status = "gap"
             reason = "no_backup_target_or_exclusion"
 
-        unit_mode = target_unit_mode.get(backup_target, "")
         if (
             subject["runtime_status"] == "running"
             and backup_target

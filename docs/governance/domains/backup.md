@@ -32,6 +32,10 @@ machine.
 - Large media payloads remain excluded; only media config-state is backed up.
 - MinIO duplicate payload backups remain excluded by policy.
 - Immich photos stay on their existing photo-backup story and are not duplicated into the shop backup plane.
+- Surveillance VM 215 recurring VM-image backup remains excluded by policy. Its
+  active first-class backup promise is config-only under
+  `/md1400/backups/configs/surveillance`; NVR footage remains cyclic retention
+  on the Hikvision appliance, and VM media/cache is not business record.
 - Regenerable metadata caches must stay excluded from media-config backups, including:
   - `Radarr` / `Sonarr` / `Lidarr` `MediaCover`
   - `Jellyfin` metadata cache

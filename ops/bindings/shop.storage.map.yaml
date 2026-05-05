@@ -419,12 +419,14 @@ service_lifecycle:
   backup_runtime_units:
   - vm-215-surveillance-stack
   backup_targets:
-  - vm-215-surveillance-stack-primary
+  - app-surveillance-config
+  - app-surveillance-config-manifest
   canonical_live_roots:
   - surveillance-stack:/srv/config/surveillance (Canonical live compose/config authority
-    proved by the 2026-03-19 normalization wave.)
-  - surveillance-stack:/srv/data/surveillance (Rolling retention surface for active
-    recordings/clips/snapshots. Final archive home is md1400.)
+    proved by the 2026-03-19 normalization wave; config-only backup lands under
+    pve:/md1400/backups/configs/surveillance.)
+  - surveillance-stack:/srv/data/surveillance (Empty VM media/cache skeleton in the
+    NVR-first posture; not business-record backup authority.)
   - surveillance-stack:/srv/runtime/surveillance (Canonical runtime cache surface
     for tmpfs-backed transient state.)
   allowed_secondary_roots:
@@ -442,10 +444,9 @@ service_lifecycle:
     claim_days: 0
     clips_days: 0
     snapshots_days: 0
-    description: 'Watch-only minimal posture (2026-04-14): all retention claims are
-      zero because record.enabled, detect.enabled, and snapshots are all false. Target
-      after recording enabled on 100GB disk: 1d motion, 14d clips. Target after 2TB
-      remediation: 7d/14d.'
+    description: 'NVR-first low-compute posture (2026-05-05): VM retention claims
+      are zero because the VM does not record. Hikvision NVR owns footage retention;
+      VM config recovery is handled by app-surveillance-config.'
   tombstone_policy:
     expiry_mode: review_before_delete
     default_review_days: 30
@@ -453,9 +454,9 @@ service_lifecycle:
   capacity_honesty:
     status: accepted
     assessment: honest
-    description: Retention claim fits within modeled safe capacity.
+    description: VM retention claim is zero; NVR HDD repair owns footage capacity.
     claim_days: 0.0
-    achievable_days: 1.27
+    achievable_days: 0.0
 runtime_storage:
 - vm_id: 202
   hostname: automation-stack
@@ -1350,20 +1351,21 @@ runtime_storage:
   - tank-vms:vm-215-disk-0
   - tank-vms:vm-215-disk-1
   owner: '@ronny'
-  purpose: Frigate/go2rtc surveillance platform for shop NVR (12 channels, CPU-first).
-    Integrates with home HA. LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.
+  purpose: NVR-first low-compute surveillance viewer for shop cameras. go2rtc serves
+    browser live view; Hikvision NVR owns recording.
   active_services:
-  - frigate
+  - go2rtc
+  - node-exporter
   health_probe_ids:
   - frigate-vm215
   public_routes: []
   public_route_count: 0
   backup_profiles:
-  - vm-rebuildable
+  - app-small-state
   durability_classes:
-  - large_state
+  - small_state
   restore_classes:
-  - vm-dry-run-quarterly
+  - app-dry-run-monthly
   storage_objects:
   - kind: boot_ref
     object: md1400-vms:vm-215-disk-0
@@ -1397,12 +1399,24 @@ runtime_storage:
     durability_role: stale_residue
     pool: tank
   backup_generation_lanes:
-  - lane_id: pve-vzdump-cold-canonical
+  - lane_id: r730xd-surveillance-config-backups
     host: pve
-    base_path: /md1400/backups/vm-images/pve
-  restore_targets: []
+    base_path: /md1400/backups/configs/surveillance
+  restore_targets:
+  - name: app-surveillance-config
+    enabled: true
+    host: pve
+    base_path: /md1400/backups/configs/surveillance
+    glob: surveillance-config-*.tar.gz
+    classification: rebuildable
+  - name: app-surveillance-config-manifest
+    enabled: true
+    host: pve
+    base_path: /md1400/backups/configs/surveillance
+    glob: surveillance-config-*.txt
+    classification: rebuildable
   backup_admission_states:
-  - planned
+  - production_ready
   primary_backup_unit: vm-215-surveillance-stack
 - vm_id: 216
   hostname: observability-r620
