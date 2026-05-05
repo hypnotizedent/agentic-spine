@@ -283,7 +283,105 @@ def normalize_since(value: str) -> str:
     return f"{n} {unit} ago"
 
 
-def recent_commits(ref: str, limit: int, since: str | None = None) -> list[dict[str, Any]]:
+DIFF_TOO_LARGE_THRESHOLD = 50000
+
+
+def collect_commit_diff(
+    sha: str,
+    *,
+    max_per_file: int,
+    max_per_commit: int,
+    max_files: int,
+    shortstat: dict[str, int],
+) -> dict[str, Any]:
+    """Read bounded full-diff body for a commit. Honest disclosure on truncation.
+
+    Witness-only: this is a read of git history. No mutation, no decision.
+    """
+    total_in_commit = (shortstat or {}).get("insertions", 0) + (shortstat or {}).get("deletions", 0)
+    files_total = (shortstat or {}).get("files_changed", 0)
+    block: dict[str, Any] = {
+        "status": "included",
+        "truncated": False,
+        "total_lines_collected": 0,
+        "total_lines_in_commit": total_in_commit,
+        "files_included": 0,
+        "files_total": files_total,
+        "per_file_caps_hit": [],
+        "max_per_file": max_per_file,
+        "max_per_commit": max_per_commit,
+        "max_files": max_files,
+    }
+    if total_in_commit > DIFF_TOO_LARGE_THRESHOLD:
+        block["status"] = "skipped_too_large"
+        block["truncated"] = True
+        return block
+    proc = git("show", sha, "--no-color", "--format=", "--unified=3")
+    if proc.returncode != 0:
+        block["status"] = "skipped_git_failed"
+        block["truncated"] = True
+        block["error"] = (proc.stderr or proc.stdout).strip()[:300]
+        return block
+    raw = proc.stdout
+    if not raw:
+        block["status"] = "included"
+        block["body"] = ""
+        return block
+    file_chunks: list[tuple[str, list[str]]] = []
+    current_path = "<unknown>"
+    current_lines: list[str] = []
+    for line in raw.splitlines():
+        if line.startswith("diff --git "):
+            if current_lines:
+                file_chunks.append((current_path, current_lines))
+            current_lines = [line]
+            tail = line.split(" b/", 1)
+            current_path = tail[1] if len(tail) == 2 else "<unknown>"
+        else:
+            current_lines.append(line)
+    if current_lines:
+        file_chunks.append((current_path, current_lines))
+    body_parts: list[str] = []
+    total_collected = 0
+    files_emitted = 0
+    for path, chunk in file_chunks:
+        if files_emitted >= max_files:
+            block["status"] = "skipped_per_commit_cap"
+            block["truncated"] = True
+            break
+        if len(chunk) > max_per_file:
+            chunk = chunk[:max_per_file] + [f"... [diff truncated at {max_per_file} lines for {path}]"]
+            block["per_file_caps_hit"].append(path)
+            block["truncated"] = True
+        if total_collected + len(chunk) > max_per_commit:
+            remaining = max(0, max_per_commit - total_collected)
+            if remaining > 0:
+                truncated_chunk = chunk[:remaining]
+                body_parts.append("\n".join(truncated_chunk + ["... [diff truncated at per-commit cap]"]))
+                total_collected += remaining
+                files_emitted += 1
+            block["status"] = "skipped_per_commit_cap"
+            block["truncated"] = True
+            break
+        body_parts.append("\n".join(chunk))
+        total_collected += len(chunk)
+        files_emitted += 1
+    block["body"] = "\n".join(body_parts)
+    block["total_lines_collected"] = total_collected
+    block["files_included"] = files_emitted
+    return block
+
+
+def recent_commits(
+    ref: str,
+    limit: int,
+    since: str | None = None,
+    *,
+    include_diff: bool = False,
+    diff_max_per_file: int = 500,
+    diff_max_per_commit: int = 5000,
+    diff_max_files: int = 100,
+) -> list[dict[str, Any]]:
     log_args = ["log", ref, "--date=iso-strict",
                 "--format=%H%x1f%aI%x1f%an%x1f%ae%x1f%s"]
     if since:
@@ -299,6 +397,7 @@ def recent_commits(ref: str, limit: int, since: str | None = None) -> list[dict[
             continue
         sha, author_date, author_name, author_email, subject = parts
         paths, status_counts = changed_paths_for_commit(sha)
+        shortstat = commit_shortstat(sha)
         row: dict[str, Any] = {
             "sha": sha,
             "short_sha": sha[:8],
@@ -308,8 +407,18 @@ def recent_commits(ref: str, limit: int, since: str | None = None) -> list[dict[
             "subject": subject,
             "paths": paths,
             "status_counts": status_counts,
-            "shortstat": commit_shortstat(sha),
+            "shortstat": shortstat,
         }
+        if include_diff:
+            row["diff_body"] = collect_commit_diff(
+                sha,
+                max_per_file=diff_max_per_file,
+                max_per_commit=diff_max_per_commit,
+                max_files=diff_max_files,
+                shortstat=shortstat,
+            )
+        else:
+            row["diff_body"] = {"status": "skipped_disabled", "truncated": False}
         row.update(classify_commit(row))
         rows.append(row)
     return rows
@@ -415,17 +524,37 @@ def input_readbacks(nodes: list[str]) -> dict[str, Any]:
 
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     since = getattr(args, "since", None)
-    commits = recent_commits(args.ref, args.limit, since=since)
+    include_diff = getattr(args, "include_diff", False)
+    commits = recent_commits(
+        args.ref,
+        args.limit,
+        since=since,
+        include_diff=include_diff,
+        diff_max_per_file=getattr(args, "diff_max_lines_per_file", 500),
+        diff_max_per_commit=getattr(args, "diff_max_lines_per_commit", 5000),
+        diff_max_files=getattr(args, "diff_max_files_per_commit", 100),
+    )
     scope: dict[str, Any] = {
         "class": "witness",
         "subject": "commit_class_estate_narrative",
         "ref": args.ref,
         "limit": args.limit,
-        "read_depth": READ_BOUNDARY,
+        "read_depth": (
+            "commit_metadata_changed_paths_shortstat_and_bounded_full_diff"
+            if include_diff
+            else READ_BOUNDARY
+        ),
     }
     if since:
         scope["since"] = since
         scope["since_normalized"] = normalize_since(since)
+    if include_diff:
+        scope["diff_caps"] = {
+            "max_per_file": getattr(args, "diff_max_lines_per_file", 500),
+            "max_per_commit": getattr(args, "diff_max_lines_per_commit", 5000),
+            "max_files": getattr(args, "diff_max_files_per_commit", 100),
+            "skip_threshold_total_lines": DIFF_TOO_LARGE_THRESHOLD,
+        }
     payload: dict[str, Any] = {
         "canonical_authority": CAPABILITY,
         "capability": CAPABILITY,
@@ -475,9 +604,17 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "direction_signals": summarize(commits, args.ref),
         "commits": commits,
         "read_boundaries": [
-            READ_BOUNDARY,
+            (
+                "commit_metadata_changed_paths_shortstat_and_bounded_full_diff_when_include_diff_set"
+                if include_diff
+                else READ_BOUNDARY
+            ),
             "no LLM inference in v1",
-            "no full diff body read in v1",
+            (
+                "full diff body bounded by per-file and per-commit caps; skipped-diff disclosed in diff_body block"
+                if include_diff
+                else "no full diff body read unless --include-diff"
+            ),
             "node admission and site intelligence are consumed only as readback inputs",
         ],
     }
@@ -525,6 +662,15 @@ def print_human(payload: dict[str, Any]) -> None:
         shown = ", ".join(paths[:5])
         suffix = f" (+{len(paths) - 5} more)" if len(paths) > 5 else ""
         print(f"  paths: {shown}{suffix}")
+        diff = row.get("diff_body") or {}
+        if diff.get("status") and diff.get("status") != "skipped_disabled":
+            disclosure = (
+                f"  diff: status={diff.get('status')} "
+                f"truncated={diff.get('truncated')} "
+                f"lines={diff.get('total_lines_collected')}/{diff.get('total_lines_in_commit')} "
+                f"files={diff.get('files_included')}/{diff.get('files_total')}"
+            )
+            print(disclosure)
 
 
 def print_markdown(payload: dict[str, Any]) -> None:
@@ -564,6 +710,15 @@ def print_markdown(payload: dict[str, Any]) -> None:
         suffix = f" (+{len(paths) - 5} more)" if len(paths) > 5 else ""
         if paths:
             print(f"  - paths: {shown}{suffix}")
+        diff = row.get("diff_body") or {}
+        if diff.get("status") and diff.get("status") != "skipped_disabled":
+            disclosure = (
+                f"  - diff: `{diff.get('status')}` "
+                f"truncated={diff.get('truncated')} "
+                f"lines={diff.get('total_lines_collected')}/{diff.get('total_lines_in_commit')} "
+                f"files={diff.get('files_included')}/{diff.get('files_total')}"
+            )
+            print(disclosure)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -572,6 +727,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Recent commit count (or safety cap when --since is supplied)")
     parser.add_argument("--since", default=None, help="Filter to commits within window. Accepts compact forms like 14.days, 7d, 2w, 24h, 2.months, or git-readable forms (ISO date, '2 weeks ago').")
     parser.add_argument("--format", dest="format", choices=("line", "markdown", "json"), default="line", help="Output format (default: line). --json is a compat alias for --format json.")
+    parser.add_argument("--include-diff", action="store_true", help="Include bounded full-diff body per commit (size-capped, with skipped-diff disclosure). Default off; preserves slice-A payload shape when absent.")
+    parser.add_argument("--diff-max-lines-per-file", type=int, default=500, help="Max diff lines included per file when --include-diff (default 500); excess truncated with disclosure.")
+    parser.add_argument("--diff-max-lines-per-commit", type=int, default=5000, help="Max diff lines collected per commit when --include-diff (default 5000); excess truncated with disclosure.")
+    parser.add_argument("--diff-max-files-per-commit", type=int, default=100, help="Max files emitted per commit when --include-diff (default 100); excess truncated with disclosure.")
     parser.add_argument("--input-node", action="append", default=[], help="Node id to summarize via node.admission.status")
     parser.add_argument("--skip-input-readbacks", action="store_true", help="Do not invoke node/site input readbacks")
     parser.add_argument("--json", action="store_true", help="Compat alias for --format json")
@@ -583,6 +742,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         args.limit = 200
     if args.limit < 1 or args.limit > 500:
         parser.error("--limit must be between 1 and 500")
+    if args.diff_max_lines_per_file < 10 or args.diff_max_lines_per_file > 50000:
+        parser.error("--diff-max-lines-per-file must be between 10 and 50000")
+    if args.diff_max_lines_per_commit < 100 or args.diff_max_lines_per_commit > 200000:
+        parser.error("--diff-max-lines-per-commit must be between 100 and 200000")
+    if args.diff_max_files_per_commit < 1 or args.diff_max_files_per_commit > 1000:
+        parser.error("--diff-max-files-per-commit must be between 1 and 1000")
     if not args.input_node:
         args.input_node = list(DEFAULT_INPUT_NODES)
     return args

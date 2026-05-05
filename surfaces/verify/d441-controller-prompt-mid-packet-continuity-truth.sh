@@ -102,6 +102,57 @@ if a != b:
     raise SystemExit("--json compat alias must produce same payload as --format json")
 PY
 
+NARRATOR_DIFF_PAYLOAD="$("$COMMIT_NARRATOR_BIN" --include-diff --limit 2 --skip-input-readbacks --json)"
+python3 - "$NARRATOR_DIFF_PAYLOAD" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+scope = payload.get("scope") or {}
+caps = scope.get("diff_caps") or {}
+for key in ("max_per_file", "max_per_commit", "max_files", "skip_threshold_total_lines"):
+    if not isinstance(caps.get(key), int):
+        raise SystemExit(f"commit narrator --include-diff scope must publish diff_caps.{key} integer")
+if scope.get("read_depth") != "commit_metadata_changed_paths_shortstat_and_bounded_full_diff":
+    raise SystemExit("commit narrator --include-diff must update scope.read_depth to bounded full-diff form")
+boundary = payload.get("authority_boundary") or {}
+if boundary.get("mutation_access") != "none" or boundary.get("decision_authority") != "none":
+    raise SystemExit("commit narrator --include-diff must keep witness-only authority bounds")
+commits = payload.get("commits") or []
+if not commits:
+    raise SystemExit("commit narrator --include-diff emitted no commit rows")
+allowed_statuses = {"included", "skipped_per_file_cap", "skipped_per_commit_cap", "skipped_too_large", "skipped_git_failed", "skipped_disabled"}
+for row in commits:
+    db = row.get("diff_body") or {}
+    if db.get("status") not in allowed_statuses:
+        raise SystemExit(f"commit narrator --include-diff row diff_body.status invalid: {db.get('status')}")
+    if "truncated" not in db:
+        raise SystemExit("commit narrator --include-diff row diff_body must expose truncated boolean")
+    if db.get("status") == "included" and not isinstance(db.get("body"), str):
+        raise SystemExit("commit narrator --include-diff included row must carry body string")
+PY
+
+NARRATOR_DIFF_TRUNC_PAYLOAD="$("$COMMIT_NARRATOR_BIN" --include-diff --limit 2 --skip-input-readbacks --diff-max-lines-per-commit 100 --json)"
+python3 - "$NARRATOR_DIFF_TRUNC_PAYLOAD" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+commits = payload.get("commits") or []
+saw_truncation_or_small = False
+for row in commits:
+    db = row.get("diff_body") or {}
+    total = db.get("total_lines_collected") or 0
+    if total > 100:
+        raise SystemExit(f"commit narrator --include-diff exceeded per-commit cap: collected {total}")
+    if db.get("status") == "skipped_per_commit_cap" and not db.get("truncated"):
+        raise SystemExit("commit narrator --include-diff per-commit cap must mark truncated true on disclosure")
+    if db.get("status") in {"skipped_per_commit_cap", "included"}:
+        saw_truncation_or_small = True
+if not saw_truncation_or_small:
+    raise SystemExit("commit narrator --include-diff did not produce a recognizable diff_body status under cap probe")
+PY
+
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/d441-mid-packet.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 STATE_ROOT="$TMP_ROOT/state"
@@ -540,5 +591,5 @@ if closed_residue_row.get("continuity_reason") != "linked loop is terminal (stat
     raise SystemExit(f"unexpected closed-loop continuity_reason: {closed_residue_row.get('continuity_reason')}")
 PY
 
-echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
+echo "D441 PASS: controller_prompt.amend restores mid-packet continuity, controller_prompt.status reads packet and reservation state, controller_prompt.reserve blocks parallel packet-number collision and demotes born-packet reservations from active status, commit.narrator.status is locked as a read-only witness that subtracts manual commit narration without replacing node admission or Site Intelligence, commit.narrator.status --since accepts compact forms and exposes since/since_normalized in scope, commit.narrator.status --format markdown emits the witness-only rollup with header and direction-signal sections, commit.narrator.status --json remains a compat alias for --format json with byte-equivalent payload, commit.narrator.status --include-diff publishes diff_caps in scope and emits a witness-only diff_body block per commit with bounded body and honest truncation disclosure, session.v3.attach default banner teaches commit.narrator.status as normal orientation pointer, entry-compile recovers packet continuity without tracker glue, close paths terminalize unclaimed delegations, ops status ignores stale ambient repo env, ops status brief falls back to cache instead of all-unknown degradation, and closed-loop delegation residue is terminal instead of stale work"
 exit 0
