@@ -31,7 +31,10 @@ resolve_family_lib_path() {
   printf '%s\n' "$(dirname "$(dirname "$script_path")")/lib/$lib_name"
 }
 
-SNAPSHOT_SURFACE_LIB="$(resolve_family_lib_path "snapshot.projection.apply" "./ops/plugins/core/kernel/snapshot/bin/snapshot-projection-apply" "snapshot-surface-common.sh")"
+SNAPSHOT_SURFACE_LIB="$ROOT/ops/plugins/core/snapshot/lib/snapshot-surface-common.sh"
+if [[ ! -f "$SNAPSHOT_SURFACE_LIB" ]]; then
+  SNAPSHOT_SURFACE_LIB="$(resolve_family_lib_path "snapshot.projection.apply" "./ops/plugins/core/kernel/snapshot/bin/snapshot-projection-apply" "snapshot-surface-common.sh")"
+fi
 source "$SNAPSHOT_SURFACE_LIB"
 POLICY_FILE="${MEDIA_CAPACITY_GUARD_POLICY:-$MEDIA_BINDINGS_HOME/infra.capacity.guard.policy.yaml}"
 
@@ -70,7 +73,11 @@ if [[ -n "${MEDIA_CAPACITY_SNAPSHOT_PATH:-}" ]]; then
   SNAPSHOT_PATH="$MEDIA_CAPACITY_SNAPSHOT_PATH"
 else
   SNAPSHOT_REL="$(yq -r '.runway.snapshot_path // "/Users/ronnyworks/code/projects/media/bindings/media.capacity.snapshot.yaml"' "$POLICY_FILE" 2>/dev/null || echo '/Users/ronnyworks/code/projects/media/bindings/media.capacity.snapshot.yaml')"
-  SNAPSHOT_PATH="$(snapshot_surface_resolve_source_path "$ROOT" "$SNAPSHOT_REL")"
+  if [[ "$SNAPSHOT_REL" = /* ]]; then
+    SNAPSHOT_PATH="$SNAPSHOT_REL"
+  else
+    SNAPSHOT_PATH="$(snapshot_surface_resolve_source_path "$ROOT" "$SNAPSHOT_REL")"
+  fi
 fi
 
 python3 - "$SNAPSHOT_PATH" "$JSON_MODE" <<'PY'
