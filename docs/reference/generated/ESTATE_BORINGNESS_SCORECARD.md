@@ -1,14 +1,14 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-05-02
+last_verified: 2026-05-05
 scope: estate-boringness-scorecard
 source_binding: ops/bindings/estate.surface.register.yaml
 ---
 
 # Estate Boringness Scorecard
 
-- Generated: `2026-05-02T03:53:11Z`
+- Generated: `2026-05-05T19:24:17Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Repo surfaces tracked: `2`
 - Ghosts: `10`

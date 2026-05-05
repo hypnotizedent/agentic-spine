@@ -1,14 +1,14 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-04-30
+last_verified: 2026-05-05
 scope: home-rack-scorecard
 source_binding: ops/bindings/home.storage.map.yaml
 ---
 
 # Home Rack Scorecard
 
-- Generated: `2026-04-30T14:38:04Z`
+- Generated: `2026-05-05T19:24:17Z`
 - Rebuild: `./bin/ops cap run infra.estate.boringness.build`
 - Active runtimes: `2`
 - Tombstones: `4`
@@ -19,7 +19,7 @@ source_binding: ops/bindings/home.storage.map.yaml
 | Plane | Canonical surface | Current truth |
 | --- | --- | --- |
 | Hypervisor | `ops/bindings/home.proxmox.inventory.yaml` | `proxmox-home` is the only home hypervisor. |
-| Storage map | `ops/bindings/home.storage.map.yaml` | Runtime, backup, and personal-data storage truth are projected from authoritative bindings plus live proof. |
+| Folded storage map | `ops/bindings/home.storage.map.yaml` | Folded input subordinate to `payload.custody.status`; not an operator-facing storage authority. |
 | Ingress | `ops/bindings/home.ingress.map.yaml` | Public, local-DNS, and Tailscale ingress lanes are explicit. |
 
 ## Storage Tiers

@@ -805,5 +805,17 @@ for fragment in [
     if fragment not in shop_dhcp_audit_text:
         fail(f"network-shop-dhcp-audit must declare classification bucket {fragment!r} (PACKET-1317)")
 
-print("D448 PASS: first-class Site Intelligence lifecycle is locked; old network/device registries are folded inputs rather than evidence-only subsystems; site.presence.status reports profile/topology/presence plus node admission, bootstrap, provisioning, network_visibility_proof, identity_state, hardware_class, storage custody, and backup posture; visibility cannot create node admission; site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115); home.unifi.network.inventory.yaml authority claims are folded at both leaf and parent; DHCP audit/status reads are bounded to folded DHCP intent under site.presence.status and bind Infisical lookup to the canonical spine root; UniFi snapshot caps are bounded to folded observed-client input; telemetry-proven dead network cap families/wrappers stay subtracted; the legacy subtracted_peer_authority JSON key is deleted; storage maps are subordinate to payload.custody.status; the zero-receipt shop readmodel generator stays retired under first-class Site Intelligence readbacks (PACKET-1312); freshness state is resolved from declared freshness_policy max_age_hours (no hardcoded stale); freshness_summary always emits canonical fresh/stale/policy_missing/declared_only keys; and shop UniFi unregistered clients are classified into honest folded-input buckets (already_declared_other_key, transient_non_node, observed_only_unknown, stale_snapshot_artifact, candidate_pending_admission) so the 55-row set no longer floats as audit-only bloat (PACKET-1317)")
+print(
+    "D448 PASS: site.presence.status is the single first-class Site Intelligence "
+    "readback; site profile, topology, presence, node admission, bootstrap, and "
+    "provisioning boundaries hold; row fields network_visibility_proof, "
+    "identity_state, hardware_class, bootstrap_state, storage_custody_state, and "
+    "backup_posture compose without inferring node admission from network "
+    "visibility; remaining registries, UniFi observed snapshots, storage maps, "
+    "and DHCP audits are non-authoritative folded/generated inputs with explicit "
+    "producer or canonical consumer; retired cap names and wrappers stay absent "
+    "from live grammar; freshness state is resolved from declared policy "
+    "max_age_hours and the summary always emits canonical state keys; shop "
+    "unregistered clients are classified into bounded folded-input buckets."
+)
 PY
