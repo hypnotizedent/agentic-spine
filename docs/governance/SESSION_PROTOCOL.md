@@ -13,8 +13,8 @@ Agent entry is simple:
 2. Read [AGENTS.md](../../AGENTS.md) first, then [NORTH_STAR.md](../../NORTH_STAR.md), [SPINE.md](SPINE.md), and this file.
 3. Governed session start is `ops terminal launch` — it sets identity, resolves
    custody, and auto-attaches loops. If you are already inside a terminal-launch
-   session, orientation context was rendered at birth. If you need to re-read
-   orientation without restarting, use:
+   session and lose orientation mid-session, re-render the read-only orientation
+   banner immediately with:
 
 ```bash
 ./bin/ops cap run session.v3.attach
@@ -22,7 +22,8 @@ Agent entry is simple:
 
    Note: `session.v3.attach` is a read-only orientation surface. It does not
    create admission, bind identity, or attach loops. It is not a substitute for
-   `ops terminal launch`.
+   `ops terminal launch`. If it reports `UNBOUND`, the shell is not admitted:
+   stop before mutation and run `ops terminal launch`.
 
    The operator workstation is an admitting client, not the unattended runtime
    substrate. Autonomous execution belongs on governed nodes and worker lanes,
@@ -124,6 +125,12 @@ which loop you are in, do not create one to satisfy ceremony; identify
 the operator input being carried, attach it to an existing loop when
 the fit is clear, and create a loop only when there is a bounded objective
 with acceptance and close criteria.
+
+When the steward asks to "capture this as evidence," the correct move is to
+preserve the readback through a governed capability receipt or evidence path on
+the storage evidence node. It does not mean moving L3 product logic, findings,
+or domain bodies into L1. Evidence may cite the domain home; authority stays in
+the existing canonical home for that concern.
 
 Workflow telemetry that another lane created is evidence, not scratch space.
 Loop scopes, controller-prompt packets, orchestration manifests, wave runtime

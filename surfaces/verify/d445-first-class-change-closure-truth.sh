@@ -63,6 +63,9 @@ grep -q "subtraction tail" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missing w
 grep -q "Human intent is provenance" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missing human intent authority boundary"
 grep -q "examples or templates as illustrative" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missing examples-not-scope rule"
 grep -q "cross-plane readback" "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missing pre-mutation cross-plane readback rule"
+grep -q 'capture this as evidence' "$SESSION_DOC" || fail "SESSION_PROTOCOL.md missing capture-as-evidence rule"
+grep -q 'storage evidence node' "$SESSION_DOC" || fail "SESSION_PROTOCOL.md evidence capture must route through storage evidence node"
+grep -q 'does not mean moving L3 product logic' "$SESSION_DOC" || fail "SESSION_PROTOCOL.md must not conflate evidence capture with L3-to-L1 promotion"
 grep -q "D445" "$REGISTRY" || fail "gate registry missing D445"
 grep -q "D445" "$TOPOLOGY" || fail "gate topology core_mode missing D445"
 

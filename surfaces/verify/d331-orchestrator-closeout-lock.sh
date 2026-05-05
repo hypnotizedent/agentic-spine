@@ -83,6 +83,9 @@ for marker in \
   "+refs/heads/\$LANE_BRANCH:refs/heads/\$LANE_BRANCH" \
   "lane_branch_pushed" \
   "target_publish_command" \
+  "self_hosting_proof_command" \
+  "self_hosting_proof_required" \
+  "closeout/readback plumbing" \
   "missing lane branch" \
   "coordinator.lane.publish" \
   "coordinator.target.publish"; do

@@ -78,6 +78,27 @@ worktree_is_clean() {
   [[ -z "$(git -C "$path" status --porcelain 2>/dev/null)" ]]
 }
 
+self_hosting_closeout_paths_changed() {
+  local base="$1"
+  local head="$2"
+  git -C "$ROOT" diff --name-only "$base" "$head" -- \
+    ops/plugins/core/orchestration/bin/coordinator-lane-closeout \
+    ops/plugins/core/orchestration/bin/coordinator-target-publish \
+    ops/capabilities.yaml \
+    ops/plugins/MANIFEST.yaml \
+    surfaces/verify/d331-orchestrator-closeout-lock.sh 2>/dev/null \
+    | grep -q .
+}
+
+append_closeout_flag() {
+  local command="$1"
+  local flag="$2"
+  if [[ "$flag" -eq 1 ]]; then
+    command+=" $3"
+  fi
+  printf '%s\n' "$command"
+}
+
 sync_target_branch_checkout() {
   local target_wt="$1"
   local target_branch="$2"
@@ -223,6 +244,9 @@ target_start_ref="$TARGET_BRANCH"
 target_start_head="$target_head_before"
 target_branch_worktree="$(branch_worktree_path "$TARGET_BRANCH")"
 target_sync_status="not_needed"
+self_hosting_proof_required=0
+self_hosting_proof_command=""
+self_hosting_proof_note=""
 
 cleanup_integration_worktree() {
   [[ -n "$integration_worktree" ]] || return 0
@@ -230,6 +254,21 @@ cleanup_integration_worktree() {
   rmdir "$integration_worktree" >/dev/null 2>&1 || true
 }
 trap 'cleanup_integration_worktree; cleanup_branch_restore' EXIT INT TERM
+
+if [[ -n "$remote_target_head_before" ]]; then
+  target_start_ref="$remote_target_ref"
+  target_start_head="$remote_target_head_before"
+fi
+
+if ! git -C "$ROOT" merge-base --is-ancestor "$lane_head" "$target_head_before" >/dev/null 2>&1 \
+  && self_hosting_closeout_paths_changed "$target_start_head" "$lane_head"; then
+  self_hosting_proof_required=1
+  self_hosting_proof_command="./bin/ops cap run coordinator.lane.closeout -- --loop-id $LOOP_ID --lane-branch $LANE_BRANCH --target-branch $TARGET_BRANCH --cleanup-mode $CLEANUP_MODE"
+  self_hosting_proof_command="$(append_closeout_flag "$self_hosting_proof_command" "$NO_PUSH" "--no-push")"
+  self_hosting_proof_command="$(append_closeout_flag "$self_hosting_proof_command" "$NO_LANE_PUSH" "--no-lane-push")"
+  self_hosting_proof_command+=" --json"
+  self_hosting_proof_note="This lane changes closeout/readback plumbing. The current closeout process may be emitting the pre-integration receipt shape. After target publish and runtime.checkout.deploy.update, rerun the idempotent proof command once; expected integration_status=already_integrated."
+fi
 
 if git -C "$ROOT" merge-base --is-ancestor "$lane_head" "$target_head_before" >/dev/null 2>&1; then
   integration_status="already_integrated"
@@ -242,10 +281,6 @@ else
   if [[ -n "$target_branch_worktree" ]]; then
     worktree_is_clean "$target_branch_worktree" \
       || fail "target branch worktree is dirty before closeout; clean or shelve before integrating: $target_branch_worktree"
-  fi
-  if [[ -n "$remote_target_head_before" ]]; then
-    target_start_ref="$remote_target_ref"
-    target_start_head="$remote_target_head_before"
   fi
   integration_worktree="$(mktemp -d "${TMPDIR:-/tmp}/spine-closeout-${TARGET_BRANCH//\//-}.XXXXXX")"
   git -C "$ROOT" worktree add --detach "$integration_worktree" "$target_start_ref" >/dev/null 2>&1 \
@@ -292,7 +327,10 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
       --arg integration_status "$integration_status" \
       --arg integration_strategy "$integration_strategy" \
       --arg target_branch_worktree "${target_branch_worktree:-}" \
+      --arg self_hosting_proof_command "$self_hosting_proof_command" \
+      --arg self_hosting_proof_note "$self_hosting_proof_note" \
       --arg cleanup_mode "$CLEANUP_MODE" \
+      --argjson self_hosting_proof_required "$self_hosting_proof_required" \
       '{
         capability: $capability,
         status: $status,
@@ -308,6 +346,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
         integration_status: $integration_status,
         integration_strategy: $integration_strategy,
         target_branch_worktree: (if $target_branch_worktree == "" then null else $target_branch_worktree end),
+        self_hosting_proof_required: ($self_hosting_proof_required == 1),
+        self_hosting_proof_command: (if $self_hosting_proof_command == "" then null else $self_hosting_proof_command end),
+        self_hosting_proof_note: (if $self_hosting_proof_note == "" then null else $self_hosting_proof_note end),
         cleanup_mode: $cleanup_mode
       }'
   else
@@ -326,6 +367,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "integration_status: $integration_status"
     echo "integration_strategy: $integration_strategy"
     echo "target_branch_worktree: ${target_branch_worktree:-none}"
+    echo "self_hosting_proof_required: $self_hosting_proof_required"
+    echo "self_hosting_proof_command: ${self_hosting_proof_command:-none}"
+    echo "self_hosting_proof_note: ${self_hosting_proof_note:-none}"
     echo "cleanup_mode: $CLEANUP_MODE"
   fi
   exit 0
@@ -373,10 +417,13 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg target_branch_worktree "${target_branch_worktree:-}" \
     --arg target_sync_status "$target_sync_status" \
     --arg target_publish_command "$target_publish_command" \
+    --arg self_hosting_proof_command "$self_hosting_proof_command" \
+    --arg self_hosting_proof_note "$self_hosting_proof_note" \
     --arg cleanup_mode "$CLEANUP_MODE" \
     --argjson pushed "$did_push" \
     --argjson lane_branch_pushed "$lane_branch_pushed" \
     --argjson target_publish_required "$target_publish_required" \
+    --argjson self_hosting_proof_required "$self_hosting_proof_required" \
     --argjson step_failures "$step_failures" \
     --argjson steps "$steps_json" \
     '{
@@ -398,6 +445,9 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       target_sync_status: $target_sync_status,
       target_publish_required: ($target_publish_required == 1),
       target_publish_command: (if $target_publish_command == "" then null else $target_publish_command end),
+      self_hosting_proof_required: ($self_hosting_proof_required == 1),
+      self_hosting_proof_command: (if $self_hosting_proof_command == "" then null else $self_hosting_proof_command end),
+      self_hosting_proof_note: (if $self_hosting_proof_note == "" then null else $self_hosting_proof_note end),
       cleanup_mode: $cleanup_mode,
       pushed: ($pushed == 1),
       lane_branch_pushed: ($lane_branch_pushed == 1),
@@ -423,6 +473,9 @@ else
   echo "target_sync_status: $target_sync_status"
   echo "target_publish_required: $target_publish_required"
   echo "target_publish_command: ${target_publish_command:-none}"
+  echo "self_hosting_proof_required: $self_hosting_proof_required"
+  echo "self_hosting_proof_command: ${self_hosting_proof_command:-none}"
+  echo "self_hosting_proof_note: ${self_hosting_proof_note:-none}"
   echo "cleanup_mode: $CLEANUP_MODE"
   echo "lane_branch_pushed: $lane_branch_pushed"
   echo "pushed: $did_push"

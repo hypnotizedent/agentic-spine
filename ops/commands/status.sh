@@ -300,6 +300,32 @@ except Exception as exc:
     sys.exit(1 if strict_mode else 0)
 
 summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+verify_payload = payload.get("verify") if isinstance(payload.get("verify"), dict) else {}
+secondary_payload = verify_payload.get("secondary") if isinstance(verify_payload.get("secondary"), dict) else {}
+
+def _age_text(minutes):
+    try:
+        minutes = int(minutes)
+    except Exception:
+        return "unknown age"
+    if minutes >= 1440:
+        return f"{minutes // 1440}d{(minutes % 1440) // 60}h old"
+    if minutes >= 60:
+        return f"{minutes // 60}h{minutes % 60}m old"
+    return f"{minutes}m old"
+
+def secondary_brief_text():
+    status = str(summary.get("secondary_verify_status") or "unknown")
+    if status != "stale":
+        return f"Secondary: {status}"
+    stale_status = str(secondary_payload.get("stale_status") or "unknown")
+    age = _age_text(secondary_payload.get("age_minutes"))
+    return (
+        "Secondary: stale "
+        f"(verify.infra.run {stale_status}, {age}; "
+        "run ./bin/ops cap run verify.infra.run -- --json)"
+    )
+
 open_loops = int(summary.get("open_loops") or 0)
 loops_source = str(summary.get("open_loops_source") or "")
 if loops_source == "canonical_routed":
@@ -321,7 +347,7 @@ parts = [
     gap_part,
     f"Engine: {summary.get('engine_verify_status', 'unknown')}",
     f"Spine: {summary.get('spine_verify_status', 'unknown')}",
-    f"Secondary: {summary.get('secondary_verify_status', 'unknown')}",
+    secondary_brief_text(),
 ]
 
 projection_residue = int(summary.get("projection_residue") or 0)
@@ -1394,6 +1420,7 @@ joined_state_summary = {
 }
 joined_state_verify_temporal = {}
 joined_state_verify_payload = {}
+joined_state_secondary_verify_payload = {}
 joined_state_projection_residue = []
 
 joined_state_bin = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-engine-joined-state"
@@ -1408,10 +1435,13 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
             _jdata = json.loads(_proc.stdout)
             _summary = _jdata.get("summary", {})
             _verify_payload = ((_jdata.get("verify") or {}).get("latest_fast")) or {}
+            _secondary_verify_payload = ((_jdata.get("verify") or {}).get("secondary")) or {}
             _verify_temporal = ((_jdata.get("temporal_truth") or {}).get("verify")) or {}
             _projection_residue = ((_jdata.get("loops") or {}).get("projection_residue")) or []
             if isinstance(_verify_payload, dict):
                 joined_state_verify_payload = _verify_payload
+            if isinstance(_secondary_verify_payload, dict):
+                joined_state_secondary_verify_payload = _secondary_verify_payload
             if isinstance(_verify_temporal, dict):
                 joined_state_verify_temporal = _verify_temporal
             if isinstance(_projection_residue, list):
@@ -1437,6 +1467,8 @@ if joined_state_bin.exists() and os.access(str(joined_state_bin), os.X_OK):
                     "verify_temporal_class": _summary.get("latest_verify_temporal_class", ""),
                     "verify_known_since_utc": _summary.get("latest_verify_known_since_utc", ""),
                     "verify_standing_evidence_count": _summary.get("latest_verify_standing_evidence_count", 0),
+                    "secondary_verify_freshness": _summary.get("secondary_verify_freshness", "unknown"),
+                    "secondary_verify_stale_status": _summary.get("secondary_verify_stale_status", ""),
                     "coherence_attention": bool(_summary.get("engine_coherence_needs_attention", False)),
                     "completion_state": _cs if isinstance(_cs, dict) else None,
                 }
@@ -1983,6 +2015,66 @@ if temporal_truth is not None:
 
 # ── Output ────────────────────────────────────────────────────────────────
 
+def _minutes_caption(value) -> str:
+    try:
+        minutes = int(value)
+    except Exception:
+        return "unknown age"
+    if minutes >= 1440:
+        return f"{minutes // 1440}d{(minutes % 1440) // 60}h old"
+    if minutes >= 60:
+        return f"{minutes // 60}h{minutes % 60}m old"
+    return f"{minutes}m old"
+
+
+def secondary_verify_readback() -> dict:
+    payload = joined_state_secondary_verify_payload if isinstance(joined_state_secondary_verify_payload, dict) else {}
+    status = str(joined_state_summary.get("secondary_verify_status") or payload.get("status") or "unknown")
+    stale_status = str(payload.get("stale_status") or joined_state_summary.get("secondary_verify_stale_status") or "")
+    age = payload.get("age_minutes")
+    window = payload.get("freshness_minutes_window")
+    source = str(payload.get("source") or "unknown")
+    receipt = str(payload.get("receipt_path") or "")
+    generated = str(payload.get("generated_at_utc") or "")
+    next_command = "./bin/ops cap run verify.infra.run -- --json"
+    owner = "verify.infra.run (scoped estate/workload health, not foundational spine truth)"
+
+    if status == "stale":
+        meaning = (
+            "Secondary verify is the estate/workload health lane. Its last "
+            f"{stale_status or 'unknown'} receipt is {_minutes_caption(age)}; "
+            "engine/spine foundational truth remains separate."
+        )
+        action = next_command
+    elif status in {"failed", "fail", "error"}:
+        meaning = "Secondary estate/workload health is currently failing; inspect the verify.infra.run receipt."
+        action = next_command
+    elif status == "pass":
+        meaning = "Secondary estate/workload health is fresh enough and passing."
+        action = "none"
+    else:
+        meaning = "Secondary estate/workload health has no clear fresh readback."
+        action = next_command
+
+    return {
+        "status": status,
+        "owner": owner,
+        "scope": str(payload.get("scope") or "infra"),
+        "freshness": str(payload.get("freshness") or joined_state_summary.get("secondary_verify_freshness") or "unknown"),
+        "stale_status": stale_status,
+        "age_minutes": age,
+        "age": _minutes_caption(age),
+        "freshness_window_minutes": window,
+        "source": source,
+        "generated_at_utc": generated,
+        "receipt_path": receipt,
+        "meaning": meaning,
+        "next_command": action,
+    }
+
+
+secondary_verify_action = secondary_verify_readback()
+
 def build_seven_questions() -> dict:
     sp_summary = standing_program_health.get("summary") if isinstance(standing_program_health.get("summary"), dict) else {}
     pickup_summary = execution_pickup_status.get("summary") if isinstance(execution_pickup_status.get("summary"), dict) else {}
@@ -2083,6 +2175,7 @@ if mode == "--json":
             "loops": joined_state_projection_residue,
         },
         "coherence_summary": joined_state_summary,
+        "secondary_verify_readback": secondary_verify_action,
         "daemons": daemons_summary,
         "temporal_truth": temporal_truth_payload,
         "standing_program_health": standing_program_health,
@@ -2201,7 +2294,15 @@ if mode == "--brief":
     _engine_vs = joined_state_summary.get("engine_verify_status", "unknown")
     _spine_vs = joined_state_summary.get("spine_verify_status", "unknown")
     _secondary_vs = joined_state_summary.get("secondary_verify_status", "unknown")
-    parts.append(f"Engine: {_engine_vs} | Spine: {_spine_vs} | Secondary: {_secondary_vs}")
+    if _secondary_vs == "stale":
+        parts.append(
+            "Engine: "
+            f"{_engine_vs} | Spine: {_spine_vs} | Secondary: stale "
+            f"({secondary_verify_action.get('stale_status') or 'unknown'}, "
+            f"{secondary_verify_action.get('age')}; run {secondary_verify_action.get('next_command')})"
+        )
+    else:
+        parts.append(f"Engine: {_engine_vs} | Spine: {_spine_vs} | Secondary: {_secondary_vs}")
     if joined_state_summary.get("coherence_attention"):
         parts.append("Coherence: attention")
     if inbox_actionable:
@@ -2435,6 +2536,11 @@ if mode != "--expert":
         _attention.append("RECOVERY DRILL STALE: execution pickup recovery drill is not fresh")
     if joined_state_summary.get("coherence_attention"):
         _attention.append("HEALTH DRIFT: engine coherence needs attention")
+    if secondary_verify_action.get("status") == "stale":
+        _attention.append(
+            "SECONDARY VERIFY STALE: "
+            f"{secondary_verify_action.get('owner')} — run {secondary_verify_action.get('next_command')}"
+        )
     if inbox_actionable:
         _attention.append(f"INBOX ATTENTION: {inbox_actionable} actionable inbox item(s)")
     if int(delegation_summary.get("active", 0) or 0):
@@ -2488,6 +2594,10 @@ if mode != "--expert":
         print("  watcher inputs:    unavailable")
     print(f"  engine verify:     {joined_state_summary.get('engine_verify_status', 'unknown')}")
     print(f"  spine verify:      {joined_state_summary.get('spine_verify_status', 'unknown')}")
+    print(f"  secondary verify:  {secondary_verify_action.get('status', 'unknown')}")
+    if secondary_verify_action.get("status") != "pass":
+        print(f"  secondary owner:   {secondary_verify_action.get('owner')}")
+        print(f"  secondary action:  {secondary_verify_action.get('next_command')}")
     print()
 
     print("EXECUTION")
@@ -2565,6 +2675,10 @@ print(f"  open gaps:          {joined_state_summary.get('open_gaps', open_gap_co
 print(f"  engine verify:      {joined_state_summary.get('engine_verify_status', 'unknown')}")
 print(f"  spine verify:       {joined_state_summary.get('spine_verify_status', 'unknown')}")
 print(f"  secondary verify:   {joined_state_summary.get('secondary_verify_status', 'unknown')}")
+print(f"  secondary owner:    {secondary_verify_action.get('owner')}")
+print(f"  secondary meaning:  {secondary_verify_action.get('meaning')}")
+print(f"  secondary source:   {secondary_verify_action.get('source')} {secondary_verify_action.get('generated_at_utc') or ''}".rstrip())
+print(f"  secondary next:     {secondary_verify_action.get('next_command')}")
 _verify_temporal = temporal_truth_payload.get("verify") or {}
 if _verify_temporal.get("temporal_class"):
     _verify_line = str(_verify_temporal.get("temporal_class") or "")

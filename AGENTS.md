@@ -175,8 +175,10 @@ cd ~/code/agentic-spine
 ./bin/ops cap run spine.verify
 ```
 
-Use `./bin/ops cap run session.v3.attach` only to re-render read-only
-orientation inside an already admitted terminal. It is not admission.
+Use `./bin/ops cap run session.v3.attach` when an already admitted terminal
+loses orientation and needs the entry banner again. It is read-only
+orientation, not admission. If it reports `UNBOUND`, stop and run
+`./bin/ops terminal launch --tool <tool> --terminal <name>` before mutation.
 
 Operating invariants:
 
