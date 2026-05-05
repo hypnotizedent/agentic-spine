@@ -319,6 +319,9 @@ for rel, required_fragments in dhcp_script_expectations:
     for fragment in required_fragments:
         if fragment not in text:
             fail(f"{rel} missing DHCP/Site Intelligence boundary fragment {fragment!r} (PACKET-1272)")
+    if rel.endswith("-dhcp-audit"):
+        if 'SPINE_REPO="$SPINE_ROOT"' not in text or 'SPINE_CODE="$SPINE_ROOT"' not in text:
+            fail(f"{rel} must bind Infisical lookup to the canonical spine root instead of ambient SPINE_REPO (PACKET-1312)")
 
 shop_dhcp_text = (root / "ops/plugins/infra/network/bin/network-shop-dhcp-audit").read_text(encoding="utf-8")
 for fragment in ['.data | type == "array"', "yaml.safe_dump", "unregistered_clients"]:
@@ -729,5 +732,5 @@ for phrase in required_teaching_phrases:
     if phrase not in proc_h.stdout:
         fail(f"site.presence.status human readback must teach {phrase!r} (PACKET-1215)")
 
-print("D448 PASS: first-class Site Intelligence lifecycle is locked; old network/device registries are folded inputs rather than evidence-only subsystems; site.presence.status reports profile/topology/presence plus node admission, bootstrap, provisioning, network_visibility_proof, identity_state, hardware_class, storage custody, and backup posture; visibility cannot create node admission; site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115); home.unifi.network.inventory.yaml authority claims are folded at both leaf and parent; DHCP audit/status reads are bounded to folded DHCP intent under site.presence.status; UniFi snapshot caps are bounded to folded observed-client input; telemetry-proven dead network cap families/wrappers stay subtracted; the legacy subtracted_peer_authority JSON key is deleted; storage maps are subordinate to payload.custody.status; and the zero-receipt shop readmodel generator stays retired under first-class Site Intelligence readbacks (PACKET-1308)")
+print("D448 PASS: first-class Site Intelligence lifecycle is locked; old network/device registries are folded inputs rather than evidence-only subsystems; site.presence.status reports profile/topology/presence plus node admission, bootstrap, provisioning, network_visibility_proof, identity_state, hardware_class, storage custody, and backup posture; visibility cannot create node admission; site.profile first-class HI primitive is locked through site.presence.status consumption (PACKET-1115); home.unifi.network.inventory.yaml authority claims are folded at both leaf and parent; DHCP audit/status reads are bounded to folded DHCP intent under site.presence.status and bind Infisical lookup to the canonical spine root; UniFi snapshot caps are bounded to folded observed-client input; telemetry-proven dead network cap families/wrappers stay subtracted; the legacy subtracted_peer_authority JSON key is deleted; storage maps are subordinate to payload.custody.status; and the zero-receipt shop readmodel generator stays retired under first-class Site Intelligence readbacks (PACKET-1312)")
 PY
