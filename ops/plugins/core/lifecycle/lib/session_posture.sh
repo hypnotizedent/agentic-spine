@@ -19,10 +19,11 @@
 #   session_posture_resolve TERMINAL_NAME REQUESTED_POSTURE [EXECUTION_CLASS]
 #   session_posture_emit_env
 
-__SP_CONTRACT_PATH="/Users/ronnyworks/code/agentic-spine/ops/bindings/terminal.role.contract.yaml"
-__SP_SSH_TARGETS_PATH="/Users/ronnyworks/code/agentic-spine/ops/bindings/ssh.targets.yaml"
-__SP_EXECUTION_HOST_TARGET_ID="ai-consolidation"
-__SP_EXECUTION_HOST_STATE_ROOT="/opt/spine-state"
+__SP_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+__SP_CONTRACT_PATH="$__SP_ROOT/ops/bindings/terminal.role.contract.yaml"
+__SP_SSH_TARGETS_PATH="$__SP_ROOT/ops/bindings/ssh.targets.yaml"
+__SP_STORAGE_EVIDENCE_TARGET_ID="pve"
+__SP_STORAGE_EVIDENCE_STATE_ROOT="/md1400/spine/state"
 
 __sp_is_valid_posture() {
     case "$1" in
@@ -213,13 +214,16 @@ session_recovery_posture_resolve() {
         *)      __SP_RECOVERY_POSTURE="unknown" ;;
     esac
 
-    # recovery_ready derivation (telemetry only — see banner above; not a mutation gate)
-    local execution_host_state_status=""
-    execution_host_state_status="$(__sp_probe_execution_host_state)"
-    case "$execution_host_state_status" in
+    # recovery_ready derivation (telemetry only; not a mutation gate).
+    # Post-D.3b v4, canonical state readiness is storage_evidence_node
+    # reachability, not execution-host local state. execution_host local state is
+    # projection/cache and must not make this banner look canonical.
+    local storage_evidence_state_status=""
+    storage_evidence_state_status="$(__sp_probe_storage_evidence_state)"
+    case "$storage_evidence_state_status" in
         ready)
             __SP_RECOVERY_READY="true"
-            __SP_SITE_DETECTION_BASIS="${__SP_SITE_DETECTION_BASIS}+execution_host_state:ready"
+            __SP_SITE_DETECTION_BASIS="${__SP_SITE_DETECTION_BASIS}+storage_evidence_node_state:ready"
             ;;
         *)
             case "$__SP_RECOVERY_POSTURE" in
@@ -228,8 +232,8 @@ session_recovery_posture_resolve() {
                 remote)  __SP_RECOVERY_READY="tailscale_reachable_only" ;;
                 *)       __SP_RECOVERY_READY="false" ;;
             esac
-            if [ -n "$execution_host_state_status" ]; then
-                __SP_SITE_DETECTION_BASIS="${__SP_SITE_DETECTION_BASIS}+execution_host_state:${execution_host_state_status}"
+            if [ -n "$storage_evidence_state_status" ]; then
+                __SP_SITE_DETECTION_BASIS="${__SP_SITE_DETECTION_BASIS}+storage_evidence_node_state:${storage_evidence_state_status}"
             fi
             ;;
     esac
@@ -237,7 +241,7 @@ session_recovery_posture_resolve() {
     return 0
 }
 
-__sp_probe_execution_host_state() {
+__sp_probe_storage_evidence_state() {
     if ! command -v ssh >/dev/null 2>&1; then
         printf 'ssh_unavailable'
         return 0
@@ -252,7 +256,7 @@ __sp_probe_execution_host_state() {
     fi
 
     # Source resolver lazily (not at file top) to avoid init-time overhead
-    local _sp_resolver="${SPINE_ROOT:-/Users/ronnyworks/code/agentic-spine}/ops/lib/ssh-resolve.sh"
+    local _sp_resolver="$__SP_ROOT/ops/lib/ssh-resolve.sh"
     if [ -f "$_sp_resolver" ]; then
         # shellcheck source=ops/lib/ssh-resolve.sh
         . "$_sp_resolver"
@@ -262,10 +266,10 @@ __sp_probe_execution_host_state() {
     fi
 
     local host tailscale_ip user probe_host identity_opts
-    host="$(ssh_resolve_host "$__SP_EXECUTION_HOST_TARGET_ID")"
-    tailscale_ip="$(ssh_resolve_tailscale_ip "$__SP_EXECUTION_HOST_TARGET_ID")"
-    user="$(ssh_resolve_user "$__SP_EXECUTION_HOST_TARGET_ID" "ubuntu")"
-    identity_opts="$(ssh_resolve_machine_identity_opts "$__SP_EXECUTION_HOST_TARGET_ID" 2>/dev/null)" || true
+    host="$(ssh_resolve_host "$__SP_STORAGE_EVIDENCE_TARGET_ID")"
+    tailscale_ip="$(ssh_resolve_tailscale_ip "$__SP_STORAGE_EVIDENCE_TARGET_ID")"
+    user="$(ssh_resolve_user "$__SP_STORAGE_EVIDENCE_TARGET_ID" "root")"
+    identity_opts="$(ssh_resolve_machine_identity_opts "$__SP_STORAGE_EVIDENCE_TARGET_ID" 2>/dev/null)" || true
 
     case "$__SP_OPERATOR_SITE" in
         shop)
@@ -288,7 +292,7 @@ __sp_probe_execution_host_state() {
     if ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         $identity_opts \
         "${user}@${probe_host}" \
-        "test -r '$__SP_EXECUTION_HOST_STATE_ROOT/shared_authority.db' && test -d '$__SP_EXECUTION_HOST_STATE_ROOT/loop-scopes'" \
+        "test -r '$__SP_STORAGE_EVIDENCE_STATE_ROOT/shared_authority.db' && test -d '$__SP_STORAGE_EVIDENCE_STATE_ROOT/loop-scopes'" \
         >/dev/null 2>&1; then
         printf 'ready'
     else

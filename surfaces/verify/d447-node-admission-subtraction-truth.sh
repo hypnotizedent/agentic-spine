@@ -90,6 +90,10 @@ runtime_bootstrap_contract = load_yaml(root / "ops/bindings/runtime.bootstrap.co
 runtime_bootstrap_text = (root / "ops/bindings/runtime.bootstrap.contract.yaml").read_text(encoding="utf-8")
 if "v3.attach since deprecated" in runtime_bootstrap_text:
     fail("runtime.bootstrap.contract.yaml must not describe session.v3.attach as deprecated; it is read-only orientation demoted from admission")
+if "Read-only caps stay local" in runtime_bootstrap_text:
+    fail("runtime.bootstrap.contract.yaml must not teach all read-only caps stay local; DB-backed read-only caps route when annotated")
+if "canonical_local_spine_truth_check" in runtime_bootstrap_text:
+    fail("runtime.bootstrap.contract.yaml must not describe spine.verify as local truth after state authority moved to storage_evidence_node")
 if "ops status" not in runtime_bootstrap_text:
     fail("runtime.bootstrap.contract.yaml canonical_bootstrap_sequence must include ops status public readback")
 db_authority = runtime_bootstrap_contract.get("db_authority")
@@ -1686,22 +1690,36 @@ node_role_contract = yaml.safe_load(node_role_contract_path.read_text(encoding="
 node_role_contract_text = node_role_contract_path.read_text(encoding="utf-8")
 if "NOT yet consumed" in node_role_contract_text:
     fail("node.role.contract.yaml canonical_plane_access must not claim Stage 2 consumers are NOT yet consumed")
+if "Stage 2 organ-consumption slices land separately" in node_role_contract_text:
+    fail("node.role.contract.yaml canonical_plane_access must not teach Stage 2 consumers as future-only after consumers landed")
 if "canonical_plane_access is the governing" not in node_role_contract_text:
     fail("node.role.contract.yaml must explicitly subordinate legacy state_access_model to canonical_plane_access")
 cpa_block = node_role_contract.get("canonical_plane_access") or {}
 if not isinstance(cpa_block, dict):
-    fail("node.role.contract.yaml canonical_plane_access must be a mapping (PACKET-840 Stage 1)")
+    fail("node.role.contract.yaml canonical_plane_access must be a mapping (plane-access authority)")
 by_role_block = cpa_block.get("by_role") or {}
 if not isinstance(by_role_block, dict) or not by_role_block:
-    fail("node.role.contract.yaml canonical_plane_access.by_role must be a non-empty mapping (PACKET-840 Stage 1)")
+    fail("node.role.contract.yaml canonical_plane_access.by_role must be a non-empty mapping (plane-access authority)")
 required_role_keys = {"storage_evidence_node", "execution_host", "operator_console", "watcher_node"}
 missing_roles = required_role_keys - set(by_role_block.keys())
 if missing_roles:
-    fail(f"node.role.contract.yaml canonical_plane_access.by_role missing roles: {sorted(missing_roles)} (PACKET-840 Stage 1)")
+    fail(f"node.role.contract.yaml canonical_plane_access.by_role missing roles: {sorted(missing_roles)} (plane-access authority)")
 node_admission_text = (root / "ops/plugins/infra/bin/node-admission-status").read_text(encoding="utf-8")
 for required_token in ("canonical_plane_access", "plane_access_for_roles", "emit_canonical_plane_access_section"):
     if required_token not in node_admission_text:
-        fail(f"node-admission-status must consume canonical_plane_access: missing token {required_token!r} (PACKET-840 Stage 1)")
+        fail(f"node-admission-status must consume canonical_plane_access: missing token {required_token!r} (plane-access authority)")
+
+session_posture_text = (root / "ops/plugins/core/lifecycle/lib/session_posture.sh").read_text(encoding="utf-8")
+if "/opt/spine-state" in session_posture_text:
+    fail("session_posture.sh must not probe obsolete /opt/spine-state as canonical recovery state")
+if "/Users/ronnyworks/code/agentic-spine/ops/bindings/terminal.role.contract.yaml" in session_posture_text:
+    fail("session_posture.sh must not hardcode the primary checkout for contract reads; managed worktrees must read their own checkout")
+for required_token in ("__SP_STORAGE_EVIDENCE_TARGET_ID=\"pve\"", "__SP_STORAGE_EVIDENCE_STATE_ROOT=\"/md1400/spine/state\"", "storage_evidence_node_state"):
+    if required_token not in session_posture_text:
+        fail(f"session_posture.sh must derive recovery_ready from storage_evidence_node canonical state: missing {required_token}")
+for required_token in ("__SP_ROOT=", "__SP_CONTRACT_PATH=\"$__SP_ROOT/ops/bindings/terminal.role.contract.yaml\"", "__SP_SSH_TARGETS_PATH=\"$__SP_ROOT/ops/bindings/ssh.targets.yaml\""):
+    if required_token not in session_posture_text:
+        fail(f"session_posture.sh must resolve contracts from active checkout root: missing {required_token}")
 
 # PACKET-985: subject_class + access_class as first-class row fields.
 # Asserts (a) every emitted row carries both, (b) values are inside approved
