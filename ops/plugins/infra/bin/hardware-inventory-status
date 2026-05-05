@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""hardware.inventory.status — single Site Intelligence Hardware branch readback.
+
+Fuses physical/virtual hardware facts from node.admission.status,
+hardware.inventory.yaml, and operator.hardware.inventory.yaml into one
+read-only Hardware branch readback. Refuses admission/promotion authority;
+node.admission.status remains the Node lifecycle/admission authority.
+
+Promoted under PACKET-1342 as the Hardware lever in the Site Intelligence
+five-branch framework.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+NODE_ADMISSION = ROOT / "ops/plugins/infra/bin/node-admission-status"
+HARDWARE_INVENTORY = ROOT / "ops/bindings/hardware.inventory.yaml"
+OPERATOR_HARDWARE = ROOT / "ops/bindings/operator.hardware.inventory.yaml"
+
+TRANSITION_CAPS = [
+    {
+        "capability": "host.operator-hardware.bootstrap-kit.render",
+        "kind": "transition_mutation_cap",
+        "boundary": "renders bootstrap kit; not a Hardware read authority",
+    },
+    {
+        "capability": "host.operator-hardware.post-boot.normalize",
+        "kind": "transition_mutation_cap",
+        "boundary": "post-boot normalization; not a Hardware read authority",
+    },
+    {
+        "capability": "host.operator-hardware.firstboot.claim",
+        "kind": "transition_mutation_cap",
+        "boundary": "first-boot claim; not a Hardware read authority",
+    },
+]
+
+FOLDED_HARDWARE_INPUTS = [
+    {
+        "path": "ops/bindings/hardware.inventory.yaml",
+        "role": "authoritative_physical_machine_inventory_input",
+        "consumer": "hardware.inventory.status",
+    },
+    {
+        "path": "ops/bindings/operator.hardware.inventory.yaml",
+        "role": "operator_owned_hardware_identity_and_candidacy_input",
+        "consumer": "hardware.inventory.status",
+    },
+    {
+        "path": "ops/bindings/home.hardware.inventory.yaml",
+        "role": "compatibility_evidence_only",
+        "consumer": "hardware.inventory.status",
+    },
+]
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def run_node_admission() -> dict[str, Any]:
+    proc = subprocess.run(
+        [str(NODE_ADMISSION), "--json"], text=True, capture_output=True
+    )
+    if proc.returncode != 0:
+        raise SystemExit(
+            proc.stderr.strip() or proc.stdout.strip() or "node.admission.status failed"
+        )
+    return json.loads(proc.stdout)
+
+
+def normalize(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def physical_or_virtual(admission_row: dict[str, Any]) -> str:
+    # subject_class is the load-bearing classifier; object_kind names the
+    # admission slot (e.g. shop_physical_machine) and may include the word
+    # "physical" even for VM rows running on that slot.
+    subject_class = normalize(admission_row.get("subject_class"))
+    if subject_class == "vm":
+        return "virtual"
+    if subject_class in {"physical_machine", "appliance", "network_device", "portable_media"}:
+        return "physical"
+    return subject_class or "unknown"
+
+
+def host_type(admission_row: dict[str, Any]) -> str:
+    placement = admission_row.get("placement_truth") or {}
+    return normalize(placement.get("host_kind") or admission_row.get("subject_class") or "unknown") or "unknown"
+
+
+def bootstrap_state(admission_row: dict[str, Any]) -> str:
+    boot = admission_row.get("boot_identity") or {}
+    claim = normalize(boot.get("claim_state"))
+    lifecycle = normalize(admission_row.get("lifecycle_state"))
+    first_touch = normalize(admission_row.get("first_touch_state"))
+    if claim.startswith("admitted_stable") or lifecycle == "admitted_runtime_present":
+        return "bootstrapped"
+    if first_touch in {"ft-ssh", "ft-bmc", "appliance-readback"}:
+        return "first_touch_claimed"
+    if first_touch in {"none", ""}:
+        return "unprovisioned"
+    return first_touch or "unknown"
+
+
+def management_path(admission_row: dict[str, Any]) -> str:
+    access = admission_row.get("access_path") or {}
+    method = access.get("access_method") or admission_row.get("access_class") or "unknown"
+    host = access.get("host") or access.get("tailscale_ip") or admission_row.get("node_id") or ""
+    return f"{method}:{host}".strip(":") or "unknown"
+
+
+def hardware_inventory_index() -> dict[str, dict[str, Any]]:
+    doc = load_yaml(HARDWARE_INVENTORY)
+    out: dict[str, dict[str, Any]] = {}
+    for row in doc.get("machines") or []:
+        if not isinstance(row, dict):
+            continue
+        for key in (row.get("machine_id"), row.get("hostname")):
+            if isinstance(key, str) and key:
+                out.setdefault(key.lower(), row)
+    return out
+
+
+def operator_hardware_index() -> dict[str, dict[str, Any]]:
+    doc = load_yaml(OPERATOR_HARDWARE)
+    out: dict[str, dict[str, Any]] = {}
+    for row in doc.get("machines") or doc.get("hardware") or []:
+        if not isinstance(row, dict):
+            continue
+        for key in (
+            row.get("machine_id"),
+            row.get("hostname"),
+            row.get("operator_hardware_id"),
+            row.get("name"),
+        ):
+            if isinstance(key, str) and key:
+                out.setdefault(key.lower(), row)
+    return out
+
+
+def build_row(
+    admission_row: dict[str, Any],
+    hw_idx: dict[str, dict[str, Any]],
+    op_idx: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    node_id = admission_row.get("node_id") or "unknown"
+    site = admission_row.get("site") or "unknown"
+    object_kind = admission_row.get("object_kind") or "unknown"
+    physical = admission_row.get("physical_identity") or {}
+    placement = admission_row.get("placement_truth") or {}
+
+    hw_evidence = hw_idx.get(node_id.lower())
+    op_evidence = op_idx.get(node_id.lower())
+
+    physical_constraints: list[str] = []
+    if op_evidence and isinstance(op_evidence.get("physical_constraints"), list):
+        physical_constraints = [str(x) for x in op_evidence["physical_constraints"]]
+
+    sources: list[dict[str, str]] = [
+        {"path": "node.admission.status", "role": "node_admission_authority"}
+    ]
+    if hw_evidence:
+        sources.append(
+            {
+                "path": "ops/bindings/hardware.inventory.yaml",
+                "role": "authoritative_physical_inventory_input",
+            }
+        )
+    if op_evidence:
+        sources.append(
+            {
+                "path": "ops/bindings/operator.hardware.inventory.yaml",
+                "role": "operator_owned_hardware_identity_input",
+            }
+        )
+
+    return {
+        "subject_id": node_id,
+        "hostname": (admission_row.get("boot_identity") or {}).get("hostname") or node_id,
+        "site": site,
+        "physical_or_virtual": physical_or_virtual(admission_row),
+        "hardware_class": object_kind,
+        "host_type": host_type(admission_row),
+        "management_path": management_path(admission_row),
+        "bootstrap_state": bootstrap_state(admission_row),
+        "physical_inventory_known": bool(physical.get("inventory_known"))
+        or hw_evidence is not None
+        or op_evidence is not None,
+        "physical_inventory_evidence": {
+            "model": (hw_evidence or {}).get("model")
+            or (op_evidence or {}).get("model"),
+            "service_tag": (hw_evidence or {}).get("service_tag"),
+            "operator_owned": op_evidence is not None,
+        },
+        "physical_constraints": physical_constraints,
+        "active_runtime_count": placement.get("active_runtime_count"),
+        "active_runtime_roles": placement.get("active_runtime_roles") or [],
+        "source_surfaces": sources,
+        "actions_allowed": {
+            "may_create_node": False,
+            "may_admit_node": False,
+            "may_promote_node": False,
+            "may_decide_node_lifecycle": False,
+            "may_decide_storage_custody": False,
+            "may_decide_backup_posture": False,
+        },
+    }
+
+
+def build_payload() -> dict[str, Any]:
+    admission = run_node_admission()
+    hw_idx = hardware_inventory_index()
+    op_idx = operator_hardware_index()
+    rows = [
+        build_row(r, hw_idx, op_idx)
+        for r in (admission.get("rows") or [])
+        if isinstance(r, dict)
+    ]
+
+    summary: dict[str, Any] = {
+        "rows": len(rows),
+        "physical": sum(1 for r in rows if r["physical_or_virtual"] == "physical"),
+        "virtual": sum(1 for r in rows if r["physical_or_virtual"] == "virtual"),
+        "bootstrapped": sum(1 for r in rows if r["bootstrap_state"] == "bootstrapped"),
+        "physical_inventory_known": sum(1 for r in rows if r["physical_inventory_known"]),
+        "operator_owned_count": sum(
+            1 for r in rows if r["physical_inventory_evidence"].get("operator_owned")
+        ),
+    }
+
+    return {
+        "canonical_authority": "hardware.inventory.status",
+        "capability": "hardware.inventory.status",
+        "branch_role": "hardware_branch_readback",
+        "operator_label": "Hardware",
+        "status": "ok",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "boundary": {
+            "owns": [
+                "physical_or_virtual_classification",
+                "hardware_class_summary",
+                "host_type_summary",
+                "bootstrap_readiness_summary",
+                "physical_constraints_view",
+                "physical_inventory_evidence_view",
+            ],
+            "does_not_decide": [
+                "node_admission",
+                "node_promotion",
+                "node_lifecycle_state",
+                "storage_custody",
+                "backup_posture",
+                "network_visibility",
+            ],
+            "admission_authority": "node.admission.status",
+        },
+        "transition_caps": TRANSITION_CAPS,
+        "folded_inputs": FOLDED_HARDWARE_INPUTS,
+        "rows": rows,
+        "summary": summary,
+    }
+
+
+def render_human(payload: dict[str, Any]) -> None:
+    print("hardware.inventory.status")
+    print(
+        f"branch: {payload['branch_role']} (operator label: {payload['operator_label']})"
+    )
+    s = payload["summary"]
+    print(
+        f"summary: rows={s['rows']} physical={s['physical']} virtual={s['virtual']} "
+        f"bootstrapped={s['bootstrapped']} physical_inventory_known={s['physical_inventory_known']} "
+        f"operator_owned={s['operator_owned_count']}"
+    )
+    print("")
+    print("Transition mutation caps (not Hardware read authority):")
+    for cap in payload["transition_caps"]:
+        print(f"  {cap['capability']:<46} [{cap['kind']}] {cap['boundary']}")
+    print("")
+    print("Folded hardware inputs (not operator first-read):")
+    for item in payload["folded_inputs"]:
+        print(f"  {item['path']} -> {item['consumer']} [{item['role']}]")
+    print("")
+    print(
+        "Boundary: Hardware does not decide admission/promotion/lifecycle/storage/backup/network;"
+    )
+    print("          node.admission.status remains admission/lifecycle authority.")
+    print("")
+    for row in payload["rows"]:
+        ev = row["physical_inventory_evidence"]
+        print(
+            f"- {row['subject_id']:<40} site={row['site']} "
+            f"{row['physical_or_virtual']:<8} class={row['hardware_class']} "
+            f"host={row['host_type']} bootstrap={row['bootstrap_state']} "
+            f"mgmt={row['management_path']} "
+            f"model={ev.get('model') or '-'}"
+        )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Site Intelligence Hardware branch readback"
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
+    args = parser.parse_args()
+
+    payload = build_payload()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    render_human(payload)
+
+
+if __name__ == "__main__":
+    main()
