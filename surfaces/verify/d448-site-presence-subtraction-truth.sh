@@ -845,6 +845,57 @@ for fragment in [
     if fragment not in shop_dhcp_audit_text:
         fail(f"network-shop-dhcp-audit must declare classification bucket {fragment!r} (PACKET-1317)")
 
+# PACKET-1334: every folded YAML input listed in folded_legacy_inputs must
+# declare producer_metadata so a fresh agent can see — without re-deriving —
+# whether the file is cap_generated (and which cap) or
+# hand_maintained_operator_assertion (and what the named blocker is). This
+# closes the "generated folded input" definition: generator/producer named,
+# non-authority header, consumer path, all four facts machine-readable.
+PRODUCER_KIND_ALLOWED = {"cap_generated", "hand_maintained_operator_assertion"}
+folded_paths = [
+    item.get("path") for item in folded_inputs if isinstance(item, dict) and item.get("path")
+]
+for rel in folded_paths:
+    folded_path = root / rel
+    if not folded_path.exists():
+        fail(f"folded_legacy_inputs path missing on disk: {rel} (PACKET-1334)")
+    folded_doc = yaml.safe_load(folded_path.read_text(encoding="utf-8")) or {}
+    pm = folded_doc.get("producer_metadata")
+    if not isinstance(pm, dict):
+        fail(f"{rel}: missing producer_metadata block (PACKET-1334)")
+    kind = pm.get("producer_kind")
+    if kind not in PRODUCER_KIND_ALLOWED:
+        fail(f"{rel}: producer_metadata.producer_kind must be one of {sorted(PRODUCER_KIND_ALLOWED)}, got {kind!r} (PACKET-1334)")
+    consumer = pm.get("consumer_path")
+    if not consumer:
+        fail(f"{rel}: producer_metadata.consumer_path must name a consumer readback or path (PACKET-1334)")
+    if kind == "cap_generated":
+        for required_field in ("producer_capability", "producer_script", "regenerate_command"):
+            if not pm.get(required_field):
+                fail(f"{rel}: cap_generated producer_metadata must declare {required_field} (PACKET-1334)")
+    else:  # hand_maintained_operator_assertion
+        for required_field in ("generation_blocker", "next_governed_packet_hint"):
+            if not pm.get(required_field):
+                fail(f"{rel}: hand_maintained_operator_assertion producer_metadata must declare {required_field} (PACKET-1334)")
+        if pm.get("producer_script") not in (None, ""):
+            fail(f"{rel}: hand_maintained_operator_assertion must not declare a producer_script (PACKET-1334)")
+
+# PACKET-1334: cap-generated producer scripts must teach the producer_metadata
+# block in source so the contract stays in the generator path, not just in
+# emitted files where it could drift.
+cap_generator_sources = [
+    "ops/plugins/infra/network/bin/network-home-unifi-clients-snapshot",
+    "ops/plugins/infra/network/bin/network-unifi-clients-snapshot",
+    "ops/plugins/infra/bin/infra-estate-boringness-build",
+    "ops/plugins/infra/bin/infra-shop-storage-authority-build",
+]
+for cap_rel in cap_generator_sources:
+    text = (root / cap_rel).read_text(encoding="utf-8")
+    if "producer_metadata" not in text:
+        fail(f"{cap_rel} must emit producer_metadata in generated payload (PACKET-1334)")
+    if "cap_generated" not in text:
+        fail(f"{cap_rel} must declare producer_kind=cap_generated (PACKET-1334)")
+
 print(
     "D448 PASS: site.presence.status is the single operator first-read for Site "
     "Intelligence; site profile, topology, presence, node admission, bootstrap, "
@@ -858,6 +909,8 @@ print(
     "wrappers stay absent from live grammar; freshness state is resolved from "
     "declared policy max_age_hours and the summary always emits canonical state "
     "keys; shop unregistered clients are classified into bounded folded-input "
-    "buckets."
+    "buckets; every folded input declares producer_metadata naming either "
+    "the cap that generates it or the exact operator-assertion blocker plus "
+    "the next governed packet hint."
 )
 PY
