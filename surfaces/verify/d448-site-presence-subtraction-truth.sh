@@ -108,68 +108,22 @@ for old_id in [
     if authority.get("expected_authority_state") == "authoritative":
         fail(f"{old_id} still authoritative in master inventory")
 
-# PACKET-1378: network.unifi.{home,shop}.clients.observed.yaml were deleted
-# from ops/bindings/ and moved behind the Network branch's runtime cache.
-# Only the surviving ops/bindings/ folded carrier needs the
-# site.presence.status replacement-pointer text now.
-for rel in [
-    "ops/bindings/home.device.registry.yaml",
-]:
-    text = (root / rel).read_text(encoding="utf-8")
-    if "site.presence.status" not in text:
-        fail(f"{rel} must name site.presence.status as replacement")
+# PACKET-1378/1379: cap-generated UniFi/storage carriers + hand-maintained
+# device registries were all deleted from ops/bindings/. Site Intelligence
+# enforces absence; the prior PACKET-1270/1301 file-local demotion locks
+# (home.device.registry.yaml status/owns/does_not_decide) were retired with
+# the file. Network/Storage runtime caches are checked elsewhere; here we
+# only assert no resurrection of the deleted repo carriers.
 for deleted_rel in [
     "ops/bindings/network.unifi.home.clients.observed.yaml",
     "ops/bindings/network.unifi.shop.clients.observed.yaml",
     "ops/bindings/home.storage.map.yaml",
     "ops/bindings/shop.storage.map.yaml",
+    "ops/bindings/home.device.registry.yaml",
+    "ops/bindings/shop.device.registry.yaml",
 ]:
     if (root / deleted_rel).exists():
-        fail(f"{deleted_rel} must remain deleted (PACKET-1378); cap-generated carriers live under $SPINE_DOMAIN_STATE/site-intelligence/")
-
-# PACKET-1270: lock home.device.registry.yaml file-local authority scope.
-# Snapshot/master inventory already demote this registry to compatibility
-# evidence; the file itself must also carry the same first-class Site
-# Intelligence boundary so it cannot be read as current presence, profile,
-# admission, placement, role, or recovery authority.
-home_device_path = root / "ops/bindings/home.device.registry.yaml"
-home_device_doc = yaml.safe_load(home_device_path.read_text(encoding="utf-8")) or {}
-if home_device_doc.get("status") != "folded_legacy_input":
-    fail("home.device.registry.yaml status must be folded_legacy_input (PACKET-1301)")
-if home_device_doc.get("superseded_for_site_presence_by") != "site.presence.status":
-    fail("home.device.registry.yaml must declare superseded_for_site_presence_by=site.presence.status (PACKET-1270)")
-if home_device_doc.get("folded_into_first_class_system") != "site.presence.status":
-    fail("home.device.registry.yaml must declare folded_into_first_class_system=site.presence.status (PACKET-1301)")
-if home_device_doc.get("subordinate_to") != "ops/bindings/site.profile.contract.yaml":
-    fail("home.device.registry.yaml must declare subordinate_to=ops/bindings/site.profile.contract.yaml (PACKET-1270)")
-home_device_scope = home_device_doc.get("authority_scope") or {}
-if not isinstance(home_device_scope, dict) or not home_device_scope:
-    fail("home.device.registry.yaml must declare authority_scope block (PACKET-1270)")
-HOME_DEVICE_REQUIRED_OWNS = {
-    "home_declared_device_folded_input",
-    "home_device_categorization_vocabulary",
-    "home_network_observed_clients_folded_input",
-    "home_dhcp_reservation_folded_input",
-}
-home_device_owns = set(home_device_scope.get("owns") or [])
-missing_home_device_owns = HOME_DEVICE_REQUIRED_OWNS - home_device_owns
-if missing_home_device_owns:
-    fail(f"home.device.registry.yaml authority_scope.owns missing evidence entries: {sorted(missing_home_device_owns)} (PACKET-1270)")
-HOME_DEVICE_REQUIRED_DOES_NOT_DECIDE = {
-    "current_site_presence",
-    "site_profile_authority",
-    "physical_machine_identity",
-    "node_admission",
-    "node_activation",
-    "role_assignment",
-    "node_placement",
-    "node_recovery_readback",
-    "recovery_action_authority",
-}
-home_device_dnd = set(home_device_scope.get("does_not_decide") or [])
-missing_home_device_dnd = HOME_DEVICE_REQUIRED_DOES_NOT_DECIDE - home_device_dnd
-if missing_home_device_dnd:
-    fail(f"home.device.registry.yaml authority_scope.does_not_decide missing boundary entries: {sorted(missing_home_device_dnd)} (PACKET-1270)")
+        fail(f"{deleted_rel} must remain deleted (PACKET-1378/1379); Site Intelligence carriers live under runtime cache or are retired entirely")
 
 # PACKET-1272: DHCP audit/status surfaces may consume registry DHCP
 # reservation intent, but must not teach registries as Site Intelligence or
@@ -408,9 +362,9 @@ folded_paths = {row.get("path") for row in folded_inputs if isinstance(row, dict
 # PACKET-1378: UniFi observed-client carriers + storage maps moved out of
 # ops/bindings/ into the runtime cache. folded_legacy_inputs lists them
 # under their $SPINE_DOMAIN_STATE/site-intelligence/<branch>/ path now.
+# PACKET-1379: home/shop device registries deleted; retired from
+# folded_legacy_inputs.
 for required_path in [
-    "ops/bindings/home.device.registry.yaml",
-    "ops/bindings/shop.device.registry.yaml",
     "$SPINE_DOMAIN_STATE/site-intelligence/network/network.unifi.home.clients.observed.yaml",
     "$SPINE_DOMAIN_STATE/site-intelligence/network/network.unifi.shop.clients.observed.yaml",
     "$SPINE_DOMAIN_STATE/site-intelligence/storage/home.storage.map.yaml",
@@ -424,9 +378,11 @@ for forbidden_repo_path in [
     "ops/bindings/network.unifi.shop.clients.observed.yaml",
     "ops/bindings/home.storage.map.yaml",
     "ops/bindings/shop.storage.map.yaml",
+    "ops/bindings/home.device.registry.yaml",
+    "ops/bindings/shop.device.registry.yaml",
 ]:
     if forbidden_repo_path in folded_paths:
-        fail(f"site.presence.status folded_legacy_inputs must not list deleted repo binding {forbidden_repo_path} (PACKET-1378)")
+        fail(f"site.presence.status folded_legacy_inputs must not list deleted repo binding {forbidden_repo_path} (PACKET-1378/1379)")
 for item in folded_inputs:
     if isinstance(item, dict) and item.get("standalone_operator_surface") is not False:
         fail(f"folded legacy input must not remain standalone operator surface: {item} (PACKET-1301)")

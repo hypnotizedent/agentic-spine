@@ -68,7 +68,11 @@ echo
 command -v yq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: yq"; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: jq"; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo "STOP (2): missing dependency: python3"; exit 2; }
-[[ -f "$REGISTRY" ]] || { echo "STOP (2): shop.device.registry.yaml not found"; exit 2; }
+# PACKET-1379: shop.device.registry.yaml was deleted as a hand-maintained
+# Site Intelligence carrier. The cap continues to run observation-only when
+# the registry is absent; intent_source becomes "" so the python step's
+# registry-loading code returns an empty list.
+[[ -f "$REGISTRY" ]] || REGISTRY=""
 
 # ── Resolve API key ──
 API_KEY="${UNIFI_SHOP_API_KEY:-}"
@@ -152,7 +156,11 @@ def mac(value: Any) -> str:
 
 reservations = json.loads(reservations_path.read_text(encoding="utf-8"))
 clients = json.loads(clients_path.read_text(encoding="utf-8"))
-registry = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
+# PACKET-1379: registry_path may be empty/absent after registry deletion.
+if str(registry_path) and registry_path.exists():
+    registry = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
+else:
+    registry = {}
 registry_devices = [row for row in (registry.get("devices") or []) if isinstance(row, dict)]
 registry_macs = {mac(row.get("mac")) for row in registry_devices if mac(row.get("mac"))}
 registry_ips = {str(row.get("ip") or "").strip() for row in registry_devices if row.get("ip")}

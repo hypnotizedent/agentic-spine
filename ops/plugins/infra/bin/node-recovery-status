@@ -17,6 +17,8 @@ OP_HW_BINDING="$SPINE_ROOT/ops/bindings/operator.hardware.inventory.yaml"
 APPLIANCE_BINDING="$SPINE_ROOT/ops/bindings/appliance.identity.contract.yaml"
 FLEET_ADMISSION_BINDING="$SPINE_ROOT/ops/bindings/fleet.admission.classification.yaml"
 PLACEMENT_BINDING="$SPINE_ROOT/ops/bindings/infra.placement.policy.yaml"
+# PACKET-1379: shop.device.registry.yaml deleted. Path retained as a label
+# so the yq lookups below silently return empty when 2>/dev/null fires.
 SHOP_DEVICE_BINDING="$SPINE_ROOT/ops/bindings/shop.device.registry.yaml"
 SESSION_POSTURE_LIB="$SPINE_ROOT/ops/plugins/core/lifecycle/lib/session_posture.sh"
 
@@ -60,7 +62,11 @@ done
 need yq
 need jq
 
-for f in "$SSH_BINDING" "$HW_BINDING" "$OP_HW_BINDING" "$APPLIANCE_BINDING" "$FLEET_ADMISSION_BINDING" "$PLACEMENT_BINDING" "$SHOP_DEVICE_BINDING" "$SESSION_POSTURE_LIB"; do
+# PACKET-1379: shop.device.registry.yaml deleted — drop from required-surface
+# guard. Devices that lived there were L3 function categorization without
+# branch authority; node recovery now sources its IDs from the surviving
+# bindings only.
+for f in "$SSH_BINDING" "$HW_BINDING" "$OP_HW_BINDING" "$APPLIANCE_BINDING" "$FLEET_ADMISSION_BINDING" "$PLACEMENT_BINDING" "$SESSION_POSTURE_LIB"; do
   [[ -f "$f" ]] || fail "missing required surface: $f"
 done
 
@@ -87,7 +93,13 @@ ssh_json="$(yq e -o=json ".ssh.targets[] | select(.id == \"$NODE_ID\")" "$SSH_BI
 hw_json="$(yq e -o=json ".machines[] | select(.machine_id == \"$NODE_ID\")" "$HW_BINDING" 2>/dev/null || true)"
 op_hw_json="$(yq e -o=json ".machines[] | select(.device_id == \"$NODE_ID\")" "$OP_HW_BINDING" 2>/dev/null || true)"
 appliance_json="$(yq e -o=json ".appliances[] | select(.appliance_id == \"$NODE_ID\")" "$APPLIANCE_BINDING" 2>/dev/null || true)"
+# PACKET-1379: shop.device.registry.yaml deleted as a hand-maintained Site
+# Intelligence carrier. yq returns empty silently because the file is
+# absent; downstream conditionals on shop_device_json fall back to fleet
+# admission classification when the machine is registered there.
 shop_device_json="$(yq e -o=json ".devices[] | select(.id == \"$NODE_ID\")" "$SHOP_DEVICE_BINDING" 2>/dev/null || true)"
+fleet_machine_json="$(yq e -o=json ".fleet.\"$NODE_ID\"" "$FLEET_ADMISSION_BINDING" 2>/dev/null || true)"
+[[ -n "$fleet_machine_json" && "$fleet_machine_json" != "null" ]] || fleet_machine_json='{}'
 
 [[ -n "$admission_binding_json" && "$admission_binding_json" != "null" ]] || admission_binding_json='{}'
 [[ -n "$placement_binding_json" && "$placement_binding_json" != "null" ]] || placement_binding_json='{}'
@@ -96,6 +108,20 @@ shop_device_json="$(yq e -o=json ".devices[] | select(.id == \"$NODE_ID\")" "$SH
 [[ -n "$op_hw_json" && "$op_hw_json" != "null" ]] || op_hw_json='{}'
 [[ -n "$appliance_json" && "$appliance_json" != "null" ]] || appliance_json='{}'
 [[ -n "$shop_device_json" && "$shop_device_json" != "null" ]] || shop_device_json='{}'
+
+# PACKET-1379: when the deleted shop registry leaves shop_device_json empty
+# but the machine is in fleet admission with site=shop, fall back to the
+# fleet entry so downstream conditionals (recovery_status defaults,
+# physical_presence_required, primary_description) keep their shop-shape
+# behavior. Physical-presence required is the conservative default for an
+# admitted/excluded shop physical machine without a proved remote power
+# plane.
+if [[ "$shop_device_json" == "{}" && "$fleet_machine_json" != "{}" ]]; then
+  fleet_site="$(jq -r '.site // empty' <<<"$fleet_machine_json")"
+  if [[ "$fleet_site" == "shop" ]]; then
+    shop_device_json="$fleet_machine_json"
+  fi
+fi
 
 if [[ "$ssh_json" == "{}" && "$hw_json" == "{}" && "$op_hw_json" == "{}" && "$appliance_json" == "{}" && "$shop_device_json" == "{}" ]]; then
   fail "node not found in governed recovery surfaces: $NODE_ID"

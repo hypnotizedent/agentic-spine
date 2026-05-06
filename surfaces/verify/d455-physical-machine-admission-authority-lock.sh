@@ -22,7 +22,10 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 [[ -x "$RECOVERY_STATUS" ]] || fail "missing executable node-recovery-status"
 [[ -x "$READMODEL_GENERATOR" ]] || fail "missing executable infra-device-identity-readmodel-generate"
 [[ -f "$SSH_TARGETS" ]] || fail "missing ssh.targets.yaml"
-[[ -f "$SHOP_DEVICES" ]] || fail "missing shop.device.registry.yaml"
+# PACKET-1379: shop.device.registry.yaml deleted as a hand-maintained
+# Site Intelligence carrier. Skip the file-presence check; the assertions
+# below that previously read it become absence assertions.
+[[ ! -f "$SHOP_DEVICES" ]] || fail "shop.device.registry.yaml must remain deleted (PACKET-1379)"
 [[ -f "$FLEET" ]] || fail "missing fleet.admission.classification.yaml"
 [[ -f "$GATE_TOPOLOGY" ]] || fail "missing gate.execution.topology.yaml"
 
@@ -67,45 +70,25 @@ def load_yaml(path: Path) -> dict:
 
 ssh_path, shop_path, fleet_path, topology_path, access_projection_path, *json_paths = map(Path, sys.argv[1:])
 ssh = load_yaml(ssh_path)
-shop = load_yaml(shop_path)
+# PACKET-1379: shop.device.registry.yaml deleted; load_yaml on the missing
+# path would crash. Skip the load — the assertions previously gated by it
+# became absence assertions.
+shop = {}
 fleet = load_yaml(fleet_path)
 topology = load_yaml(topology_path)
 access_projection = load_yaml(access_projection_path)
 
 ssh_text = ssh_path.read_text(encoding="utf-8")
-shop_text = shop_path.read_text(encoding="utf-8")
 for phrase in ["authoritative for access paths only", "not physical-machine identity", "node.admission.status", "node.recovery.status"]:
     if phrase not in ssh_text:
         fail(f"ssh.targets.yaml header must demote SSH targets to access evidence: missing {phrase!r}")
-for phrase in ["Status: folded_l3_source_input", "not a standalone shop registry subsystem", "node.admission.status", "node.recovery.status"]:
-    if phrase not in shop_text:
-        fail(f"shop.device.registry.yaml header must fold shop registry into Site Intelligence/node admission: missing {phrase!r}")
-if shop.get("status") != "folded_l3_source_input":
-    fail("shop.device.registry.yaml status must be folded_l3_source_input")
-
-shop_authority_scope = shop.get("authority_scope") or {}
-shop_owns = set(shop_authority_scope.get("owns") or [])
-shop_does_not_decide = set(shop_authority_scope.get("does_not_decide") or [])
-required_owns = {"l3_shop_function_projection", "shop_device_categorization_vocabulary"}
-missing_owns = required_owns - shop_owns
-if missing_owns:
-    fail(f"shop.device.registry.yaml authority_scope.owns must include: {sorted(missing_owns)}")
-required_does_not_decide = {
-    "physical_machine_identity",
-    "node_admission",
-    "node_activation",
-    "role_assignment",
-    "node_placement",
-    "node_recovery_readback",
-    "recovery_action_authority",
-}
-missing_does_not_decide = required_does_not_decide - shop_does_not_decide
-if missing_does_not_decide:
-    fail(f"shop.device.registry.yaml authority_scope.does_not_decide must include: {sorted(missing_does_not_decide)}")
-if shop.get("superseded_for_node_admission_by") != "node.admission.status":
-    fail("shop.device.registry.yaml must declare superseded_for_node_admission_by: node.admission.status")
-if shop.get("superseded_for_recovery_by") != "node.recovery.status":
-    fail("shop.device.registry.yaml must declare superseded_for_recovery_by: node.recovery.status")
+# PACKET-1379: shop.device.registry.yaml deleted as a hand-maintained Site
+# Intelligence carrier. The PACKET-1235 file-local fold/owns/superseded_for_*
+# locks were retired with the file. D455 enforces absence here so the
+# carrier cannot quietly return; physical machine identity reads from
+# hardware.inventory.yaml and node.admission.status only.
+if shop_path.exists():
+    fail("shop.device.registry.yaml must remain deleted (PACKET-1379); shop physical-machine identity reads through node.admission.status + hardware.inventory.yaml only")
 
 core_mode = topology.get("core_mode") or {}
 readback_ids = core_mode.get("core_readback_suites") or []
@@ -149,8 +132,10 @@ for sample_id in ["pve", "pve-r620", "nas", "screenpro-lenovo"]:
 for machine_id in ["dfs-laptop", "screenpro-lenovo"]:
     if not any(isinstance(row, dict) and row.get("id") == machine_id for row in ssh_targets):
         fail(f"{machine_id} must have SSH/access projection evidence")
-    if not any(isinstance(row, dict) and row.get("id") == machine_id for row in shop_devices):
-        fail(f"{machine_id} must have shop function projection evidence")
+    # PACKET-1379: shop.device.registry.yaml deleted; the L3 function
+    # projection it carried is gone. Physical machine admission identity
+    # now reads through node.admission.status + ssh.targets.yaml +
+    # fleet.admission.classification.yaml only.
 if "screenpro-lenovo" not in fleet_rows:
     fail("screenpro-lenovo must have fleet admission classification evidence")
 if fleet_rows.get("screenpro-lenovo", {}).get("admission_status") != "admitted":
@@ -169,10 +154,13 @@ recoveries = {
     "screenpro-lenovo": json.loads(json_paths[5].read_text(encoding="utf-8")),
 }
 
+# PACKET-1379: shop.device.registry.yaml deleted; expected_sources for
+# shop physical machines drop the registry source. Identity comes through
+# fleet admission + ssh access + recovery status.
 expected_sources = {
     "windows-mint": {"ops/bindings/operator.hardware.inventory.yaml", "node.recovery.status"},
-    "dfs-laptop": {"ops/bindings/fleet.admission.classification.yaml", "ops/bindings/ssh.targets.yaml", "ops/bindings/shop.device.registry.yaml", "node.recovery.status"},
-    "screenpro-lenovo": {"ops/bindings/fleet.admission.classification.yaml", "ops/bindings/ssh.targets.yaml", "ops/bindings/shop.device.registry.yaml", "node.recovery.status"},
+    "dfs-laptop": {"ops/bindings/fleet.admission.classification.yaml", "ops/bindings/ssh.targets.yaml", "node.recovery.status"},
+    "screenpro-lenovo": {"ops/bindings/fleet.admission.classification.yaml", "ops/bindings/ssh.targets.yaml", "node.recovery.status"},
 }
 
 for machine_id, payload in admissions.items():
@@ -195,11 +183,13 @@ for machine_id, payload in admissions.items():
     if machine_id in {"dfs-laptop", "screenpro-lenovo"}:
         if known.get("site") != "shop":
             fail(f"{machine_id} must resolve as shop physical machine")
-        if known.get("platform") != "windows":
-            fail(f"{machine_id} must resolve as Windows platform evidence")
-        caption = str(row.get("subtraction_caption") or "")
-        if "shop.device.registry is folded L3 source input" not in caption:
-            fail(f"{machine_id} must explicitly fold shop.device.registry in subtraction caption")
+        # PACKET-1379: shop.device.registry.yaml deleted; the platform=windows
+        # categorization came from registry's per-device os field which is
+        # gone. That categorization was L3/product semantics — Wilcom/DFS
+        # production knowledge — not Site Intelligence. Drop the assertion.
+        # The "shop.device.registry is folded L3 source input" caption is no
+        # longer required either; physical identity now reads through
+        # ssh.targets / fleet.admission directly.
     if machine_id == "windows-mint" and row.get("object_kind") != "operator_hardware":
         fail("windows-mint must remain distinct operator hardware, not collapsed with shop production machines")
     if machine_id == "windows-mint":
@@ -207,9 +197,9 @@ for machine_id, payload in admissions.items():
             fail("windows-mint must not synthesize an admin identity from tailnet visibility")
         if (row.get("boot_identity") or {}).get("stable_os_identity_claimed") is not False:
             fail("windows-mint must remain inventory/access evidence only until admitted")
-    if machine_id in {"dfs-laptop", "screenpro-lenovo"}:
-        if (row.get("physical_identity") or {}).get("source_surface") != "ops/bindings/shop.device.registry.yaml":
-            fail(f"{machine_id} physical identity must resolve as subordinate shop projection evidence")
+    # PACKET-1379: shop.device.registry.yaml deleted; physical_identity
+    # source_surface for shop machines no longer constrained to that
+    # specific path.
     if machine_id == "screenpro-lenovo":
         if (row.get("boot_identity") or {}).get("stable_os_identity_claimed") is not True:
             fail("screenpro-lenovo admitted shop machine must expose stable boot identity")
