@@ -1823,6 +1823,39 @@ def collect_execution_recovery_drill_status():
     return result
 
 
+def collect_friction_readback():
+    data = run_cap_json_command("friction.queue.status", ["--json"], timeout=12)
+    if data.get("status") == "error":
+        return {
+            "status": "unavailable",
+            "error": data.get("error", "friction.queue.status failed"),
+        }
+    worker = data.get("worker_drain") if isinstance(data.get("worker_drain"), dict) else {}
+    dispositions = data.get("open_reconcile_dispositions") if isinstance(data.get("open_reconcile_dispositions"), dict) else {}
+    return {
+        "status": "ok",
+        "open": int(data.get("open", 0) or 0),
+        "worker": str(worker.get("status") or "unknown"),
+        "blocked": int(dispositions.get("blocked_needs_evidence", 0) or 0),
+        "repairable": int(dispositions.get("repair_task_enqueued", 0) or 0),
+        "dispositions": dispositions,
+    }
+
+
+def friction_public_line() -> str:
+    capture = str(terminal_capture_summary.get("line") or "Friction: capture=unknown")
+    capture = capture.replace("Friction: ", "", 1)
+    if friction_readback.get("status") != "ok":
+        return f"Friction: {capture} worker=unknown open=unknown blocked=unknown repairable=unknown"
+    return (
+        f"Friction: {capture} "
+        f"worker={friction_readback.get('worker')} "
+        f"open={friction_readback.get('open')} "
+        f"blocked={friction_readback.get('blocked')} "
+        f"repairable={friction_readback.get('repairable')}"
+    )
+
+
 gap_state = collect_gap_state()
 gaps_available = gap_state.get("status") == "ok"
 open_gaps = gap_state.get("open_gaps", []) if gaps_available else []
@@ -1838,6 +1871,7 @@ current_assignment = collect_current_assignment()
 delegation_summary = collect_delegation_summary()
 execution_pickup_status = collect_execution_pickup_status()
 execution_recovery_drill_status = collect_execution_recovery_drill_status()
+friction_readback = collect_friction_readback()
 
 # ── Parse inbox lanes ─────────────────────────────────────────────────────
 
@@ -2649,6 +2683,7 @@ if mode == "--json":
         "planned_loops": planned_loops,
         "terminal_telemetry": terminal_telemetry_summary,
         "terminal_capture": terminal_capture_summary,
+        "friction_readback": friction_readback,
         "durable_transfer": durable_transfer_status,
         "open_gaps": open_gaps,
         "gap_state": {
@@ -2903,7 +2938,7 @@ if mode == "--brief":
                     parts.append(f"Authority: degraded ({', '.join(_degraded_summary)})")
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, ValueError):
             parts.append("Authority: unknown")
-    parts.append(terminal_capture_summary.get("line", "Friction: capture=unknown"))
+    parts.append(friction_public_line())
     # PACKET-592 Phase 2: clerk rollup. Read clerk's classification of the
     # current symptoms and compress to a single actionable line. The default
     # clerk invocation below is diagnostic/dry-run; only an explicit file mode
@@ -3108,7 +3143,7 @@ if mode != "--expert":
     print("LIVENESS")
     print("-" * 72)
     print(f"  capability worker: {_pickup_worker_status}{' fresh' if _pickup_worker_fresh else ' not fresh'}")
-    print(f"  terminal capture:  {terminal_capture_summary.get('line', 'Friction: capture=unknown').replace('Friction: capture=', '')}")
+    print(f"  friction:          {friction_public_line().replace('Friction: ', '')}")
     if _sp_total:
         print(f"  standing programs: {_sp_total} total, {_sp_healthy} healthy, {_sp_degraded} degraded")
     else:
@@ -3470,6 +3505,13 @@ if terminal_telemetry:
     print("-" * 72)
     print(f"  status:             {terminal_telemetry_status}")
     print(f"  capture:            {terminal_capture_summary.get('line', 'Friction: capture=unknown').replace('Friction: capture=', '')}")
+    if friction_readback.get("status") == "ok":
+        print(
+            f"  friction worker:    {friction_readback.get('worker')} "
+            f"open={friction_readback.get('open')} "
+            f"blocked={friction_readback.get('blocked')} "
+            f"repairable={friction_readback.get('repairable')}"
+        )
     print(f"  fresh terminals:    {len(fresh_terminals)}")
     print(f"  fresh custody:      {len(fresh_custody_terminals)}")
     print(f"  mapped open loops:  {mapped_open_loops}/{len(open_loops)}")

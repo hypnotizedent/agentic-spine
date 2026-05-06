@@ -202,6 +202,10 @@ Agent cockpit habits:
   who owns the work, and what receipt will prove closure?
 - Before leaving, close the packet, release the lease, clean landed residue,
   and dispose filed friction with evidence.
+- Spine bugs are not closing-prose chores for Ronny. File them in-session via
+  `friction.ingest` when precise; terminal closeout capture is an engine
+  backstop, and known captured friction appears in attach context so agents do
+  not re-file the same concern without new evidence.
 
 Operating invariants:
 

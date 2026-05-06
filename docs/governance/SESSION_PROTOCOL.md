@@ -143,6 +143,14 @@ friction and use an existing amend/promote/close/cleanup capability. If no such
 capability exists, the missing governed repair path is the work; raw filesystem
 surgery is not an acceptable substitute.
 
+Terminal closeout capture is an engine backstop, not a new operator chore.
+Supported tools route closing spine-bug prose through the terminal runner into
+the clerk/friction ledger; PTY-incompatible tools stay usable as passthrough
+and are visible coverage debt. Agents should still file precise friction
+in-session when they have evidence, and attach context surfaces known open
+friction so repeated sessions do not rediscover the same spine bug as fresh
+work.
+
 Workflow telemetry is routing input. A terminal must not treat
 `entry.compile`, `ops status`, `worktree.lifecycle.report`, open delegations,
 or drift readbacks as advisory only. Before opening or executing adjacent work,
