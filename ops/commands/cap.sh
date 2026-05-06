@@ -351,6 +351,88 @@ ensure_runtime_dirs() {
         "$SPINE_DOMAIN_STATE"
 }
 
+state_home_approval_guard() {
+    local stage="$1"
+    local capability_name="$2"
+    local safety="$3"
+
+    cap_safety_requires_mutation_policy "$safety" || return 0
+
+    local contract="$SPINE_CODE/ops/bindings/root.authority.contract.yaml"
+    [[ -f "$contract" ]] || {
+        echo "STOP: state home approval guard cannot find $contract" >&2
+        return 78
+    }
+
+    python3 - "$contract" "$SPINE_STATE" "$stage" "$capability_name" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+contract_path = Path(sys.argv[1])
+state_root = Path(sys.argv[2])
+stage = sys.argv[3]
+capability = sys.argv[4]
+
+try:
+    contract = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+except Exception as exc:
+    print(f"STOP: state home approval guard could not parse {contract_path}: {exc}", file=sys.stderr)
+    raise SystemExit(78)
+
+storage = ((contract.get("taxonomy") or {}).get("storage_evidence_node_canonical") or {})
+canonical_raw = ((storage.get("primary_canonical_subpaths") or {}).get("state") or "").strip()
+policy = ((storage.get("file_plane_policy") or {}).get("state_home_approval") or {})
+
+if not canonical_raw or not policy:
+    print("STOP: root.authority.contract.yaml is missing state_home_approval policy", file=sys.stderr)
+    raise SystemExit(78)
+
+if not state_root.exists():
+    # Non-materialized consumer projection. Routing sends canonical mutations to
+    # the authority host; local install-default absence is not a policy event.
+    raise SystemExit(0)
+
+canonical = Path(canonical_raw)
+try:
+    if state_root.resolve() != canonical.resolve():
+        # Consumer-local projection/cache is not canonical authority. D423 and
+        # the routed authority-side cap path enforce the canonical state root.
+        raise SystemExit(0)
+except FileNotFoundError:
+    raise SystemExit(0)
+
+approved_top = set(str(x) for x in (policy.get("approved_top_level_homes") or []))
+approved_domain = set(str(x) for x in (policy.get("approved_domain_state_homes") or []))
+retired_domain = set(str(x) for x in (policy.get("retired_domain_state_homes") or []))
+
+top_dirs = sorted(p.name for p in state_root.iterdir() if p.is_dir())
+domain_root = state_root / "domain-state"
+domain_dirs = sorted(p.name for p in domain_root.iterdir() if p.is_dir()) if domain_root.is_dir() else []
+
+unapproved_top = [name for name in top_dirs if name not in approved_top]
+unapproved_domain = [name for name in domain_dirs if name not in approved_domain]
+retired_present = [name for name in domain_dirs if name in retired_domain]
+
+if unapproved_top or unapproved_domain or retired_present:
+    print("STOP: state home approval guard blocked capability side effect", file=sys.stderr)
+    print(f"  capability: {capability}", file=sys.stderr)
+    print(f"  stage:      {stage}", file=sys.stderr)
+    print(f"  state_root: {state_root}", file=sys.stderr)
+    if unapproved_top:
+        print(f"  unapproved top-level homes: {', '.join(unapproved_top)}", file=sys.stderr)
+    if unapproved_domain:
+        print(f"  unapproved domain-state homes: {', '.join(unapproved_domain)}", file=sys.stderr)
+    if retired_present:
+        print(f"  retired domain-state homes present: {', '.join(retired_present)}", file=sys.stderr)
+    print("  next: human steward must approve the home in root.authority.contract.yaml, or remove the drift.", file=sys.stderr)
+    raise SystemExit(78)
+
+raise SystemExit(0)
+PY
+}
+
 list_caps() {
     local show_all=0
     local include_retired=0
@@ -1658,13 +1740,22 @@ run_cap() {
         command_string="$(build_command_string "$cmd")"
     fi
 
-    echo "Executing..."
-    echo "────────────────────────────────────────"
     set +e
-    execute_command "$command_string" "$cwd" "$run_key" 2>&1 | tee "$output_file"
-    rc=$?
+    state_home_approval_guard "pre" "$name" "$safety" 2>&1 | tee -a "$output_file"
+    rc=${PIPESTATUS[0]}
     set -e
-    echo "────────────────────────────────────────"
+    if [[ "$rc" -ne 0 ]]; then
+        CAP_BLOCKER_REASON="state_home_approval_guard"
+        echo "────────────────────────────────────────"
+    else
+        echo "Executing..."
+        echo "────────────────────────────────────────"
+        set +e
+        execute_command "$command_string" "$cwd" "$run_key" 2>&1 | tee "$output_file"
+        rc=$?
+        set -e
+        echo "────────────────────────────────────────"
+    fi
 
     if [[ "$rc" -eq 0 && -n "${post_action:-}" && "$post_action" != "null" ]]; then
         echo ""
@@ -1680,6 +1771,17 @@ run_cap() {
             echo "POST-ACTION WARN: ${post_action} failed (non-blocking)"
         fi
         echo "────────────────────────────────────────"
+    fi
+
+    if [[ "$rc" -eq 0 ]]; then
+        set +e
+        state_home_approval_guard "post" "$name" "$safety" 2>&1 | tee -a "$output_file"
+        rc=${PIPESTATUS[0]}
+        set -e
+        if [[ "$rc" -ne 0 ]]; then
+            CAP_BLOCKER_REASON="state_home_approval_guard"
+            echo "────────────────────────────────────────"
+        fi
     fi
 
     end_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

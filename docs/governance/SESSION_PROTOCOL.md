@@ -224,6 +224,13 @@ The state paths in the workflow objects below name **logical** state.
 Resolved authority for each path is on pve canonical; consumer-local copies
 are projection unless the cap that wrote them was routed.
 
+Creating a new state home is approval-gated. Governed terminals and
+mutating/destructive caps may only create directories inside the top-level
+`$SPINE_STATE` homes and `$SPINE_STATE/domain-state/<home>` roots listed in
+`root.authority.contract.yaml`. A new home requires human-steward approval
+recorded in that existing contract in the same slice. Otherwise it is drift:
+the cap path fails on canonical state and D423 catches direct-shell creation.
+
 `$SPINE_STATE/domain-state/spine/` is not a general research, proof, or RAG
 authority surface. It contains historical mixed projection residue on consumer
 hosts and must not be indexed or cited as `spine_domain_state`. Durable research
