@@ -63,6 +63,10 @@ def _resolve_task_heartbeat_stale_threshold() -> int:
 
 STALE_SECONDS = _resolve_task_heartbeat_stale_threshold()
 CANONICAL_TASK_ROOT_DEFAULT = "/md1400/spine/state/agent-tasks"
+# PACKET-1380: canonical delegations root mirrors the canonical task root so
+# pickup status sees the same delegation files delegation.status sees,
+# regardless of which host the cap runs on.
+CANONICAL_DELEGATIONS_ROOT_DEFAULT = "/md1400/spine/state/delegations"
 LOCAL_CANONICAL_FETCH_DISABLE = os.environ.get("EXECUTION_PICKUP_DISABLE_CANONICAL_FETCH", "").strip() == "1"
 CANONICAL_PLANE_ACCESS_BINDING = "ops/bindings/node.role.contract.yaml#canonical_plane_access.by_role"
 
@@ -462,32 +466,74 @@ def collect_wave_dispatches(rows: list[dict[str, Any]]) -> None:
             )
 
 
-def collect_delegations(rows: list[dict[str, Any]]) -> None:
-    if not DELEGATIONS_ROOT.is_dir():
+def _emit_delegation_row(rows: list[dict[str, Any]], doc: dict[str, Any], path_stem: str, task_source: str) -> None:
+    state = str(doc.get("delegation_state") or doc.get("state") or "").strip()
+    if state not in ACTIVE_DELEGATION_STATES:
         return
-    for path in sorted(DELEGATIONS_ROOT.glob("DEL-*.yaml")):
-        doc = load_yaml(path)
-        state = str(doc.get("delegation_state") or doc.get("state") or "").strip()
-        if state not in ACTIVE_DELEGATION_STATES:
-            continue
-        picked_up = state in {"picked_up", "executing", "running"}
-        heartbeat = doc.get("heartbeat_at") or doc.get("updated_at") or doc.get("picked_up_at")
-        heartbeat_age = age_seconds(heartbeat)
-        stale = picked_up and (heartbeat_age is None or heartbeat_age > STALE_SECONDS)
-        add_request(
-            rows,
-            request_id=str(doc.get("delegation_id") or path.stem),
-            source="delegation",
-            realization="interactive_worker_handoff",
-            pickup_state="stale" if stale else ("claimed" if picked_up else "not_claimed"),
-            loop_id=doc.get("loop_id"),
-            packet_id=doc.get("packet_id") or doc.get("packet"),
-            worker=doc.get("worker") or doc.get("claimed_by"),
-            heartbeat_at=heartbeat,
-            heartbeat_age_seconds=heartbeat_age,
-            task=str(doc.get("summary") or doc.get("objective") or "")[:180],
-            task_source="local",
+    picked_up = state in {"picked_up", "executing", "running"}
+    heartbeat = doc.get("heartbeat_at") or doc.get("updated_at") or doc.get("picked_up_at")
+    heartbeat_age = age_seconds(heartbeat)
+    stale = picked_up and (heartbeat_age is None or heartbeat_age > STALE_SECONDS)
+    add_request(
+        rows,
+        request_id=str(doc.get("delegation_id") or path_stem),
+        source="delegation",
+        realization="interactive_worker_handoff",
+        pickup_state="stale" if stale else ("claimed" if picked_up else "not_claimed"),
+        loop_id=doc.get("loop_id"),
+        packet_id=doc.get("packet_id") or doc.get("packet"),
+        worker=doc.get("worker") or doc.get("claimed_by"),
+        heartbeat_at=heartbeat,
+        heartbeat_age_seconds=heartbeat_age,
+        task=str(doc.get("summary") or doc.get("objective") or "")[:180],
+        task_source=task_source,
+    )
+
+
+def collect_delegations(rows: list[dict[str, Any]]) -> tuple[str, int]:
+    """Merge local + canonical delegation envelopes; canonical wins on dedupe.
+
+    PACKET-1380: mirrors collect_operational_tasks so that delegation.status
+    and execution.pickup.status agree about pending delegations regardless of
+    whether the cap runs on the canonical authority host or fetches over SSH.
+
+    Returns (canonical_status, canonical_row_count) for summary surfacing.
+    """
+    target, reason = _canonical_fetch_target()
+    canonical_rows = 0
+    canonical_status = reason
+    seen: set[str] = set()
+
+    if reason == "fetch" and target:
+        remote_dir = (
+            target.get("delegations_remote_root")
+            or CANONICAL_DELEGATIONS_ROOT_DEFAULT
         )
+        docs, fetch_status = load_remote_yaml_dir(
+            target["host_ref"], remote_dir, glob_pattern="DEL-*.yaml"
+        )
+        if fetch_status == "ok":
+            canonical_status = "merged"
+            for doc in docs:
+                delegation_id = str(doc.get("delegation_id") or "").strip()
+                if not delegation_id or delegation_id in seen:
+                    continue
+                seen.add(delegation_id)
+                _emit_delegation_row(rows, doc, delegation_id, "canonical")
+                canonical_rows += 1
+        else:
+            canonical_status = "unreachable"
+
+    if DELEGATIONS_ROOT.is_dir():
+        for path in sorted(DELEGATIONS_ROOT.glob("DEL-*.yaml")):
+            doc = load_yaml(path)
+            delegation_id = str(doc.get("delegation_id") or path.stem).strip()
+            if delegation_id in seen:
+                continue
+            seen.add(delegation_id)
+            _emit_delegation_row(rows, doc, delegation_id, "local")
+
+    return canonical_status, canonical_rows
 
 
 def collect_task_dir(rows: list[dict[str, Any]], state_name: str) -> None:
@@ -595,8 +641,12 @@ def _canonical_fetch_target() -> tuple[dict[str, str], str]:
     return {"host_ref": host_ref, "remote_root": CANONICAL_TASK_ROOT_DEFAULT}, "fetch"
 
 
-def load_remote_yaml_dir(host_ref: str, remote_dir: str) -> tuple[list[dict[str, Any]], str]:
-    """SSH to host_ref, list TASK-*.yaml under remote_dir, return (docs, status).
+def load_remote_yaml_dir(host_ref: str, remote_dir: str, glob_pattern: str = "TASK-*.yaml") -> tuple[list[dict[str, Any]], str]:
+    """SSH to host_ref, list <glob_pattern> under remote_dir, return (docs, status).
+
+    PACKET-1380: glob_pattern is parameterized so the same SSH/yaml stream
+    helper can carry both TASK-*.yaml (operational tasks) and DEL-*.yaml
+    (interactive delegations).
 
     status: 'ok' on success (possibly empty list); 'unreachable' on SSH/parse failure.
     Reuses the ssh-resolve helper used by load_remote_json so identity/key/host
@@ -604,17 +654,19 @@ def load_remote_yaml_dir(host_ref: str, remote_dir: str) -> tuple[list[dict[str,
     """
     if not host_ref or not remote_dir or not SSH_RESOLVER.is_file():
         return [], "unreachable"
+    glob_quoted = shlex.quote(glob_pattern)
     script = f'''
 set -euo pipefail
 source {shlex.quote(str(SSH_RESOLVER))}
 target={shlex.quote(host_ref)}
 dir={shlex.quote(remote_dir)}
+pattern={glob_quoted}
 resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
 user="$(ssh_resolve_user "$target" ubuntu)"
 identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
 ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" \
-    "for f in \\"$dir\\"/TASK-*.yaml; do [ -f \\"\\$f\\" ] || continue; echo '---'; cat \\"\\$f\\"; done"
+    "for f in \\"$dir\\"/$pattern; do [ -f \\"\\$f\\" ] || continue; echo '---'; cat \\"\\$f\\"; done"
 '''
     try:
         proc = subprocess.run(
@@ -927,12 +979,17 @@ def routine_summary(data: dict[str, Any], *, limit: int = 12) -> dict[str, Any]:
 def collect() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     collect_wave_dispatches(rows)
-    collect_delegations(rows)
+    canonical_delegation_status, canonical_delegation_rows = collect_delegations(rows)
     canonical_status, canonical_rows = collect_operational_tasks(rows)
     rows.sort(key=lambda row: (str(row.get("pickup_state")), str(row.get("request_id"))))
     summary = summarize(rows)
     summary["canonical_task_source"] = canonical_status
     summary["canonical_task_rows"] = canonical_rows
+    # PACKET-1380: surface canonical delegation merge status alongside tasks
+    # so the readback honestly reports whether pending delegations were
+    # joined from the canonical authority host.
+    summary["canonical_delegation_source"] = canonical_delegation_status
+    summary["canonical_delegation_rows"] = canonical_delegation_rows
     role = canonical_plane_access_role()
     return {
         "capability": "execution.pickup.status",

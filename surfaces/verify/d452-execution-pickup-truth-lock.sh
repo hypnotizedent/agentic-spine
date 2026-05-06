@@ -669,6 +669,44 @@ if not isinstance(threshold_value, int) or threshold_value <= 0:
 for required_token in ("MAILROOM_WORKER_CONTRACT", "task_heartbeat_staleness_threshold_seconds", "_resolve_task_heartbeat_stale_threshold"):
     if required_token not in pickup_status_text:
         raise SystemExit(f"D452 FAIL: execution-pickup-status must read task heartbeat staleness threshold from mailroom worker contract: missing {required_token} (PACKET-1225)")
+
+# PACKET-1380: pickup status must merge canonical delegations (mirroring the
+# canonical task merge) so delegation.status and execution.pickup.status
+# agree about pending interactive delegations regardless of which host the
+# cap runs on. Without this, dispatched packets can appear inert from the
+# public pickup plane.
+for required_token in (
+    "CANONICAL_DELEGATIONS_ROOT_DEFAULT",
+    "canonical_delegation_source",
+    "canonical_delegation_rows",
+    'glob_pattern="DEL-*.yaml"',
+):
+    if required_token not in pickup_status_text:
+        raise SystemExit(f"D452 FAIL: execution-pickup-status must merge canonical delegations: missing {required_token} (PACKET-1380)")
+
+# PACKET-1380: delegation broker must mint unique delegation ids under
+# parallel calls. Without exclusive create, simultaneous delegate.to.execution
+# requests in the same second clobber each other's envelope file via
+# tmp+rename and partially update packet frontmatter.
+broker_path = root_dir / "ops/plugins/core/lifecycle/lib/delegation_broker.py"
+broker_text = broker_path.read_text(encoding="utf-8") if broker_path.is_file() else ""
+for required_token in (
+    "_mint_unique_delegation_id",
+    "O_EXCL",
+    "FileExistsError",
+):
+    if required_token not in broker_text:
+        raise SystemExit(f"D452 FAIL: delegation broker must mint unique ids via exclusive create: missing {required_token} (PACKET-1380)")
+if 'delegation_id = f"DEL-{_now_id()}"' in broker_text:
+    raise SystemExit("D452 FAIL: delegation broker still uses second-resolution _now_id() for create_delegation; use _mint_unique_delegation_id (PACKET-1380)")
+
+# PACKET-1380: wave close validator must teach the zero-work abandoned
+# disposition path when a never-dispatched wave hits the state-machine
+# block, so agents do not work around it with --force or hand-edits.
+validator_path = root_dir / "ops/plugins/core/lifecycle/lib/wave_close_validator.py"
+validator_text = validator_path.read_text(encoding="utf-8") if validator_path.is_file() else ""
+if "for never-dispatched waves use --disposition abandoned" not in validator_text:
+    raise SystemExit("D452 FAIL: wave_close_validator must teach the zero-work abandoned disposition path in the state-machine-blocked message (PACKET-1380)")
 PY
 
 echo "D452 PASS: execution pickup truth locked"
