@@ -214,19 +214,35 @@ def _sanitize_error(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_:.-]", "_", text)[:80]
 
 
-def _write_heartbeat_capture(*, terminal_id: str, status: str, error_class: str) -> None:
-    """Append/refresh capture_last_status / capture_last_error_class /
-    capture_last_at on $SPINE_STATE/terminal-heartbeats/<terminal>.yaml.
-    Reads existing YAML, strips any prior capture_last_* lines, appends new
-    ones, and atomically replaces the file. Other fields are preserved verbatim.
-    Silently no-ops when terminal_id is empty or SPINE_STATE is unset.
+def _resolve_heartbeat_path(terminal_id: str) -> Path | None:
+    """Resolve the canonical terminal heartbeat path for the running session.
+
+    Prefers $SPINE_HEARTBEAT_FILE (set by terminal.sh:413, the existing readback
+    path that ops status / cap.sh / clerk all consume). Falls back to
+    $SPINE_STATE/terminal-heartbeats/<terminal>.yaml so test harnesses that set
+    SPINE_STATE alone keep working.
     """
+    env_path = os.environ.get("SPINE_HEARTBEAT_FILE")
+    if env_path:
+        return Path(env_path)
     if not terminal_id:
-        return
+        return None
     state_root = os.environ.get("SPINE_STATE")
     if not state_root:
+        return None
+    return Path(state_root) / "terminal-heartbeats" / f"{terminal_id}.yaml"
+
+
+def _write_heartbeat_capture(*, terminal_id: str, status: str, error_class: str) -> None:
+    """Append/refresh capture_last_status / capture_last_error_class /
+    capture_last_at on the canonical terminal heartbeat file. Reads existing
+    YAML, strips any prior capture_last_* lines, appends new ones, and
+    atomically replaces the file. Other fields are preserved verbatim. Silently
+    no-ops when no heartbeat path is resolvable.
+    """
+    hb_path = _resolve_heartbeat_path(terminal_id)
+    if hb_path is None:
         return
-    hb_path = Path(state_root) / "terminal-heartbeats" / f"{terminal_id}.yaml"
     try:
         hb_path.parent.mkdir(parents=True, exist_ok=True)
         existing = (
