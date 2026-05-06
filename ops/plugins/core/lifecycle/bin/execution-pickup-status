@@ -67,6 +67,7 @@ CANONICAL_TASK_ROOT_DEFAULT = "/md1400/spine/state/agent-tasks"
 # pickup status sees the same delegation files delegation.status sees,
 # regardless of which host the cap runs on.
 CANONICAL_DELEGATIONS_ROOT_DEFAULT = "/md1400/spine/state/delegations"
+CANONICAL_PATCH_REVIEW_ROOT_DEFAULT = "/md1400/spine/state/domain-state/ai-patch-reviews"
 LOCAL_CANONICAL_FETCH_DISABLE = os.environ.get("EXECUTION_PICKUP_DISABLE_CANONICAL_FETCH", "").strip() == "1"
 CANONICAL_PLANE_ACCESS_BINDING = "ops/bindings/node.role.contract.yaml#canonical_plane_access.by_role"
 
@@ -118,7 +119,24 @@ def load_yaml(path: Path) -> dict[str, Any]:
 def patch_review_for(task_id: str) -> dict[str, Any]:
     if not task_id:
         return {}
-    return load_yaml(PATCH_REVIEW_ROOT / f"{task_id}.yaml")
+    local_path = PATCH_REVIEW_ROOT / f"{task_id}.yaml"
+    local_review = load_yaml(local_path)
+    if local_review:
+        local_review["_patch_review_receipt_path"] = str(local_path)
+        return local_review
+    target, reason = _canonical_fetch_target()
+    if reason != "fetch" or not target:
+        return {}
+    docs, status = load_remote_yaml_dir(
+        target["host_ref"],
+        CANONICAL_PATCH_REVIEW_ROOT_DEFAULT,
+        f"{task_id}.yaml",
+    )
+    if status != "ok" or not docs:
+        return {}
+    review = docs[0]
+    review["_patch_review_receipt_path"] = f"{CANONICAL_PATCH_REVIEW_ROOT_DEFAULT}/{task_id}.yaml"
+    return review
 
 
 def effective_patch_review_state(review: dict[str, Any]) -> str:
@@ -401,7 +419,10 @@ def add_request(rows: list[dict[str, Any]], **kwargs: Any) -> None:
         review = patch_review_for(str(row.get("request_id") or ""))
         if review:
             row["review_state"] = effective_patch_review_state(review)
-            row["patch_review_receipt"] = str(PATCH_REVIEW_ROOT / f"{row.get('request_id')}.yaml")
+            row["patch_review_receipt"] = str(
+                review.get("_patch_review_receipt_path")
+                or PATCH_REVIEW_ROOT / f"{row.get('request_id')}.yaml"
+            )
             if row["review_state"] == "review_worktree_active" and review.get("review_worktree"):
                 row["review_worktree"] = review.get("review_worktree")
             if row["review_state"] == "review_worktree_active" and review.get("review_branch"):
