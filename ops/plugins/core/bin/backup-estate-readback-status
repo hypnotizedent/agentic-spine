@@ -149,6 +149,20 @@ for entry in locality_doc.get("target_localities") or []:
 def derive_recovery_alternative(target_name):
     if not target_name:
         return []
+    target_def = target_by_name.get(target_name) or {}
+    explicit_alternatives = [
+        str(item)
+        for item in (target_def.get("recovery_alternative") or [])
+        if str(item)
+    ]
+    if explicit_alternatives:
+        seen = set()
+        out = []
+        for item in explicit_alternatives:
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
     direct_companions = []
     for unit in runtime_units:
         members = [str(m) for m in unit.get("inventory_targets") or []]
@@ -213,21 +227,23 @@ def classify_disabled_target(target_name, target_def):
 
     Reads existing fields only:
       - target_def.classification (critical|important|rebuildable|retired|decommissioned)
+      - target_def.description
       - target_def.retirement_reason
       - locality_by_target[target_name].note
     """
     locality_entry = locality_by_target.get(target_name) or {}
     note = str(locality_entry.get("note") or "")
+    description = str(target_def.get("description") or "")
     inv_classification = str(target_def.get("classification") or "")
     retirement_reason = str(target_def.get("retirement_reason") or "")
 
     # rollback / appliance cutover -> appliance_cutover_rollback_only
-    note_l = note.lower()
-    if "rollback evidence" in note_l or "appliance cutover" in note_l:
+    evidence_l = f"{note}\n{description}".lower()
+    if "rollback evidence" in evidence_l or "appliance cutover" in evidence_l:
         return "appliance_cutover_rollback_only"
     # app-local subtraction
     if (
-        "not active readiness authority unless re-admitted" in note_l
+        "not active readiness authority unless re-admitted" in evidence_l
         or retirement_reason == "app_local_backup_subtraction_policy"
     ):
         return "app_local_subtraction"
@@ -236,13 +252,19 @@ def classify_disabled_target(target_name, target_def):
     # without other markers — retired and decommissioned are aligned residue
     # semantics per the locality contract restore_matrix).
     if (
-        "decommissioned" in note_l
-        or "tombstoned" in note_l
+        "decommissioned" in evidence_l
+        or "tombstoned" in evidence_l
         or inv_classification == "decommissioned"
     ):
         return "decommissioned_residue"
     # disabled by policy
-    if "intentionally retired" in note_l or "intentionally disabled" in note_l:
+    if (
+        "intentionally retired" in evidence_l
+        or "intentionally disabled" in evidence_l
+        or "disabled recurring backup target" in evidence_l
+        or "adequate recovery surface" in evidence_l
+        or "vm-level-only backup" in evidence_l
+    ):
         return "disabled_by_policy"
     # classification: retired with no other clue -> bucket as decommissioned_residue
     # (residue semantics; canonical recovery is on a different surface).
@@ -433,8 +455,13 @@ for host, doc in host_docs.items():
         classification = "subject"
         status = "ok"
         reason = "covered_by_inventory_and_readback"
+        lifecycle_role = str((lifecycle_row or {}).get("role") or "")
 
-        if subject["runtime_status"] == "stopped":
+        if lifecycle_status == "template" or lifecycle_role == "template":
+            classification = "exclusion"
+            status = "ok"
+            reason = "template_excluded_from_runtime_backup"
+        elif subject["runtime_status"] == "stopped":
             classification = "residue"
             status = "residue"
             reason = "stopped_guest_requires_disposition_not_runtime_backup"
