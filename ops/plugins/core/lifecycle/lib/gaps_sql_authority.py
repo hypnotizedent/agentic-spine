@@ -1244,35 +1244,37 @@ def get_latest_friction_event_payload(
     conn: sqlite3.Connection,
     friction_id: str,
 ) -> dict[str, Any] | None:
-    """Return the most-recent friction_events.payload_json for a friction_id
-    as a parsed dict. None when no events exist or payload is empty/null.
-    Used by friction.queue.status --source-drilldown to surface source metadata
-    (V2.1 Slice 1B) without a new index plane.
+    """Return the most-recent NON-EMPTY friction_events.payload_json for a
+    friction_id, as a parsed dict. Walks events newest-to-oldest and returns
+    the first one carrying real source metadata; later events with empty/null
+    payload (e.g. dedup hits invoked without source flags, or annotate events
+    that don't carry source) do not erase the source ingested earlier.
+    Used by friction.queue.status --source-drilldown (V2.1 Slice 1B) to
+    surface source metadata without a new index plane.
     """
-    row = conn.execute(
+    rows = conn.execute(
         """
         SELECT payload_json, event_type, created_at_utc
         FROM friction_events
         WHERE friction_id = ?
         ORDER BY created_at_utc DESC, id DESC
-        LIMIT 1
         """,
         (friction_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    raw = row["payload_json"] if hasattr(row, "keys") else row[0]
-    if not raw:
-        return None
-    try:
-        decoded = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(decoded, dict) or not decoded:
-        return None
-    decoded["_event_type"] = (row["event_type"] if hasattr(row, "keys") else row[1])
-    decoded["_event_at_utc"] = (row["created_at_utc"] if hasattr(row, "keys") else row[2])
-    return decoded
+    ).fetchall()
+    for row in rows:
+        raw = row["payload_json"] if hasattr(row, "keys") else row[0]
+        if not raw:
+            continue
+        try:
+            decoded = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(decoded, dict) or not decoded:
+            continue
+        decoded["_event_type"] = (row["event_type"] if hasattr(row, "keys") else row[1])
+        decoded["_event_at_utc"] = (row["created_at_utc"] if hasattr(row, "keys") else row[2])
+        return decoded
+    return None
 
 
 # ── Friction: Bootstrap (NDJSON -> SQLite) ───────────────────────

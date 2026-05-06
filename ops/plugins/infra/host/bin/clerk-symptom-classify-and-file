@@ -793,6 +793,11 @@ def _terminal_closeout_record(
         "source_ref": parsed.get("source_ref") or "",
         "excerpt_hash": parsed.get("excerpt_hash") or "",
         "class": sig_class,
+        # Loop id surfaced as a top-level record field so file_via_friction_ingest
+        # can forward it to friction.ingest --loop-id; this populates the
+        # canonical friction.sources[] array so loop-scoped readback (entry
+        # context in V2.1 Slice 3) can find these rows structurally.
+        "loop_id": loop_id,
     }
 
 
@@ -860,6 +865,10 @@ def file_via_friction_ingest(record: dict[str, Any]) -> dict[str, Any]:
         cmd += ["--excerpt-hash", record["excerpt_hash"]]
     if record.get("class"):
         cmd += ["--class", record["class"]]
+    # Forward loop_id so friction.ingest populates friction.sources[];
+    # required for loop-scoped readback / entry context (V2.1 Slice 3 input).
+    if record.get("loop_id"):
+        cmd += ["--loop-id", record["loop_id"]]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, env=env)
         result = {
