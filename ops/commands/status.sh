@@ -429,25 +429,42 @@ def _degraded_line(reason):
 
 timeout_seconds = _int_env("OPS_STATUS_BRIEF_JOINED_TIMEOUT_SECONDS", 4)
 cache_max_age = _int_env("OPS_STATUS_BRIEF_CACHE_MAX_AGE_SECONDS", 3600)
-narrator_timeout = _int_env("OPS_STATUS_BRIEF_NARRATOR_TIMEOUT_SECONDS", 3)
+narrator_timeout = _int_env("OPS_STATUS_BRIEF_NARRATOR_TIMEOUT_SECONDS", 5)
 
 
 def _render_narrator_attention():
-    """Best-effort narrator attention readback (PACKET-1377; spec PACKET-1374).
+    """Best-effort narrator attention readback (PACKET-1382 routes to
+    canonical via SSH dispatch of the same governed cap so consumer hosts
+    read narrator artifacts where they live — storage_evidence_node — not
+    consumer-local projection. Original helper landed in PACKET-1377;
+    spec lives in PACKET-1374).
 
-    Reads from per-commit artifacts only (--from-artifacts). Failure or
-    timeout produces None so the brief output is never broken by narrator
-    issues — narrator is operator-eye witness signal, not a verify gate.
+    Reads from per-commit artifacts only (--from-artifacts). Failure,
+    timeout, or unreachable canonical produces None so the brief output
+    is never broken by narrator issues — narrator is operator-eye
+    witness signal, not a verify gate.
     """
     if os.environ.get("OPS_STATUS_BRIEF_NARRATOR_DISABLE") == "1":
         return None
+    target = os.environ.get(
+        "OPS_STATUS_NARRATOR_DISPATCH_TARGET", "pve")
+    repo = os.environ.get(
+        "OPS_STATUS_NARRATOR_DISPATCH_REPO", "/opt/agentic-spine")
+    state_root = os.environ.get(
+        "OPS_STATUS_NARRATOR_DISPATCH_STATE", "/md1400/spine/state")
+    remote_cmd = (
+        f"cd '{repo}' && SPINE_STATE='{state_root}' "
+        "./bin/ops cap run commit.narrator.status -- "
+        "--since 14.days --from-artifacts --format json "
+        "--limit 50 --skip-input-readbacks"
+    )
     try:
-        bin_ops = spine / "bin" / "ops"
         proc = subprocess.run(
-            [str(bin_ops), "cap", "run", "commit.narrator.status",
-             "--", "--since", "14.days",
-             "--from-artifacts", "--format", "json",
-             "--limit", "50", "--skip-input-readbacks"],
+            ["ssh",
+             "-o", "ConnectTimeout=2",
+             "-o", "BatchMode=yes",
+             "-o", "StrictHostKeyChecking=accept-new",
+             target, remote_cmd],
             capture_output=True,
             text=True,
             timeout=narrator_timeout,
@@ -2849,20 +2866,35 @@ if mode != "--expert":
     # replay; failure or timeout is silent skip — narrator is operator-eye
     # signal, not a verify gate.
     def _render_full_narrator_attention():
+        # PACKET-1382: route the entry-time narrator read to canonical via
+        # SSH dispatch of the same governed cap. Drilldown invocations of
+        # commit.narrator.status (no SSH) continue to run locally.
         if os.environ.get("OPS_STATUS_FULL_NARRATOR_DISABLE") == "1":
             return None
         try:
             timeout = int(os.environ.get(
-                "OPS_STATUS_FULL_NARRATOR_TIMEOUT_SECONDS", "3"))
+                "OPS_STATUS_FULL_NARRATOR_TIMEOUT_SECONDS", "5"))
         except Exception:
-            timeout = 3
-        bin_ops = spine / "bin" / "ops"
+            timeout = 5
+        target = os.environ.get(
+            "OPS_STATUS_NARRATOR_DISPATCH_TARGET", "pve")
+        repo = os.environ.get(
+            "OPS_STATUS_NARRATOR_DISPATCH_REPO", "/opt/agentic-spine")
+        state_root = os.environ.get(
+            "OPS_STATUS_NARRATOR_DISPATCH_STATE", "/md1400/spine/state")
+        remote_cmd = (
+            f"cd '{repo}' && SPINE_STATE='{state_root}' "
+            "./bin/ops cap run commit.narrator.status -- "
+            "--since 14.days --from-artifacts --format json "
+            "--limit 50 --skip-input-readbacks"
+        )
         try:
             proc = subprocess.run(
-                [str(bin_ops), "cap", "run", "commit.narrator.status",
-                 "--", "--since", "14.days",
-                 "--from-artifacts", "--format", "json",
-                 "--limit", "50", "--skip-input-readbacks"],
+                ["ssh",
+                 "-o", "ConnectTimeout=2",
+                 "-o", "BatchMode=yes",
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 target, remote_cmd],
                 capture_output=True, text=True,
                 timeout=max(1, timeout), check=False,
             )
