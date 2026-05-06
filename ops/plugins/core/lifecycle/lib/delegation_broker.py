@@ -24,7 +24,7 @@ import os
 import re
 import sqlite3
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +87,40 @@ def _now_utc() -> str:
 
 def _now_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def _mint_unique_delegation_id(del_dir: Path) -> str:
+    """Mint a delegation id whose envelope path does not yet exist.
+
+    PACKET-1380: parallel delegate.to.execution calls within the same second
+    previously minted identical DEL ids and clobbered each other's envelope
+    via tmp+rename. Use exclusive create as the collision arbiter; on
+    EEXIST, advance the timestamp by one second and retry. The id format
+    stays DEL-YYYYMMDD-HHMMSS so DEL_ID_RE keeps matching.
+    """
+    del_dir.mkdir(parents=True, exist_ok=True)
+    base_dt = datetime.now(timezone.utc)
+    for offset in range(0, 60):
+        candidate_dt = base_dt + timedelta(seconds=offset)
+        candidate_id = f"DEL-{candidate_dt.strftime('%Y%m%d-%H%M%S')}"
+        candidate_path = del_dir / f"{candidate_id}.yaml"
+        try:
+            fd = os.open(
+                str(candidate_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+        except FileExistsError:
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return candidate_id
+    raise DelegationError(
+        "could not mint unique delegation id within 60s window; "
+        "delegations directory may be saturated"
+    )
 
 
 def _atomic_write(path: str, data: dict[str, Any]) -> None:
@@ -897,7 +931,8 @@ def delegate(
         }
 
     # ── Write delegation envelope ────────────────────────────────
-    delegation_id = f"DEL-{_now_id()}"
+    # PACKET-1380: mint via exclusive create to defeat parallel id collisions.
+    delegation_id = _mint_unique_delegation_id(del_dir)
     now = _now_utc()
 
     delegation_data: dict[str, Any] = {

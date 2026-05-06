@@ -500,8 +500,13 @@ def check_state_machine(
     elif not controller_context.get("eligible") and not controller_context.get("minimal_shell"):
         allowed = config.state_transitions.get(lifecycle_state, set())
         if "closed" not in allowed:
+            # PACKET-1380: never-dispatched waves cannot land. Teach the
+            # zero-work fast-close path explicitly so agents do not work
+            # around it with --force or hand-edits.
             violations.infra.append(
-                f"state machine blocked: {lifecycle_state} -> closed not allowed"
+                f"state machine blocked: {lifecycle_state} -> closed not allowed "
+                "(for never-dispatched waves use --disposition abandoned "
+                "--completion-level slice; the zero-work fast-close path is governed)"
             )
 
 
