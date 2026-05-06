@@ -337,7 +337,14 @@ def _load_cached_payload():
         return None, None, path
     return payload, max(0, int(time.time() - stat.st_mtime)), path
 
-def _render(payload, status_note=""):
+def _render(payload, status_note="", cache_warning=False):
+    """Render the brief line. When cache_warning is True, status_note is
+    prepended as the FIRST field instead of appended near the end so the
+    operator sees the staleness disclosure before any cached counts. The
+    rest of the parts list otherwise reads identically to the live render.
+    Stage 4: prevents the cached-fallback line from presenting cached
+    Loops/Worktree/Coherence counts as if they were fresh.
+    """
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     verify_payload = payload.get("verify") if isinstance(payload.get("verify"), dict) else {}
     secondary_payload = verify_payload.get("secondary") if isinstance(verify_payload.get("secondary"), dict) else {}
@@ -370,13 +377,16 @@ def _render(payload, status_note=""):
     else:
         gap_part = f"Gaps: {open_gaps} open"
 
-    parts = [
+    parts: list[str] = []
+    if cache_warning and status_note:
+        parts.append(status_note)
+    parts.extend([
         loop_part,
         gap_part,
         f"Engine: {summary.get('engine_verify_status', 'unknown')}",
         f"Spine: {summary.get('spine_verify_status', 'unknown')}",
         secondary_brief_text(),
-    ]
+    ])
 
     projection_residue = int(summary.get("projection_residue") or 0)
     scope_orphans = int(summary.get("scope_only_orphans") or 0)
@@ -412,7 +422,9 @@ def _render(payload, status_note=""):
     parts.append("Code drift: skipped")
     parts.append("Authority: skipped")
     parts.append("Clerk: skipped")
-    if status_note:
+    # Cache warning is prepended at the head of parts (above); only append
+    # status_note here when the caller did NOT request the prepend treatment.
+    if status_note and not cache_warning:
         parts.append(status_note)
     anomalies = 1 if coherence_attention and coherence_status != "skipped" else 0
     parts.append(f"Anomalies: {anomalies}")
@@ -595,9 +607,10 @@ except Exception as exc:
     if cached and cache_age is not None and cache_age <= cache_max_age:
         line, anomalies = _render(
             cached,
-            "Status: cached "
+            "Status: STALE-CACHE "
             f"({_seconds_age_text(cache_age)}; joined-state unavailable: {exc}; "
-            "next run OPS_STATUS_FULL_BRIEF=1 ./bin/ops status --brief)",
+            "values below are from cache; refresh: OPS_STATUS_FULL_BRIEF=1 ./bin/ops status --brief)",
+            cache_warning=True,
         )
         print(line)
         narrator_line = _render_narrator_attention()
