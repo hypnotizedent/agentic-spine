@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import sqlite3
 import shlex
 import subprocess
 from pathlib import Path
@@ -73,6 +74,9 @@ CANONICAL_PLANE_ACCESS_BINDING = "ops/bindings/node.role.contract.yaml#canonical
 
 
 ACTIVE_DELEGATION_STATES = {"delegated", "picked_up", "executing", "running"}
+ACTIVE_LOOP_STATUSES = {"active", "open", "draft"}
+TERMINAL_DELEGATION_STATES = {"landed", "needs_review", "cancelled"}
+TERMINAL_DELEGATION_CONTINUITY_STATES = {"closed_loop_terminal", "closed_packet_terminal"}
 TERMINAL_TASK_STATES = {"done", "failed", "cancelled"}
 
 
@@ -487,7 +491,117 @@ def collect_wave_dispatches(rows: list[dict[str, Any]]) -> None:
             )
 
 
-def _emit_delegation_row(rows: list[dict[str, Any]], doc: dict[str, Any], path_stem: str, task_source: str) -> None:
+def _safe_yaml_frontmatter_status(path_text: str) -> str:
+    if not path_text:
+        return ""
+    path = Path(path_text)
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if not text.startswith("---"):
+        try:
+            doc = yaml.safe_load(text)
+        except yaml.YAMLError:
+            return ""
+        return str((doc or {}).get("disposition") or "").strip().lower() if isinstance(doc, dict) else ""
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return ""
+    try:
+        fm = yaml.safe_load(parts[1])
+    except yaml.YAMLError:
+        return ""
+    return str((fm or {}).get("status") or "").strip().lower() if isinstance(fm, dict) else ""
+
+
+def _local_loop_status(loop_id: str) -> str:
+    if not loop_id:
+        return ""
+    db_path = STATE_ROOT / "shared_authority.db"
+    if not db_path.is_file():
+        return ""
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5) as conn:
+            row = conn.execute(
+                "SELECT status FROM loops WHERE loop_id = ? LIMIT 1",
+                (loop_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return ""
+    if not row:
+        return ""
+    return str(row[0] or "").strip().lower()
+
+
+def _enrich_delegation_continuity(doc: dict[str, Any]) -> dict[str, Any]:
+    """Apply the same terminal-continuity model public delegation readback uses.
+
+    PACKET-1397: raw delegation_state is historical evidence, not by itself
+    proof that a request is live. When the linked loop or controller packet is
+    already terminal, execution pickup must not count the envelope as active
+    stale work.
+    """
+    enriched = dict(doc)
+    raw_state = str(doc.get("delegation_state") or doc.get("state") or "").strip().lower() or "unknown"
+    loop_status = str(doc.get("loop_status") or "").strip().lower()
+    packet_status = str(doc.get("packet_status") or "").strip().lower()
+    if not loop_status or loop_status == "unknown":
+        loop_status = _local_loop_status(str(doc.get("loop_id") or "").strip())
+    if not packet_status or packet_status == "unknown":
+        packet_status = _safe_yaml_frontmatter_status(str(doc.get("packet_path") or "").strip())
+
+    continuity_live = raw_state not in TERMINAL_DELEGATION_STATES
+    effective_state = raw_state
+    reason = ""
+    if continuity_live:
+        if loop_status and loop_status not in ACTIVE_LOOP_STATUSES:
+            continuity_live = False
+            effective_state = "closed_loop_terminal"
+            reason = f"linked loop is terminal (status={loop_status})"
+        elif packet_status == "closed":
+            continuity_live = False
+            effective_state = "closed_packet_terminal"
+            reason = "linked packet is already closed"
+
+    enriched["loop_status"] = loop_status or "unknown"
+    enriched["packet_status"] = packet_status or "unknown"
+    enriched["continuity_live"] = continuity_live
+    enriched["effective_state"] = effective_state
+    if reason:
+        enriched["continuity_reason"] = reason
+    return enriched
+
+
+def _terminal_continuity_state(doc: dict[str, Any]) -> str:
+    effective_state = str(doc.get("effective_state") or "").strip().lower()
+    if effective_state in TERMINAL_DELEGATION_CONTINUITY_STATES:
+        return effective_state
+    if doc.get("continuity_live") is False and effective_state:
+        return effective_state if effective_state in TERMINAL_DELEGATION_CONTINUITY_STATES else ""
+    return ""
+
+
+def _record_terminal_continuity(counts: dict[str, int], state: str) -> None:
+    if not state:
+        return
+    counts[state] = int(counts.get(state, 0) or 0) + 1
+
+
+def _emit_delegation_row(
+    rows: list[dict[str, Any]],
+    doc: dict[str, Any],
+    path_stem: str,
+    task_source: str,
+    terminal_continuity_counts: dict[str, int],
+) -> None:
+    doc = _enrich_delegation_continuity(doc)
+    terminal_state = _terminal_continuity_state(doc)
+    if terminal_state:
+        _record_terminal_continuity(terminal_continuity_counts, terminal_state)
+        return
     state = str(doc.get("delegation_state") or doc.get("state") or "").strip()
     if state not in ACTIVE_DELEGATION_STATES:
         return
@@ -511,28 +625,28 @@ def _emit_delegation_row(rows: list[dict[str, Any]], doc: dict[str, Any], path_s
     )
 
 
-def collect_delegations(rows: list[dict[str, Any]]) -> tuple[str, int]:
+def collect_delegations(rows: list[dict[str, Any]]) -> tuple[str, int, dict[str, int]]:
     """Merge local + canonical delegation envelopes; canonical wins on dedupe.
 
     PACKET-1380: mirrors collect_operational_tasks so that delegation.status
     and execution.pickup.status agree about pending delegations regardless of
     whether the cap runs on the canonical authority host or fetches over SSH.
 
-    Returns (canonical_status, canonical_row_count) for summary surfacing.
+    Returns (canonical_status, canonical_row_count, terminal_continuity_counts)
+    for summary surfacing.
     """
     target, reason = _canonical_fetch_target()
     canonical_rows = 0
     canonical_status = reason
     seen: set[str] = set()
+    terminal_continuity_counts = {state: 0 for state in sorted(TERMINAL_DELEGATION_CONTINUITY_STATES)}
 
     if reason == "fetch" and target:
         remote_dir = (
             target.get("delegations_remote_root")
             or CANONICAL_DELEGATIONS_ROOT_DEFAULT
         )
-        docs, fetch_status = load_remote_yaml_dir(
-            target["host_ref"], remote_dir, glob_pattern="DEL-*.yaml"
-        )
+        docs, fetch_status = load_remote_delegation_docs(target["host_ref"], remote_dir)
         if fetch_status == "ok":
             canonical_status = "merged"
             for doc in docs:
@@ -540,7 +654,7 @@ def collect_delegations(rows: list[dict[str, Any]]) -> tuple[str, int]:
                 if not delegation_id or delegation_id in seen:
                     continue
                 seen.add(delegation_id)
-                _emit_delegation_row(rows, doc, delegation_id, "canonical")
+                _emit_delegation_row(rows, doc, delegation_id, "canonical", terminal_continuity_counts)
                 canonical_rows += 1
         else:
             canonical_status = "unreachable"
@@ -552,9 +666,9 @@ def collect_delegations(rows: list[dict[str, Any]]) -> tuple[str, int]:
             if delegation_id in seen:
                 continue
             seen.add(delegation_id)
-            _emit_delegation_row(rows, doc, delegation_id, "local")
+            _emit_delegation_row(rows, doc, delegation_id, "local", terminal_continuity_counts)
 
-    return canonical_status, canonical_rows
+    return canonical_status, canonical_rows, terminal_continuity_counts
 
 
 def collect_task_dir(rows: list[dict[str, Any]], state_name: str) -> None:
@@ -688,6 +802,148 @@ identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true
 ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" \
     "for f in \\"$dir\\"/$pattern; do [ -f \\"\\$f\\" ] || continue; echo '---'; cat \\"\\$f\\"; done"
+'''
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", script],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except Exception:
+        return [], "unreachable"
+    if proc.returncode != 0:
+        return [], "unreachable"
+    text = proc.stdout
+    if not text.strip():
+        return [], "ok"
+    try:
+        docs = list(yaml.safe_load_all(text))
+    except Exception:
+        return [], "unreachable"
+    return [d for d in docs if isinstance(d, dict)], "ok"
+
+
+def load_remote_delegation_docs(host_ref: str, remote_dir: str) -> tuple[list[dict[str, Any]], str]:
+    """Read canonical delegation envelopes with loop/packet continuity attached.
+
+    PACKET-1397: `execution.pickup.status` may run on an operator console while
+    `delegation.status` routes to canonical state. Fetching raw DEL files alone
+    recreates split-brain because closed-loop / closed-packet continuity lives in
+    the canonical loop DB and controller-prompt frontmatter. This helper joins
+    that continuity on the authority host before the public pickup summary
+    decides which requests are live.
+    """
+    if not host_ref or not remote_dir or not SSH_RESOLVER.is_file():
+        return [], "unreachable"
+    # Preserve PACKET-1380 semantics: this replaces the raw glob_pattern="DEL-*.yaml"
+    # fetch with the same DEL scan plus canonical continuity enrichment.
+    remote_state_root = str(Path(remote_dir).parent)
+    remote_python = r'''
+import glob
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+import yaml
+
+state_root = sys.argv[1]
+delegation_dir = sys.argv[2]
+active_loop_statuses = {"active", "open", "draft"}
+terminal_delegation_states = {"landed", "needs_review", "cancelled"}
+
+
+def loop_status(loop_id):
+    if not loop_id:
+        return ""
+    db_path = Path(state_root) / "shared_authority.db"
+    if not db_path.is_file():
+        return ""
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5) as conn:
+            row = conn.execute(
+                "SELECT status FROM loops WHERE loop_id = ? LIMIT 1",
+                (loop_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return ""
+    return str(row[0] or "").strip().lower() if row else ""
+
+
+def packet_status(packet_path):
+    if not packet_path:
+        return ""
+    path = Path(packet_path)
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if not text.startswith("---"):
+        try:
+            doc = yaml.safe_load(text)
+        except yaml.YAMLError:
+            return ""
+        return str((doc or {}).get("disposition") or "").strip().lower() if isinstance(doc, dict) else ""
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return ""
+    try:
+        fm = yaml.safe_load(parts[1])
+    except yaml.YAMLError:
+        return ""
+    return str((fm or {}).get("status") or "").strip().lower() if isinstance(fm, dict) else ""
+
+
+docs = []
+for path in sorted(glob.glob(os.path.join(delegation_dir, "DEL-*.yaml"))):
+    try:
+        doc = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        continue
+    if not isinstance(doc, dict):
+        continue
+    raw_state = str(doc.get("delegation_state") or doc.get("state") or "").strip().lower() or "unknown"
+    loop = loop_status(str(doc.get("loop_id") or "").strip())
+    packet = packet_status(str(doc.get("packet_path") or "").strip())
+    continuity_live = raw_state not in terminal_delegation_states
+    effective_state = raw_state
+    reason = ""
+    if continuity_live:
+        if loop and loop not in active_loop_statuses:
+            continuity_live = False
+            effective_state = "closed_loop_terminal"
+            reason = f"linked loop is terminal (status={loop})"
+        elif packet == "closed":
+            continuity_live = False
+            effective_state = "closed_packet_terminal"
+            reason = "linked packet is already closed"
+    doc["loop_status"] = loop or "unknown"
+    doc["packet_status"] = packet or "unknown"
+    doc["continuity_live"] = continuity_live
+    doc["effective_state"] = effective_state
+    if reason:
+        doc["continuity_reason"] = reason
+    docs.append(doc)
+
+yaml.safe_dump_all(docs, sys.stdout, sort_keys=False)
+'''
+    script = f'''
+set -euo pipefail
+source {shlex.quote(str(SSH_RESOLVER))}
+target={shlex.quote(host_ref)}
+resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
+user="$(ssh_resolve_user "$target" ubuntu)"
+identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
+ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" \
+    python3 - {shlex.quote(remote_state_root)} {shlex.quote(remote_dir)} <<'PY'
+{remote_python}
+PY
 '''
     try:
         proc = subprocess.run(
@@ -1000,7 +1256,7 @@ def routine_summary(data: dict[str, Any], *, limit: int = 12) -> dict[str, Any]:
 def collect() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     collect_wave_dispatches(rows)
-    canonical_delegation_status, canonical_delegation_rows = collect_delegations(rows)
+    canonical_delegation_status, canonical_delegation_rows, terminal_continuity_counts = collect_delegations(rows)
     canonical_status, canonical_rows = collect_operational_tasks(rows)
     rows.sort(key=lambda row: (str(row.get("pickup_state")), str(row.get("request_id"))))
     summary = summarize(rows)
@@ -1011,6 +1267,8 @@ def collect() -> dict[str, Any]:
     # joined from the canonical authority host.
     summary["canonical_delegation_source"] = canonical_delegation_status
     summary["canonical_delegation_rows"] = canonical_delegation_rows
+    summary["terminal_continuity_suppressed"] = sum(int(v or 0) for v in terminal_continuity_counts.values())
+    summary["terminal_continuity_by_state"] = terminal_continuity_counts
     role = canonical_plane_access_role()
     return {
         "capability": "execution.pickup.status",
@@ -1060,6 +1318,11 @@ def render_human(data: dict[str, Any]) -> None:
     print(f"  not claimed:       {summary['not_claimed']}")
     print(f"  claimed/running:   {summary['claimed_or_running']}")
     print(f"  stale:             {summary['stale']}")
+    suppressed = int(summary.get("terminal_continuity_suppressed") or 0)
+    if suppressed:
+        by_state = summary.get("terminal_continuity_by_state") if isinstance(summary.get("terminal_continuity_by_state"), dict) else {}
+        details = ", ".join(f"{key}={value}" for key, value in sorted(by_state.items()) if value)
+        print(f"  terminal residue:  {suppressed} suppressed ({details})")
     print(f"  done recent:       {summary['done_recent']}")
     print(f"  failed recent:     {summary['failed_recent']}")
     print(f"  AI agent bridge:   {summary['ai_agent_bridge']}")
@@ -1120,6 +1383,25 @@ def main() -> int:
 
     data = collect()
     if args.self_check:
+        synthetic_rows: list[dict[str, Any]] = []
+        synthetic_counts = {state: 0 for state in sorted(TERMINAL_DELEGATION_CONTINUITY_STATES)}
+        _emit_delegation_row(
+            synthetic_rows,
+            {
+                "delegation_id": "DEL-20000101-000000",
+                "delegation_state": "picked_up",
+                "continuity_live": False,
+                "effective_state": "closed_loop_terminal",
+                "loop_status": "closed",
+                "packet_status": "closed",
+            },
+            "DEL-20000101-000000",
+            "self_check",
+            synthetic_counts,
+        )
+        if synthetic_rows or synthetic_counts.get("closed_loop_terminal") != 1:
+            print("execution.pickup.status self-check FAIL: terminal delegation continuity rendered as active pickup", file=os.sys.stderr)
+            return 1
         dispatch_only = [
             row for row in data["requests"]
             if row.get("source") == "wave_dispatch" and row.get("realization") == "wave_dispatch_request_only"

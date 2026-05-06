@@ -211,6 +211,14 @@ if not isinstance(safety_tiers, dict):
 patch_review = summary.get("patch_review")
 if not isinstance(patch_review, dict):
     raise SystemExit("D452 FAIL: execution pickup summary must expose patch_review")
+terminal_continuity_by_state = summary.get("terminal_continuity_by_state")
+if not isinstance(terminal_continuity_by_state, dict):
+    raise SystemExit("D452 FAIL: execution pickup summary must expose terminal_continuity_by_state")
+if "terminal_continuity_suppressed" not in summary:
+    raise SystemExit("D452 FAIL: execution pickup summary must expose terminal_continuity_suppressed")
+for required_terminal_state in ("closed_loop_terminal", "closed_packet_terminal"):
+    if required_terminal_state not in terminal_continuity_by_state:
+        raise SystemExit(f"D452 FAIL: execution pickup terminal continuity summary missing {required_terminal_state}")
 review_states = {
     "needs_controller_review",
     "review_worktree_active",
@@ -229,6 +237,10 @@ for required_tier in ("capability", "bounded_readonly_provider_agent", "tool_usi
 if int(safety_tiers.get("tool_using_agent_reserved") or 0) != 0:
     raise SystemExit("D452 FAIL: tool_using_agent_reserved must remain empty until a proven V2 lands")
 for row in data.get("requests") or []:
+    if row.get("continuity_live") is False:
+        raise SystemExit("D452 FAIL: terminal delegation continuity must not render as active pickup row")
+    if row.get("effective_state") in {"closed_loop_terminal", "closed_packet_terminal"}:
+        raise SystemExit("D452 FAIL: closed-loop/closed-packet delegation continuity must be suppressed from active pickup rows")
     tier = row.get("safety_tier")
     if tier not in safety_tiers:
         raise SystemExit(f"D452 FAIL: request has unknown safety_tier={tier!r}")
@@ -683,6 +695,22 @@ for required_token in (
 ):
     if required_token not in pickup_status_text:
         raise SystemExit(f"D452 FAIL: execution-pickup-status must merge canonical delegations: missing {required_token} (PACKET-1380)")
+
+# PACKET-1397: execution pickup must apply delegation continuity before
+# counting raw delegation envelopes as live work. D433/delegation.status already
+# classifies closed-loop and closed-packet continuity; public pickup/status must
+# not resurrect those rows as active stale requests.
+for required_token in (
+    "load_remote_delegation_docs",
+    "continuity_live",
+    "effective_state",
+    "closed_loop_terminal",
+    "closed_packet_terminal",
+    "terminal_continuity_suppressed",
+    "terminal_continuity_by_state",
+):
+    if required_token not in pickup_status_text:
+        raise SystemExit(f"D452 FAIL: execution-pickup-status must suppress terminal delegation continuity before active pickup readback: missing {required_token} (PACKET-1397)")
 
 # PACKET-1380: delegation broker must mint unique delegation ids under
 # parallel calls. Without exclusive create, simultaneous delegate.to.execution
