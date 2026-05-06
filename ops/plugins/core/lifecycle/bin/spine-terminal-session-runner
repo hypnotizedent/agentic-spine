@@ -1,16 +1,30 @@
 #!/usr/bin/env python3
-"""V2.1 Slice 1A passthrough runner — internal terminal plumbing.
+"""V2.1 Slice 1C runner — supervised tool spawn + closeout capture.
 
-Replaces the per-tool exec block in ops/commands/terminal.sh with a single
-uniform supervisor entry point so future slices can wire bounded buffer +
-clerk hand-off + heartbeat without re-touching terminal.sh. Slice 1A scope
-is passthrough only; identity env / orientation stay in terminal.sh.
+Replaces the per-tool exec block in ops/commands/terminal.sh with a uniform
+PTY-based supervisor. terminal.sh remains the admission authority (identity
+env, posture, loop env, orientation); the runner only spawns the tool inside
+a PTY, captures a bounded rolling buffer of output, and on tool exit hands
+the captured prose to clerk.symptom.classify.and.file --source agent-terminal-
+closeout in a detached background process. Updates terminal heartbeat with
+capture_last_status / capture_last_error_class / capture_last_at so ops status
+can surface degraded capture without a new authority plane.
+
+Not a registered cap. Not on $PATH. Invoked only via $SPINE_ROOT-relative
+absolute path from terminal.sh.
 """
 from __future__ import annotations
 
 import argparse
 import os
+import pty
+import re
+import shutil
+import signal
+import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 
 TOOL_COMMANDS = {
@@ -20,10 +34,23 @@ TOOL_COMMANDS = {
     "verify":   ["./bin/ops", "cap", "run", "spine.verify"],
 }
 
+# Last 8KB of tool output retained for closeout. Tool output beyond this slides
+# off the front; we only care about the closing prose anyway.
+BUFFER_SIZE = 8192
+
+# ANSI escape stripping (CSI / OSC / simple cases). Run before clerk hand-off
+# so prose pattern-match doesn't have to deal with rendering bytes.
+ANSI_RE = re.compile(
+    rb"\x1b\[[0-9;?]*[ -/]*[@-~]"            # CSI: ESC [ ... letter
+    rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"    # OSC: ESC ] ... BEL or ESC \
+    rb"|\x1b[()][A-Z0-9]"                     # designate G0/G1
+    rb"|\x1b[=>]"                              # keypad mode
+)
+
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
-        description="V2.1 Slice 1A passthrough runner. Internal terminal plumbing.",
+        description="V2.1 Slice 1C runner — PTY-supervised tool spawn + closeout capture.",
     )
     p.add_argument("--tool", required=True, choices=sorted(TOOL_COMMANDS.keys()))
     p.add_argument("--terminal", default="")
@@ -31,15 +58,198 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     cmd = TOOL_COMMANDS[args.tool]
-    try:
-        os.execvp(cmd[0], cmd)
-    except OSError as exc:
+    # Pre-flight: pty.spawn forks before exec, so a missing binary in the child
+    # would emit a Python traceback into the PTY and exit 1, not the clean 127
+    # the parent should return. Resolve via shutil.which (relative paths like
+    # ./bin/ops are skipped — only absolute names get the existence check).
+    if "/" not in cmd[0] and shutil.which(cmd[0]) is None:
         print(
-            f"spine-terminal-session-runner: exec {cmd[0]} failed: {exc}",
+            f"spine-terminal-session-runner: {cmd[0]} not found in PATH",
             file=sys.stderr,
         )
         return 127
-    return 127
+
+    out_buffer = bytearray()
+
+    def master_read(fd):
+        try:
+            data = os.read(fd, 1024)
+        except OSError:
+            return b""
+        if data:
+            out_buffer.extend(data)
+            if len(out_buffer) > BUFFER_SIZE:
+                del out_buffer[:len(out_buffer) - BUFFER_SIZE]
+        return data
+
+    try:
+        wait_status = pty.spawn(cmd, master_read=master_read)
+    except FileNotFoundError as exc:
+        print(
+            f"spine-terminal-session-runner: spawn {cmd[0]} failed: {exc}",
+            file=sys.stderr,
+        )
+        return 127
+    except OSError as exc:
+        print(
+            f"spine-terminal-session-runner: spawn {cmd[0]} failed: {exc}",
+            file=sys.stderr,
+        )
+        return 127
+
+    if os.WIFEXITED(wait_status):
+        exit_code = os.WEXITSTATUS(wait_status)
+    elif os.WIFSIGNALED(wait_status):
+        exit_code = 128 + os.WTERMSIG(wait_status)
+    else:
+        exit_code = 1
+
+    _detached_handoff(
+        buffer=bytes(out_buffer),
+        tool=args.tool,
+        terminal_id=args.terminal,
+        loop_id=args.loop,
+    )
+
+    return exit_code
+
+
+def _detached_handoff(*, buffer: bytes, tool: str, terminal_id: str, loop_id: str) -> None:
+    """Fire-and-forget double-fork: parent returns immediately, grandchild runs
+    detached from the controlling terminal (survives iTerm window close).
+    """
+    try:
+        pid = os.fork()
+    except OSError:
+        return
+    if pid > 0:
+        return  # parent returns immediately (tool exit code passes through caller)
+    # child
+    try:
+        os.setsid()
+        pid2 = os.fork()
+        if pid2 > 0:
+            os._exit(0)  # intermediate exits → grandchild orphaned but detached
+    except OSError:
+        os._exit(1)
+    # grandchild: detached, no controlling terminal
+    try:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        devnull = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull, 0)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+    except OSError:
+        pass
+    status, error_class = _do_handoff(
+        buffer=buffer, tool=tool, terminal_id=terminal_id, loop_id=loop_id,
+    )
+    _write_heartbeat_capture(
+        terminal_id=terminal_id, status=status, error_class=error_class,
+    )
+    os._exit(0)
+
+
+def _do_handoff(*, buffer: bytes, tool: str, terminal_id: str, loop_id: str) -> tuple[str, str]:
+    """Run clerk hand-off. Returns (status, error_class).
+
+    status: ok | no_signal | failed
+    error_class: short sanitized reason when failed; empty otherwise.
+    """
+    try:
+        cleaned = ANSI_RE.sub(b"", buffer).decode("utf-8", errors="replace")
+    except Exception:
+        return ("failed", "decode_error")
+    if not cleaned.strip():
+        return ("no_signal", "")
+    repo_root = Path(__file__).resolve().parents[5]
+    clerk_path = (
+        repo_root / "ops" / "plugins" / "infra" / "host" / "bin"
+        / "clerk-symptom-classify-and-file"
+    )
+    if not clerk_path.exists():
+        return ("failed", "clerk_unavailable")
+    cmd = [
+        "python3", str(clerk_path),
+        "--source", "agent-terminal-closeout",
+        "--file",
+        "--tool", tool,
+        "--terminal-id", terminal_id,
+        "--loop-id", loop_id,
+    ]
+    env = os.environ.copy()
+    if loop_id:
+        env["SPINE_LOOP_ID"] = loop_id
+    try:
+        result = subprocess.run(
+            cmd,
+            input=cleaned,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return ("failed", "clerk_timeout")
+    except OSError as exc:
+        return ("failed", _sanitize_error(type(exc).__name__))
+    if result.returncode == 0:
+        return ("ok", "")
+    return ("failed", _classify_handoff_failure(result.stdout + result.stderr))
+
+
+def _classify_handoff_failure(text: str) -> str:
+    txt = (text or "").lower()
+    if "admission_gate_refused" in txt or "execution class policy blocked" in txt:
+        return "admission_gate_refused"
+    if "timeout" in txt or "timed out" in txt:
+        return "clerk_timeout"
+    if "no such file" in txt or "filenotfounderror" in txt:
+        return "clerk_unavailable"
+    return "clerk_filed_nonzero"
+
+
+def _sanitize_error(text: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_:.-]", "_", text)[:80]
+
+
+def _write_heartbeat_capture(*, terminal_id: str, status: str, error_class: str) -> None:
+    """Append/refresh capture_last_status / capture_last_error_class /
+    capture_last_at on $SPINE_STATE/terminal-heartbeats/<terminal>.yaml.
+    Reads existing YAML, strips any prior capture_last_* lines, appends new
+    ones, and atomically replaces the file. Other fields are preserved verbatim.
+    Silently no-ops when terminal_id is empty or SPINE_STATE is unset.
+    """
+    if not terminal_id:
+        return
+    state_root = os.environ.get("SPINE_STATE")
+    if not state_root:
+        return
+    hb_path = Path(state_root) / "terminal-heartbeats" / f"{terminal_id}.yaml"
+    try:
+        hb_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = (
+            hb_path.read_text(encoding="utf-8", errors="replace")
+            if hb_path.exists()
+            else ""
+        )
+        kept_lines = [
+            line for line in existing.splitlines()
+            if not line.startswith("capture_last_status:")
+            and not line.startswith("capture_last_error_class:")
+            and not line.startswith("capture_last_at:")
+        ]
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        kept_lines.append(f'capture_last_status: "{status}"')
+        kept_lines.append(f'capture_last_error_class: "{error_class}"')
+        kept_lines.append(f'capture_last_at: "{now}"')
+        new_text = "\n".join(kept_lines) + "\n"
+        tmp_path = hb_path.with_suffix(hb_path.suffix + ".cap.tmp")
+        tmp_path.write_text(new_text, encoding="utf-8")
+        os.replace(tmp_path, hb_path)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
