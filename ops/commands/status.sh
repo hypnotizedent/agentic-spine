@@ -433,53 +433,88 @@ narrator_timeout = _int_env("OPS_STATUS_BRIEF_NARRATOR_TIMEOUT_SECONDS", 5)
 
 
 def _render_narrator_attention():
-    """Best-effort narrator attention readback (PACKET-1382 routes to
-    canonical via SSH dispatch of the same governed cap so consumer hosts
-    read narrator artifacts where they live — storage_evidence_node — not
-    consumer-local projection. Original helper landed in PACKET-1377;
-    spec lives in PACKET-1374).
+    """Best-effort narrator attention readback (PACKET-1382: local-first,
+    SSH-route-to-canonical fallback so canonical hosts use their local
+    artifacts and consumer hosts route the entry-time read to canonical
+    where artifacts live. Original helper landed in PACKET-1377; spec
+    lives in PACKET-1374).
 
-    Reads from per-commit artifacts only (--from-artifacts). Failure,
-    timeout, or unreachable canonical produces None so the brief output
-    is never broken by narrator issues — narrator is operator-eye
-    witness signal, not a verify gate.
+    Reads from per-commit artifacts only (--from-artifacts). Local cap
+    runs first; if it reports any from_artifact rows, that result is
+    used (canonical hosts hit this path with no SSH cost; this path
+    also applies on a consumer host that has been mirrored). Otherwise
+    the helper SSH-dispatches the same cap to canonical so the entry-
+    time read sees canonical truth.
+
+    Failure, timeout, or unreachable canonical produces None so the
+    brief output is never broken by narrator issues — narrator is
+    operator-eye witness signal, not a verify gate.
     """
     if os.environ.get("OPS_STATUS_BRIEF_NARRATOR_DISABLE") == "1":
         return None
-    target = os.environ.get(
-        "OPS_STATUS_NARRATOR_DISPATCH_TARGET", "pve")
-    repo = os.environ.get(
-        "OPS_STATUS_NARRATOR_DISPATCH_REPO", "/opt/agentic-spine")
-    state_root = os.environ.get(
-        "OPS_STATUS_NARRATOR_DISPATCH_STATE", "/md1400/spine/state")
-    remote_cmd = (
-        f"cd '{repo}' && SPINE_STATE='{state_root}' "
-        "./bin/ops cap run commit.narrator.status -- "
-        "--since 14.days --from-artifacts --format json "
-        "--limit 50 --skip-input-readbacks"
-    )
-    try:
-        proc = subprocess.run(
-            ["ssh",
-             "-o", "ConnectTimeout=2",
-             "-o", "BatchMode=yes",
-             "-o", "StrictHostKeyChecking=accept-new",
-             target, remote_cmd],
-            capture_output=True,
-            text=True,
-            timeout=narrator_timeout,
-            check=False,
-        )
-        if proc.returncode != 0:
-            return None
-        text = proc.stdout
-        # cap.sh wraps output with banner; extract first JSON object
+    bin_ops = spine / "bin" / "ops"
+
+    def _parse_payload(text):
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
             return None
-        payload = json.loads(text[start:end + 1])
+        try:
+            return json.loads(text[start:end + 1])
+        except Exception:
+            return None
+
+    payload = None
+    try:
+        proc = subprocess.run(
+            [str(bin_ops), "cap", "run", "commit.narrator.status",
+             "--", "--since", "14.days",
+             "--from-artifacts", "--format", "json",
+             "--limit", "50", "--skip-input-readbacks"],
+            capture_output=True, text=True,
+            timeout=narrator_timeout, check=False,
+        )
+        if proc.returncode == 0:
+            payload = _parse_payload(proc.stdout)
     except Exception:
+        payload = None
+
+    needs_route = True
+    if payload is not None:
+        artifact_reads = payload.get("artifact_reads") or {}
+        if int(artifact_reads.get("from_artifact") or 0) > 0:
+            needs_route = False
+    if needs_route:
+        target = os.environ.get(
+            "OPS_STATUS_NARRATOR_DISPATCH_TARGET", "pve")
+        repo = os.environ.get(
+            "OPS_STATUS_NARRATOR_DISPATCH_REPO", "/opt/agentic-spine")
+        state_root = os.environ.get(
+            "OPS_STATUS_NARRATOR_DISPATCH_STATE", "/md1400/spine/state")
+        remote_cmd = (
+            f"cd '{repo}' && SPINE_STATE='{state_root}' "
+            "./bin/ops cap run commit.narrator.status -- "
+            "--since 14.days --from-artifacts --format json "
+            "--limit 50 --skip-input-readbacks"
+        )
+        try:
+            proc = subprocess.run(
+                ["ssh",
+                 "-o", "ConnectTimeout=2",
+                 "-o", "BatchMode=yes",
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 target, remote_cmd],
+                capture_output=True, text=True,
+                timeout=narrator_timeout, check=False,
+            )
+            if proc.returncode == 0:
+                routed = _parse_payload(proc.stdout)
+                if routed is not None:
+                    payload = routed
+        except Exception:
+            pass
+
+    if payload is None:
         return None
     artifact_reads = payload.get("artifact_reads") or {}
     attempted = int(artifact_reads.get("attempted") or 0)
@@ -2866,9 +2901,10 @@ if mode != "--expert":
     # replay; failure or timeout is silent skip — narrator is operator-eye
     # signal, not a verify gate.
     def _render_full_narrator_attention():
-        # PACKET-1382: route the entry-time narrator read to canonical via
-        # SSH dispatch of the same governed cap. Drilldown invocations of
-        # commit.narrator.status (no SSH) continue to run locally.
+        # PACKET-1382: local-first, SSH-route-to-canonical fallback.
+        # Canonical hosts read their local artifacts; consumer hosts
+        # route the entry-time read to canonical. Drilldown invocations
+        # of commit.narrator.status (no SSH) continue to run locally.
         if os.environ.get("OPS_STATUS_FULL_NARRATOR_DISABLE") == "1":
             return None
         try:
@@ -2876,37 +2912,69 @@ if mode != "--expert":
                 "OPS_STATUS_FULL_NARRATOR_TIMEOUT_SECONDS", "5"))
         except Exception:
             timeout = 5
-        target = os.environ.get(
-            "OPS_STATUS_NARRATOR_DISPATCH_TARGET", "pve")
-        repo = os.environ.get(
-            "OPS_STATUS_NARRATOR_DISPATCH_REPO", "/opt/agentic-spine")
-        state_root = os.environ.get(
-            "OPS_STATUS_NARRATOR_DISPATCH_STATE", "/md1400/spine/state")
-        remote_cmd = (
-            f"cd '{repo}' && SPINE_STATE='{state_root}' "
-            "./bin/ops cap run commit.narrator.status -- "
-            "--since 14.days --from-artifacts --format json "
-            "--limit 50 --skip-input-readbacks"
-        )
-        try:
-            proc = subprocess.run(
-                ["ssh",
-                 "-o", "ConnectTimeout=2",
-                 "-o", "BatchMode=yes",
-                 "-o", "StrictHostKeyChecking=accept-new",
-                 target, remote_cmd],
-                capture_output=True, text=True,
-                timeout=max(1, timeout), check=False,
-            )
-            if proc.returncode != 0:
-                return None
-            text = proc.stdout
+        bin_ops = spine / "bin" / "ops"
+
+        def _parse_payload(text):
             start = text.find("{")
             end = text.rfind("}")
             if start == -1 or end == -1 or end <= start:
                 return None
-            payload = json.loads(text[start:end + 1])
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                return None
+
+        payload = None
+        try:
+            proc = subprocess.run(
+                [str(bin_ops), "cap", "run", "commit.narrator.status",
+                 "--", "--since", "14.days",
+                 "--from-artifacts", "--format", "json",
+                 "--limit", "50", "--skip-input-readbacks"],
+                capture_output=True, text=True,
+                timeout=max(1, timeout), check=False,
+            )
+            if proc.returncode == 0:
+                payload = _parse_payload(proc.stdout)
         except Exception:
+            payload = None
+
+        needs_route = True
+        if payload is not None:
+            artifact_reads = payload.get("artifact_reads") or {}
+            if int(artifact_reads.get("from_artifact") or 0) > 0:
+                needs_route = False
+        if needs_route:
+            target = os.environ.get(
+                "OPS_STATUS_NARRATOR_DISPATCH_TARGET", "pve")
+            repo = os.environ.get(
+                "OPS_STATUS_NARRATOR_DISPATCH_REPO", "/opt/agentic-spine")
+            state_root = os.environ.get(
+                "OPS_STATUS_NARRATOR_DISPATCH_STATE", "/md1400/spine/state")
+            remote_cmd = (
+                f"cd '{repo}' && SPINE_STATE='{state_root}' "
+                "./bin/ops cap run commit.narrator.status -- "
+                "--since 14.days --from-artifacts --format json "
+                "--limit 50 --skip-input-readbacks"
+            )
+            try:
+                proc = subprocess.run(
+                    ["ssh",
+                     "-o", "ConnectTimeout=2",
+                     "-o", "BatchMode=yes",
+                     "-o", "StrictHostKeyChecking=accept-new",
+                     target, remote_cmd],
+                    capture_output=True, text=True,
+                    timeout=max(1, timeout), check=False,
+                )
+                if proc.returncode == 0:
+                    routed = _parse_payload(proc.stdout)
+                    if routed is not None:
+                        payload = routed
+            except Exception:
+                pass
+
+        if payload is None:
             return None
         artifact_reads = payload.get("artifact_reads") or {}
         attempted = int(artifact_reads.get("attempted") or 0)
