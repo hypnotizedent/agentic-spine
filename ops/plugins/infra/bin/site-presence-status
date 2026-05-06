@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,12 +18,34 @@ NODE_ADMISSION = ROOT / "ops/plugins/infra/bin/node-admission-status"
 PAYLOAD_CUSTODY = ROOT / "ops/plugins/infra/bin/payload-custody-status"
 BACKUP_ESTATE = ROOT / "ops/plugins/core/bin/backup-estate-readback-status"
 
+
+def _domain_state_root() -> Path:
+    """Resolve canonical SPINE_DOMAIN_STATE.
+
+    PACKET-1378: cap-generated Site Intelligence carriers live under
+    $SPINE_DOMAIN_STATE/site-intelligence/<branch>/ rather than ops/bindings/.
+    """
+    explicit = os.environ.get("SPINE_DOMAIN_STATE")
+    if explicit:
+        return Path(explicit)
+    state = os.environ.get("SPINE_STATE")
+    if state:
+        return Path(state) / "domain-state"
+    return ROOT / ".runtime/spine/state/domain-state"
+
+
+_SITE_INTEL_NETWORK = _domain_state_root() / "site-intelligence/network"
+
+
 PATHS = {
     "topology_sites": ROOT / "ops/bindings/topology.sites.yaml",
     "ssh_targets": ROOT / "ops/bindings/ssh.targets.yaml",
     "home_device": ROOT / "ops/bindings/home.device.registry.yaml",
-    "unifi_home": ROOT / "ops/bindings/network.unifi.home.clients.observed.yaml",
-    "unifi_shop": ROOT / "ops/bindings/network.unifi.shop.clients.observed.yaml",
+    # PACKET-1378: UniFi observed-client carriers moved out of ops/bindings/
+    # into the branch-owned runtime cache. Only the runtime cache path is
+    # read; the repo binding was deleted.
+    "unifi_home": _SITE_INTEL_NETWORK / "network.unifi.home.clients.observed.yaml",
+    "unifi_shop": _SITE_INTEL_NETWORK / "network.unifi.shop.clients.observed.yaml",
     "site_profile": ROOT / "ops/bindings/site.profile.contract.yaml",
 }
 
@@ -34,19 +57,24 @@ FOLDED_LEGACY_INPUTS = [
         "standalone_operator_surface": False,
         "subtraction_state": "folded_source_input",
     },
+    # PACKET-1378: UniFi observed-client carriers moved out of ops/bindings/
+    # into the branch-owned runtime cache under
+    # $SPINE_DOMAIN_STATE/site-intelligence/network/. Old repo paths were
+    # deleted; the runtime cache is implementation detail of the Network
+    # branch, not a hand-visible repo binding.
     {
-        "path": "ops/bindings/network.unifi.home.clients.observed.yaml",
+        "path": "$SPINE_DOMAIN_STATE/site-intelligence/network/network.unifi.home.clients.observed.yaml",
         "folded_role": "home_observed_client_snapshot",
         "folded_into": "site.presence.status",
         "standalone_operator_surface": False,
-        "subtraction_state": "folded_observation_input",
+        "subtraction_state": "runtime_cache_observation_input",
     },
     {
-        "path": "ops/bindings/network.unifi.shop.clients.observed.yaml",
+        "path": "$SPINE_DOMAIN_STATE/site-intelligence/network/network.unifi.shop.clients.observed.yaml",
         "folded_role": "shop_observed_client_snapshot",
         "folded_into": "site.presence.status",
         "standalone_operator_surface": False,
-        "subtraction_state": "folded_observation_input",
+        "subtraction_state": "runtime_cache_observation_input",
     },
     # PACKET-1371: home.unifi.network.inventory.yaml deleted. Operator-asserted
     # upstream uplink moved into site.profile.contract notes; UDR-observable
@@ -58,19 +86,23 @@ FOLDED_LEGACY_INPUTS = [
         "standalone_operator_surface": False,
         "subtraction_state": "folded_l3_source_input",
     },
+    # PACKET-1378: storage map carriers moved out of ops/bindings/ into the
+    # branch-owned runtime cache under
+    # $SPINE_DOMAIN_STATE/site-intelligence/storage/. Old repo paths were
+    # deleted; payload.custody.status reads only the runtime cache.
     {
-        "path": "ops/bindings/home.storage.map.yaml",
+        "path": "$SPINE_DOMAIN_STATE/site-intelligence/storage/home.storage.map.yaml",
         "folded_role": "home_storage_projection_input",
         "folded_into": "payload.custody.status + site.presence.status",
         "standalone_operator_surface": False,
-        "subtraction_state": "folded_storage_input",
+        "subtraction_state": "runtime_cache_storage_input",
     },
     {
-        "path": "ops/bindings/shop.storage.map.yaml",
+        "path": "$SPINE_DOMAIN_STATE/site-intelligence/storage/shop.storage.map.yaml",
         "folded_role": "shop_storage_projection_input",
         "folded_into": "payload.custody.status + site.presence.status",
         "standalone_operator_surface": False,
-        "subtraction_state": "folded_storage_input",
+        "subtraction_state": "runtime_cache_storage_input",
     },
 ]
 
@@ -223,6 +255,18 @@ BRANCH_MODEL = [
         ],
     },
 ]
+
+
+def _rel_or_abs(path: Path) -> str:
+    """Stringify a path relative to ROOT, or absolute when outside ROOT.
+
+    PACKET-1378: Site Intelligence runtime cache lives outside the repo, so
+    paths can no longer always be expressed relative to ROOT.
+    """
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -781,7 +825,7 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
             surface = unifi_home if observed_path == PATHS["unifi_home"] else unifi_shop
             source_roles.append(
                 {
-                    "path": str(observed_path.relative_to(ROOT)),
+                    "path": _rel_or_abs(observed_path),
                     "role": "folded_unifi_observation_input",
                     "capability": observed_cap,
                     "proof_ref": "generated_at",
@@ -818,7 +862,7 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
             backup_row = find_backup_match(backup_index, admission, observed)
             source_roles = [
                 {
-                    "path": str(path.relative_to(ROOT)),
+                    "path": _rel_or_abs(path),
                     "role": "folded_unifi_observation_input",
                     "capability": capability,
                     "proof_ref": "generated_at",

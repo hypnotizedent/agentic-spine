@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,22 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[4]
+
+
+def _domain_state_root() -> Path:
+    """Resolve SPINE_DOMAIN_STATE for runtime cache writes (PACKET-1378)."""
+    explicit = os.environ.get("SPINE_DOMAIN_STATE")
+    if explicit:
+        return Path(explicit)
+    state = os.environ.get("SPINE_STATE")
+    if state:
+        return Path(state) / "domain-state"
+    return ROOT / ".runtime/spine/state/domain-state"
+
+
+_SITE_INTEL_STORAGE = _domain_state_root() / "site-intelligence/storage"
+
+
 HARDWARE_PATH = ROOT / "ops/bindings/hardware.inventory.yaml"
 VM_LIFECYCLE_PATH = ROOT / "ops/bindings/vm.lifecycle.yaml"
 VM_PROFILE_PATH = ROOT / "ops/bindings/vm.operating.profile.yaml"
@@ -23,7 +40,9 @@ SHOP_INGRESS_PATH = ROOT / "ops/bindings/shop.ingress.map.yaml"
 MEDIA_PRESSURE_PATH = ROOT / "ops/bindings/shop.media.pressure.authority.yaml"
 LIFECYCLE_REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
 STORAGE_SCAFFOLD_PATH = ROOT / "ops/bindings/storage.scaffold.authority.yaml"
-OUTPUT_BINDING_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
+# PACKET-1378: shop storage map carrier moved out of ops/bindings/ into the
+# branch-owned runtime cache. Repo binding deleted.
+OUTPUT_BINDING_PATH = _SITE_INTEL_STORAGE / "shop.storage.map.yaml"
 OUTPUT_SCORECARD_PATH = ROOT / "docs/reference/generated/SHOP_RACK_SCORECARD.md"
 
 
@@ -45,7 +64,12 @@ def today_utc() -> str:
 
 
 def rel(path: Path) -> str:
-    return str(path.resolve().relative_to(ROOT))
+    """Stringify path relative to ROOT, falling back to absolute when the
+    path lives outside the repo (PACKET-1378 runtime cache outputs)."""
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path.resolve())
 
 
 def load_yaml(path: Path) -> dict[str, Any]:

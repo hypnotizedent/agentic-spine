@@ -33,8 +33,13 @@ source "$CONTROL_ROOT/ops/lib/spine-paths.sh"
 export SPINE_TARGET_REPO="$TARGET_ROOT"
 spine_paths_init >/dev/null 2>&1 || true
 
-OBSERVED_REL="ops/bindings/network.unifi.shop.clients.observed.yaml"
-OBSERVED_BINDING="$TARGET_ROOT/$OBSERVED_REL"
+OBSERVED_BASENAME="network.unifi.shop.clients.observed.yaml"
+# PACKET-1378: cap-generated carrier moved out of ops/bindings/ into the
+# runtime cache under $SPINE_DOMAIN_STATE/site-intelligence/network/. The
+# repo binding was deleted; this cap now writes to and reads back from the
+# branch-owned runtime cache only.
+OBSERVED_REL="domain-state/site-intelligence/network/$OBSERVED_BASENAME"
+OBSERVED_BINDING="$(spine_resolve_domain_state "site-intelligence/network/$OBSERVED_BASENAME")"
 AGENT="${UNIFI_SHOP_AGENT_BIN:-$TARGET_ROOT/ops/plugins/providers/bin/unifi-agent.sh}"
 SITE_PRESENCE_AUTHORITY="site.presence.status"
 FOLDED_ROLE="folded_observation_input"
@@ -87,10 +92,11 @@ done
 if [[ "$MODE" == "apply" ]]; then
   OUTPUT_PATH="$OBSERVED_BINDING"
 elif [[ -z "$OUTPUT_PATH" ]]; then
-  OUTPUT_PATH="$(spine_resolve_domain_state "snapshots/$(basename "$OBSERVED_REL")")"
+  OUTPUT_PATH="$(spine_resolve_domain_state "snapshots/$OBSERVED_BASENAME")"
 fi
 
 [[ -n "$OUTPUT_PATH" ]] || { echo "FAIL: output path cannot be empty"; exit 1; }
+mkdir -p "$(dirname "$OBSERVED_BINDING")"
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 
 [[ -f "$AGENT" ]] || { echo "STOP (2): missing unifi-agent.sh at $AGENT"; exit 2; }

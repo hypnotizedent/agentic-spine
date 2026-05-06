@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -13,6 +14,21 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[4]
 
+
+def _domain_state_root() -> Path:
+    """Resolve SPINE_DOMAIN_STATE for runtime cache writes (PACKET-1378)."""
+    explicit = os.environ.get("SPINE_DOMAIN_STATE")
+    if explicit:
+        return Path(explicit)
+    state = os.environ.get("SPINE_STATE")
+    if state:
+        return Path(state) / "domain-state"
+    return ROOT / ".runtime/spine/state/domain-state"
+
+
+_SITE_INTEL_STORAGE = _domain_state_root() / "site-intelligence/storage"
+
+
 BACKUP_PATH = ROOT / "ops/bindings/domains/backup/backup.inventory.yaml"
 ESTATE_AUTHORITY_PATH = ROOT / "ops/bindings/estate.boringness.authority.yaml"
 HOME_AUTHORITY_PATH = ROOT / "ops/bindings/home.authority.contract.yaml"
@@ -22,12 +38,13 @@ HOME_UNIFI_PATH = ROOT / "ops/bindings/home.unifi.network.inventory.yaml"
 NETWORK_DNS_LOCAL_PATH = ROOT / "ops/bindings/network.dns.local.registry.yaml"
 LIFECYCLE_REGISTRY_PATH = ROOT / "ops/bindings/service.data.lifecycle.registry.yaml"
 STORAGE_SCAFFOLD_PATH = ROOT / "ops/bindings/storage.scaffold.authority.yaml"
-SHOP_STORAGE_MAP_PATH = ROOT / "ops/bindings/shop.storage.map.yaml"
+# PACKET-1378: storage maps moved out of ops/bindings/ into runtime cache.
+SHOP_STORAGE_MAP_PATH = _SITE_INTEL_STORAGE / "shop.storage.map.yaml"
 SSH_TARGETS_PATH = ROOT / "ops/bindings/ssh.targets.yaml"
 SYNOLOGY_STORAGE_PATH = ROOT / "ops/bindings/synology918.storage.manifest.yaml"
 VM_LIFECYCLE_PATH = ROOT / "ops/bindings/vm.lifecycle.yaml"
 
-HOME_STORAGE_MAP_PATH = ROOT / "ops/bindings/home.storage.map.yaml"
+HOME_STORAGE_MAP_PATH = _SITE_INTEL_STORAGE / "home.storage.map.yaml"
 SHOP_INGRESS_MAP_PATH = ROOT / "ops/bindings/shop.ingress.map.yaml"
 HOME_INGRESS_MAP_PATH = ROOT / "ops/bindings/home.ingress.map.yaml"
 ESTATE_SURFACE_REGISTER_PATH = ROOT / "ops/bindings/estate.surface.register.yaml"
@@ -53,7 +70,13 @@ def today_utc() -> str:
 
 
 def rel(path: Path) -> str:
-    return str(path.resolve().relative_to(ROOT))
+    """Stringify a path relative to ROOT, falling back to absolute when the
+    path lives outside the repo (e.g. PACKET-1378 runtime cache outputs).
+    """
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path.resolve())
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -935,7 +958,7 @@ def build_home_scorecard(home_storage_map: dict[str, Any], home_ingress_map: dic
             ["Plane", "Canonical surface", "Current truth"],
             [
                 ["Hypervisor", "`ops/bindings/home.proxmox.inventory.yaml`", "`proxmox-home` is the only home hypervisor."],
-                ["Folded storage map", "`ops/bindings/home.storage.map.yaml`", "Folded input subordinate to `payload.custody.status`; not an operator-facing storage authority."],
+                ["Folded storage map", "`$SPINE_DOMAIN_STATE/site-intelligence/storage/home.storage.map.yaml`", "Runtime-cache projection consumed by `payload.custody.status`; not a hand-visible repo binding (PACKET-1378)."],
                 ["Ingress", "`ops/bindings/home.ingress.map.yaml`", "Public, local-DNS, and Tailscale ingress lanes are explicit."],
             ],
         )
