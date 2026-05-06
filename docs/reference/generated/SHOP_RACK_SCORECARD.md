@@ -1,14 +1,14 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-05-05
+last_verified: 2026-05-06
 scope: shop-rack-scorecard
 source_binding: ops/bindings/shop.storage.map.yaml
 ---
 
 # Shop Rack Scorecard
 
-- Generated: `2026-05-05T21:00:22Z`
+- Generated: `2026-05-06T01:04:18Z`
 - Rebuild: `./bin/ops cap run infra.shop.storage.authority.build`
 - Active runtimes: `12`
 - Tombstones: `3`
@@ -58,7 +58,7 @@ source_binding: ops/bindings/shop.storage.map.yaml
 | 212 | mint-data | vm | auto | data-vms | boot-disk:local-lvm:vm-212-disk-0, data-vms:pve:data/vms/vm-212-disk-0 (ZFS zvol, 320G) mounted at /mnt/data; DockerRootDir=/mnt/data/docker, data-vms:vm-212-disk-0, +3 more | pve-vzdump-cold-canonical, r730xd-mint-backups | private-only | 1 probes |
 | 213 | mint-apps | vm | auto | boot-only | boot-disk:local-lvm:vm-213-disk-0, local-lvm:vm-213-cloudinit, boot-disk:/opt/stacks/mint-apps | pve-vzdump-cold-canonical | suppliers.mintprints.co, api.mintprints.com, customer.mintprints.co, customer.mintprints.com, estimator.mintprints.co, mintprints-app.ronny.works, mintprints.com, pricing.mintprints.co, pricing.mintprints.com, shipping.mintprints.co, shipping.mintprints.com, www.mintprints.com | 12 probes |
 | 214 | communications-stack | vm | auto | data-vms | boot-disk:local-lvm:vm-214-disk-0, data-vms:pve:data/vms/vm-214-disk-0 (ZFS zvol, 1000G), data-vms:vm-214-disk-0, +4 more | pve-vzdump-cold-canonical, r730xd-communications-backups | mail-archive.ronny.works | 2 probes |
-| 215 | surveillance-stack | vm | auto | md1400-vms | md1400:md1400-vms:vm-215-disk-0, boot-disk:pve:md1400-vms/vm-215-disk-{0,1} (boot 50G + data 100G), md1400:md1400-vms:vm-215-disk-1, +3 more | pve-vzdump-cold-canonical | private-only | 1 probes |
+| 215 | surveillance-stack | vm | auto | md1400-vms | md1400:md1400-vms:vm-215-disk-0, boot-disk:pve:md1400-vms/vm-215-disk-{0,1} (boot 50G + data 100G), md1400:md1400-vms:vm-215-disk-1, +4 more | r730xd-surveillance-config-backups | private-only | 1 probes |
 | 216 | observability-r620 | vm | unknown | boot-only | boot-disk:local-lvm:vm-216-disk-0, local-lvm:vm-216-cloudinit | pve-vzdump-cold-canonical | grafana.ronny.works | 5 probes, node-exporter |
 | 221 | shop-files | lxc | auto | tank | none | r730xd-shop-files-backups | private-only | 0 probes |
 

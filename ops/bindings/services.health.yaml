@@ -5,7 +5,7 @@
 # authority_concern: l1_probe_registry_surfaces
 # projection_of: ops/bindings/probe.registry.yaml
 # generated_by: probe.registry.projection.build
-# source_sha256: c0c95b09eae83fc7f6ecd2f5e4b30d13e66096d1082f5f9c6899fe9a554e5ed0
+# source_sha256: 60f208ef1664afddc27e5f59dcd3a81ef4486e49f67c0d3d93e87faa3cabaab9
 # Do NOT edit manually. Rebuild with: ./bin/ops cap run probe.registry.projection.build
 version: 1
 status: projection
@@ -13,7 +13,7 @@ authority_state: projection
 authority_concern: l1_probe_registry_surfaces
 projection_of: ops/bindings/probe.registry.yaml
 source_capability: probe.registry.projection.build
-source_sha256: c0c95b09eae83fc7f6ecd2f5e4b30d13e66096d1082f5f9c6899fe9a554e5ed0
+source_sha256: 60f208ef1664afddc27e5f59dcd3a81ef4486e49f67c0d3d93e87faa3cabaab9
 defaults:
   connect_timeout_sec: 5
   max_time_sec: 10
@@ -64,16 +64,15 @@ endpoints:
   description: "Firefly III on finance-stack VM 211. Live \u2014 migrated from docker-host\
     \ (LOOP-FINANCE-VM-SEPARATION-20260211). Canonical public finance URL moved under\
     \ mintprints.com."
-- id: frigate-vm215
+- id: surveillance-go2rtc-vm215
   host: surveillance-stack
-  url: http://192.168.1.215:5000/api/version
+  url: http://192.168.1.215:5000/api/streams
   expect: 200
   enabled: true
-  description: Shop surveillance runtime on VM 215. Live compose authority is /srv/config/surveillance,
-    with /opt/stacks/surveillance as a thin entrypoint symlink. Frigate appstate and
-    media payload now bind from /srv/data/surveillance and cache from /srv/runtime/surveillance.
-    CPU-first Frigate baseline with 8 live cameras. Home Assistant uses direct Tailscale
-    URL http://100.89.1.111:5000 and MQTT at 100.67.120.1:1883.
+  description: Shop surveillance viewer on VM 215. The L3 product body lives in /Users/ronnyworks/code/projects/surveillance.
+    go2rtc serves the VM/runtime viewer at http://192.168.1.215:5000 and the public
+    viewer is https://cameras.ronny.works behind Cloudflare Access. Hikvision NVR
+    owns recording; VM storage is config/cache only.
 - id: ghostfolio-vm211
   host: finance-stack
   url: http://192.168.1.211:3340/
@@ -432,10 +431,10 @@ lifecycle_bindings:
     display_name: Surveillance
     criticality: tier3
     canonical_live_roots:
-    - surveillance-stack:/srv/config/surveillance (Canonical live compose/config authority
-      proved by the 2026-03-19 normalization wave.)
-    - surveillance-stack:/srv/data/surveillance (Rolling retention surface for active
-      recordings/clips/snapshots. Final archive home is md1400.)
+    - surveillance-stack:/srv/config/surveillance (Canonical live compose/config authority.
+      Config-only backup lands under pve:/md1400/backups/configs/surveillance.)
+    - surveillance-stack:/srv/data/surveillance (Empty VM media/cache skeleton in
+      the NVR-first posture; not business-record backup authority.)
     - surveillance-stack:/srv/runtime/surveillance (Canonical runtime cache surface
       for tmpfs-backed transient state.)
     staging_roots: []
@@ -446,22 +445,17 @@ lifecycle_bindings:
     - pve:/md1400/archive/surveillance-exports (Cold archive lane for exported surveillance
       evidence; offsite coverage comes from the existing md1400 backup program.)
     retention_policy:
-      policy_type: rolling_days
-      claim_days: 0
-      clips_days: 0
-      snapshots_days: 0
-      description: 'Watch-only minimal posture (2026-04-14): all retention claims
-        are zero because record.enabled, detect.enabled, and snapshots are all false.
-        Target after recording enabled on 100GB disk: 1d motion, 14d clips. Target
-        after 2TB remediation: 7d/14d.'
+      policy_type: nvr_cyclic_external
+      claim_days: null
+      clips_days: null
+      snapshots_days: null
+      description: 'NVR-first low-compute posture (2026-05-05): VM retention claims
+        are zero because the VM does not record. Hikvision NVR owns footage retention;
+        VM config recovery is handled by app-surveillance-config.'
     capacity_model:
-      mode: enforce
-      type: rolling_retention_bytes
+      mode: not_applicable
+      type: nvr_owned_footage_config_only
       source_ref: project:surveillance/contracts/surveillance.contract.yaml
-      usable_capacity_gib: 100
-      observed_used_gib: 81.1
-      reserved_headroom_gib: 10
-      observed_daily_growth_gib: 7.0
-      description: The 2026-03-18 placement census recorded 76G recordings plus 5.1G
-        clips on the 100G data disk. The remaining safe headroom supports about 1.27
-        days, so the current claim is capped at 1 day until the 2TB remediation lands.
+      description: Capacity honesty for VM rolling footage is not applicable in the
+        current posture. Hikvision NVR owns footage retention; VM 215 keeps only config,
+        runtime cache, and manual export staging.

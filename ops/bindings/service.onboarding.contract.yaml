@@ -19,7 +19,7 @@ last_verified: "2026-03-05"
 boring_onboarding_checklist:
   - question: "service_id"
     description: "What is the service called? (lowercase, hyphens, no underscores)"
-    examples: ["frigate", "go2rtc", "vaultwarden", "jellyfin"]
+    examples: ["go2rtc", "vaultwarden", "jellyfin"]
 
   - question: "runtime_host"
     description: "Where does it run?"
@@ -73,9 +73,9 @@ boring_onboarding_checklist:
   - question: "smoke_check_command"
     description: "How do you verify the service is healthy?"
     examples:
-      - "curl http://surveillance-stack:5000/api/version"
+      - "curl http://surveillance-stack:5000/api/streams"
       - "./bin/ops cap run services.health.status -- --host surveillance-stack"
-      - "ssh surveillance-stack docker ps | grep frigate"
+      - "ssh surveillance-stack docker ps"
     authority: "ops/bindings/services.health.yaml (HTTP probes) OR capability script"
 
 # ═══════════════════════════════════════════════════════════════
@@ -120,37 +120,22 @@ policy:
     migration_path: "Use ops/bindings/secrets.namespace.policy.yaml to route keys to /spine/* namespaces"
 
 # ═══════════════════════════════════════════════════════════════
-# EXEMPLAR: surveillance / Frigate
+# EXEMPLAR: surveillance / go2rtc viewer
 # ═══════════════════════════════════════════════════════════════
-
-exemplar_surveillance_frigate:
-  service_id: "frigate"
-  runtime_host: "surveillance-stack"
-  canonical_secret_namespace: "/spine/shop/nvr"
-  required_machine_keys:
-    - "NVR_ADMIN_USER"
-    - "NVR_ADMIN_PASSWORD"
-  consumer_path: "secrets-exec (via docker-compose .env file sourced from Infisical)"
-  sanctioned_admin_url: "http://surveillance-stack:5000"
-  sanctioned_admin_url_note: "Internal-only by design. No public URL."
-  vaultwarden_entry_required: false
-  vaultwarden_rationale: "Frigate has no admin login UI — it uses MQTT/API integration with Home Assistant. NVR credentials are machine secrets (Infisical), not human credentials (Vaultwarden)."
-  smoke_check_command: "curl -sf http://surveillance-stack:5000/api/version"
-  smoke_check_note: "HTTP health probe against Frigate API. Returns version JSON when healthy."
 
 exemplar_surveillance_go2rtc:
   service_id: "go2rtc"
   runtime_host: "surveillance-stack"
   canonical_secret_namespace: ""
-  canonical_secret_namespace_note: "No machine secret namespace required. go2rtc is bundled inside Frigate 0.17+ and proxied through Frigate nginx. Configuration via go2rtc.yaml volume mount only."
+  canonical_secret_namespace_note: "No machine secret namespace required for viewer health. NVR and RTSP credentials remain machine secrets in Infisical."
   required_machine_keys: []
   consumer_path: "n/a"
-  sanctioned_admin_url: ""
-  sanctioned_admin_url_note: "No separate admin URL. Bundled inside Frigate; API proxied at http://surveillance-stack:5000/api/go2rtc/"
+  sanctioned_admin_url: "http://surveillance-stack:5000"
+  sanctioned_admin_url_note: "VM/runtime viewer URL. Public human viewer is https://cameras.ronny.works behind Cloudflare Access."
   vaultwarden_entry_required: false
   vaultwarden_rationale: "go2rtc has no admin login. It is a low-latency RTSP/WebRTC proxy with no authentication surface."
-  smoke_check_command: "curl -sf http://surveillance-stack:5000/api/go2rtc/api/streams"
-  smoke_check_note: "HTTP health probe against go2rtc API (Frigate-proxied)."
+  smoke_check_command: "curl -sf http://surveillance-stack:5000/api/streams"
+  smoke_check_note: "HTTP health probe against the go2rtc streams API."
 
 # ═══════════════════════════════════════════════════════════════
 # LEGACY AMBIGUITY CLEANUP
@@ -172,5 +157,5 @@ design_constraints:
   no_new_loops: "This contract does NOT require loop creation. It is a reference contract for agents."
   no_broad_rewrite: "This contract does NOT trigger a mass service migration. It defines the standard for NEW services."
   no_framework: "This contract does NOT build a provisioning engine. It documents the boring transaction."
-  no_matrix_sprawl: "This contract does NOT enumerate all existing services. The surveillance/Frigate exemplar below is historical (L3 authority moved to workbench 2026-04-14); other services follow on-demand."
+  no_matrix_sprawl: "This contract does NOT enumerate all existing services. The surveillance/go2rtc exemplar is a current viewer example; the L3 surveillance product body lives in /Users/ronnyworks/code/projects/surveillance. Other services follow on-demand."
   no_follow_on_proof: "This contract does NOT require follow-on validation waves. The exemplar pattern is sufficient proof."

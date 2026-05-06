@@ -142,8 +142,8 @@ services:
     sites:
       - shop
     criticality: tier3  # not critical, archive-class storage
-    data_class: time_series_video
-    final_storage_target: md1400  # VM 215 local is rolling retention; md1400 is canonical archive home
+    data_class: viewer_config_and_manual_exports
+    final_storage_target: hikvision_nvr_for_footage  # md1400 holds config backups and manual exports only
     canonical_live_roots:
       - host: surveillance-stack
         path: /srv/config/surveillance
@@ -169,52 +169,22 @@ services:
         purpose: "Cold archive lane for exported surveillance evidence; offsite coverage comes from the existing md1400 backup program."
     background_actions:
       declared:
-        - action_id: frigate_recording_writer
-          host: surveillance-stack
-          mechanism: docker_container
-          locus: /srv/config/surveillance/config.yml
+        - action_id: hikvision_nvr_cyclic_footage_owner
+          host: nvr-shop
+          mechanism: appliance_internal_storage
+          locus: Hikvision NVR
           schedule: continuous
-          effect: write_recordings_clips_snapshots
-          live_state: INACTIVE  # record.enabled: false as of 2026-04-14
-          live_state_note: "Recording writer exists in Frigate but is disabled. Recordings dir is empty. Will become active when operator enables record.enabled."
-          evidence_ref: /Users/ronnyworks/code/.evidence/spine/verify/SURVEILLANCE_OPERATING_MODEL_CONTRACT_20260319.md
-        - action_id: frigate_retention_purger
-          host: surveillance-stack
-          mechanism: docker_container
-          locus: /srv/config/surveillance/config.yml
-          schedule: continuous
-          effect: auto_purge_by_retention_policy
-          live_state: INACTIVE  # no recordings to purge
-          live_state_note: "Purger exists but has nothing to act on while recording is disabled."
-          evidence_ref: /Users/ronnyworks/code/.evidence/spine/verify/SURVEILLANCE_RETENTION_AUDIT_20260319.md
+          effect: own_cyclic_footage_retention
+          live_state: ACTIVE
+          live_state_note: "Recording owner is the Hikvision NVR appliance, not the VM viewer or VM storage."
+          evidence_ref: /Users/ronnyworks/code/projects/surveillance/contracts/surveillance.contract.yaml
       retired: []
-    destructive_behaviors:
-      - behavior_id: recordings_retention_expiry
-        host: surveillance-stack
-        trigger: application_retention_policy
-        effect: delete_expired_recordings
-        target_roots:
-          - host: surveillance-stack
-            path: /srv/data/surveillance/recordings
-      - behavior_id: clips_retention_expiry
-        host: surveillance-stack
-        trigger: application_retention_policy
-        effect: delete_expired_clips
-        target_roots:
-          - host: surveillance-stack
-            path: /srv/data/surveillance/clips
-      - behavior_id: snapshots_retention_expiry
-        host: surveillance-stack
-        trigger: application_retention_policy
-        effect: delete_expired_snapshots
-        target_roots:
-          - host: surveillance-stack
-            path: /srv/data/surveillance/snapshots
+    destructive_behaviors: []
     retention_policy:
-      policy_type: rolling_days
-      claim_days: 0  # recording disabled, no active writer
-      clips_days: 0  # detection disabled, no clips generated
-      snapshots_days: 0  # snapshots disabled
+      policy_type: nvr_cyclic_external
+      claim_days: null
+      clips_days: null
+      snapshots_days: null
       description: "NVR-first low-compute posture (2026-05-05): VM retention claims are zero because the VM does not record. Hikvision NVR owns footage retention; VM config recovery is handled by app-surveillance-config."
     tombstone_policy:
       expiry_mode: review_before_delete
@@ -226,14 +196,10 @@ services:
       cadence: quarterly
       authority_ref: ops/bindings/domains/backup/backup.inventory.yaml
     capacity_model:
-      mode: enforce
-      type: rolling_retention_bytes
+      mode: not_applicable
+      type: nvr_owned_footage_config_only
       source_ref: project:surveillance/contracts/surveillance.contract.yaml
-      usable_capacity_gib: 100
-      observed_used_gib: 81.1
-      reserved_headroom_gib: 10
-      observed_daily_growth_gib: 7.0
-      description: "The 2026-03-18 placement census recorded 76G recordings plus 5.1G clips on the 100G data disk. The remaining safe headroom supports about 1.27 days, so the current claim is capped at 1 day until the 2TB remediation lands."
+      description: "Capacity honesty for VM rolling footage is not applicable in the current posture. Hikvision NVR owns footage retention; VM 215 keeps only config, runtime cache, and manual export staging."
     drift_rules:
       canonical_root_count_limit: 3
       staging_requires_expiry: false
@@ -243,8 +209,8 @@ services:
           path: /home/ubuntu/surveillance.pre-normalization-20260319T120655Z
           reason: "Rollback capsule retained after the 2026-03-19 /srv normalization wave; not a live writer root."
     drift_signals:
-      - retention_claim_exceeds_capacity
-      - undeclared_retention_purger
+      - stale_vm_recording_claim_present
+      - recurring_vm_backup_enabled
       - retired_root_written
     binding_refs:
       storage_map_sites:
