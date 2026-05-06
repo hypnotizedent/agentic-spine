@@ -423,11 +423,20 @@ def main() -> int:
             owner_type == "packet"
             and owner_state in {"unresolved", "present", "unknown", None}
             and owner_id
-            and not lease.get("active")
-            and merged
-            and not dirty
         ):
-            owner_state = routed_status_cache.get(owner_id) or owner_state
+            cached_status = routed_status_cache.get(owner_id)
+            if cached_status:
+                owner_state = cached_status
+            elif (
+                merged
+                and not dirty
+                and not lease.get("active")
+            ):
+                # Packet not found in canonical state and worktree is clean +
+                # landed + unleased. Treat as terminal residue rather than
+                # blocked-on-missing-owner; downstream merged-check classifies
+                # as cleanable_landed_residue.
+                owner_state = "missing_terminal"
         ownership = classify_ownership(
             repo=repo,
             path=path,
