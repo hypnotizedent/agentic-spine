@@ -16,6 +16,7 @@ PUBLISH_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-publis
 TARGET_PUBLISH_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-target-publish"
 REHYDRATE_SCRIPT="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-rehydrate"
 WORKTREE_REPORT_BIN="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-report"
+WORKTREE_CLEANUP_BIN="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-cleanup"
 CLOSEOUT_CAP="coordinator.lane.closeout"
 PUBLISH_CAP="coordinator.lane.publish"
 TARGET_PUBLISH_CAP="coordinator.target.publish"
@@ -40,6 +41,7 @@ fail() {
 [[ -x "$TARGET_PUBLISH_SCRIPT" ]] || fail "missing target publish script: $TARGET_PUBLISH_SCRIPT"
 [[ -x "$REHYDRATE_SCRIPT" ]] || fail "missing rehydrate script: $REHYDRATE_SCRIPT"
 [[ -x "$WORKTREE_REPORT_BIN" ]] || fail "missing worktree lifecycle report script: $WORKTREE_REPORT_BIN"
+[[ -x "$WORKTREE_CLEANUP_BIN" ]] || fail "missing worktree lifecycle cleanup script: $WORKTREE_CLEANUP_BIN"
 [[ -f "$WAVE_CMD" ]] || fail "missing wave command: $WAVE_CMD"
 [[ -x "$WAVE_CLOSE_BIN" ]] || fail "missing wave close script: $WAVE_CLOSE_BIN"
 [[ -x "$FRICTION_RECONCILE_BIN" ]] || fail "missing friction reconcile surface: $FRICTION_RECONCILE_BIN"
@@ -176,7 +178,14 @@ for marker in \
   "cross-repo inspection must be explicit via --repo"; do
   grep -qF -- "$marker" "$WORKTREE_REPORT_BIN" || fail "worktree.lifecycle.report missing target-root locality marker: $marker"
 done
-python3 - "$WORKTREE_REPORT_BIN" <<'PY'
+for marker in \
+  "--repo" \
+  "REQUESTED_REPO" \
+  "CWD_GIT_ROOT" \
+  "cross-repo cleanup must be explicit"; do
+  grep -qF -- "$marker" "$WORKTREE_CLEANUP_BIN" || fail "worktree.lifecycle.cleanup missing target-root locality marker: $marker"
+done
+python3 - "$WORKTREE_REPORT_BIN" "$WORKTREE_CLEANUP_BIN" <<'PY'
 import json
 import os
 import subprocess
@@ -185,6 +194,7 @@ import tempfile
 from pathlib import Path
 
 report_bin = Path(sys.argv[1])
+cleanup_bin = Path(sys.argv[2])
 
 def run(cmd, *, cwd, env=None):
     return subprocess.run(
@@ -238,6 +248,28 @@ with tempfile.TemporaryDirectory(prefix="d331-worktree-report-target.") as td:
         raise SystemExit(
             "D331 FAIL: worktree.lifecycle.report --repo must preserve explicit cross-repo "
             f"inspection, got {explicit_repo}"
+        )
+
+    cleanup_default_proc = run([str(cleanup_bin), "--mode", "report-only", "--json"], cwd=repo, env=polluted_env)
+    cleanup_default_payload = json.loads(cleanup_default_proc.stdout)
+    cleanup_default_repo = (cleanup_default_payload.get("summary") or {}).get("repo") or cleanup_default_payload.get("repo")
+    if Path(str(cleanup_default_repo)).resolve() != repo.resolve():
+        raise SystemExit(
+            "D331 FAIL: worktree.lifecycle.cleanup must prefer current checkout over ambient "
+            f"SPINE_TARGET_REPO, got {cleanup_default_repo}"
+        )
+
+    cleanup_explicit_proc = run(
+        [str(cleanup_bin), "--repo", str(other_repo), "--mode", "report-only", "--json"],
+        cwd=repo,
+        env=polluted_env,
+    )
+    cleanup_explicit_payload = json.loads(cleanup_explicit_proc.stdout)
+    cleanup_explicit_repo = (cleanup_explicit_payload.get("summary") or {}).get("repo") or cleanup_explicit_payload.get("repo")
+    if Path(str(cleanup_explicit_repo)).resolve() != other_repo.resolve():
+        raise SystemExit(
+            "D331 FAIL: worktree.lifecycle.cleanup --repo must preserve explicit cross-repo "
+            f"cleanup, got {cleanup_explicit_repo}"
         )
 PY
 for marker in \

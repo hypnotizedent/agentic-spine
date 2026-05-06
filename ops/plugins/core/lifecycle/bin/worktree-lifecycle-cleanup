@@ -2,33 +2,27 @@
 set -euo pipefail
 
 CONTROL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-TARGET_ROOT="${SPINE_TARGET_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "${SPINE_REPO:-$PWD}")}"
-export SPINE_CODE="${SPINE_CODE:-$CONTROL_ROOT}"
-export SPINE_REPO="$TARGET_ROOT"
-source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
-spine_runtime_resolve_paths
-source "$CONTROL_ROOT/ops/lib/git-lock.sh"
-CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
-CLOSEOUT_CONTRACT="$CONTROL_ROOT/ops/bindings/wave.closeout.contract.yaml"
-RECONCILE_SCRIPT="$CONTROL_ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
-REPORT_SCRIPT="$CONTROL_ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-report"
 
 MODE="report-only"
 TOKEN=""
 MANIFEST=""
 JSON_MODE=0
+REQUESTED_REPO=""
 
 usage() {
   cat <<'USAGE'
 worktree-lifecycle-cleanup
 
 Usage:
-  worktree-lifecycle-cleanup --mode report-only|archive-only|delete [--token <token>] [--manifest <path>] [--json]
+  worktree-lifecycle-cleanup --mode report-only|archive-only|delete [--repo PATH] [--token <token>] [--manifest <path>] [--json]
 
 Modes:
   report-only  Classify only; no filesystem/git mutations.
   archive-only Snapshot + archive candidate worktrees (no delete).
   delete       Token-gated delete path (requires archive manifest when contract enabled).
+
+Target root:
+  Defaults to the current git checkout. Use --repo PATH for explicit cross-repo cleanup.
 USAGE
 }
 
@@ -36,6 +30,11 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
     --mode) MODE="${2:-}"; shift 2 ;;
+    --repo)
+      [[ $# -ge 2 ]] || { echo "--repo requires a path" >&2; exit 2; }
+      REQUESTED_REPO="$2"
+      shift 2
+      ;;
     --token) TOKEN="${2:-}"; shift 2 ;;
     --manifest) MANIFEST="${2:-}"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
@@ -48,6 +47,31 @@ case "$MODE" in
   report-only|archive-only|delete) ;;
   *) echo "FAIL: --mode must be report-only|archive-only|delete" >&2; exit 2 ;;
 esac
+
+CWD_GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "$REQUESTED_REPO" ]]; then
+  TARGET_ROOT="$REQUESTED_REPO"
+elif [[ -n "$CWD_GIT_ROOT" ]]; then
+  # PACKET-1400: cleanup is the mutating companion to report. It follows the
+  # checkout the operator is standing in; cross-repo cleanup must be explicit.
+  TARGET_ROOT="$CWD_GIT_ROOT"
+else
+  TARGET_ROOT="${SPINE_TARGET_REPO:-$(printf '%s\n' "${SPINE_REPO:-$PWD}")}"
+fi
+if [[ -d "$TARGET_ROOT" ]]; then
+  TARGET_ROOT="$(cd "$TARGET_ROOT" && pwd)"
+fi
+
+export SPINE_CODE="${SPINE_CODE:-$CONTROL_ROOT}"
+export SPINE_REPO="$CONTROL_ROOT"
+export SPINE_TARGET_REPO="$TARGET_ROOT"
+source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+source "$CONTROL_ROOT/ops/lib/git-lock.sh"
+CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+CLOSEOUT_CONTRACT="$CONTROL_ROOT/ops/bindings/wave.closeout.contract.yaml"
+RECONCILE_SCRIPT="$CONTROL_ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
+REPORT_SCRIPT="$CONTROL_ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-report"
 
 MAIN_BRANCH="main"
 CANONICAL_WORKTREE_ROOT="${SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT:-$SPINE_TMP/worktrees}"
