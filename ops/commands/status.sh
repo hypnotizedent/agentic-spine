@@ -607,7 +607,7 @@ except Exception as exc:
     if cached and cache_age is not None and cache_age <= cache_max_age:
         line, anomalies = _render(
             cached,
-            "Status: STALE-CACHE "
+            "Status: cached "
             f"({_seconds_age_text(cache_age)}; joined-state unavailable: {exc}; "
             "values below are from cache; refresh: OPS_STATUS_FULL_BRIEF=1 ./bin/ops status --brief)",
             cache_warning=True,
