@@ -67,7 +67,10 @@ echo
 # ── Dependencies ──
 command -v yq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: yq"; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: jq"; exit 2; }
-[[ -f "$REGISTRY" ]] || { echo "STOP (2): home.device.registry.yaml not found"; exit 2; }
+# PACKET-1379: home.device.registry.yaml deleted as a hand-maintained Site
+# Intelligence carrier. The cap continues to run observation-only when the
+# registry is absent.
+[[ -f "$REGISTRY" ]] || REGISTRY=""
 
 # ── Resolve API key ──
 API_KEY="${UNIFI_HOME_API_KEY:-}"
@@ -117,8 +120,13 @@ clients_path, registry_path = sys.argv[1], sys.argv[2]
 
 with open(clients_path) as f:
     api_data = json.load(f)
-with open(registry_path) as f:
-    registry = yaml.safe_load(f)
+# PACKET-1379: registry_path may be empty/absent after registry deletion.
+import os
+if registry_path and os.path.isfile(registry_path):
+    with open(registry_path) as f:
+        registry = yaml.safe_load(f) or {}
+else:
+    registry = {}
 
 clients = {c['mac']: c for c in api_data.get('data', [])}
 reg_devices = registry.get('devices', [])
@@ -219,10 +227,15 @@ authority_boundary:
     - role_assignment
 summary:
   registry_devices_checked: $(python3 -c "
-import yaml, sys
-with open('$REGISTRY') as f:
-    r = yaml.safe_load(f)
-devs = [d for d in r.get('devices', []) if d.get('mac') and d.get('ip') and d.get('ip') != 'dynamic']
+# PACKET-1379: registry deleted; treat registry-devices count as 0 when absent.
+import os, yaml
+path = '$REGISTRY'
+if path and os.path.isfile(path):
+    with open(path) as f:
+        r = yaml.safe_load(f) or {}
+    devs = [d for d in r.get('devices', []) if d.get('mac') and d.get('ip') and d.get('ip') != 'dynamic']
+else:
+    devs = []
 print(len(devs))
 ")
   unifi_clients_total: $(jq '.data | length' "$TMPDIR_WORK/clients.json")

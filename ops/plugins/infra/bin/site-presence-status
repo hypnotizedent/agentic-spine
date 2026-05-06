@@ -40,6 +40,9 @@ _SITE_INTEL_NETWORK = _domain_state_root() / "site-intelligence/network"
 PATHS = {
     "topology_sites": ROOT / "ops/bindings/topology.sites.yaml",
     "ssh_targets": ROOT / "ops/bindings/ssh.targets.yaml",
+    # PACKET-1379: home.device.registry.yaml deleted. The path remains in
+    # PATHS for legacy load_yaml() calls but the file no longer exists; the
+    # graceful-fallback in load_yaml() returns {} so declared_rows is empty.
     "home_device": ROOT / "ops/bindings/home.device.registry.yaml",
     # PACKET-1378: UniFi observed-client carriers moved out of ops/bindings/
     # into the branch-owned runtime cache. Only the runtime cache path is
@@ -49,14 +52,13 @@ PATHS = {
     "site_profile": ROOT / "ops/bindings/site.profile.contract.yaml",
 }
 
+# PACKET-1379: home.device.registry.yaml + shop.device.registry.yaml were
+# deleted. Removed from folded_legacy_inputs; their L3 function
+# categorization had no existing branch home and was retired with the file
+# (stale_deleted), operator-asserted DHCP intent was retired with the
+# hidden consuming caps, admitted-machine fields lived in
+# node.admission.status already.
 FOLDED_LEGACY_INPUTS = [
-    {
-        "path": "ops/bindings/home.device.registry.yaml",
-        "folded_role": "declared_home_device_and_dhcp_intent",
-        "folded_into": "site.presence.status",
-        "standalone_operator_surface": False,
-        "subtraction_state": "folded_source_input",
-    },
     # PACKET-1378: UniFi observed-client carriers moved out of ops/bindings/
     # into the branch-owned runtime cache under
     # $SPINE_DOMAIN_STATE/site-intelligence/network/. Old repo paths were
@@ -79,13 +81,14 @@ FOLDED_LEGACY_INPUTS = [
     # PACKET-1371: home.unifi.network.inventory.yaml deleted. Operator-asserted
     # upstream uplink moved into site.profile.contract notes; UDR-observable
     # network state lives under network.presence.status (Network branch).
-    {
-        "path": "ops/bindings/shop.device.registry.yaml",
-        "folded_role": "shop_l3_function_and_dhcp_intent",
-        "folded_into": "site.presence.status + node.admission.status",
-        "standalone_operator_surface": False,
-        "subtraction_state": "folded_l3_source_input",
-    },
+    # PACKET-1379: home/shop device registries deleted. L3 function
+    # categorization had no existing branch home so it was retired with the
+    # files (stale_deleted); operator-asserted DHCP intent was retired
+    # because consuming caps are now hidden producers (PACKET-1371) able to
+    # work observation-only; admitted-machine semantics remained where
+    # they already lived in node.admission.status / hardware.inventory.yaml /
+    # operator.hardware.inventory.yaml. The folded_legacy_inputs entries
+    # below for storage maps stay; the device registry entries are gone.
     # PACKET-1378: storage map carriers moved out of ops/bindings/ into the
     # branch-owned runtime cache under
     # $SPINE_DOMAIN_STATE/site-intelligence/storage/. Old repo paths were
@@ -270,6 +273,11 @@ def _rel_or_abs(path: Path) -> str:
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
+    # PACKET-1379: gracefully return {} for missing files. Old hand-maintained
+    # device registries were deleted; consumers continue to function without
+    # them rather than fail loudly when a folded input is absent.
+    if not path.exists():
+        return {}
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     return data if isinstance(data, dict) else {}
@@ -812,8 +820,13 @@ def build_rows(site_filter: str | None) -> list[dict[str, Any]]:
         site = str(declared.get("site") or (admission or {}).get("site") or "home")
         if site_filter and site != site_filter:
             continue
+        # PACKET-1379: home.device.registry.yaml deleted; only retain the
+        # source_roles entry when the file (now absent) is somehow present
+        # again. In normal operation declared_rows is empty so this branch
+        # rarely runs, but the source_roles entry must not assert a path
+        # that no longer exists.
         source_roles = [
-            {"path": str(PATHS["home_device"].relative_to(ROOT)), "role": "folded_declared_device_input", "proof_ref": "updated_at"},
+            {"path": _rel_or_abs(PATHS["home_device"]), "role": "folded_declared_device_input", "proof_ref": "updated_at"},
         ]
         freshness = {
             "state": "declared_only",
