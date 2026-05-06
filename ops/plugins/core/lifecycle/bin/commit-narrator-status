@@ -552,7 +552,13 @@ def _route_artifacts_to_canonical(
     repo = os.environ.get("COMMIT_NARRATOR_DISPATCH_REPO", "/opt/agentic-spine")
     state_root = os.environ.get("COMMIT_NARRATOR_DISPATCH_STATE", "/md1400/spine/state")
     try:
-        timeout = int(os.environ.get("COMMIT_NARRATOR_DISPATCH_TIMEOUT_SECONDS", "5"))
+        # 14-day default window with --limit auto-bumped to 200 makes the
+        # canonical-side read ~4s; SSH overhead pushes the wall-clock past
+        # the prior 5s default and silently dropped to "all missing". Bump
+        # default to 15s — still bounded, comfortably covers default
+        # operator drilldown shape; status.sh entry-time helpers keep
+        # their own tighter 5s caps so brief stays fast.
+        timeout = int(os.environ.get("COMMIT_NARRATOR_DISPATCH_TIMEOUT_SECONDS", "15"))
     except Exception:
         timeout = 5
     args_part = ["--ref", ref, "--limit", str(limit),
