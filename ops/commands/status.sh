@@ -429,6 +429,96 @@ def _degraded_line(reason):
 
 timeout_seconds = _int_env("OPS_STATUS_BRIEF_JOINED_TIMEOUT_SECONDS", 4)
 cache_max_age = _int_env("OPS_STATUS_BRIEF_CACHE_MAX_AGE_SECONDS", 3600)
+narrator_timeout = _int_env("OPS_STATUS_BRIEF_NARRATOR_TIMEOUT_SECONDS", 3)
+
+
+def _render_narrator_attention():
+    """Best-effort narrator attention readback (PACKET-1377; spec PACKET-1374).
+
+    Reads from per-commit artifacts only (--from-artifacts). Failure or
+    timeout produces None so the brief output is never broken by narrator
+    issues — narrator is operator-eye witness signal, not a verify gate.
+    """
+    if os.environ.get("OPS_STATUS_BRIEF_NARRATOR_DISABLE") == "1":
+        return None
+    try:
+        bin_ops = spine / "bin" / "ops"
+        proc = subprocess.run(
+            [str(bin_ops), "cap", "run", "commit.narrator.status",
+             "--", "--since", "14.days",
+             "--from-artifacts", "--format", "json",
+             "--limit", "50", "--skip-input-readbacks"],
+            capture_output=True,
+            text=True,
+            timeout=narrator_timeout,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        text = proc.stdout
+        # cap.sh wraps output with banner; extract first JSON object
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        payload = json.loads(text[start:end + 1])
+    except Exception:
+        return None
+    artifact_reads = payload.get("artifact_reads") or {}
+    attempted = int(artifact_reads.get("attempted") or 0)
+    from_artifact = int(artifact_reads.get("from_artifact") or 0)
+    missing = int(artifact_reads.get("artifact_missing") or 0)
+    commits = payload.get("commits") or []
+    drilldown = ("./bin/ops cap run commit.narrator.status -- "
+                 "--since 14.days --from-artifacts --format markdown "
+                 "--skip-input-readbacks")
+    actionable_verdicts = {"regression_risk", "regression_seen",
+                            "unknown_requires_human_eye"}
+    actionable = None
+    for row in commits:
+        if not isinstance(row, dict):
+            continue
+        if not row.get("from_artifact"):
+            continue
+        rl = row.get("rule_layer") if isinstance(row.get("rule_layer"), dict) else None
+        verdict = (rl or {}).get("verdict") or ""
+        confidence = (rl or {}).get("confidence") or ""
+        if verdict in actionable_verdicts or row.get("operator_eye"):
+            actionable = (row, verdict, confidence)
+            break
+    if actionable:
+        row, verdict, confidence = actionable
+        sha = row.get("short_sha") or ""
+        subject = (row.get("subject") or "").strip()
+        if len(subject) > 90:
+            subject = subject[:90] + "…"
+        # short reason: top matched-rule reason if available, else
+        # honest_unknown_reason, else fact-layer reason
+        rl = row.get("rule_layer") if isinstance(row.get("rule_layer"), dict) else {}
+        outcomes = rl.get("rule_outcomes") or []
+        matched = [o for o in outcomes if isinstance(o, dict) and o.get("outcome") == "matched"]
+        reason = ""
+        if matched:
+            reason = (matched[0].get("reason") or "").strip()
+        if not reason:
+            reason = (rl.get("honest_unknown_reason") or row.get("reason") or "").strip()
+        if len(reason) > 140:
+            reason = reason[:140] + "…"
+        verdict_part = verdict or "operator_eye"
+        conf_part = f" ({confidence})" if confidence else ""
+        return (f"Narrator: attention — {sha} {verdict_part}{conf_part}: "
+                f"{subject}; reason: {reason}; drilldown: {drilldown}")
+    # No actionable row. Disclose stale/missing artifacts honestly when
+    # the window has commits but none are artifact-backed; stay silent
+    # when artifacts are present and clear.
+    if attempted and from_artifact == 0:
+        return ("Narrator: stale — "
+                f"{missing} commit(s) in last 14d without artifacts; "
+                "backfill via Forge push or "
+                "./bin/ops cap run commit.narrator.status -- "
+                "--since 14.days --include-diff --evaluate-rules "
+                "--write-artifacts --skip-input-readbacks")
+    return None
 
 try:
     if os.environ.get("OPS_STATUS_BRIEF_FORCE_CACHE_FALLBACK") == "1":
@@ -444,6 +534,9 @@ try:
         raise RuntimeError((proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}")
     line, anomalies = _render(json.loads(proc.stdout))
     print(line)
+    narrator_line = _render_narrator_attention()
+    if narrator_line:
+        print(narrator_line)
     sys.exit(1 if strict_mode and anomalies else 0)
 except Exception as exc:
     cached, cache_age, cache_path = _load_cached_payload()
@@ -455,6 +548,9 @@ except Exception as exc:
             "next run OPS_STATUS_FULL_BRIEF=1 ./bin/ops status --brief)",
         )
         print(line)
+        narrator_line = _render_narrator_attention()
+        if narrator_line:
+            print(narrator_line)
         sys.exit(1 if strict_mode else 0)
     print(_degraded_line(str(exc)))
     sys.exit(1 if strict_mode else 0)
@@ -2748,6 +2844,96 @@ if mode != "--expert":
     print("  node recovery:     status-derived; see node.recovery.status")
     print(f"  coherence:         {'attention' if joined_state_summary.get('coherence_attention') else 'ok'}")
     print()
+
+    # NARRATOR section (PACKET-1377; spec PACKET-1374). Best-effort artifact
+    # replay; failure or timeout is silent skip — narrator is operator-eye
+    # signal, not a verify gate.
+    def _render_full_narrator_attention():
+        if os.environ.get("OPS_STATUS_FULL_NARRATOR_DISABLE") == "1":
+            return None
+        try:
+            timeout = int(os.environ.get(
+                "OPS_STATUS_FULL_NARRATOR_TIMEOUT_SECONDS", "3"))
+        except Exception:
+            timeout = 3
+        bin_ops = spine / "bin" / "ops"
+        try:
+            proc = subprocess.run(
+                [str(bin_ops), "cap", "run", "commit.narrator.status",
+                 "--", "--since", "14.days",
+                 "--from-artifacts", "--format", "json",
+                 "--limit", "50", "--skip-input-readbacks"],
+                capture_output=True, text=True,
+                timeout=max(1, timeout), check=False,
+            )
+            if proc.returncode != 0:
+                return None
+            text = proc.stdout
+            start = text.find("{")
+            end = text.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return None
+            payload = json.loads(text[start:end + 1])
+        except Exception:
+            return None
+        artifact_reads = payload.get("artifact_reads") or {}
+        attempted = int(artifact_reads.get("attempted") or 0)
+        from_artifact = int(artifact_reads.get("from_artifact") or 0)
+        missing = int(artifact_reads.get("artifact_missing") or 0)
+        commits = payload.get("commits") or []
+        drilldown = (
+            "./bin/ops cap run commit.narrator.status -- "
+            "--since 14.days --from-artifacts --format markdown "
+            "--skip-input-readbacks"
+        )
+        actionable_verdicts = {"regression_risk", "regression_seen",
+                                "unknown_requires_human_eye"}
+        for row in commits:
+            if not isinstance(row, dict):
+                continue
+            if not row.get("from_artifact"):
+                continue
+            rl = row.get("rule_layer") if isinstance(row.get("rule_layer"), dict) else None
+            verdict = (rl or {}).get("verdict") or ""
+            confidence = (rl or {}).get("confidence") or ""
+            if verdict in actionable_verdicts or row.get("operator_eye"):
+                sha = row.get("short_sha") or ""
+                subject = (row.get("subject") or "").strip()
+                if len(subject) > 90:
+                    subject = subject[:90] + "…"
+                outcomes = (rl or {}).get("rule_outcomes") or []
+                matched = [o for o in outcomes
+                           if isinstance(o, dict) and o.get("outcome") == "matched"]
+                reason = ""
+                if matched:
+                    reason = (matched[0].get("reason") or "").strip()
+                if not reason:
+                    reason = ((rl or {}).get("honest_unknown_reason")
+                              or row.get("reason") or "").strip()
+                if len(reason) > 140:
+                    reason = reason[:140] + "…"
+                verdict_part = verdict or "operator_eye"
+                conf_part = f" ({confidence})" if confidence else ""
+                return (
+                    f"  Narrator: attention — {sha} {verdict_part}{conf_part}: "
+                    f"{subject}; reason: {reason}; drilldown: {drilldown}"
+                )
+        if attempted and from_artifact == 0:
+            return (
+                f"  Narrator: stale — {missing} commit(s) in last 14d without artifacts; "
+                "backfill via Forge push or "
+                "./bin/ops cap run commit.narrator.status -- --since 14.days "
+                "--include-diff --evaluate-rules --write-artifacts "
+                "--skip-input-readbacks"
+            )
+        return None
+
+    _narrator_full_line = _render_full_narrator_attention()
+    if _narrator_full_line:
+        print("NARRATOR")
+        print("-" * 72)
+        print(_narrator_full_line)
+        print()
 
     print("ATTENTION")
     print("-" * 72)
