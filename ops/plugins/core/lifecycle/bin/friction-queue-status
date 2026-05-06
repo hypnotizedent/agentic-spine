@@ -534,7 +534,42 @@ def _build_payload(conn, args: argparse.Namespace) -> dict[str, object]:
             worker_drain=worker_drain,
         )
 
+    if args.source_drilldown:
+        payload["source_drilldown"] = _source_drilldown(conn, args.source_drilldown)
+
     return payload
+
+
+def _source_drilldown(conn, friction_id: str) -> dict[str, object]:
+    """Surface latest friction_events.payload metadata for a friction_id.
+    Returns shape: {friction_id, found, source_kind, source_ref, class,
+    excerpt_hash, event_type, event_at_utc, raw_payload}.
+    V2.1 Slice 1B drilldown — reads existing event payload column; no new
+    index, projection, or authority plane.
+    """
+    out: dict[str, object] = {
+        "friction_id": friction_id,
+        "found": False,
+        "source_kind": None,
+        "source_ref": None,
+        "class": None,
+        "excerpt_hash": None,
+        "event_type": None,
+        "event_at_utc": None,
+        "raw_payload": None,
+    }
+    payload = authority.get_latest_friction_event_payload(conn, friction_id)
+    if not payload:
+        return out
+    out["found"] = True
+    out["raw_payload"] = {k: v for k, v in payload.items() if not k.startswith("_")}
+    out["source_kind"] = payload.get("source_kind")
+    out["source_ref"] = payload.get("source_ref")
+    out["class"] = payload.get("class")
+    out["excerpt_hash"] = payload.get("excerpt_hash")
+    out["event_type"] = payload.get("_event_type")
+    out["event_at_utc"] = payload.get("_event_at_utc")
+    return out
 
 
 def _self_check() -> int:
@@ -675,6 +710,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=DEFAULT_MANIFEST_LIMIT,
         help=f"Maximum rows to include in generated manifest (max {MAX_MANIFEST_LIMIT}).",
     )
+    # V2.1 Slice 1B: per-row source drilldown reads the latest event payload for
+    # the given friction_id (no new index, no projection, no directory).
+    parser.add_argument(
+        "--source-drilldown",
+        default=None,
+        metavar="FRICTION_ID",
+        help=(
+            "Read the latest friction_events.payload for the named friction_id "
+            "and surface source_kind / source_ref / class / excerpt_hash. "
+            "Read-only; no mutation."
+        ),
+    )
     args = parser.parse_args(argv)
     args.db_path = None
     return args
@@ -746,6 +793,18 @@ def main() -> int:
                     print(f"    - {reason}")
             if manifest.get("enqueue_command"):
                 print(f"  enqueue_command: {manifest['enqueue_command']}")
+        drilldown = payload.get("source_drilldown")
+        if isinstance(drilldown, dict):
+            print("source_drilldown:")
+            print(f"  friction_id: {drilldown['friction_id']}")
+            print(f"  found: {drilldown['found']}")
+            if drilldown["found"]:
+                print(f"  source_kind: {drilldown['source_kind']}")
+                print(f"  class: {drilldown['class']}")
+                print(f"  source_ref: {drilldown['source_ref']}")
+                print(f"  excerpt_hash: {drilldown['excerpt_hash']}")
+                print(f"  event_type: {drilldown['event_type']}")
+                print(f"  event_at_utc: {drilldown['event_at_utc']}")
         print(f"db_path: {db_path}")
     return 0
 

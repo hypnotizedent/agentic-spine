@@ -45,6 +45,37 @@ def main() -> int:
     parser.add_argument("--actual", required=True)
     parser.add_argument("--severity", default="medium")
     parser.add_argument("--auto-reconcile", action="store_true")
+    # V2.1 Slice 1B: optional source-metadata flags persisted in the
+    # friction_events.payload_json column. No schema migration; payload column
+    # already accepts arbitrary JSON keys (gaps_sql_authority.insert_friction_event).
+    # Read back via friction.queue.status --source-drilldown <friction_id>.
+    parser.add_argument(
+        "--source-kind",
+        default=None,
+        help=(
+            "Source classification: agent_terminal_closeout | clerk_structured | "
+            "operator | other. Optional; persisted in event payload."
+        ),
+    )
+    parser.add_argument(
+        "--source-ref",
+        default=None,
+        help="Free-form source reference (session/tool/run ref). Optional.",
+    )
+    parser.add_argument(
+        "--excerpt-hash",
+        default=None,
+        help="sha256 of the raw closeout excerpt that produced this row. Optional.",
+    )
+    parser.add_argument(
+        "--class",
+        dest="class_",
+        default=None,
+        help=(
+            "Friction class (e.g. agent_reported_lifecycle_stall). "
+            "Persisted in event payload for drilldown."
+        ),
+    )
     args = parser.parse_args()
 
     db_path, _ = authority.resolve_paths(ROOT)
@@ -53,6 +84,18 @@ def main() -> int:
 
     now = utc_now()
     fingerprint = make_fingerprint(args.capability, args.expected, args.actual)
+
+    # Build optional source-metadata payload (V2.1 Slice 1B).
+    # Empty when no flags supplied → existing callers see no event-payload change.
+    source_payload: dict[str, str] = {}
+    if args.source_kind:
+        source_payload["source_kind"] = args.source_kind
+    if args.source_ref:
+        source_payload["source_ref"] = args.source_ref
+    if args.excerpt_hash:
+        source_payload["excerpt_hash"] = args.excerpt_hash
+    if args.class_:
+        source_payload["class"] = args.class_
 
     # Dedup: if same fingerprint exists, increment hit_count
     existing = authority.get_friction_by_fingerprint(conn, fingerprint)
@@ -75,6 +118,7 @@ def main() -> int:
             to_status=existing["status"],
             reason=f"Duplicate ingest (hit_count={existing['hit_count']})",
             actor="friction.ingest",
+            payload=source_payload or None,
         )
         conn.commit()
         item_out = {
@@ -109,6 +153,7 @@ def main() -> int:
             to_status="queued",
             reason="New friction item ingested via friction.ingest capability",
             actor="friction.ingest",
+            payload=source_payload or None,
         )
         conn.commit()
         item_out = {
@@ -117,6 +162,8 @@ def main() -> int:
             "severity": args.severity,
             "dedup": False,
         }
+        if source_payload:
+            item_out["source_metadata"] = source_payload
 
     # Append to NDJSON projection for parity
     state_root = Path(os.environ.get(

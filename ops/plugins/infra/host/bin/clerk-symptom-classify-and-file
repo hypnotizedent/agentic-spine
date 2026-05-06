@@ -45,6 +45,7 @@ Operator-mandated stop lines per PACKET-592 Phase 1 approval:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -623,6 +624,211 @@ def classify_entry_policy(signals: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# V2.1 Slice 1B — agent terminal closeout source mode
+#
+# Classifies free-text closeout prose from the spine-terminal-session-runner
+# into a fixed set of agent-semantic friction classes. Calls friction.ingest
+# with source-metadata flags so friction.queue.status --source-drilldown can
+# trace each row back to its closeout origin via the existing event payload
+# column. NO new authority plane, NO new index, NO new directory.
+#
+# Fingerprint design: (capability, expected, actual) is stable per
+# (class, tool, loop_id) so same agent in same loop emitting paraphrases
+# of the same root issue dedups (hit_count++). Source ref + excerpt hash
+# live in event payload, NOT in fingerprint, so anchors don't fragment dedup.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# (class_name, regex, severity, expected_string)
+TERMINAL_CLOSEOUT_PATTERNS: list[tuple[str, re.Pattern[str], str, str]] = [
+    (
+        "agent_reported_lifecycle_stall",
+        re.compile(
+            r"stamps?\s+stay\s+executing"
+            r"|delegation\s+stuck\s+on\s+picked[_\s-]?up"
+            r"|loop\s+closeout\s+defers"
+            r"|worker\s+lease\s+(?:didn'?t|did\s+not|never)\s+release"
+            r"|stuck\s+on\s+executing",
+            re.IGNORECASE,
+        ),
+        "medium",
+        "lifecycle stamps transition out of executing within lease lifecycle",
+    ),
+    (
+        "agent_reported_recurring_failure",
+        re.compile(
+            r"kept\s+hitting"
+            r"|hit\s+this\s+again"
+            r"|this\s+keeps?\s+breaking"
+            r"|keeps?\s+failing",
+            re.IGNORECASE,
+        ),
+        "medium",
+        "agent calls friction.ingest in-session for recurring failure, not in closing prose",
+    ),
+    (
+        "agent_reported_packetization_request",
+        re.compile(
+            r"worth\s+packetizing"
+            r"|should\s+(?:be|need\s+to\s+be)\s+a\s+packet"
+            r"|needs?\s+governed\s+work"
+            r"|needs?\s+a\s+packet",
+            re.IGNORECASE,
+        ),
+        "low",
+        "agent calls controller_prompt.create directly when work is governed-packet-shaped",
+    ),
+    (
+        "agent_reported_worker_state_drift",
+        re.compile(
+            r"worker\s+thinks\s+it'?s\s+executing\s+but\s+isn'?t"
+            r"|claim\s*/\s*result\s+divergence"
+            r"|worker\s+state\s+drift",
+            re.IGNORECASE,
+        ),
+        "high",
+        "worker claim and result states converge under canonical lifecycle reads",
+    ),
+    (
+        "agent_reported_split_brain",
+        re.compile(
+            r"two\s+truths"
+            r"|projection\s+disagrees\s+with\s+authority"
+            r"|readback\s+doesn'?t\s+match\s+state"
+            r"|split[\s-]?brain",
+            re.IGNORECASE,
+        ),
+        "high",
+        "shared_authority.db is the single source; projections converge",
+    ),
+]
+
+TERMINAL_CLOSEOUT_CATCHALL_KW = re.compile(
+    r"\b(?:bug|broken|wrong|stuck|crashes?|crashing|hangs?|hanging)\b",
+    re.IGNORECASE,
+)
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _build_source_ref(
+    *,
+    tool: str,
+    session_id: str,
+    terminal_id: str,
+    explicit: str,
+) -> str:
+    """Build a deterministic source_ref string from runner metadata. Avoids
+    mutating user input; just joins fields. Stored in friction event payload.
+    """
+    if explicit:
+        return explicit
+    parts: list[str] = []
+    if tool:
+        parts.append(f"tool={tool}")
+    if session_id:
+        parts.append(f"session={session_id}")
+    if terminal_id:
+        parts.append(f"terminal={terminal_id}")
+    return ";".join(parts) if parts else "(unspecified)"
+
+
+def read_agent_terminal_closeout(
+    *,
+    prose: str,
+    tool: str,
+    session_id: str,
+    terminal_id: str,
+    loop_id: str,
+    source_ref: str,
+) -> dict[str, Any]:
+    return {
+        "prose": prose or "",
+        "tool": tool or "",
+        "session_id": session_id or "",
+        "terminal_id": terminal_id or "",
+        "loop_id": loop_id or "",
+        "source_ref": _build_source_ref(
+            tool=tool,
+            session_id=session_id,
+            terminal_id=terminal_id,
+            explicit=source_ref,
+        ),
+        "excerpt_hash": _sha256_text(prose or ""),
+    }
+
+
+def _terminal_closeout_record(
+    *,
+    sig_class: str,
+    severity: str,
+    expected: str,
+    parsed: dict[str, Any],
+) -> dict[str, Any]:
+    """Emit one classified record. Fingerprint is stable per (class, tool,
+    loop_id) — anchors and excerpt live in event payload, not fingerprint.
+    """
+    tool = parsed.get("tool") or ""
+    loop_id = parsed.get("loop_id") or ""
+    actual = (
+        f"{sig_class}: detected in agent closeout prose; "
+        f"tool={tool or '-'}; loop={loop_id or '-'}"
+    )
+    return {
+        "dedupe_key": f"agent_terminal_closeout:{sig_class}:{loop_id or '-'}",
+        "classification": "agent_terminal_closeout",
+        "capability": sig_class,
+        "expected": expected,
+        "actual": actual,
+        "severity": severity,
+        "owner": "agent_actor",
+        "autonomy": "read_only_diagnosis_auto",
+        "next_action": (
+            "reconcile via friction.reconcile --friction-id <id> "
+            "(routed by mailroom in V2.1 Slice 2)"
+        ),
+        # Source metadata — written to friction event payload by file_via_friction_ingest.
+        "source_kind": "agent_terminal_closeout",
+        "source_ref": parsed.get("source_ref") or "",
+        "excerpt_hash": parsed.get("excerpt_hash") or "",
+        "class": sig_class,
+    }
+
+
+def classify_agent_terminal_closeout(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Match prose against the fixed pattern table; emit one record per
+    matched class. If no specific class matched but strong-concern keywords
+    are present, emit a single agent_reported_unknown_spine_bug catch-all.
+    """
+    out: list[dict[str, Any]] = []
+    prose = parsed.get("prose") or ""
+    if not prose.strip():
+        return out
+    matched_classes: set[str] = set()
+    for sig_class, pattern, severity, expected in TERMINAL_CLOSEOUT_PATTERNS:
+        if pattern.search(prose):
+            matched_classes.add(sig_class)
+            out.append(_terminal_closeout_record(
+                sig_class=sig_class,
+                severity=severity,
+                expected=expected,
+                parsed=parsed,
+            ))
+    if not matched_classes and TERMINAL_CLOSEOUT_CATCHALL_KW.search(prose):
+        out.append(_terminal_closeout_record(
+            sig_class="agent_reported_unknown_spine_bug",
+            severity="low",
+            expected=(
+                "agent describes spine-internal concern using a recognized class; "
+                "catch-all means class taxonomy needs widening or the prose was unclear"
+            ),
+            parsed=parsed,
+        ))
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Filing
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -630,6 +836,8 @@ def file_via_friction_ingest(record: dict[str, Any]) -> dict[str, Any]:
     """Invoke ./bin/ops cap run friction.ingest with the record's fields.
 
     Sets SPINE_ROLE_POLICY_OVERRIDE_REF to identify the clerk as the caller.
+    Forwards V2.1 Slice 1B source-metadata flags when the record carries them
+    (only agent-terminal-closeout records today; existing classifiers omit).
     """
     env = os.environ.copy()
     env["SPINE_ROLE_POLICY_OVERRIDE_REF"] = "PACKET-592-CLERK-FRICTION-RAIL"
@@ -644,6 +852,14 @@ def file_via_friction_ingest(record: dict[str, Any]) -> dict[str, Any]:
         "--actual", record["actual"],
         "--severity", record["severity"],
     ]
+    if record.get("source_kind"):
+        cmd += ["--source-kind", record["source_kind"]]
+    if record.get("source_ref"):
+        cmd += ["--source-ref", record["source_ref"]]
+    if record.get("excerpt_hash"):
+        cmd += ["--excerpt-hash", record["excerpt_hash"]]
+    if record.get("class"):
+        cmd += ["--class", record["class"]]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, env=env)
         result = {
@@ -679,10 +895,99 @@ def main() -> int:
                              "(default: dry-run JSON only)")
     parser.add_argument("--json", action="store_true", help="JSON output")
     parser.add_argument("--self-check", action="store_true", help="self-check pass")
+    # V2.1 Slice 1B: dispatch to agent-terminal-closeout mode (reads stdin
+    # closeout prose; runs only the closeout classifier; skips all
+    # structured-signal probes). Default mode runs all existing classifiers.
+    parser.add_argument(
+        "--source",
+        choices=["all", "agent-terminal-closeout"],
+        default="all",
+        help=(
+            "Symptom source. 'all' (default) runs the existing structured-signal "
+            "classifiers. 'agent-terminal-closeout' reads closeout prose from stdin "
+            "and classifies into agent_reported_* friction classes."
+        ),
+    )
+    parser.add_argument("--session-id", default="", help="Closeout session id (V2.1 1B).")
+    parser.add_argument("--tool", default="", help="Closeout tool name (V2.1 1B).")
+    parser.add_argument("--terminal-id", default="", help="Closeout terminal id (V2.1 1B).")
+    parser.add_argument("--loop-id", default="", help="Closeout loop id (V2.1 1B).")
+    parser.add_argument(
+        "--source-ref",
+        default="",
+        help="Optional explicit source_ref override (V2.1 1B). Falls back to tool/session/terminal join.",
+    )
     args = parser.parse_args()
 
     if args.self_check:
         print("clerk.symptom.classify.and.file self-check PASS")
+        return 0
+
+    # V2.1 Slice 1B: agent-terminal-closeout mode reads stdin and runs ONLY
+    # the closeout classifier. Skips structured-signal reads/classifiers.
+    if args.source == "agent-terminal-closeout":
+        prose = sys.stdin.read() if not sys.stdin.isatty() else ""
+        parsed = read_agent_terminal_closeout(
+            prose=prose,
+            tool=args.tool,
+            session_id=args.session_id,
+            terminal_id=args.terminal_id,
+            loop_id=args.loop_id,
+            source_ref=args.source_ref,
+        )
+        classified = classify_agent_terminal_closeout(parsed)
+        filings: list[dict[str, Any]] = []
+        if args.file:
+            for record in classified:
+                result = file_via_friction_ingest(record)
+                filings.append({"dedupe_key": record["dedupe_key"], "result": result})
+        payload = {
+            "capability": "clerk.symptom.classify.and.file",
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "mode": "file" if args.file else "dry_run",
+            "source": "agent-terminal-closeout",
+            "input_summary": {
+                "tool": parsed["tool"],
+                "session_id": parsed["session_id"],
+                "terminal_id": parsed["terminal_id"],
+                "loop_id": parsed["loop_id"],
+                "source_ref": parsed["source_ref"],
+                "excerpt_hash": parsed["excerpt_hash"],
+                "prose_chars": len(parsed["prose"]),
+            },
+            "classified_count": len(classified),
+            "classified": classified,
+            "filings": filings if args.file else None,
+            "scope_note": (
+                "V2.1 Slice 1B agent-terminal-closeout source mode. "
+                "Reads stdin closeout prose; classifies into agent_reported_* friction classes; "
+                "files via existing friction.ingest with source-metadata flags. "
+                "Mailroom routing for known classes lands in Slice 2."
+            ),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"clerk.symptom.classify.and.file --source agent-terminal-closeout (mode: {payload['mode']})")
+            print(f"tool: {parsed['tool'] or '-'}; session: {parsed['session_id'] or '-'}; "
+                  f"terminal: {parsed['terminal_id'] or '-'}; loop: {parsed['loop_id'] or '-'}")
+            print(f"source_ref: {parsed['source_ref']}")
+            print(f"excerpt_hash: {parsed['excerpt_hash']}")
+            print(f"classified: {len(classified)} record(s)")
+            for record in classified:
+                print(f"  [{record['severity']:>6}] {record['classification']:<26} {record['dedupe_key']}")
+                print(f"          class:  {record['class']}")
+                print(f"          next:   {record['next_action']}")
+            if args.file:
+                filed_count = sum(1 for f in filings if f.get("result", {}).get("filed"))
+                print(f"\nfiled: {filed_count} / {len(filings)}")
+                for f in filings:
+                    rc = f.get("result", {}).get("exit_code", "?")
+                    ok = f.get("result", {}).get("filed")
+                    marker = "✓" if ok else "✗"
+                    print(f"  {marker} ({rc}) {f['dedupe_key']}")
+            else:
+                print("\n(dry-run; pass --file to invoke friction.ingest for each record)")
         return 0
 
     # PACKET-592 Phase 2: when status.sh --brief invokes the clerk for its

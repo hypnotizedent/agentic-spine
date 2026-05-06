@@ -1240,6 +1240,41 @@ def insert_friction_event(
     )
 
 
+def get_latest_friction_event_payload(
+    conn: sqlite3.Connection,
+    friction_id: str,
+) -> dict[str, Any] | None:
+    """Return the most-recent friction_events.payload_json for a friction_id
+    as a parsed dict. None when no events exist or payload is empty/null.
+    Used by friction.queue.status --source-drilldown to surface source metadata
+    (V2.1 Slice 1B) without a new index plane.
+    """
+    row = conn.execute(
+        """
+        SELECT payload_json, event_type, created_at_utc
+        FROM friction_events
+        WHERE friction_id = ?
+        ORDER BY created_at_utc DESC, id DESC
+        LIMIT 1
+        """,
+        (friction_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = row["payload_json"] if hasattr(row, "keys") else row[0]
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(decoded, dict) or not decoded:
+        return None
+    decoded["_event_type"] = (row["event_type"] if hasattr(row, "keys") else row[1])
+    decoded["_event_at_utc"] = (row["created_at_utc"] if hasattr(row, "keys") else row[2])
+    return decoded
+
+
 # ── Friction: Bootstrap (NDJSON -> SQLite) ───────────────────────
 
 
