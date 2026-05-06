@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# mint.suppliers.poll — producer-host orchestrator for the suppliers
+# witness pair (PACKET-1395). Runs ./bin/ops cap run mint.runtime.proof
+# locally (the read-only Mint product probe; requires ~/code/mint-modules
+# to be present on this host) and pipes its stdout into ./bin/ops cap run
+# mint.suppliers.witness, which is canonical-routed and writes the
+# per-poll artifact under storage_evidence_node state.
+#
+# Witness boundary: this script does NOT inspect or interpret the
+# suppliers.* rows. It only orchestrates the two cap calls. Mint product
+# logic stays Mint-owned; canonical artifact placement stays canonical-
+# owned. The script body is the substrate-honest answer to "producer
+# repo lives where mint-modules is, canonical state lives elsewhere":
+# run the producer where it works, route the writer to canonical.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+OPS="$REPO_ROOT/bin/ops"
+
+if [[ ! -x "$OPS" ]]; then
+    echo "mint.suppliers.poll FAIL: bin/ops not executable at $OPS" >&2
+    exit 1
+fi
+
+SELF_CHECK=0
+WITNESS_FORWARD_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --self-check)
+            SELF_CHECK=1
+            ;;
+        *)
+            WITNESS_FORWARD_ARGS+=("$arg")
+            ;;
+    esac
+done
+
+if [[ "$SELF_CHECK" == "1" ]]; then
+    # Cap-binding sanity only. Do NOT run the actual producer here —
+    # self-check must be safe to run on canonical (where mint-modules
+    # is absent by design).
+    if ! "$OPS" cap show mint.runtime.proof >/dev/null 2>&1; then
+        echo "mint.suppliers.poll self-check FAIL: cap show mint.runtime.proof" >&2
+        exit 1
+    fi
+    if ! "$OPS" cap show mint.suppliers.witness >/dev/null 2>&1; then
+        echo "mint.suppliers.poll self-check FAIL: cap show mint.suppliers.witness" >&2
+        exit 1
+    fi
+    echo "mint.suppliers.poll self-check PASS"
+    exit 0
+fi
+
+# Capture producer stdout (mint.runtime.proof is read-only and runs on
+# this host; it requires mint-modules to be present). Producer exits
+# non-zero when any check FAILs — that's normal Mint behavior, not a
+# poll failure. Use a tempfile so we can re-pipe to the writer cleanly.
+TMP="$(mktemp -t mint-suppliers-producer.XXXXXX)"
+trap 'rm -f "$TMP"' EXIT
+
+set +e
+"$OPS" cap run mint.runtime.proof > "$TMP" 2>&1
+producer_rc=$?
+set -e
+
+if [[ ! -s "$TMP" ]]; then
+    echo "mint.suppliers.poll FAIL: mint.runtime.proof produced no output (rc=$producer_rc)" >&2
+    echo "  Likely cause: ~/code/mint-modules is not present on this host." >&2
+    echo "  Run mint.suppliers.poll from the operator workstation where mint-modules lives." >&2
+    exit 1
+fi
+
+# Pipe captured producer stdout into the canonical-routed writer. The
+# writer reads sys.stdin in default mode; cap.sh forwards stdin across
+# its SSH route to canonical (storage_evidence_node) where the artifact
+# write lands.
+"$OPS" cap run mint.suppliers.witness "${WITNESS_FORWARD_ARGS[@]}" < "$TMP"

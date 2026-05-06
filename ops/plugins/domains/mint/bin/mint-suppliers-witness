@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """mint.suppliers.witness — first L3 witness adoption (PACKET-1395).
 
-Polls the existing mint.runtime.proof producer, filters for suppliers.*
-checks, writes a per-poll yaml under canonical state, and emits a status
-JSON. Witness-only by construction:
+Canonical-routed writer half of the suppliers witness pair. Reads
+pre-captured mint.runtime.proof stdout from sys.stdin, filters
+suppliers.* CHECK rows, writes a per-poll yaml under canonical state,
+and emits a status JSON. Witness-only by construction:
 
 - mutation_access: scoped_to_artifact_self (per-poll yaml under
   $SPINE_STATE/domain-state/mint/suppliers/per-poll/<iso>.yaml)
 - decision_authority: none — does not decide module promotion, runtime
-  state, pricing action, customer action, or any Mint product state
+  state, pricing action, customer action, supplier admission, or
+  verify pass/fail
 - does_not_replace: mint.runtime.proof, mint.modules.health, suppliers
   product state
 
@@ -17,10 +19,18 @@ producer's stdout text and parses CHECK / STATE / DETAIL columns ONLY.
 It does not parse the FAIL detail body (which carries Mint-specific
 JSON shape — operator drilldown via mint.runtime.proof handles that).
 
-Patterned after commit.narrator.artifact.write + Slice E reader. The
-runbook recommends generalizing this to a generic
-witness.artifact.write primitive when a third L3 adoption appears;
-two domains (narrator + this) is too few to justify the abstraction.
+The substrate boundary is real: mint.runtime.proof requires
+~/code/mint-modules which lives only on the operator workstation;
+canonical state lives on storage_evidence_node (pve). The split:
+- mint.suppliers.poll runs the producer where mint-modules exists and
+  pipes producer stdout into this writer cap
+- mint.suppliers.witness (this) is mutating + state_authority
+  read_write_canonical, so cap.sh routes it to canonical, where it
+  reads piped stdin and writes the artifact.
+
+Patterned after commit.narrator.artifact.write. The runbook recommends
+generalizing into a generic witness.artifact.write primitive when a
+third L3 adoption appears; two domains (narrator + this) is too few.
 """
 from __future__ import annotations
 
@@ -28,9 +38,8 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -75,26 +84,8 @@ def parse_suppliers_rows(text: str) -> list[dict[str, str]]:
     return rows
 
 
-def run_producer(timeout: int = 60) -> tuple[str, int]:
-    """Invoke mint.runtime.proof via cap.sh. Returns (stdout, returncode).
-
-    The producer exits non-zero when any check FAILs — that's normal Mint
-    behavior, not a witness error. Caller treats stdout as the truth.
-    """
-    repo_root = Path(__file__).resolve().parents[5]
-    bin_ops = repo_root / "bin" / "ops"
-    proc = subprocess.run(
-        [str(bin_ops), "cap", "run", PRODUCER_CAP],
-        capture_output=True, text=True,
-        timeout=timeout, check=False,
-        cwd=str(repo_root),
-    )
-    return proc.stdout, proc.returncode
-
-
 def build_artifact(
     rows: list[dict[str, str]],
-    producer_returncode: int,
     producer_stdout_excerpt: str,
 ) -> dict[str, Any]:
     fail_rows = [r for r in rows if r["state"] == "FAIL"]
@@ -126,7 +117,6 @@ def build_artifact(
         },
         "producer": {
             "cap": PRODUCER_CAP,
-            "returncode": producer_returncode,
             "stdout_excerpt": producer_stdout_excerpt[:2000],
         },
         "checks": rows,
@@ -199,14 +189,16 @@ def emit_status(state_root: Path, ttl_seconds: int) -> dict[str, Any]:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=CAPABILITY)
     parser.add_argument("--read-only", action="store_true",
-                        help="Skip producer; just read latest artifact and emit status JSON.")
+                        help="Skip stdin read; just emit latest artifact's status JSON.")
     parser.add_argument("--state-root", default=None,
                         help="Override SPINE_STATE root (default: env SPINE_STATE).")
     parser.add_argument("--freshness-ttl-seconds", type=int,
                         default=DEFAULT_FRESHNESS_TTL_SECONDS,
                         help=f"Stale TTL for latest poll (default {DEFAULT_FRESHNESS_TTL_SECONDS}s = 6h).")
-    parser.add_argument("--producer-timeout-seconds", type=int, default=60,
-                        help="Timeout for mint.runtime.proof invocation (default 60s).")
+    parser.add_argument("--from-file", default=None,
+                        help="Read producer stdout from FILE instead of sys.stdin "
+                             "(file path resolved on the host where the writer "
+                             "executes — i.e., canonical after cap.sh routing).")
     parser.add_argument("--json", action="store_true", help="Emit JSON outcome.")
     parser.add_argument("--self-check", action="store_true", help="Verify dependencies and exit.")
     return parser.parse_args(argv)
@@ -222,7 +214,10 @@ def main(argv: list[str]) -> int:
             print(f"{CAPABILITY} self-check FAIL: pyyaml import: {exc}", file=sys.stderr)
             return 1
         # parser sanity
-        _ = parse_suppliers_rows("suppliers.health PASS ok")
+        rows = parse_suppliers_rows("suppliers.health PASS ok")
+        if not rows or rows[0]["check"] != "suppliers.health":
+            print(f"{CAPABILITY} self-check FAIL: row parse", file=sys.stderr)
+            return 1
         print(f"{CAPABILITY} self-check PASS")
         return 0
 
@@ -241,17 +236,30 @@ def main(argv: list[str]) -> int:
                   f"fail_count={attn.get('fail_count')}/{attn.get('total_checks')}")
         return 0
 
-    # Default poll mode: run producer, filter, write artifact, emit status.
-    try:
-        stdout, returncode = run_producer(timeout=max(5, args.producer_timeout_seconds))
-    except Exception as exc:
-        print(f"{CAPABILITY} FAIL: producer invocation: {exc}", file=sys.stderr)
+    # Default mode: read pre-captured producer stdout, filter, write
+    # artifact, emit status. The producer is NOT invoked here — see
+    # mint.suppliers.poll for the producer-host orchestrator.
+    if args.from_file:
+        try:
+            stdout_text = Path(args.from_file).read_text(encoding="utf-8")
+        except Exception as exc:
+            print(f"{CAPABILITY} FAIL: cannot read --from-file {args.from_file}: {exc}",
+                  file=sys.stderr)
+            return 1
+    else:
+        stdout_text = sys.stdin.read()
+    if not stdout_text.strip():
+        print(f"{CAPABILITY} FAIL: producer stdout is empty — pipe "
+              "mint.runtime.proof stdout into this cap, or use "
+              "mint.suppliers.poll to orchestrate the producer call.",
+              file=sys.stderr)
         return 1
-    rows = parse_suppliers_rows(stdout)
+    rows = parse_suppliers_rows(stdout_text)
     if not rows:
-        print(f"{CAPABILITY} FAIL: producer emitted no suppliers.* rows", file=sys.stderr)
+        print(f"{CAPABILITY} FAIL: producer stdout contained no "
+              "suppliers.* rows", file=sys.stderr)
         return 1
-    artifact = build_artifact(rows, returncode, stdout)
+    artifact = build_artifact(rows, stdout_text)
 
     target_dir = state_root / ARTIFACT_REL
     target_dir.mkdir(parents=True, exist_ok=True)

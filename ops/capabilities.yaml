@@ -2113,20 +2113,26 @@ capabilities:
     layer: L3_product_runtime
   mint.suppliers.witness:
     description: |
-      First L3 witness adoption (PACKET-1395). Polls the existing
-      mint.runtime.proof producer, filters suppliers.* CHECK rows, writes a
-      per-poll yaml under $SPINE_STATE/domain-state/mint/suppliers/per-poll/
-      <iso>.yaml with schema_version=1 and a witness_bound declaration.
-      Witness-bound: mutation_access is scoped to the artifact path; no
-      decision authority over module promotion, runtime state, pricing
-      action, customer action, supplier admission, or verify pass/fail.
-      Does not replace mint.runtime.proof / mint.modules.health / suppliers
-      product state. Mint product/domain logic stays Mint-owned: only the
-      producer's stdout text is parsed (CHECK / STATE / DETAIL columns); the
-      FAIL detail body is kept RAW. Routed via cap.sh so writes land on
-      storage_evidence_node canonical regardless of calling host. --read-only
-      skips the producer and just emits the latest artifact's parsed status
-      JSON for status.sh consumption.
+      First L3 witness adoption (PACKET-1395). Canonical-routed writer
+      half of the suppliers witness pair. Reads pre-captured
+      mint.runtime.proof stdout from sys.stdin (or --from-file PATH on
+      the writer host), filters suppliers.* CHECK rows, and writes a
+      per-poll yaml under $SPINE_STATE/domain-state/mint/suppliers/per-
+      poll/<iso>.yaml with schema_version=1 and a witness_bound
+      declaration. Witness-bound: mutation_access is scoped to the
+      artifact path; no decision authority over module promotion,
+      runtime state, pricing action, customer action, supplier
+      admission, or verify pass/fail. Does not replace
+      mint.runtime.proof / mint.modules.health / suppliers product
+      state. Mint product/domain logic stays Mint-owned: only the
+      producer's stdout text is parsed (CHECK / STATE / DETAIL columns);
+      the FAIL detail body is kept RAW. Routed via cap.sh so writes
+      land on storage_evidence_node canonical regardless of calling
+      host. The producer (mint.runtime.proof) is NOT invoked here —
+      see mint.suppliers.poll for the producer-host orchestrator that
+      pipes the producer into this writer. --read-only skips stdin and
+      emits the latest artifact's parsed status JSON for status.sh
+      consumption.
     tags:
       - mint
       - observability
@@ -2144,7 +2150,38 @@ capabilities:
     outputs:
       - stdout
       - file:domain-state/mint/suppliers/per-poll/<iso>.yaml
-    plane: domain_external
+    plane: fabric
+    domain: mint
+    layer: L3_product_runtime
+  mint.suppliers.poll:
+    description: |
+      Producer-host orchestrator for the suppliers witness pair
+      (PACKET-1395). Runs mint.runtime.proof locally — requires
+      ~/code/mint-modules to be present on the calling host — and pipes
+      its stdout into mint.suppliers.witness, which is canonical-routed
+      and writes the per-poll artifact under storage_evidence_node
+      state. This is the substrate-honest split: producer runs where the
+      Mint product repo lives; canonical write lands where canonical
+      state lives. Operator-elective; no auto-poll cron yet (future
+      scheduler.registry entry). Read-only at this layer because the
+      script itself does no I/O beyond invoking the two caps; the
+      mutation gate fires on the routed mint.suppliers.witness call.
+    tags:
+      - mint
+      - observability
+      - suppliers
+      - witness
+      - orchestrator
+    command: ./ops/plugins/domains/mint/bin/mint-suppliers-poll
+    script_path: ./ops/plugins/domains/mint/bin/mint-suppliers-poll
+    cwd: $SPINE_CODE
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+      - stdout
+    plane: fabric
     domain: mint
     layer: L3_product_runtime
   infra.proxmox.guest.control:
