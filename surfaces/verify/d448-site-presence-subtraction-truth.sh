@@ -108,14 +108,24 @@ for old_id in [
     if authority.get("expected_authority_state") == "authoritative":
         fail(f"{old_id} still authoritative in master inventory")
 
+# PACKET-1378: network.unifi.{home,shop}.clients.observed.yaml were deleted
+# from ops/bindings/ and moved behind the Network branch's runtime cache.
+# Only the surviving ops/bindings/ folded carrier needs the
+# site.presence.status replacement-pointer text now.
 for rel in [
     "ops/bindings/home.device.registry.yaml",
-    "ops/bindings/network.unifi.home.clients.observed.yaml",
-    "ops/bindings/network.unifi.shop.clients.observed.yaml",
 ]:
     text = (root / rel).read_text(encoding="utf-8")
     if "site.presence.status" not in text:
         fail(f"{rel} must name site.presence.status as replacement")
+for deleted_rel in [
+    "ops/bindings/network.unifi.home.clients.observed.yaml",
+    "ops/bindings/network.unifi.shop.clients.observed.yaml",
+    "ops/bindings/home.storage.map.yaml",
+    "ops/bindings/shop.storage.map.yaml",
+]:
+    if (root / deleted_rel).exists():
+        fail(f"{deleted_rel} must remain deleted (PACKET-1378); cap-generated carriers live under $SPINE_DOMAIN_STATE/site-intelligence/")
 
 # PACKET-1270: lock home.device.registry.yaml file-local authority scope.
 # Snapshot/master inventory already demote this registry to compatibility
@@ -394,33 +404,37 @@ for required_stage in ["site_profile", "topology", "presence", "node_admission",
         fail(f"site.presence.status --expert first_class_system.lifecycle missing stage {required_stage!r} (PACKET-1301)")
 folded_inputs = expert_payload.get("folded_legacy_inputs") or []
 folded_paths = {row.get("path") for row in folded_inputs if isinstance(row, dict)}
-# PACKET-1371: home.unifi.network.inventory.yaml deleted; the file/path is no
-# longer required in the folded_legacy_inputs provenance set. The remaining
-# six folded carriers stay until their own deletion/migration packet lands.
+# PACKET-1371: home.unifi.network.inventory.yaml deleted.
+# PACKET-1378: UniFi observed-client carriers + storage maps moved out of
+# ops/bindings/ into the runtime cache. folded_legacy_inputs lists them
+# under their $SPINE_DOMAIN_STATE/site-intelligence/<branch>/ path now.
 for required_path in [
     "ops/bindings/home.device.registry.yaml",
+    "ops/bindings/shop.device.registry.yaml",
+    "$SPINE_DOMAIN_STATE/site-intelligence/network/network.unifi.home.clients.observed.yaml",
+    "$SPINE_DOMAIN_STATE/site-intelligence/network/network.unifi.shop.clients.observed.yaml",
+    "$SPINE_DOMAIN_STATE/site-intelligence/storage/home.storage.map.yaml",
+    "$SPINE_DOMAIN_STATE/site-intelligence/storage/shop.storage.map.yaml",
+]:
+    if required_path not in folded_paths:
+        fail(f"site.presence.status --expert folded_legacy_inputs missing {required_path} (PACKET-1378)")
+for forbidden_repo_path in [
+    "ops/bindings/home.unifi.network.inventory.yaml",
     "ops/bindings/network.unifi.home.clients.observed.yaml",
     "ops/bindings/network.unifi.shop.clients.observed.yaml",
-    "ops/bindings/shop.device.registry.yaml",
     "ops/bindings/home.storage.map.yaml",
     "ops/bindings/shop.storage.map.yaml",
 ]:
-    if required_path not in folded_paths:
-        fail(f"site.presence.status --expert folded_legacy_inputs missing {required_path} (PACKET-1301)")
-if "ops/bindings/home.unifi.network.inventory.yaml" in folded_paths:
-    fail("site.presence.status folded_legacy_inputs must not list deleted home.unifi.network.inventory.yaml (PACKET-1371)")
+    if forbidden_repo_path in folded_paths:
+        fail(f"site.presence.status folded_legacy_inputs must not list deleted repo binding {forbidden_repo_path} (PACKET-1378)")
 for item in folded_inputs:
     if isinstance(item, dict) and item.get("standalone_operator_surface") is not False:
         fail(f"folded legacy input must not remain standalone operator surface: {item} (PACKET-1301)")
-
-for rel in ["ops/bindings/home.storage.map.yaml", "ops/bindings/shop.storage.map.yaml"]:
-    storage_map = yaml.safe_load((root / rel).read_text(encoding="utf-8")) or {}
-    if storage_map.get("subordinate_to") != "ops/bindings/storage.scaffold.authority.yaml":
-        fail(f"{rel} must declare subordinate_to=ops/bindings/storage.scaffold.authority.yaml (PACKET-1308)")
-    if storage_map.get("superseded_for_storage_truth_by") != "payload.custody.status":
-        fail(f"{rel} must declare superseded_for_storage_truth_by=payload.custody.status (PACKET-1308)")
-    if storage_map.get("superseded_for_payload_custody_by") != "payload.custody.status":
-        fail(f"{rel} must declare superseded_for_payload_custody_by=payload.custody.status (PACKET-1308)")
+# PACKET-1378: storage maps moved out of ops/bindings/; the PACKET-1308
+# repo-file-local subordinate_to/superseded_for_*_by checks were retired
+# with the file. The runtime cache copies inherit producer_metadata + the
+# folded_legacy_inputs subtraction_state="runtime_cache_storage_input"
+# instead of repo-side string assertions.
 freshness_summary = all_payload.get("freshness_summary") or {}
 if "stale" not in freshness_summary:
     fail("site.presence.status must emit freshness_summary with stale input count (PACKET-1301 honesty)")
@@ -1152,8 +1166,17 @@ PRODUCER_KIND_ALLOWED = {"cap_generated", "hand_maintained_operator_assertion"}
 folded_paths = [
     item.get("path") for item in folded_inputs if isinstance(item, dict) and item.get("path")
 ]
+# PACKET-1378: folded_legacy_inputs may use $SPINE_DOMAIN_STATE/... for
+# runtime-cache carriers. Expand the env var so the producer_metadata check
+# can read the live file regardless of which host runs the gate.
+domain_state_env = os.environ.get("SPINE_DOMAIN_STATE", "")
 for rel in folded_paths:
-    folded_path = root / rel
+    if rel.startswith("$SPINE_DOMAIN_STATE/"):
+        if not domain_state_env:
+            fail(f"folded_legacy_inputs path uses $SPINE_DOMAIN_STATE but env var unset: {rel} (PACKET-1378)")
+        folded_path = Path(domain_state_env) / rel[len("$SPINE_DOMAIN_STATE/"):]
+    else:
+        folded_path = root / rel
     if not folded_path.exists():
         fail(f"folded_legacy_inputs path missing on disk: {rel} (PACKET-1334)")
     folded_doc = yaml.safe_load(folded_path.read_text(encoding="utf-8")) or {}

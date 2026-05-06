@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,9 +27,32 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[5]
+
+
+def _domain_state_root() -> Path:
+    """Resolve the canonical SPINE_DOMAIN_STATE root.
+
+    PACKET-1378: site-intelligence runtime cache lives under
+    $SPINE_DOMAIN_STATE/site-intelligence/<branch>/...
+    """
+    explicit = os.environ.get("SPINE_DOMAIN_STATE")
+    if explicit:
+        return Path(explicit)
+    state = os.environ.get("SPINE_STATE")
+    if state:
+        return Path(state) / "domain-state"
+    return ROOT / ".runtime/spine/state/domain-state"
+
+
+_SITE_INTEL_NETWORK = _domain_state_root() / "site-intelligence/network"
+
+
 PATHS = {
-    "home_observed": ROOT / "ops/bindings/network.unifi.home.clients.observed.yaml",
-    "shop_observed": ROOT / "ops/bindings/network.unifi.shop.clients.observed.yaml",
+    # PACKET-1378: cap-generated UniFi observed carriers live under the
+    # branch-owned runtime cache, not in ops/bindings/. The repo bindings
+    # were deleted; only the runtime cache is read.
+    "home_observed": _SITE_INTEL_NETWORK / "network.unifi.home.clients.observed.yaml",
+    "shop_observed": _SITE_INTEL_NETWORK / "network.unifi.shop.clients.observed.yaml",
     "home_dhcp_audit": ROOT / "ops/bindings/home.dhcp.audit.yaml",
     "shop_dhcp_audit": ROOT / "ops/bindings/shop.dhcp.audit.yaml",
 }
@@ -37,12 +61,12 @@ PRIVATE_PRODUCERS = [
     {
         "capability": "network.home.unifi.clients.snapshot",
         "kind": "private_producer",
-        "writes": "ops/bindings/network.unifi.home.clients.observed.yaml",
+        "writes": "$SPINE_DOMAIN_STATE/site-intelligence/network/network.unifi.home.clients.observed.yaml",
     },
     {
         "capability": "network.unifi.clients.snapshot",
         "kind": "private_producer",
-        "writes": "ops/bindings/network.unifi.shop.clients.observed.yaml",
+        "writes": "$SPINE_DOMAIN_STATE/site-intelligence/network/network.unifi.shop.clients.observed.yaml",
     },
     {
         "capability": "network.home.dhcp.audit",
@@ -55,6 +79,21 @@ PRIVATE_PRODUCERS = [
         "writes": "ops/bindings/shop.dhcp.audit.yaml",
     },
 ]
+
+
+def _source_ref_path(path: Path | None) -> str | None:
+    """Stringify a source path for the source_refs block.
+
+    PACKET-1378: site-intelligence carriers now live under the runtime cache
+    (outside the repo); fall back to absolute string when the path does not
+    descend from ROOT instead of raising.
+    """
+    if path is None or not path.exists():
+        return None
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -170,12 +209,12 @@ def site_block(
         "stale_snapshot_artifacts": stale_snapshot_artifacts,
         "unknown_observed_clients": unknown_observed,
         "source_refs": {
-            "observed_clients": str(observed_path.relative_to(ROOT))
-            if observed_path.exists()
-            else None,
-            "dhcp_audit": str(dhcp_path.relative_to(ROOT))
-            if dhcp_path.exists()
-            else None,
+            # PACKET-1378: paths can be inside the repo (DHCP audit YAML) or
+            # under the runtime cache (UniFi observed). Stringify the
+            # absolute path; only call relative_to when it actually descends
+            # from ROOT.
+            "observed_clients": _source_ref_path(observed_path),
+            "dhcp_audit": _source_ref_path(dhcp_path),
         },
         "actions_allowed": {
             "may_create_node": False,

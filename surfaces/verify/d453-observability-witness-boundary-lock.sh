@@ -17,7 +17,12 @@ DASHY_RETIRE="$ROOT/ops/plugins/infra/observability/bin/observability-dashy-resi
 VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
 PLACEMENT_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
 STACK_REGISTRY="$ROOT/docs/governance/STACK_REGISTRY.yaml"
-SHOP_STORAGE_MAP="$ROOT/ops/bindings/shop.storage.map.yaml"
+# PACKET-1378: shop storage map carrier moved out of ops/bindings/ into the
+# branch-owned runtime cache under
+# $SPINE_DOMAIN_STATE/site-intelligence/storage/. Observability witness
+# boundary still consumes the projection's runtime contents.
+_SPINE_DOMAIN_STATE="${SPINE_DOMAIN_STATE:-$ROOT/.runtime/spine/state/domain-state}"
+SHOP_STORAGE_MAP="$_SPINE_DOMAIN_STATE/site-intelligence/storage/shop.storage.map.yaml"
 
 fail() { echo "D453 FAIL: $*" >&2; exit 1; }
 

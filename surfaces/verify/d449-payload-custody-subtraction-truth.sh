@@ -19,6 +19,7 @@ command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 
 python3 - "$ROOT" "$CAPS" "$SNAPSHOT" "$MASTER" "$PAYLOAD_CUSTODY" <<'PY'
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -98,13 +99,31 @@ if not isinstance(master_by_id.get("authority.payload.custody.readback"), dict):
 # root.authority.contract.yaml#storage_evidence_node_canonical.file_plane_policy
 # and prior forensic trace
 # $SPINE_STATE/domain-state/STORAGE-EVIDENCE-PHASE-E-FORENSIC-DRIFT-TRACE-20260502.md.)
-for rel in [
+# PACKET-1378: shop/home storage maps moved out of ops/bindings/ into the
+# branch-owned runtime cache under
+# $SPINE_DOMAIN_STATE/site-intelligence/storage/. The repo bindings were
+# deleted; the runtime cache copies inherit producer_metadata +
+# superseded_for_payload_custody_by from the cap-generated payload, which
+# D448's PACKET-1334 producer_metadata check enforces.
+for forbidden_repo_path in [
     "ops/bindings/shop.storage.map.yaml",
     "ops/bindings/home.storage.map.yaml",
 ]:
-    text = (root / rel).read_text(encoding="utf-8")
+    if (root / forbidden_repo_path).exists():
+        fail(f"{forbidden_repo_path} must remain deleted (PACKET-1378); storage maps live under $SPINE_DOMAIN_STATE/site-intelligence/storage/")
+domain_state_env = os.environ.get("SPINE_DOMAIN_STATE", "")
+if not domain_state_env:
+    fail("PACKET-1378 storage map runtime cache check requires SPINE_DOMAIN_STATE env")
+for runtime_rel in (
+    "site-intelligence/storage/shop.storage.map.yaml",
+    "site-intelligence/storage/home.storage.map.yaml",
+):
+    runtime_path = Path(domain_state_env) / runtime_rel
+    if not runtime_path.exists():
+        fail(f"$SPINE_DOMAIN_STATE/{runtime_rel} must exist as runtime cache for storage map (PACKET-1378)")
+    text = runtime_path.read_text(encoding="utf-8")
     if "payload.custody.status" not in text:
-        fail(f"{rel} must name payload.custody.status as replacement")
+        fail(f"$SPINE_DOMAIN_STATE/{runtime_rel} must name payload.custody.status as the consuming branch readback")
 
 proc = subprocess.run([str(payload_custody), "--json"], text=True, capture_output=True)
 if proc.returncode != 0:
