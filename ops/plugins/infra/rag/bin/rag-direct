@@ -46,6 +46,32 @@ def expand_path(raw: str) -> Path:
     return Path(raw.replace("$SPINE_STATE", str(state_root()))).expanduser().resolve()
 
 
+def exclusion_prefixes(doc: dict[str, Any]) -> list[Path]:
+    policy = doc.get("index_policy") if isinstance(doc.get("index_policy"), dict) else {}
+    rows = policy.get("exclusion_prefixes") if isinstance(policy.get("exclusion_prefixes"), list) else []
+    prefixes: list[Path] = []
+    for item in rows:
+        raw = str(item or "").rstrip("/")
+        if not raw:
+            continue
+        if "$SPINE_STATE" in raw:
+            prefixes.append(expand_path(raw))
+            continue
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = SPINE_ROOT / path
+        prefixes.append(path.resolve())
+    return prefixes
+
+
+def is_excluded(path: Path, prefixes: list[Path]) -> bool:
+    resolved = path.resolve()
+    for prefix in prefixes:
+        if resolved == prefix or prefix in resolved.parents:
+            return True
+    return False
+
+
 def contract() -> dict[str, Any]:
     return load_yaml(CONTRACT_PATH)
 
@@ -200,17 +226,18 @@ def has_secret_material(text: str) -> bool:
 def iter_manifest(doc: dict[str, Any]) -> list[dict[str, Any]]:
     policy = doc.get("index_policy") if isinstance(doc.get("index_policy"), dict) else {}
     rows = policy.get("runtime_allowlist") if isinstance(policy.get("runtime_allowlist"), list) else []
+    excluded = exclusion_prefixes(doc)
     files: dict[str, dict[str, Any]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
         base = expand_path(str(row.get("path") or ""))
-        if not base.exists():
+        if not base.exists() or is_excluded(base, excluded):
             continue
         globs = row.get("include_globs") if isinstance(row.get("include_globs"), list) else []
         if not globs:
             continue
-        candidates = [base] if base.is_file() else [p for p in base.rglob("*") if p.is_file()]
+        candidates = [base] if base.is_file() else [p for p in base.rglob("*") if p.is_file() and not is_excluded(p, excluded)]
         matched: list[Path] = []
         for path in candidates:
             rel_to_base = path.relative_to(base).as_posix() if base.is_dir() else path.name

@@ -63,6 +63,19 @@ grep -q "RAG is first-class retrieval tooling for agents, not memory and not aut
 grep -q "RAG answers must be treated as pointers" "$ROOT/docs/governance/SESSION_PROTOCOL.md" || fail "SESSION_PROTOCOL must require cited source reads before mutation"
 grep -q "Do not claim authority; cite source paths" "$ROOT/ops/plugins/infra/rag/bin/rag-direct" || fail "rag.direct must keep non-authority answer boundary"
 
+RAG_WORKSPACE="$ROOT/ops/bindings/domains/rag/rag.workspace.contract.yaml"
+if rg -n '(^|[[:space:]-])id:[[:space:]]*domain-state-spine|authority_class:[[:space:]]*spine_domain_state' "$RAG_WORKSPACE" >/tmp/d446-rag-domain-state-spine.txt 2>/dev/null; then
+  cat /tmp/d446-rag-domain-state-spine.txt >&2
+  rm -f /tmp/d446-rag-domain-state-spine.txt
+  fail "RAG must not index consumer-local domain-state/spine as an authority source"
+fi
+rm -f /tmp/d446-rag-domain-state-spine.txt
+
+if "$ROOT/ops/plugins/infra/rag/bin/rag-direct" manifest --summary | grep -q '"domain-state-spine"'; then
+  "$ROOT/ops/plugins/infra/rag/bin/rag-direct" manifest --summary >&2 || true
+  fail "RAG manifest still includes domain-state-spine sources"
+fi
+
 if rg -n '100\.98\.70\.70:11434|100\.71\.17\.29:6333' "$ROOT/ops/plugins/infra/rag/bin" >/tmp/d446-rag-endpoint-residue.txt 2>/dev/null; then
   cat /tmp/d446-rag-endpoint-residue.txt >&2
   rm -f /tmp/d446-rag-endpoint-residue.txt
@@ -70,4 +83,4 @@ if rg -n '100\.98\.70\.70:11434|100\.71\.17\.29:6333' "$ROOT/ops/plugins/infra/r
 fi
 rm -f /tmp/d446-rag-endpoint-residue.txt
 
-echo "D446 PASS: retired AnythingLLM/remote-reindex RAG residue is absent from current agent grammar and direct RAG remains canonical"
+echo "D446 PASS: retired AnythingLLM/remote-reindex RAG residue is absent, consumer-local domain-state/spine is not indexed, and direct RAG remains canonical"

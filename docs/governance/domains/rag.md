@@ -14,6 +14,11 @@ Spine retains `rag` as the capability domain name for policy and control-plane a
 RAG is L2 retrieval assistance only. It returns source refs for agents to read;
 it is not authority, not L1 kernel, and not a promoted standalone node.
 
+The RAG allowlist must index governed source surfaces, not consumer-local mixed
+memory. `$SPINE_STATE/domain-state/spine/` is excluded because it contains
+historical narrative bodies, archived receipts, and projection/cache artifacts;
+indexing it as authority teaches agents to recreate that residue.
+
 AnythingLLM is retired from normal RAG agent grammar. Its runtime may remain
 temporarily on ai-consolidation as compatibility residue, but the canonical
 agent path is direct Qdrant/Ollama through `rag.direct.*`.

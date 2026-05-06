@@ -224,6 +224,13 @@ The state paths in the workflow objects below name **logical** state.
 Resolved authority for each path is on pve canonical; consumer-local copies
 are projection unless the cap that wrote them was routed.
 
+`$SPINE_STATE/domain-state/spine/` is not a general research, proof, or RAG
+authority surface. It contains historical mixed projection residue on consumer
+hosts and must not be indexed or cited as `spine_domain_state`. Durable research
+bodies live in controller-prompt packet markdown; proof lives in RCAP receipts,
+EXEC_RECEIPT YAML, loop closeout receipts, or a specific generated readback
+with an owning capability.
+
 ### Tool-local cache vs spine authority
 
 Agent-harness private homes — `~/.claude/{plans, commands,
