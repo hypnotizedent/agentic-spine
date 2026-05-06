@@ -23,6 +23,7 @@ WORKSPACE_ROOT = ROOT.parent
 RUNTIME_ROOT = Path(os.environ.get("SPINE_RUNTIME_ROOT") or WORKSPACE_ROOT / ".runtime" / "spine")
 STATE_ROOT = Path(os.environ.get("SPINE_STATE") or RUNTIME_ROOT / "state")
 TASK_ROOT = STATE_ROOT / "agent-tasks"
+WAVE_ROOT = RUNTIME_ROOT / "waves"
 REVIEW_ROOT = RUNTIME_ROOT / "tmp" / "worktrees" / "agentic-spine"
 RECEIPT_ROOT = STATE_ROOT / "domain-state" / "ai-patch-reviews"
 CONTRACT = ROOT / "ops" / "bindings" / "ai.patch.review.contract.yaml"
@@ -198,6 +199,22 @@ def write_yaml(path: Path, data: dict[str, Any]) -> None:
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def review_workspace_from_wave(wave_id: str) -> tuple[Path | None, str]:
+    state = load_json(WAVE_ROOT / wave_id / "state.json")
+    workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
+    worktree_raw = str(workspace.get("worktree") or "").strip()
+    branch = str(workspace.get("branch") or "").strip()
+    return (Path(worktree_raw) if worktree_raw else None, branch)
+
+
 def promote(task_id: str, loop_id: str, retain_existing: bool = False) -> dict[str, Any]:
     if not CONTRACT.is_file():
         raise ReviewError(f"contract missing: {CONTRACT}")
@@ -244,7 +261,14 @@ def promote(task_id: str, loop_id: str, retain_existing: bool = False) -> dict[s
         ROOT,
     )
     if start.returncode != 0:
-        raise ReviewError(f"ops wave start failed: {(start.stderr or start.stdout).strip()}")
+        detail = (start.stderr or start.stdout).strip()
+        if "already exists" not in detail:
+            raise ReviewError(f"ops wave start failed: {detail}")
+    actual_worktree, actual_branch = review_workspace_from_wave(wave_id)
+    if actual_worktree is not None:
+        review_worktree = actual_worktree
+    if actual_branch:
+        branch = actual_branch
     if not review_worktree.is_dir():
         raise ReviewError(f"review worktree not created by wave start: {review_worktree}")
 
