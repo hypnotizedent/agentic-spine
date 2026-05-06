@@ -277,6 +277,7 @@ if [[ "$MODE" == "--brief" && "${OPS_STATUS_FULL_BRIEF:-0}" != "1" ]]; then
   exec python3 - "$STATUS_CODE_ROOT" "$STRICT" <<'PYTHON'
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -336,6 +337,81 @@ def _load_cached_payload():
     if not isinstance(payload, dict):
         return None, None, path
     return payload, max(0, int(time.time() - stat.st_mtime)), path
+
+def _parse_kv_text(text):
+    data = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        data[key.strip()] = val.strip().strip('"').strip("'")
+    return data
+
+def _runner_capture_support():
+    terminal_cmd = spine / "ops" / "commands" / "terminal.sh"
+    runner = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-terminal-session-runner"
+    try:
+        terminal_text = terminal_cmd.read_text(encoding="utf-8", errors="replace")
+        runner_text = runner.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False, set()
+    if "spine-terminal-session-runner" not in terminal_text:
+        return False, set()
+    supported = {
+        tool for tool in ("claude", "codex", "opencode")
+        if re.search(r"CAPTURE_SUPPORTED_TOOLS\s*=\s*\{[^}]*['\"]" + re.escape(tool) + r"['\"]", runner_text, re.S)
+    }
+    return True, supported
+
+def _capture_heartbeat_counts():
+    state_root = (os.environ.get("SPINE_STATE") or "").strip()
+    if not state_root:
+        return {}
+    hb_dir = Path(state_root) / "terminal-heartbeats"
+    counts = {}
+    if not hb_dir.is_dir():
+        return counts
+    try:
+        paths = sorted(hb_dir.glob("*.yaml"))
+    except Exception:
+        return counts
+    for path in paths:
+        try:
+            hb = _parse_kv_text(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        status = str(hb.get("capture_last_status") or "").strip()
+        if not status:
+            continue
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+def _terminal_capture_brief():
+    configured, supported = _runner_capture_support()
+    if not configured:
+        return "Friction: capture=off"
+    unsupported = [tool for tool in ("codex", "opencode") if tool not in supported]
+    counts = _capture_heartbeat_counts()
+    if "claude" not in supported:
+        claude_state = "off"
+    elif counts.get("failed", 0):
+        claude_state = "failed"
+    elif counts.get("ok", 0):
+        claude_state = "on"
+    else:
+        claude_state = "supported"
+    if supported and unsupported:
+        estate_state = "partial"
+    elif supported:
+        estate_state = "on"
+    else:
+        estate_state = "off"
+    unsupported_text = "unsupported" if unsupported else "supported"
+    return (
+        f"Friction: capture={estate_state} "
+        f"(claude={claude_state}; codex/opencode={unsupported_text}; verify=passthrough)"
+    )
 
 def _render(payload, status_note="", cache_warning=False):
     """Render the brief line. When cache_warning is True, status_note is
@@ -421,7 +497,7 @@ def _render(payload, status_note="", cache_warning=False):
         parts.append("Coherence: attention" if coherence_attention else "Coherence: ok")
     parts.append("Code drift: skipped")
     parts.append("Authority: skipped")
-    parts.append("Clerk: skipped")
+    parts.append(_terminal_capture_brief())
     # Cache warning is prepended at the head of parts (above); only append
     # status_note here when the caller did NOT request the prepend treatment.
     if status_note and not cache_warning:
@@ -434,7 +510,7 @@ def _degraded_line(reason):
     return (
         "Loops: unknown | Gaps: unknown | Engine: unknown | Spine: unknown | "
         "Secondary: unknown | Coherence: unknown | Code drift: skipped | "
-        "Authority: skipped | Clerk: skipped | "
+        f"Authority: skipped | {_terminal_capture_brief()} | "
         f"Status: degraded ({reason}; owner spine-engine-joined-state; "
         "next run OPS_STATUS_FULL_BRIEF=1 ./bin/ops status --brief) | Anomalies: 1"
     )
@@ -969,6 +1045,9 @@ def collect_terminal_telemetry():
                 "hostname": str(hb.get("hostname") or "").strip(),
                 "heartbeat_at": str(hb.get("heartbeat_at") or "").strip(),
                 "expires_at": str(hb.get("expires_at") or "").strip(),
+                "capture_last_status": str(hb.get("capture_last_status") or "").strip(),
+                "capture_last_error_class": str(hb.get("capture_last_error_class") or "").strip(),
+                "capture_last_at": str(hb.get("capture_last_at") or "").strip(),
             }
 
     rows = []
@@ -1044,6 +1123,9 @@ def collect_terminal_telemetry():
             "custody_anomaly": custody_anomaly,
             "pid": custody.get("pid", ""),
             "hostname": custody.get("hostname", ""),
+            "capture_last_status": custody.get("capture_last_status", ""),
+            "capture_last_error_class": custody.get("capture_last_error_class", ""),
+            "capture_last_at": custody.get("capture_last_at", ""),
             "_sort_utc": last_seen_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if last_seen_dt else "",
         }
         rows.append(row)
@@ -1197,6 +1279,82 @@ terminal_telemetry_summary = {
     "unmapped_open_loops": unmapped_open_loops,
     "terminals": terminal_telemetry,
 }
+
+def terminal_capture_route_config() -> dict:
+    terminal_cmd = spine / "ops" / "commands" / "terminal.sh"
+    runner = spine / "ops" / "plugins" / "core" / "lifecycle" / "bin" / "spine-terminal-session-runner"
+    try:
+        terminal_text = terminal_cmd.read_text(encoding="utf-8", errors="replace")
+        runner_text = runner.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return {
+            "configured": False,
+            "supported_tools": [],
+            "unsupported_tools": ["claude", "codex", "opencode"],
+            "passthrough_tools": ["verify"],
+            "error": str(exc),
+        }
+    configured = "spine-terminal-session-runner" in terminal_text
+    supported = sorted({
+        tool for tool in ("claude", "codex", "opencode")
+        if re.search(
+            r"CAPTURE_SUPPORTED_TOOLS\s*=\s*\{[^}]*['\"]" + re.escape(tool) + r"['\"]",
+            runner_text,
+            re.S,
+        )
+    })
+    unsupported = [tool for tool in ("claude", "codex", "opencode") if tool not in supported]
+    return {
+        "configured": configured,
+        "supported_tools": supported if configured else [],
+        "unsupported_tools": unsupported if configured else ["claude", "codex", "opencode"],
+        "passthrough_tools": ["verify"] + ([tool for tool in unsupported if tool in {"codex", "opencode"}] if configured else []),
+        "error": "",
+    }
+
+def collect_terminal_capture_summary() -> dict:
+    route = terminal_capture_route_config()
+    counts = Counter(
+        str(row.get("capture_last_status") or "").strip()
+        for row in terminal_telemetry
+        if str(row.get("capture_last_status") or "").strip()
+    )
+    supported = route.get("supported_tools") or []
+    unsupported = route.get("unsupported_tools") or []
+    if not route.get("configured") or not supported:
+        estate_state = "off"
+    elif unsupported:
+        estate_state = "partial"
+    else:
+        estate_state = "on"
+    if "claude" not in supported:
+        claude_state = "off"
+    elif counts.get("failed", 0):
+        claude_state = "failed"
+    elif counts.get("ok", 0):
+        claude_state = "on"
+    else:
+        claude_state = "supported"
+    codex_opencode_state = "unsupported" if any(tool in unsupported for tool in ("codex", "opencode")) else "supported"
+    line = (
+        f"Friction: capture={estate_state} "
+        f"(claude={claude_state}; codex/opencode={codex_opencode_state}; verify=passthrough)"
+    )
+    return {
+        "status": estate_state,
+        "line": line,
+        "configured": bool(route.get("configured")),
+        "supported_tools": supported,
+        "unsupported_tools": unsupported,
+        "passthrough_tools": route.get("passthrough_tools") or [],
+        "heartbeat_counts": dict(counts),
+        "claude": claude_state,
+        "codex_opencode": codex_opencode_state,
+        "verify": "passthrough",
+        "route_error": route.get("error") or "",
+    }
+
+terminal_capture_summary = collect_terminal_capture_summary()
 
 # ── Parse gaps via shared authority ───────────────────────────────────────
 
@@ -2490,6 +2648,7 @@ if mode == "--json":
         "open_loops": open_loops,
         "planned_loops": planned_loops,
         "terminal_telemetry": terminal_telemetry_summary,
+        "terminal_capture": terminal_capture_summary,
         "durable_transfer": durable_transfer_status,
         "open_gaps": open_gaps,
         "gap_state": {
@@ -2565,6 +2724,7 @@ if mode == "--json":
             "worktree_cleanup_dirty_blocked": int(worktree_cleanup_state.get("dirty_blocked_worktrees", 0) or 0),
             "fresh_terminals": len(fresh_terminals),
             "fresh_custody_terminals": len(fresh_custody_terminals),
+            "terminal_capture_status": terminal_capture_summary.get("status", "unknown"),
             "durable_transfer_active": int((durable_transfer_status.get("summary") or {}).get("active", 0) or 0),
             "durable_transfer_stale": int((durable_transfer_status.get("summary") or {}).get("stale", 0) or 0),
             "active_delegations": int(delegation_summary.get("active", 0) or 0),
@@ -2743,6 +2903,7 @@ if mode == "--brief":
                     parts.append(f"Authority: degraded ({', '.join(_degraded_summary)})")
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, ValueError):
             parts.append("Authority: unknown")
+    parts.append(terminal_capture_summary.get("line", "Friction: capture=unknown"))
     # PACKET-592 Phase 2: clerk rollup. Read clerk's classification of the
     # current symptoms and compress to a single actionable line. The default
     # clerk invocation below is diagnostic/dry-run; only an explicit file mode
@@ -2947,6 +3108,7 @@ if mode != "--expert":
     print("LIVENESS")
     print("-" * 72)
     print(f"  capability worker: {_pickup_worker_status}{' fresh' if _pickup_worker_fresh else ' not fresh'}")
+    print(f"  terminal capture:  {terminal_capture_summary.get('line', 'Friction: capture=unknown').replace('Friction: capture=', '')}")
     if _sp_total:
         print(f"  standing programs: {_sp_total} total, {_sp_healthy} healthy, {_sp_degraded} degraded")
     else:
@@ -3307,6 +3469,7 @@ if terminal_telemetry:
     print("TERMINAL TELEMETRY")
     print("-" * 72)
     print(f"  status:             {terminal_telemetry_status}")
+    print(f"  capture:            {terminal_capture_summary.get('line', 'Friction: capture=unknown').replace('Friction: capture=', '')}")
     print(f"  fresh terminals:    {len(fresh_terminals)}")
     print(f"  fresh custody:      {len(fresh_custody_terminals)}")
     print(f"  mapped open loops:  {mapped_open_loops}/{len(open_loops)}")
@@ -3323,6 +3486,10 @@ if terminal_telemetry:
             term_bits.append("stale-telemetry")
         if term.get("last_capability"):
             term_bits.append(f"cap={term['last_capability']}")
+        if term.get("capture_last_status"):
+            term_bits.append(f"capture={term['capture_last_status']}")
+            if term.get("capture_last_error_class") and term.get("capture_last_status") != "ok":
+                term_bits.append(f"capture_reason={term['capture_last_error_class']}")
         if term.get("custody_fresh"):
             term_bits.append("custody")
         elif term.get("custody_heartbeat_at") or term.get("custody_expires_at"):

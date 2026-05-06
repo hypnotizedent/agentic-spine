@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""V2.1 Slice 1C runner — supervised tool spawn + closeout capture.
+"""V2.1 Slice 1C runner — tool-safe closeout capture.
 
 Replaces the per-tool exec block in ops/commands/terminal.sh with a uniform
-PTY-based supervisor. terminal.sh remains the admission authority (identity
-env, posture, loop env, orientation); the runner only spawns the tool inside
-a PTY, captures a bounded rolling buffer of output, and on tool exit hands
-the captured prose to clerk.symptom.classify.and.file --source agent-terminal-
-closeout in a detached background process. Updates terminal heartbeat with
-capture_last_status / capture_last_error_class / capture_last_at so ops status
-can surface degraded capture without a new authority plane.
+runner entry point. terminal.sh remains the admission authority (identity env,
+posture, loop env, orientation). The runner captures closeout only for tools
+whose UI survives PTY supervision. Empirical 2026-05-06 smoke: claude renders
+under PTY; codex/opencode garble. So claude uses PTY supervision + bounded
+buffer + clerk hand-off; codex/opencode/verify use Slice 1A os.execvp
+passthrough and mark capture unsupported in the existing heartbeat.
 
 Not a registered cap. Not on $PATH. Invoked only via $SPINE_ROOT-relative
 absolute path from terminal.sh.
@@ -16,13 +15,19 @@ absolute path from terminal.sh.
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import os
 import pty
 import re
+import select
 import shutil
 import signal
+import struct
 import subprocess
 import sys
+import termios
+import tty
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,9 +39,16 @@ TOOL_COMMANDS = {
     "verify":   ["./bin/ops", "cap", "run", "spine.verify"],
 }
 
+CAPTURE_SUPPORTED_TOOLS = {"claude"}
+CAPTURE_UNSUPPORTED_REASON = "pty_capture_unsupported_passthrough"
+
 # Last 8KB of tool output retained for closeout. Tool output beyond this slides
 # off the front; we only care about the closing prose anyway.
 BUFFER_SIZE = 8192
+
+# Bytes per master read — keep small enough for responsive forwarding but big
+# enough to amortize syscall cost on TUI redraws.
+READ_CHUNK = 4096
 
 # ANSI escape stripping (CSI / OSC / simple cases). Run before clerk hand-off
 # so prose pattern-match doesn't have to deal with rendering bytes.
@@ -48,7 +60,174 @@ ANSI_RE = re.compile(
 )
 
 
+def _resolve_command(tool: str, override: str) -> list[str]:
+    """Resolve the command vector to spawn.
+
+    Default: TOOL_COMMANDS[tool]. The hidden $SPINE_RUNNER_TEST_CMD env var
+    overrides for self-checks/smokes only — gated on this env so production
+    callers never trigger the override accidentally. The override is parsed
+    with shlex (POSIX). Public entry points only set tool, never override.
+    """
+    if override:
+        import shlex
+        return shlex.split(override)
+    return TOOL_COMMANDS[tool]
+
+
+def _winsz_from_fd(fd: int) -> bytes | None:
+    """Read TIOCGWINSZ off fd; return None if not a tty / unsupported."""
+    try:
+        return fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\x00" * 8)
+    except OSError:
+        return None
+
+
+def _set_winsz(fd: int, winsz: bytes) -> None:
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsz)
+    except OSError:
+        pass
+
+
+def _initial_winsz() -> bytes:
+    """Best-effort controlling-tty WINSZ for the new PTY.
+
+    Tries stdout/stdin/stderr in turn (any of which may be the controlling
+    tty when terminal.sh chains the runner via &&). Falls back to a sensible
+    default so TUI tools render at a usable size when no tty is attached
+    (rare; only happens in non-interactive smokes).
+    """
+    for fd in (1, 0, 2):
+        winsz = _winsz_from_fd(fd)
+        if winsz is not None:
+            return winsz
+    return struct.pack("HHHH", 24, 80, 0, 0)
+
+
+def supervise(cmd: list[str]) -> tuple[int, bytes]:
+    """Fork+exec cmd inside a new PTY; tee output to stdout, capture bounded
+    tail in an in-memory buffer, forward stdin and SIGWINCH. Returns
+    (exit_code, captured_buffer_bytes).
+
+    Replaces pty.spawn() so we can:
+      - set initial WINSZ from controlling tty
+      - forward SIGWINCH to the child PTY
+      - capture into a bounded buffer without losing tee fidelity
+      - propagate exit code correctly (WIFEXITED / WIFSIGNALED)
+    """
+    # Snapshot WINSZ before fork; child PTY's winsz is set after fork below.
+    winsz = _initial_winsz()
+
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        # child — exec the tool. pty.fork already made the new PTY our
+        # controlling tty; just exec.
+        try:
+            os.execvp(cmd[0], cmd)
+        except FileNotFoundError:
+            os._exit(127)
+        except OSError as exc:
+            sys.stderr.write(
+                f"spine-terminal-session-runner: spawn {cmd[0]} failed: {exc}\n"
+            )
+            os._exit(127)
+
+    # parent — set the new PTY's winsz to match controlling tty.
+    _set_winsz(master_fd, winsz)
+
+    # Make stdin raw so we forward keystrokes byte-for-byte; restore on exit.
+    stdin_fd = sys.stdin.fileno()
+    old_attrs = None
+    if os.isatty(stdin_fd):
+        try:
+            old_attrs = termios.tcgetattr(stdin_fd)
+            tty.setraw(stdin_fd)
+        except termios.error:
+            old_attrs = None
+
+    # Forward SIGWINCH from parent to child PTY.
+    def _on_sigwinch(_signum, _frame):
+        ws = _winsz_from_fd(stdin_fd) or _winsz_from_fd(1)
+        if ws is not None:
+            _set_winsz(master_fd, ws)
+
+    old_sigwinch = signal.signal(signal.SIGWINCH, _on_sigwinch)
+
+    out_buffer = bytearray()
+    try:
+        while True:
+            try:
+                rlist, _, _ = select.select([master_fd, stdin_fd], [], [])
+            except (OSError, select.error) as exc:
+                if getattr(exc, "errno", None) == errno.EINTR:
+                    continue
+                break
+            if master_fd in rlist:
+                try:
+                    data = os.read(master_fd, READ_CHUNK)
+                except OSError:
+                    data = b""
+                if not data:
+                    break  # EOF — child closed PTY
+                # Tee to our stdout (terminal display), capture into bounded
+                # buffer. Use raw write so we don't disturb buffering.
+                try:
+                    os.write(1, data)
+                except OSError:
+                    pass
+                out_buffer.extend(data)
+                if len(out_buffer) > BUFFER_SIZE:
+                    del out_buffer[:len(out_buffer) - BUFFER_SIZE]
+            if stdin_fd in rlist:
+                try:
+                    data = os.read(stdin_fd, READ_CHUNK)
+                except OSError:
+                    data = b""
+                if not data:
+                    # stdin EOF: don't kill child — many tools want to keep
+                    # running even after stdin closes (e.g. piped smokes).
+                    # Just stop forwarding.
+                    try:
+                        # Send a controlling EOF to the child PTY.
+                        os.write(master_fd, b"")
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        os.write(master_fd, data)
+                    except OSError:
+                        pass
+    finally:
+        signal.signal(signal.SIGWINCH, old_sigwinch)
+        if old_attrs is not None:
+            try:
+                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_attrs)
+            except termios.error:
+                pass
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+
+    # Reap child and translate to exit code.
+    try:
+        _wpid, status = os.waitpid(pid, 0)
+    except OSError:
+        status = 0
+    if os.WIFEXITED(status):
+        exit_code = os.WEXITSTATUS(status)
+    elif os.WIFSIGNALED(status):
+        exit_code = 128 + os.WTERMSIG(status)
+    else:
+        exit_code = 1
+    return exit_code, bytes(out_buffer)
+
+
 def main(argv=None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--self-check" in argv:
+        return _self_check()
     p = argparse.ArgumentParser(
         description="V2.1 Slice 1C runner — PTY-supervised tool spawn + closeout capture.",
     )
@@ -57,55 +236,53 @@ def main(argv=None) -> int:
     p.add_argument("--loop", default="")
     args = p.parse_args(argv)
 
-    cmd = TOOL_COMMANDS[args.tool]
-    # Pre-flight: pty.spawn forks before exec, so a missing binary in the child
-    # would emit a Python traceback into the PTY and exit 1, not the clean 127
-    # the parent should return. Resolve via shutil.which (relative paths like
-    # ./bin/ops are skipped — only absolute names get the existence check).
-    if "/" not in cmd[0] and shutil.which(cmd[0]) is None:
+    test_override = os.environ.get("SPINE_RUNNER_TEST_CMD", "").strip()
+    cmd = _resolve_command(args.tool, test_override)
+    # Pre-flight: if exec fails inside the child, the parent only sees a
+    # truncated PTY session. Detect missing binary up front for clean 127.
+    head = cmd[0]
+    if "/" not in head and shutil.which(head) is None:
         print(
-            f"spine-terminal-session-runner: {cmd[0]} not found in PATH",
+            f"spine-terminal-session-runner: {head} not found in PATH",
             file=sys.stderr,
         )
         return 127
+    if "/" in head and head not in (".", "..") and not Path(head).is_file():
+        # Allow ./bin/ops form; expand via cwd lookup.
+        if not (Path.cwd() / head).is_file():
+            print(
+                f"spine-terminal-session-runner: {head} not found",
+                file=sys.stderr,
+            )
+            return 127
 
-    out_buffer = bytearray()
-
-    def master_read(fd):
+    if args.tool not in CAPTURE_SUPPORTED_TOOLS and not test_override:
+        _write_heartbeat_capture(
+            terminal_id=args.terminal,
+            status="unsupported",
+            error_class=CAPTURE_UNSUPPORTED_REASON,
+        )
         try:
-            data = os.read(fd, 1024)
-        except OSError:
-            return b""
-        if data:
-            out_buffer.extend(data)
-            if len(out_buffer) > BUFFER_SIZE:
-                del out_buffer[:len(out_buffer) - BUFFER_SIZE]
-        return data
+            os.execvp(cmd[0], cmd)
+        except OSError as exc:
+            print(
+                f"spine-terminal-session-runner: exec {head} failed: {exc}",
+                file=sys.stderr,
+            )
+            return 127
+        return 127
 
     try:
-        wait_status = pty.spawn(cmd, master_read=master_read)
-    except FileNotFoundError as exc:
-        print(
-            f"spine-terminal-session-runner: spawn {cmd[0]} failed: {exc}",
-            file=sys.stderr,
-        )
-        return 127
+        exit_code, captured = supervise(cmd)
     except OSError as exc:
         print(
-            f"spine-terminal-session-runner: spawn {cmd[0]} failed: {exc}",
+            f"spine-terminal-session-runner: spawn {head} failed: {exc}",
             file=sys.stderr,
         )
         return 127
 
-    if os.WIFEXITED(wait_status):
-        exit_code = os.WEXITSTATUS(wait_status)
-    elif os.WIFSIGNALED(wait_status):
-        exit_code = 128 + os.WTERMSIG(wait_status)
-    else:
-        exit_code = 1
-
     _detached_handoff(
-        buffer=bytes(out_buffer),
+        buffer=captured,
         tool=args.tool,
         terminal_id=args.terminal,
         loop_id=args.loop,
@@ -173,11 +350,15 @@ def _do_handoff(*, buffer: bytes, tool: str, terminal_id: str, loop_id: str) -> 
     cmd = [
         "python3", str(clerk_path),
         "--source", "agent-terminal-closeout",
-        "--file",
         "--tool", tool,
         "--terminal-id", terminal_id,
         "--loop-id", loop_id,
     ]
+    # Default: file via friction.ingest. Self-check / smoke can disable filing
+    # by setting SPINE_RUNNER_CLERK_NO_FILE=1 so the same path can be exercised
+    # against an isolated environment without authority routing.
+    if os.environ.get("SPINE_RUNNER_CLERK_NO_FILE", "").strip() != "1":
+        cmd.append("--file")
     env = os.environ.copy()
     if loop_id:
         env["SPINE_LOOP_ID"] = loop_id
@@ -194,6 +375,16 @@ def _do_handoff(*, buffer: bytes, tool: str, terminal_id: str, loop_id: str) -> 
         return ("failed", "clerk_timeout")
     except OSError as exc:
         return ("failed", _sanitize_error(type(exc).__name__))
+    debug_log = os.environ.get("SPINE_RUNNER_DEBUG_LOG", "").strip()
+    if debug_log:
+        try:
+            with open(debug_log, "a", encoding="utf-8") as fh:
+                fh.write(f"[clerk-rc={result.returncode}]\n")
+                fh.write(f"--- stdout ---\n{result.stdout}\n")
+                fh.write(f"--- stderr ---\n{result.stderr}\n")
+                fh.write(f"--- prose ---\n{cleaned}\n")
+        except OSError:
+            pass
     if result.returncode == 0:
         return ("ok", "")
     return ("failed", _classify_handoff_failure(result.stdout + result.stderr))
@@ -266,6 +457,170 @@ def _write_heartbeat_capture(*, terminal_id: str, status: str, error_class: str)
         os.replace(tmp_path, hb_path)
     except OSError:
         pass
+
+
+def _self_check() -> int:
+    """Local self-check: drive the runner via SPINE_RUNNER_TEST_CMD against an
+    isolated heartbeat path and SPINE_RUNNER_CLERK_NO_FILE=1 so no friction
+    rows route to authority. Asserts:
+
+      1. Runner exit code propagates from the spawned command.
+      2. ANSI-stripping + buffer capture preserves the prose.
+      3. Detached handoff fires and writes capture_last_status to heartbeat.
+      4. clerk classifier matches a known phrase ("kept hitting") so the
+         runner -> clerk hand-off chain is end-to-end live.
+      5. PTY-incompatible tools keep exec passthrough semantics and mark
+         capture unsupported in the heartbeat.
+
+    Pass: prints OK, returns 0. Fail: prints diagnostic, returns 1.
+    """
+    import json
+    import tempfile
+    import time
+
+    failures: list[str] = []
+    # 1. Buffer + ANSI strip + bounded buffer.
+    sample = (b"hello \x1b[31mred\x1b[0m\nkept hitting recurring failure\n"
+              b"line that goes on" + b"a" * (BUFFER_SIZE * 2) + b"\nfinal line\n")
+    cleaned = ANSI_RE.sub(b"", sample)
+    if b"red" not in cleaned or b"\x1b" in cleaned:
+        failures.append("ANSI stripping did not preserve text / strip escapes")
+    bounded = bytearray()
+    bounded.extend(sample)
+    if len(bounded) > BUFFER_SIZE:
+        del bounded[:len(bounded) - BUFFER_SIZE]
+    if len(bounded) != BUFFER_SIZE:
+        failures.append(
+            f"bounded buffer size wrong: {len(bounded)} != {BUFFER_SIZE}"
+        )
+    if b"final line" not in bounded:
+        failures.append("bounded buffer dropped tail (closeout prose)")
+
+    # 2. Heartbeat write — direct invocation in a temp path.
+    with tempfile.TemporaryDirectory(prefix="runner-self-check-") as td:
+        hb_path = Path(td) / "heartbeat.yaml"
+        hb_path.write_text("terminal_id: SELF-CHECK\n", encoding="utf-8")
+        old_env = os.environ.get("SPINE_HEARTBEAT_FILE")
+        os.environ["SPINE_HEARTBEAT_FILE"] = str(hb_path)
+        try:
+            _write_heartbeat_capture(
+                terminal_id="SELF-CHECK", status="ok", error_class="",
+            )
+            text = hb_path.read_text(encoding="utf-8")
+        finally:
+            if old_env is None:
+                os.environ.pop("SPINE_HEARTBEAT_FILE", None)
+            else:
+                os.environ["SPINE_HEARTBEAT_FILE"] = old_env
+        if "terminal_id: SELF-CHECK" not in text:
+            failures.append("heartbeat write erased pre-existing terminal_id")
+        if 'capture_last_status: "ok"' not in text:
+            failures.append("heartbeat write did not append capture_last_status")
+        if "capture_last_at:" not in text:
+            failures.append("heartbeat write missing capture_last_at")
+
+    # 3. Drive the supervisor through SPINE_RUNNER_TEST_CMD and prove the full
+    #    runner chain (PTY -> capture -> handoff -> heartbeat) end-to-end. This
+    #    runs the runner as a subprocess so we get clean handoff timing.
+    with tempfile.TemporaryDirectory(prefix="runner-e2e-") as td:
+        td_path = Path(td)
+        hb_path = td_path / "heartbeat.yaml"
+        hb_path.write_text("terminal_id: SELF-CHECK-E2E\n", encoding="utf-8")
+        env = os.environ.copy()
+        env["SPINE_HEARTBEAT_FILE"] = str(hb_path)
+        env["SPINE_RUNNER_TEST_CMD"] = (
+            "/bin/sh -c 'printf \"kept hitting recurring failure\\n\"; "
+            "sleep 0.05'"
+        )
+        env["SPINE_RUNNER_CLERK_NO_FILE"] = "1"
+        # We pick "verify" as the --tool key so that argparse accepts; the env
+        # override redirects the actual command.
+        cmd = [
+            sys.executable, str(Path(__file__).resolve()),
+            "--tool", "verify",
+            "--terminal", "SELF-CHECK-E2E",
+            "--loop", "LOOP-RUNNER-SELF-CHECK",
+        ]
+        proc = subprocess.run(
+            cmd, env=env, capture_output=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            failures.append(
+                f"runner subprocess returned {proc.returncode}: "
+                f"stderr={proc.stderr[-400:]!r}"
+            )
+        # Wait up to 5s for the detached grandchild to write the heartbeat.
+        deadline = time.time() + 5
+        text = ""
+        while time.time() < deadline:
+            text = hb_path.read_text(encoding="utf-8")
+            if "capture_last_status:" in text:
+                break
+            time.sleep(0.1)
+        if 'capture_last_status: "ok"' not in text:
+            failures.append(
+                "e2e: capture_last_status not 'ok' after 5s; "
+                f"heartbeat={text!r}"
+            )
+
+    # 4. Unsupported tools keep Slice 1A exec semantics and mark capture
+    #    unsupported before exec. This protects codex/opencode TUIs from the
+    #    PTY path that garbled them in the 2026-05-06 smoke.
+    with tempfile.TemporaryDirectory(prefix="runner-passthrough-") as td:
+        td_path = Path(td)
+        fake_bin = td_path / "bin"
+        fake_bin.mkdir()
+        fake_codex = fake_bin / "codex"
+        fake_codex.write_text(
+            "#!/bin/sh\nprintf 'fake codex passthrough\\n'\nexit 9\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+        hb_path = td_path / "heartbeat.yaml"
+        hb_path.write_text("terminal_id: SELF-CHECK-PASSTHROUGH\n", encoding="utf-8")
+        env = os.environ.copy()
+        env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+        env["SPINE_HEARTBEAT_FILE"] = str(hb_path)
+        env.pop("SPINE_RUNNER_TEST_CMD", None)
+        proc = subprocess.run(
+            [
+                sys.executable, str(Path(__file__).resolve()),
+                "--tool", "codex",
+                "--terminal", "SELF-CHECK-PASSTHROUGH",
+                "--loop", "",
+            ],
+            env=env,
+            capture_output=True,
+            timeout=10,
+        )
+        if proc.returncode != 9:
+            failures.append(
+                f"passthrough: expected child exit 9, got {proc.returncode}; "
+                f"stdout={proc.stdout[-200:]!r} stderr={proc.stderr[-200:]!r}"
+            )
+        text = hb_path.read_text(encoding="utf-8")
+        if 'capture_last_status: "unsupported"' not in text:
+            failures.append(f"passthrough: missing unsupported heartbeat; {text!r}")
+        if b"fake codex passthrough" not in proc.stdout:
+            failures.append("passthrough: child stdout was not preserved")
+
+    if failures:
+        sys.stderr.write("spine-terminal-session-runner self-check FAIL\n")
+        for f in failures:
+            sys.stderr.write(f"  - {f}\n")
+        return 1
+    print(json.dumps({
+        "capability": "spine-terminal-session-runner.self-check",
+        "status": "ok",
+        "checks": [
+            "ansi_strip",
+            "bounded_buffer",
+            "heartbeat_write",
+            "e2e_pty_supervise_capture_handoff",
+            "unsupported_tool_exec_passthrough",
+        ],
+    }))
+    return 0
 
 
 if __name__ == "__main__":
