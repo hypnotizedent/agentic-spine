@@ -2111,6 +2111,42 @@ capabilities:
     implementation_repo: ~/code/mint-modules
     implementation_path: scripts/ops/
     layer: L3_product_runtime
+  mint.suppliers.witness:
+    description: |
+      First L3 witness adoption (PACKET-1395). Polls the existing
+      mint.runtime.proof producer, filters suppliers.* CHECK rows, writes a
+      per-poll yaml under $SPINE_STATE/domain-state/mint/suppliers/per-poll/
+      <iso>.yaml with schema_version=1 and a witness_bound declaration.
+      Witness-bound: mutation_access is scoped to the artifact path; no
+      decision authority over module promotion, runtime state, pricing
+      action, customer action, supplier admission, or verify pass/fail.
+      Does not replace mint.runtime.proof / mint.modules.health / suppliers
+      product state. Mint product/domain logic stays Mint-owned: only the
+      producer's stdout text is parsed (CHECK / STATE / DETAIL columns); the
+      FAIL detail body is kept RAW. Routed via cap.sh so writes land on
+      storage_evidence_node canonical regardless of calling host. --read-only
+      skips the producer and just emits the latest artifact's parsed status
+      JSON for status.sh consumption.
+    tags:
+      - mint
+      - observability
+      - suppliers
+      - witness
+      - persistence
+    command: python3 ./ops/plugins/domains/mint/bin/mint-suppliers-witness
+    script_path: ./ops/plugins/domains/mint/bin/mint-suppliers-witness
+    cwd: $SPINE_CODE
+    safety: mutating
+    state_authority: read_write_canonical
+    approval: auto
+    arg_protocol: argparse
+    lifecycle: ready
+    outputs:
+      - stdout
+      - file:domain-state/mint/suppliers/per-poll/<iso>.yaml
+    plane: domain_external
+    domain: mint
+    layer: L3_product_runtime
   infra.proxmox.guest.control:
     description: Single PVE guest start/shutdown/stop/destroy. Destroy is dry-run by default and only admits stopped guests marked decommissioned in vm.lifecycle.yaml.
     tags:

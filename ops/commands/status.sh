@@ -442,6 +442,8 @@ def _degraded_line(reason):
 timeout_seconds = _int_env("OPS_STATUS_BRIEF_JOINED_TIMEOUT_SECONDS", 4)
 cache_max_age = _int_env("OPS_STATUS_BRIEF_CACHE_MAX_AGE_SECONDS", 3600)
 narrator_timeout = _int_env("OPS_STATUS_BRIEF_NARRATOR_TIMEOUT_SECONDS", 5)
+mint_suppliers_timeout = _int_env(
+    "OPS_STATUS_BRIEF_MINT_SUPPLIERS_TIMEOUT_SECONDS", 5)
 
 
 def _render_narrator_attention():
@@ -584,6 +586,100 @@ def _render_narrator_attention():
                 "--write-artifacts --skip-input-readbacks")
     return None
 
+
+def _render_mint_suppliers_attention():
+    """Best-effort Mint suppliers witness readback (PACKET-1395 first L3
+    pilot). Local-first then SSH-route-to-canonical fallback so canonical
+    hosts use their local artifacts and consumer hosts route the entry-
+    time read to canonical where artifacts live.
+
+    Reads from latest per-poll yaml only (--read-only). Failure, timeout,
+    or unreachable canonical produces None — Mint witness signal is never
+    a verify gate and must not break ops status.
+    """
+    if os.environ.get("OPS_STATUS_BRIEF_MINT_SUPPLIERS_DISABLE") == "1":
+        return None
+    bin_ops = spine / "bin" / "ops"
+
+    def _parse_payload(text):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            return json.loads(text[start:end + 1])
+        except Exception:
+            return None
+
+    payload = None
+    try:
+        proc = subprocess.run(
+            [str(bin_ops), "cap", "run", "mint.suppliers.witness",
+             "--", "--read-only", "--json"],
+            capture_output=True, text=True,
+            timeout=mint_suppliers_timeout, check=False,
+        )
+        if proc.returncode == 0:
+            payload = _parse_payload(proc.stdout)
+    except Exception:
+        payload = None
+
+    needs_route = True
+    if payload is not None and payload.get("artifact_path"):
+        needs_route = False
+    if needs_route:
+        target = os.environ.get(
+            "OPS_STATUS_MINT_SUPPLIERS_DISPATCH_TARGET", "pve")
+        repo = os.environ.get(
+            "OPS_STATUS_MINT_SUPPLIERS_DISPATCH_REPO", "/opt/agentic-spine")
+        state_root = os.environ.get(
+            "OPS_STATUS_MINT_SUPPLIERS_DISPATCH_STATE",
+            "/md1400/spine/state")
+        remote_cmd = (
+            f"cd '{repo}' && SPINE_STATE='{state_root}' "
+            "./bin/ops cap run mint.suppliers.witness -- "
+            "--read-only --json"
+        )
+        try:
+            proc = subprocess.run(
+                ["ssh",
+                 "-o", "ConnectTimeout=2",
+                 "-o", "BatchMode=yes",
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 target, remote_cmd],
+                capture_output=True, text=True,
+                timeout=mint_suppliers_timeout, check=False,
+            )
+            if proc.returncode == 0:
+                routed = _parse_payload(proc.stdout)
+                if routed is not None:
+                    payload = routed
+        except Exception:
+            pass
+
+    if payload is None:
+        return None
+    freshness = payload.get("freshness") or {}
+    state = freshness.get("state") or "missing"
+    age = freshness.get("age_seconds")
+    attention = payload.get("attention") or {}
+    drilldown = "./bin/ops cap run mint.runtime.proof"
+    if state == "fresh" and attention.get("any_fail"):
+        primary = attention.get("primary_fail_check") or "suppliers.?"
+        detail = (attention.get("primary_fail_detail_truncated")
+                  or "").strip()
+        return (f"Mint suppliers: attention — {primary} FAIL: "
+                f"{detail}; drilldown: {drilldown}")
+    if state == "stale":
+        age_text = f"{age}s" if isinstance(age, int) else "?"
+        return (f"Mint suppliers: stale — last poll {age_text} ago; "
+                f"drilldown: {drilldown}")
+    if state == "missing":
+        return (f"Mint suppliers: stale — no poll yet; "
+                f"drilldown: {drilldown}")
+    return None
+
+
 try:
     if os.environ.get("OPS_STATUS_BRIEF_FORCE_CACHE_FALLBACK") == "1":
         raise TimeoutError("forced cache fallback")
@@ -601,6 +697,9 @@ try:
     narrator_line = _render_narrator_attention()
     if narrator_line:
         print(narrator_line)
+    mint_suppliers_line = _render_mint_suppliers_attention()
+    if mint_suppliers_line:
+        print(mint_suppliers_line)
     sys.exit(1 if strict_mode and anomalies else 0)
 except Exception as exc:
     cached, cache_age, cache_path = _load_cached_payload()
@@ -616,6 +715,9 @@ except Exception as exc:
         narrator_line = _render_narrator_attention()
         if narrator_line:
             print(narrator_line)
+        mint_suppliers_line = _render_mint_suppliers_attention()
+        if mint_suppliers_line:
+            print(mint_suppliers_line)
         sys.exit(1 if strict_mode else 0)
     print(_degraded_line(str(exc)))
     sys.exit(1 if strict_mode else 0)
@@ -3046,6 +3148,105 @@ if mode != "--expert":
         print("NARRATOR")
         print("-" * 72)
         print(_narrator_full_line)
+        print()
+
+    # MINT SUPPLIERS section (PACKET-1395 first L3 witness pilot).
+    # Best-effort artifact readback; failure or timeout is silent skip
+    # — Mint witness signal is operator-eye, not a verify gate.
+    def _render_full_mint_suppliers_attention():
+        if os.environ.get("OPS_STATUS_FULL_MINT_SUPPLIERS_DISABLE") == "1":
+            return None
+        try:
+            timeout = int(os.environ.get(
+                "OPS_STATUS_FULL_MINT_SUPPLIERS_TIMEOUT_SECONDS", "5"))
+        except Exception:
+            timeout = 5
+        bin_ops = spine / "bin" / "ops"
+
+        def _parse_payload(text):
+            start = text.find("{")
+            end = text.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return None
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                return None
+
+        payload = None
+        try:
+            proc = subprocess.run(
+                [str(bin_ops), "cap", "run", "mint.suppliers.witness",
+                 "--", "--read-only", "--json"],
+                capture_output=True, text=True,
+                timeout=max(1, timeout), check=False,
+            )
+            if proc.returncode == 0:
+                payload = _parse_payload(proc.stdout)
+        except Exception:
+            payload = None
+
+        needs_route = True
+        if payload is not None and payload.get("artifact_path"):
+            needs_route = False
+        if needs_route:
+            target = os.environ.get(
+                "OPS_STATUS_MINT_SUPPLIERS_DISPATCH_TARGET", "pve")
+            repo = os.environ.get(
+                "OPS_STATUS_MINT_SUPPLIERS_DISPATCH_REPO",
+                "/opt/agentic-spine")
+            state_root = os.environ.get(
+                "OPS_STATUS_MINT_SUPPLIERS_DISPATCH_STATE",
+                "/md1400/spine/state")
+            remote_cmd = (
+                f"cd '{repo}' && SPINE_STATE='{state_root}' "
+                "./bin/ops cap run mint.suppliers.witness -- "
+                "--read-only --json"
+            )
+            try:
+                proc = subprocess.run(
+                    ["ssh",
+                     "-o", "ConnectTimeout=2",
+                     "-o", "BatchMode=yes",
+                     "-o", "StrictHostKeyChecking=accept-new",
+                     target, remote_cmd],
+                    capture_output=True, text=True,
+                    timeout=max(1, timeout), check=False,
+                )
+                if proc.returncode == 0:
+                    routed = _parse_payload(proc.stdout)
+                    if routed is not None:
+                        payload = routed
+            except Exception:
+                pass
+
+        if payload is None:
+            return None
+        freshness = payload.get("freshness") or {}
+        state = freshness.get("state") or "missing"
+        age = freshness.get("age_seconds")
+        attention = payload.get("attention") or {}
+        drilldown = "./bin/ops cap run mint.runtime.proof"
+        if state == "fresh" and attention.get("any_fail"):
+            primary = attention.get("primary_fail_check") or "suppliers.?"
+            detail = (attention.get("primary_fail_detail_truncated")
+                      or "").strip()
+            return (f"  Mint suppliers: attention — {primary} FAIL: "
+                    f"{detail}; drilldown: {drilldown}")
+        if state == "stale":
+            age_text = f"{age}s" if isinstance(age, int) else "?"
+            return (f"  Mint suppliers: stale — last poll {age_text} "
+                    f"ago; drilldown: {drilldown}")
+        if state == "missing":
+            return (f"  Mint suppliers: stale — no poll yet; "
+                    f"drilldown: {drilldown}")
+        return None
+
+    _mint_suppliers_full_line = _render_full_mint_suppliers_attention()
+    if _mint_suppliers_full_line:
+        print("MINT SUPPLIERS")
+        print("-" * 72)
+        print(_mint_suppliers_full_line)
         print()
 
     print("ATTENTION")
