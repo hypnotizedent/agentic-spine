@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""friction.reconcile — first-class friction reconciliation.
+"""friction.reconcile - first-class friction reconciliation.
 
 Friction is an L1 engine diagnostic signal, not a work container. Default
 reconcile observes queued friction and keeps it visible. Explicit --auto-file
 is required to promote friction into governed gaps.
+
+V2.1 Slice 2 adds a narrow --friction-id path for terminal-closeout friction.
+It records a reconcile disposition in friction_events.payload_json and keeps
+rows open unless a future repair path explicitly calls friction.dispose with
+evidence. Reconcile does not close rows internally.
 """
 from __future__ import annotations
 
@@ -19,6 +24,21 @@ ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(ROOT / "ops" / "plugins" / "core" / "lifecycle" / "lib"))
 
 import gaps_sql_authority as authority  # noqa: E402
+
+
+AGENT_REPORTED_CLASSES = {
+    "agent_reported_lifecycle_stall",
+    "agent_reported_recurring_failure",
+    "agent_reported_packetization_request",
+    "agent_reported_worker_state_drift",
+    "agent_reported_split_brain",
+    "agent_reported_unknown_spine_bug",
+}
+
+OUTCOME_OBSERVED_NO_KNOWN_REPAIR = "observed_no_known_repair"
+OUTCOME_REPAIR_TASK_ENQUEUED = "repair_task_enqueued"
+OUTCOME_ALREADY_RESOLVED_DISPOSE_READY = "already_resolved_dispose_ready"
+OUTCOME_BLOCKED_NEEDS_EVIDENCE = "blocked_needs_evidence"
 
 
 def _state_root() -> Path:
@@ -68,6 +88,123 @@ def _project(conn, state_root: Path, gaps_yaml: Path, *, include_gaps: bool) -> 
     return projection
 
 
+def _latest_payload_class(conn, friction_id: str, item: dict[str, Any]) -> str:
+    payload = authority.get_latest_friction_event_payload(conn, friction_id) or {}
+    cls = str(payload.get("class") or "").strip()
+    return cls or str(item.get("capability") or "").strip()
+
+
+def _classify_friction_id_outcome(
+    conn,
+    *,
+    friction_id: str,
+    item: dict[str, Any],
+) -> tuple[str, str, str]:
+    cls = _latest_payload_class(conn, friction_id, item)
+    if cls == "agent_reported_lifecycle_stall" and not _first_loop_source(item):
+        return (
+            OUTCOME_BLOCKED_NEEDS_EVIDENCE,
+            cls,
+            "agent reported lifecycle stall without a loop_id/source that identifies the lifecycle to inspect",
+        )
+    if cls in AGENT_REPORTED_CLASSES:
+        return (
+            OUTCOME_OBSERVED_NO_KNOWN_REPAIR,
+            cls,
+            f"{cls} recognized and kept open; no bounded automated repair is declared for this class in this slice",
+        )
+    return (
+        OUTCOME_OBSERVED_NO_KNOWN_REPAIR,
+        cls,
+        f"friction class {cls or '<unknown>'} has no narrow --friction-id repair route",
+    )
+
+
+def reconcile_friction_id(
+    conn,
+    *,
+    state_root: Path,
+    friction_id: str,
+    actor: str = "friction.reconcile",
+    run_key: str | None = None,
+) -> dict[str, Any]:
+    authority.ensure_schema(conn)
+    item = authority.get_friction(conn, friction_id)
+    if item is None:
+        return {
+            "capability": "friction.reconcile",
+            "status": "error",
+            "authority": "sqlite",
+            "mode": "friction_id",
+            "errors": [f"friction_id not found: {friction_id}"],
+        }
+    old_status = str(item.get("status") or "queued").strip()
+    if old_status == "closed":
+        return {
+            "capability": "friction.reconcile",
+            "status": "ok",
+            "authority": "sqlite",
+            "mode": "friction_id",
+            "items": [{
+                "friction_id": friction_id,
+                "disposition": "already_closed",
+                "closed": True,
+                "from_status": old_status,
+                "to_status": old_status,
+            }],
+            "projection": _project(conn, state_root, state_root / "projections" / "operational-gaps.runtime.yaml", include_gaps=False),
+        }
+
+    prior_payload = authority.get_latest_friction_event_payload(conn, friction_id) or {}
+    outcome, cls, reason = _classify_friction_id_outcome(conn, friction_id=friction_id, item=item)
+    now = authority.utc_now_text()
+    new_status = old_status
+    if old_status == "queued":
+        new_status = "observed"
+        item["status"] = new_status
+    item["updated_at_utc"] = now
+    authority.upsert_friction(conn, item)
+    authority.insert_friction_event(
+        conn,
+        friction_id=friction_id,
+        event_type="reconcile_disposition",
+        from_status=old_status,
+        to_status=new_status,
+        reason=reason,
+        actor=actor,
+        run_key=run_key,
+        mutation_source="governed" if run_key else "direct",
+        payload={
+            "source_kind": prior_payload.get("source_kind"),
+            "source_ref": prior_payload.get("source_ref"),
+            "excerpt_hash": prior_payload.get("excerpt_hash"),
+            "disposition": outcome,
+            "class": cls,
+            "reason": reason,
+            "reconcile_owner": "friction.reconcile",
+            "closure": "not_closed_dispose_required_for_terminal_state",
+        },
+    )
+    conn.commit()
+    projection = _project(conn, state_root, state_root / "projections" / "operational-gaps.runtime.yaml", include_gaps=False)
+    return {
+        "capability": "friction.reconcile",
+        "status": "ok",
+        "authority": "sqlite",
+        "mode": "friction_id",
+        "items": [{
+            "friction_id": friction_id,
+            "class": cls,
+            "disposition": outcome,
+            "reason": reason,
+            "from_status": old_status,
+            "to_status": new_status,
+            "closed": False,
+        }],
+        "projection": projection,
+    }
+
+
 def reconcile(
     conn,
     *,
@@ -84,10 +221,7 @@ def reconcile(
     candidates: list[dict[str, Any]] = []
     for item in authority.list_friction(conn):
         status = str(item.get("status") or "queued").strip()
-        if auto_file:
-            eligible = status in {"queued", "observed"}
-        else:
-            eligible = status == "queued"
+        eligible = status in {"queued", "observed"} if auto_file else status == "queued"
         if not eligible or not _matches_loop(item, loop_id) or not _matches_capability(item, capability):
             continue
         candidates.append(item)
@@ -199,8 +333,7 @@ def self_check() -> int:
         try:
             authority.ensure_schema(conn)
             now = authority.utc_now_text()
-            authority.upsert_friction(
-                conn,
+            for item in (
                 {
                     "friction_id": "FR-VERIFY-OBSERVE",
                     "fingerprint": "verify-observe",
@@ -209,16 +342,8 @@ def self_check() -> int:
                     "actual": "queued",
                     "severity": "medium",
                     "status": "queued",
-                    "first_seen_utc": now,
-                    "last_seen_utc": now,
-                    "updated_at_utc": now,
-                    "created_at_utc": now,
-                    "hit_count": 1,
                     "sources": ["LOOP-FRICTION-VERIFY"],
                 },
-            )
-            authority.upsert_friction(
-                conn,
                 {
                     "friction_id": "FR-VERIFY-FILE",
                     "fingerprint": "verify-file",
@@ -227,14 +352,27 @@ def self_check() -> int:
                     "actual": "queued",
                     "severity": "high",
                     "status": "queued",
+                    "sources": ["LOOP-FRICTION-FILE"],
+                },
+                {
+                    "friction_id": "FR-VERIFY-ID",
+                    "fingerprint": "verify-id",
+                    "capability": "agent_reported_recurring_failure",
+                    "expected": "single id reconcile records disposition",
+                    "actual": "queued",
+                    "severity": "medium",
+                    "status": "queued",
+                    "sources": ["LOOP-FRICTION-ID"],
+                },
+            ):
+                item.update({
                     "first_seen_utc": now,
                     "last_seen_utc": now,
                     "updated_at_utc": now,
                     "created_at_utc": now,
                     "hit_count": 1,
-                    "sources": ["LOOP-FRICTION-FILE"],
-                },
-            )
+                })
+                authority.upsert_friction(conn, item)
             conn.commit()
 
             observed = reconcile(
@@ -261,6 +399,18 @@ def self_check() -> int:
             if filed["filed"] != 1 or filed_item["status"] != "filed" or not filed_item.get("filed_gap_id"):
                 print("friction.reconcile self-check FAIL: auto-file did not file a gap", file=sys.stderr)
                 return 1
+
+            by_id = reconcile_friction_id(
+                conn,
+                state_root=state,
+                friction_id="FR-VERIFY-ID",
+                actor="friction.reconcile.self_check",
+            )
+            row = authority.get_friction(conn, "FR-VERIFY-ID")
+            item = by_id.get("items", [{}])[0]
+            if row["status"] != "observed" or item.get("disposition") != OUTCOME_OBSERVED_NO_KNOWN_REPAIR or item.get("closed"):
+                print("friction.reconcile self-check FAIL: --friction-id did not record open disposition", file=sys.stderr)
+                return 1
         finally:
             conn.close()
 
@@ -272,6 +422,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Reconcile friction authority without auto-promoting by default.")
     parser.add_argument("--loop-id", default=os.environ.get("SPINE_LOOP_ID", ""))
     parser.add_argument("--capability", default="", help="Only reconcile friction records for this capability.")
+    parser.add_argument("--friction-id", default="", help="Reconcile one friction row by id without closing it internally.")
     parser.add_argument("--auto-file", action="store_true", help="Explicitly file eligible friction as gaps.")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--json", action="store_true", dest="json_output")
@@ -285,16 +436,25 @@ def main() -> int:
     state_root = _state_root()
     conn = authority.connect(db_path)
     try:
-        result = reconcile(
-            conn,
-            state_root=state_root,
-            gaps_yaml=gaps_yaml,
-            loop_id=args.loop_id,
-            capability=args.capability,
-            auto_file=args.auto_file,
-            limit=max(0, args.limit),
-            run_key=os.environ.get("SPINE_CAP_RUN_KEY", "").strip() or None,
-        )
+        run_key = os.environ.get("SPINE_CAP_RUN_KEY", "").strip() or None
+        if args.friction_id:
+            result = reconcile_friction_id(
+                conn,
+                state_root=state_root,
+                friction_id=args.friction_id,
+                run_key=run_key,
+            )
+        else:
+            result = reconcile(
+                conn,
+                state_root=state_root,
+                gaps_yaml=gaps_yaml,
+                loop_id=args.loop_id,
+                capability=args.capability,
+                auto_file=args.auto_file,
+                limit=max(0, args.limit),
+                run_key=run_key,
+            )
     finally:
         conn.close()
 
@@ -302,13 +462,21 @@ def main() -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         print("friction.reconcile")
-        print("status: ok")
-        print(f"mode: {result['mode']}")
-        print(f"loop_id: {result['loop_id'] or '<all>'}")
-        print(f"capability: {result['capability_filter'] or '<all>'}")
-        print(f"observed: {result['observed']}")
-        print(f"filed: {result['filed']}")
-    return 0
+        print(f"status: {result.get('status')}")
+        print(f"mode: {result.get('mode')}")
+        if result.get("mode") == "friction_id":
+            for item in result.get("items", []):
+                print(f"friction_id: {item.get('friction_id')}")
+                print(f"disposition: {item.get('disposition')}")
+                print(f"closed: {item.get('closed')}")
+                if item.get("reason"):
+                    print(f"reason: {item.get('reason')}")
+        else:
+            print(f"loop_id: {result['loop_id'] or '<all>'}")
+            print(f"capability: {result['capability_filter'] or '<all>'}")
+            print(f"observed: {result['observed']}")
+            print(f"filed: {result['filed']}")
+    return 0 if result.get("status") == "ok" else 1
 
 
 if __name__ == "__main__":

@@ -871,9 +871,13 @@ def file_via_friction_ingest(record: dict[str, Any]) -> dict[str, Any]:
         cmd += ["--loop-id", record["loop_id"]]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, env=env)
+        parsed = _extract_first_json_object(proc.stdout)
+        item = parsed.get("item") if isinstance(parsed, dict) and isinstance(parsed.get("item"), dict) else {}
         result = {
             "filed": proc.returncode == 0,
             "exit_code": proc.returncode,
+            "friction_id": str(item.get("friction_id") or "").strip(),
+            "dedup": bool(item.get("dedup")),
             "stdout_tail": proc.stdout.strip().splitlines()[-3:] if proc.stdout else [],
             "stderr_tail": proc.stderr.strip().splitlines()[-3:] if proc.stderr else [],
         }
@@ -891,6 +895,80 @@ def file_via_friction_ingest(record: dict[str, Any]) -> dict[str, Any]:
         return result
     except subprocess.TimeoutExpired:
         return {"filed": False, "exit_code": 124, "error": "friction.ingest timed out"}
+
+
+def _extract_first_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(text or ""):
+        if char != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        return obj if isinstance(obj, dict) else None
+    return None
+
+
+def _enqueued_task_id(friction_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", friction_id)
+    return f"TASK-FRICTION-RECONCILE-{safe}"
+
+
+def enqueue_friction_reconcile(record: dict[str, Any], ingest_result: dict[str, Any]) -> dict[str, Any]:
+    """Queue one bounded mailroom reconcile task for a newly filed
+    agent-terminal-closeout friction row. Duplicate closeout hits only bump
+    hit_count; they do not enqueue worker-task spam.
+    """
+    parsed = _extract_first_json_object("\n".join(ingest_result.get("stdout_all", [])))
+    if parsed is None:
+        parsed = _extract_first_json_object("\n".join(ingest_result.get("stdout_tail", [])))
+    item = parsed.get("item") if isinstance(parsed, dict) and isinstance(parsed.get("item"), dict) else {}
+    friction_id = str(item.get("friction_id") or ingest_result.get("friction_id") or "").strip()
+    if not friction_id:
+        return {"enqueued": False, "reason": "missing_friction_id"}
+    if bool(item.get("dedup")) or bool(ingest_result.get("dedup")):
+        return {"enqueued": False, "friction_id": friction_id, "reason": "dedup_hit_no_duplicate_task"}
+    sig_class = str(record.get("class") or record.get("capability") or "").strip()
+    if not sig_class.startswith("agent_reported_"):
+        return {"enqueued": False, "friction_id": friction_id, "reason": "not_agent_reported_class"}
+
+    env = os.environ.copy()
+    env["SPINE_ROLE_POLICY_OVERRIDE_REF"] = "terminal-closeout-friction-reconcile-routing"
+    env["SPINE_ROLE_POLICY_OVERRIDE_REASON"] = (
+        "V2.1 Slice 2: agent-terminal-closeout friction routes to bounded "
+        "mailroom-owned friction.reconcile --friction-id; no dispose without evidence."
+    )
+    cmd = [
+        str(REPO_ROOT / "bin" / "ops"), "cap", "run", "mailroom.task.enqueue", "--",
+        "--task-id", _enqueued_task_id(friction_id),
+        "--summary", f"Reconcile terminal closeout friction {friction_id} ({sig_class})",
+        "--route-target", "capability",
+        "--route-capability", "friction.reconcile",
+        "--route-arg", "--friction-id",
+        "--route-arg", friction_id,
+        "--execution-lane-id", "terminal_closeout_friction_capture",
+        "--json",
+    ]
+    if record.get("loop_id"):
+        cmd += ["--loop-id", str(record["loop_id"])]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, env=env)
+    except subprocess.TimeoutExpired:
+        return {"enqueued": False, "friction_id": friction_id, "exit_code": 124, "error": "mailroom.task.enqueue timed out"}
+    payload = _extract_first_json_object(proc.stdout)
+    task_id = ""
+    if isinstance(payload, dict):
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        task_id = str(data.get("task_id") or "").strip()
+    return {
+        "enqueued": proc.returncode == 0,
+        "friction_id": friction_id,
+        "task_id": task_id,
+        "exit_code": proc.returncode,
+        "stdout_tail": proc.stdout.strip().splitlines()[-3:] if proc.stdout else [],
+        "stderr_tail": proc.stderr.strip().splitlines()[-3:] if proc.stderr else [],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -946,10 +1024,16 @@ def main() -> int:
         )
         classified = classify_agent_terminal_closeout(parsed)
         filings: list[dict[str, Any]] = []
+        reconcile_tasks: list[dict[str, Any]] = []
         if args.file:
             for record in classified:
                 result = file_via_friction_ingest(record)
                 filings.append({"dedupe_key": record["dedupe_key"], "result": result})
+                if result.get("filed"):
+                    reconcile_tasks.append({
+                        "dedupe_key": record["dedupe_key"],
+                        "result": enqueue_friction_reconcile(record, result),
+                    })
         payload = {
             "capability": "clerk.symptom.classify.and.file",
             "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -967,11 +1051,13 @@ def main() -> int:
             "classified_count": len(classified),
             "classified": classified,
             "filings": filings if args.file else None,
+            "reconcile_tasks": reconcile_tasks if args.file else None,
             "scope_note": (
                 "V2.1 Slice 1B agent-terminal-closeout source mode. "
                 "Reads stdin closeout prose; classifies into agent_reported_* friction classes; "
                 "files via existing friction.ingest with source-metadata flags. "
-                "Mailroom routing for known classes lands in Slice 2."
+                "V2.1 Slice 2 routes newly filed agent_reported_* rows to "
+                "mailroom-owned friction.reconcile --friction-id; duplicate hits do not enqueue worker spam."
             ),
         }
         if args.json:
@@ -989,12 +1075,20 @@ def main() -> int:
                 print(f"          next:   {record['next_action']}")
             if args.file:
                 filed_count = sum(1 for f in filings if f.get("result", {}).get("filed"))
+                enqueued_count = sum(1 for f in reconcile_tasks if f.get("result", {}).get("enqueued"))
                 print(f"\nfiled: {filed_count} / {len(filings)}")
+                print(f"reconcile queued: {enqueued_count} / {len(reconcile_tasks)}")
                 for f in filings:
                     rc = f.get("result", {}).get("exit_code", "?")
                     ok = f.get("result", {}).get("filed")
                     marker = "✓" if ok else "✗"
                     print(f"  {marker} ({rc}) {f['dedupe_key']}")
+                for f in reconcile_tasks:
+                    rc = f.get("result", {}).get("exit_code", "?")
+                    ok = f.get("result", {}).get("enqueued")
+                    marker = "✓" if ok else "✗"
+                    task_id = f.get("result", {}).get("task_id") or ""
+                    print(f"  reconcile {marker} ({rc}) {f['dedupe_key']} {task_id}")
             else:
                 print("\n(dry-run; pass --file to invoke friction.ingest for each record)")
         return 0
