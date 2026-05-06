@@ -2113,30 +2113,22 @@ capabilities:
     layer: L3_product_runtime
   mint.suppliers.witness:
     description: |
-      First L3 witness adoption (PACKET-1395). Canonical-routed writer
-      half of the suppliers witness pair. Reads pre-captured
-      mint.runtime.proof stdout from sys.stdin (or --from-file PATH on
-      the writer host), filters suppliers.* CHECK rows, and writes a
-      per-poll yaml under $SPINE_STATE/domain-state/mint/suppliers/per-
-      poll/<iso>.yaml with schema_version=1 and a witness_bound
-      declaration. Witness-bound: mutation_access is scoped to the
-      artifact path; no decision authority over module promotion,
-      runtime state, pricing action, customer action, supplier
-      admission, or verify pass/fail. Does not replace
-      mint.runtime.proof / mint.modules.health / suppliers product
-      state. Mint product/domain logic stays Mint-owned: only the
-      producer's stdout text is parsed (CHECK / STATE / DETAIL columns);
-      the FAIL detail body is kept RAW. Routed via cap.sh so writes
-      land on storage_evidence_node canonical regardless of calling
-      host. The producer (mint.runtime.proof) is NOT invoked here —
-      see mint.suppliers.poll for the producer-host orchestrator that
-      pipes the producer into this writer. --read-only skips stdin and
-      emits the latest artifact's parsed status JSON for status.sh
-      consumption.
+      Canonical-routed writer for the Mint suppliers L3 witness
+      (PACKET-1395 + PACKET-1398 subtraction). Thin Mint domain
+      adapter: reads a pre-built witness yaml from sys.stdin (or
+      --from-file PATH on the writer host) and writes it verbatim to
+      $SPINE_STATE/domain-state/mint/suppliers/per-poll/<iso>.yaml.
+      Sanity-checks only that the input is a yaml dict with
+      schema_version=1; does NOT parse Mint format, does NOT interpret
+      yaml content. Routed via cap.sh so writes land on
+      storage_evidence_node canonical regardless of calling host. Mint
+      format and witness yaml shape live in mint-modules
+      (scripts/ops/suppliers-witness.py); see mint.suppliers.poll for
+      the producer-host orchestrator that pipes the yaml in. --read-only
+      emits the latest artifact's status JSON for status.sh consumption
+      via mint.suppliers.attention.line.
     tags:
       - mint
-      - observability
-      - suppliers
       - witness
       - persistence
     command: python3 ./ops/plugins/domains/mint/bin/mint-suppliers-witness
@@ -2155,25 +2147,47 @@ capabilities:
     layer: L3_product_runtime
   mint.suppliers.poll:
     description: |
-      Producer-host orchestrator for the suppliers witness pair
-      (PACKET-1395). Runs mint.runtime.proof locally — requires
-      ~/code/mint-modules to be present on the calling host — and pipes
-      its stdout into mint.suppliers.witness, which is canonical-routed
-      and writes the per-poll artifact under storage_evidence_node
-      state. This is the substrate-honest split: producer runs where the
-      Mint product repo lives; canonical write lands where canonical
-      state lives. Operator-elective; no auto-poll cron yet (future
-      scheduler.registry entry). Read-only at this layer because the
-      script itself does no I/O beyond invoking the two caps; the
-      mutation gate fires on the routed mint.suppliers.witness call.
+      Producer-host orchestrator for the Mint suppliers L3 witness.
+      Pipes mint-modules/scripts/ops/suppliers-witness.py (which runs
+      runtime-proof.sh, parses suppliers.* rows, builds the canonical
+      witness yaml) into mint.suppliers.witness (canonical-routed
+      writer). Mint format / parsing / yaml shape live in mint-modules;
+      this script knows only "run the Mint side, pipe to spine writer."
+      Requires ~/code/mint-modules on the calling host. Operator-elective.
     tags:
       - mint
-      - observability
-      - suppliers
       - witness
       - orchestrator
     command: ./ops/plugins/domains/mint/bin/mint-suppliers-poll
     script_path: ./ops/plugins/domains/mint/bin/mint-suppliers-poll
+    cwd: $SPINE_CODE
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs:
+      - stdout
+    plane: fabric
+    domain: mint
+    layer: L3_product_runtime
+  mint.suppliers.attention.line:
+    description: |
+      Entry-time line renderer for the Mint suppliers witness
+      (PACKET-1398). Reads the latest canonical witness artifact via
+      mint.suppliers.witness --read-only --json (which cap.sh routes
+      to canonical), pipes the JSON into mint-modules/scripts/ops/
+      suppliers-attention-line.py (where the "Mint suppliers: ..." line
+      format lives), and emits whatever line the renderer produces —
+      empty stdout for the clear case so status.sh hides the section.
+      Spine carries no Mint label or line format; rendering is
+      Mint-owned. On hosts without mint-modules checkout the script
+      silently skips (witness signal is operator-eye, not a verify gate).
+    tags:
+      - mint
+      - witness
+      - readback
+    command: ./ops/plugins/domains/mint/bin/mint-suppliers-attention-line
+    script_path: ./ops/plugins/domains/mint/bin/mint-suppliers-attention-line
     cwd: $SPINE_CODE
     safety: read-only
     approval: auto

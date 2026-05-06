@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# mint.suppliers.attention.line — entry-time line renderer (PACKET-1398).
+#
+# Thin Mint domain adapter. Fetches the latest canonical witness
+# artifact via mint.suppliers.witness --read-only --json (which
+# cap.sh routes to canonical), pipes the JSON into the mint-modules
+# attention-line renderer (where the Mint label and line format
+# live), and emits whatever line the renderer produces — empty for
+# the clear case so status.sh hides the section.
+#
+# Witness boundary: this script does NOT format the line itself.
+# Format string lives in mint-modules (Mint-owned). Spine just
+# orchestrates the two calls.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+OPS="$REPO_ROOT/bin/ops"
+MINT_MODULES_ROOT="${MINT_MODULES_ROOT:-$HOME/code/mint-modules}"
+MINT_LINE_RENDERER="$MINT_MODULES_ROOT/scripts/ops/suppliers-attention-line.py"
+
+if [[ "${1:-}" == "--self-check" ]]; then
+    [[ -x "$OPS" ]] || { echo "mint.suppliers.attention.line self-check FAIL: bin/ops" >&2; exit 1; }
+    "$OPS" cap show mint.suppliers.witness >/dev/null 2>&1 \
+        || { echo "mint.suppliers.attention.line self-check FAIL: cap show mint.suppliers.witness" >&2; exit 1; }
+    echo "mint.suppliers.attention.line self-check PASS"
+    exit 0
+fi
+
+# Renderer must be present on the calling host (consumer-side
+# rendering, not canonical). On consumer hosts without mint-modules
+# checkout, silent skip — status.sh treats empty output as "hide
+# section." Witness signal is operator-eye, not a verify gate.
+if [[ ! -x "$MINT_LINE_RENDERER" ]]; then
+    exit 0
+fi
+
+# --read-only is canonical-routed via cap.sh, so this read works
+# from any host with SSH access to canonical state. Strip the
+# capability banner from cap.sh to leave clean JSON for the
+# renderer (slice the {…} envelope).
+witness_output="$("$OPS" cap run mint.suppliers.witness -- --read-only --json 2>/dev/null)" || exit 0
+json_payload="$(printf '%s' "$witness_output" | awk '
+    /^{/ { found=1 }
+    found { print }
+    /^}/ && found { exit }
+')"
+if [[ -z "$json_payload" ]]; then
+    exit 0
+fi
+
+printf '%s\n' "$json_payload" | "$MINT_LINE_RENDERER" || true

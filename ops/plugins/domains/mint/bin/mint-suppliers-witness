@@ -1,43 +1,33 @@
 #!/usr/bin/env python3
-"""mint.suppliers.witness — first L3 witness adoption (PACKET-1395).
+"""mint.suppliers.witness — canonical-routed yaml writer (PACKET-1398).
 
-Canonical-routed writer half of the suppliers witness pair. Reads
-pre-captured mint.runtime.proof stdout from sys.stdin, filters
-suppliers.* CHECK rows, writes a per-poll yaml under canonical state,
-and emits a status JSON. Witness-only by construction:
+Thin Mint domain adapter. Reads a pre-built witness yaml from sys.stdin
+(or --from-file PATH on the writer host) and writes it verbatim to
+$SPINE_STATE/domain-state/mint/suppliers/per-poll/<iso>.yaml. NO row
+parsing, NO Mint format knowledge, NO yaml-content interpretation
+beyond the minimal schema-version sanity check that prevents writing
+arbitrary garbage as a witness artifact.
 
-- mutation_access: scoped_to_artifact_self (per-poll yaml under
-  $SPINE_STATE/domain-state/mint/suppliers/per-poll/<iso>.yaml)
-- decision_authority: none — does not decide module promotion, runtime
-  state, pricing action, customer action, supplier admission, or
-  verify pass/fail
-- does_not_replace: mint.runtime.proof, mint.modules.health, suppliers
-  product state
+The Mint format and witness yaml shape live in mint-modules
+(scripts/ops/suppliers-witness.py) per PACKET-1398 — the operator's
+"keep mint product/parsing logic OUT of spine core" directive after
+PACKET-1395 landed the proof-of-pattern with too much body in spine.
 
-Mint product/domain logic stays Mint-owned: this script reads the
-producer's stdout text and parses CHECK / STATE / DETAIL columns ONLY.
-It does not parse the FAIL detail body (which carries Mint-specific
-JSON shape — operator drilldown via mint.runtime.proof handles that).
+Cap binding: mutating, state_authority: read_write_canonical, plane:
+fabric, domain: mint. cap.sh routes the writer execution to the
+canonical state owner (storage_evidence_node = pve) regardless of
+calling host; the producer-host orchestrator (mint.suppliers.poll)
+pipes the yaml in from where mint-modules lives.
 
-The substrate boundary is real: mint.runtime.proof requires
-~/code/mint-modules which lives only on the operator workstation;
-canonical state lives on storage_evidence_node (pve). The split:
-- mint.suppliers.poll runs the producer where mint-modules exists and
-  pipes producer stdout into this writer cap
-- mint.suppliers.witness (this) is mutating + state_authority
-  read_write_canonical, so cap.sh routes it to canonical, where it
-  reads piped stdin and writes the artifact.
-
-Patterned after commit.narrator.artifact.write. The runbook recommends
-generalizing into a generic witness.artifact.write primitive when a
-third L3 adoption appears; two domains (narrator + this) is too few.
+--read-only mode emits the latest artifact as JSON for status.sh
+consumption (read by mint.suppliers.attention.line, which renders
+the operator-facing line).
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,13 +39,7 @@ import yaml
 CAPABILITY = "mint.suppliers.witness"
 SCHEMA_VERSION = 1
 ARTIFACT_REL = "domain-state/mint/suppliers/per-poll"
-PRODUCER_CAP = "mint.runtime.proof"
-SUBJECT_PREFIX = "suppliers."
 DEFAULT_FRESHNESS_TTL_SECONDS = 6 * 3600  # 6 hours
-DETAIL_TRUNCATE = 140
-ROW_RE = re.compile(
-    r"^(suppliers\.\S+)\s+(PASS|FAIL|SKIP|WARN|ERROR)\s+(.*)$"
-)
 
 
 def resolve_state_root(explicit: str | None) -> Path:
@@ -67,87 +51,15 @@ def resolve_state_root(explicit: str | None) -> Path:
     raise SystemExit(f"{CAPABILITY} FAIL: SPINE_STATE not set and --state-root not supplied")
 
 
-def parse_suppliers_rows(text: str) -> list[dict[str, str]]:
-    """Pull suppliers.* CHECK / STATE / DETAIL rows from producer stdout.
-
-    Detail bodies are kept RAW — no JSON parsing. Mint-side format stays
-    Mint-owned; the witness only routes the producer's truth into a
-    durable artifact and surfaces presence-of-FAIL for operator eye.
-    """
-    rows: list[dict[str, str]] = []
-    for line in text.splitlines():
-        match = ROW_RE.match(line.rstrip())
-        if not match:
-            continue
-        check, state, detail = match.group(1), match.group(2), match.group(3).strip()
-        rows.append({"check": check, "state": state, "detail": detail})
-    return rows
-
-
-def build_artifact(
-    rows: list[dict[str, str]],
-    producer_stdout_excerpt: str,
-) -> dict[str, Any]:
-    fail_rows = [r for r in rows if r["state"] == "FAIL"]
-    primary = fail_rows[0] if fail_rows else None
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "canonical_authority": "mint.suppliers.witness.artifact",
-        "written_by": CAPABILITY,
-        "written_at_utc": datetime.now(UTC).isoformat(),
-        "subject": "mint.suppliers",
-        "witness_bound": {
-            "mutation_access": "scoped_to_artifact_self",
-            "decision_authority": "none",
-            "does_not_decide": [
-                "module_promotion",
-                "runtime_state",
-                "pricing_action",
-                "customer_action",
-                "supplier_admission",
-                "verify_pass_fail",
-            ],
-            "does_not_replace": [
-                "mint.runtime.proof",
-                "mint.modules.health",
-                "suppliers product state",
-                "node.admission.status",
-                "site.presence.status",
-            ],
-        },
-        "producer": {
-            "cap": PRODUCER_CAP,
-            "stdout_excerpt": producer_stdout_excerpt[:2000],
-        },
-        "checks": rows,
-        "attention": {
-            "any_fail": bool(fail_rows),
-            "fail_count": len(fail_rows),
-            "total_checks": len(rows),
-            "primary_fail_check": primary["check"] if primary else None,
-            "primary_fail_detail_truncated": (
-                (primary["detail"][:DETAIL_TRUNCATE] + "…")
-                if primary and len(primary["detail"]) > DETAIL_TRUNCATE
-                else (primary["detail"] if primary else None)
-            ),
-        },
-    }
-
-
-def list_per_poll(state_root: Path) -> list[Path]:
+def latest_artifact(state_root: Path) -> Path | None:
     target_dir = state_root / ARTIFACT_REL
     if not target_dir.is_dir():
-        return []
-    return sorted(target_dir.glob("*.yaml"))
-
-
-def latest_artifact(state_root: Path) -> Path | None:
-    paths = list_per_poll(state_root)
+        return None
+    paths = sorted(target_dir.glob("*.yaml"))
     return paths[-1] if paths else None
 
 
 def freshness_state(path: Path | None, ttl_seconds: int) -> tuple[str, int | None]:
-    """Return (state, age_seconds): state in {fresh, stale, missing}."""
     if path is None:
         return "missing", None
     try:
@@ -163,14 +75,12 @@ def emit_status(state_root: Path, ttl_seconds: int) -> dict[str, Any]:
     state, age = freshness_state(latest, ttl_seconds)
     payload: dict[str, Any] = {
         "capability": CAPABILITY,
-        "schema_version": SCHEMA_VERSION,
         "freshness": {
             "state": state,
             "age_seconds": age,
             "ttl_seconds": ttl_seconds,
         },
         "artifact_path": str(latest) if latest else None,
-        "drilldown": "./bin/ops cap run " + PRODUCER_CAP,
     }
     if latest is not None:
         try:
@@ -181,26 +91,20 @@ def emit_status(state_root: Path, ttl_seconds: int) -> dict[str, Any]:
         if isinstance(doc, dict):
             payload["written_at_utc"] = doc.get("written_at_utc")
             payload["attention"] = doc.get("attention") or {}
-            payload["checks"] = doc.get("checks") or []
-            payload["witness_bound"] = doc.get("witness_bound") or {}
     return payload
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=CAPABILITY)
     parser.add_argument("--read-only", action="store_true",
-                        help="Skip stdin read; just emit latest artifact's status JSON.")
-    parser.add_argument("--state-root", default=None,
-                        help="Override SPINE_STATE root (default: env SPINE_STATE).")
+                        help="Skip stdin write; emit latest artifact's status JSON.")
+    parser.add_argument("--state-root", default=None)
     parser.add_argument("--freshness-ttl-seconds", type=int,
-                        default=DEFAULT_FRESHNESS_TTL_SECONDS,
-                        help=f"Stale TTL for latest poll (default {DEFAULT_FRESHNESS_TTL_SECONDS}s = 6h).")
+                        default=DEFAULT_FRESHNESS_TTL_SECONDS)
     parser.add_argument("--from-file", default=None,
-                        help="Read producer stdout from FILE instead of sys.stdin "
-                             "(file path resolved on the host where the writer "
-                             "executes — i.e., canonical after cap.sh routing).")
-    parser.add_argument("--json", action="store_true", help="Emit JSON outcome.")
-    parser.add_argument("--self-check", action="store_true", help="Verify dependencies and exit.")
+                        help="Read witness yaml from FILE on the writer host instead of stdin.")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--self-check", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -211,12 +115,8 @@ def main(argv: list[str]) -> int:
         try:
             import yaml as _yaml  # noqa: F401
         except Exception as exc:  # pragma: no cover
-            print(f"{CAPABILITY} self-check FAIL: pyyaml import: {exc}", file=sys.stderr)
-            return 1
-        # parser sanity
-        rows = parse_suppliers_rows("suppliers.health PASS ok")
-        if not rows or rows[0]["check"] != "suppliers.health":
-            print(f"{CAPABILITY} self-check FAIL: row parse", file=sys.stderr)
+            print(f"{CAPABILITY} self-check FAIL: pyyaml import: {exc}",
+                  file=sys.stderr)
             return 1
         print(f"{CAPABILITY} self-check PASS")
         return 0
@@ -236,38 +136,37 @@ def main(argv: list[str]) -> int:
                   f"fail_count={attn.get('fail_count')}/{attn.get('total_checks')}")
         return 0
 
-    # Default mode: read pre-captured producer stdout, filter, write
-    # artifact, emit status. The producer is NOT invoked here — see
-    # mint.suppliers.poll for the producer-host orchestrator.
+    # Default mode: read pre-built yaml, sanity-check shape, write
+    # verbatim to canonical artifact path. NO Mint format parsing.
     if args.from_file:
         try:
-            stdout_text = Path(args.from_file).read_text(encoding="utf-8")
+            yaml_text = Path(args.from_file).read_text(encoding="utf-8")
         except Exception as exc:
             print(f"{CAPABILITY} FAIL: cannot read --from-file {args.from_file}: {exc}",
                   file=sys.stderr)
             return 1
     else:
-        stdout_text = sys.stdin.read()
-    if not stdout_text.strip():
-        print(f"{CAPABILITY} FAIL: producer stdout is empty — pipe "
-              "mint.runtime.proof stdout into this cap, or use "
-              "mint.suppliers.poll to orchestrate the producer call.",
+        yaml_text = sys.stdin.read()
+    if not yaml_text.strip():
+        print(f"{CAPABILITY} FAIL: empty yaml on stdin — pipe a witness "
+              "yaml in (see mint.suppliers.poll for the producer-host "
+              "orchestrator that builds it via mint-modules).",
               file=sys.stderr)
         return 1
-    rows = parse_suppliers_rows(stdout_text)
-    if not rows:
-        print(f"{CAPABILITY} FAIL: producer stdout contained no "
-              "suppliers.* rows", file=sys.stderr)
+    try:
+        doc = yaml.safe_load(yaml_text)
+    except Exception as exc:
+        print(f"{CAPABILITY} FAIL: yaml parse: {exc}", file=sys.stderr)
         return 1
-    artifact = build_artifact(rows, stdout_text)
+    if not isinstance(doc, dict) or doc.get("schema_version") != SCHEMA_VERSION:
+        print(f"{CAPABILITY} FAIL: yaml shape — expected dict with "
+              f"schema_version={SCHEMA_VERSION}", file=sys.stderr)
+        return 1
 
     target_dir = state_root / ARTIFACT_REL
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.yaml"
-    target_path.write_text(
-        yaml.safe_dump(artifact, sort_keys=False),
-        encoding="utf-8",
-    )
+    target_path.write_text(yaml_text, encoding="utf-8")
 
     outcome = emit_status(state_root, ttl)
     outcome["just_polled"] = True
@@ -275,10 +174,10 @@ def main(argv: list[str]) -> int:
     if args.json:
         print(json.dumps(outcome, indent=2, sort_keys=True))
     else:
+        attn = outcome.get("attention") or {}
         print(f"{CAPABILITY}: wrote {target_path}; "
-              f"any_fail={artifact['attention']['any_fail']} "
-              f"fail_count={artifact['attention']['fail_count']}/"
-              f"{artifact['attention']['total_checks']}")
+              f"any_fail={attn.get('any_fail')} "
+              f"fail_count={attn.get('fail_count')}/{attn.get('total_checks')}")
     return 0
 
 
