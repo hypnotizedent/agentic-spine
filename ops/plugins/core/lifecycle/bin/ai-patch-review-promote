@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,11 @@ REVIEW_ROOT = RUNTIME_ROOT / "tmp" / "worktrees" / "agentic-spine"
 RECEIPT_ROOT = STATE_ROOT / "domain-state" / "ai-patch-reviews"
 CONTRACT = ROOT / "ops" / "bindings" / "ai.patch.review.contract.yaml"
 WORKTREE_CONTRACT = ROOT / "ops" / "bindings" / "worktree.lifecycle.contract.yaml"
+SSH_RESOLVER = ROOT / "ops" / "lib" / "ssh-resolve.sh"
+EXECUTION_HOST_STATE_ROOTS = (Path("/home/ubuntu/code/.runtime/spine/state"),)
+EXECUTION_HOST_WORKERS = {
+    "SPINE-MAILROOM-EXECUTION-HOST": "ai-consolidation",
+}
 
 
 class ReviewError(RuntimeError):
@@ -48,6 +54,84 @@ def load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ReviewError(f"expected mapping in {path}")
     return payload
+
+
+def is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def fetch_remote_file(host_ref: str, remote_path: Path, destination: Path, expected_bytes: int | None) -> None:
+    if not SSH_RESOLVER.is_file():
+        raise ReviewError(f"ssh resolver missing: {SSH_RESOLVER}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    remote_cmd = "cat -- " + shlex.quote(str(remote_path))
+    script = f"""
+set -euo pipefail
+source {shlex.quote(str(SSH_RESOLVER))}
+target={shlex.quote(host_ref)}
+resolved="$(ssh_resolve_ssh_host_with_fallback "$target" 3 | awk '{{print $1}}')"
+user="$(ssh_resolve_user "$target" ubuntu)"
+identity_opts="$(ssh_resolve_machine_identity_opts "$target" 2>/dev/null || true)"
+ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null $identity_opts "$user@$resolved" {shlex.quote(remote_cmd)}
+"""
+    proc = subprocess.run(["bash", "-lc", script], cwd=str(ROOT), capture_output=True, timeout=30, check=False)
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        out = proc.stdout.decode("utf-8", errors="replace").strip()
+        raise ReviewError(f"cannot fetch patch artifact from {host_ref}:{remote_path}: {err or out}")
+    if expected_bytes is not None and len(proc.stdout) != expected_bytes:
+        raise ReviewError(
+            f"remote patch artifact byte count mismatch for {remote_path}: "
+            f"expected {expected_bytes}, got {len(proc.stdout)}"
+        )
+    tmp_path = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+    tmp_path.write_bytes(proc.stdout)
+    os.replace(tmp_path, destination)
+
+
+def materialize_patch_artifact(task_id: str, task: dict[str, Any], proof: dict[str, Any]) -> dict[str, Any]:
+    patch_path = Path(str(proof.get("patch_artifact_path") or ""))
+    if patch_path.is_file():
+        if not is_relative_to(patch_path, STATE_ROOT):
+            raise ReviewError(f"patch artifact must live under SPINE_STATE: {patch_path}")
+        return proof
+
+    claimed_by = str(task.get("claimed_by") or "").strip()
+    host_ref = EXECUTION_HOST_WORKERS.get(claimed_by)
+    if not host_ref:
+        raise ReviewError(f"patch artifact missing: {patch_path}")
+
+    canonical_path: Path | None = None
+    for remote_state_root in EXECUTION_HOST_STATE_ROOTS:
+        if not is_relative_to(patch_path, remote_state_root):
+            continue
+        relative_path = patch_path.relative_to(remote_state_root)
+        if relative_path.parts[:2] != ("agent-artifacts", "ai-bridge-patches"):
+            break
+        if len(relative_path.parts) < 3 or relative_path.parts[2] != task_id:
+            raise ReviewError(f"patch artifact path does not match task id {task_id}: {patch_path}")
+        canonical_path = STATE_ROOT / relative_path
+        break
+
+    if canonical_path is None:
+        raise ReviewError(f"patch artifact missing: {patch_path}")
+
+    expected_bytes = proof.get("patch_bytes")
+    expected_int = int(expected_bytes) if isinstance(expected_bytes, int) else None
+    fetch_remote_file(host_ref, patch_path, canonical_path, expected_int)
+    if not canonical_path.is_file():
+        raise ReviewError(f"canonical patch materialization failed: {canonical_path}")
+    updated = dict(proof)
+    updated["patch_artifact_source_path"] = str(patch_path)
+    updated["patch_artifact_source_host"] = host_ref
+    updated["patch_artifact_materialized_via"] = "ssh_execution_host_to_canonical_state"
+    updated["patch_artifact_path"] = str(canonical_path)
+    return updated
 
 
 def safe_slug(value: str) -> str:
@@ -96,9 +180,9 @@ def validate_task(task: dict[str, Any], task_file: Path) -> dict[str, Any]:
         raise ReviewError("expected_patch_files must exactly equal actual_patch_files")
     if proof.get("side_effect_files") != []:
         raise ReviewError("side_effect_files must be empty")
+    task_id = str(task.get("task_id") or task_file.stem).strip()
+    proof = materialize_patch_artifact(task_id, task, proof)
     patch_path = Path(str(proof.get("patch_artifact_path") or ""))
-    if not patch_path.is_file():
-        raise ReviewError(f"patch artifact missing: {patch_path}")
     if STATE_ROOT not in patch_path.parents:
         raise ReviewError(f"patch artifact must live under SPINE_STATE: {patch_path}")
     return proof
@@ -248,6 +332,13 @@ def promote(task_id: str, loop_id: str, retain_existing: bool = False) -> dict[s
         "commit_performed": True,
         "mutation_access": "controller_review_worktree_only",
     }
+    for key in (
+        "patch_artifact_source_path",
+        "patch_artifact_source_host",
+        "patch_artifact_materialized_via",
+    ):
+        if proof.get(key):
+            receipt[key] = proof[key]
     write_yaml(receipt_path, receipt)
     return {"status": "promoted", "receipt_path": str(receipt_path), "review_worktree": str(review_worktree), "review_wave_id": wave_id, "review_branch": branch}
 
