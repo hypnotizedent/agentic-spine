@@ -15,6 +15,7 @@ CLOSEOUT_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-close
 PUBLISH_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-lane-publish"
 TARGET_PUBLISH_SCRIPT="$ROOT/ops/plugins/core/orchestration/bin/coordinator-target-publish"
 REHYDRATE_SCRIPT="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-rehydrate"
+WORKTREE_REPORT_BIN="$ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-report"
 CLOSEOUT_CAP="coordinator.lane.closeout"
 PUBLISH_CAP="coordinator.lane.publish"
 TARGET_PUBLISH_CAP="coordinator.target.publish"
@@ -38,6 +39,7 @@ fail() {
 [[ -x "$PUBLISH_SCRIPT" ]] || fail "missing lane publish script: $PUBLISH_SCRIPT"
 [[ -x "$TARGET_PUBLISH_SCRIPT" ]] || fail "missing target publish script: $TARGET_PUBLISH_SCRIPT"
 [[ -x "$REHYDRATE_SCRIPT" ]] || fail "missing rehydrate script: $REHYDRATE_SCRIPT"
+[[ -x "$WORKTREE_REPORT_BIN" ]] || fail "missing worktree lifecycle report script: $WORKTREE_REPORT_BIN"
 [[ -f "$WAVE_CMD" ]] || fail "missing wave command: $WAVE_CMD"
 [[ -x "$WAVE_CLOSE_BIN" ]] || fail "missing wave close script: $WAVE_CLOSE_BIN"
 [[ -x "$FRICTION_RECONCILE_BIN" ]] || fail "missing friction reconcile surface: $FRICTION_RECONCILE_BIN"
@@ -167,6 +169,77 @@ if grep -qF 'worktree add --force "$integration_worktree" "$TARGET_BRANCH"' "$CL
 fi
 
 "$REHYDRATE_SCRIPT" --self-check >/dev/null || fail "worktree.lifecycle.rehydrate self-check failed"
+for marker in \
+  "--repo" \
+  "REQUESTED_REPO" \
+  "CWD_GIT_ROOT" \
+  "cross-repo inspection must be explicit via --repo"; do
+  grep -qF -- "$marker" "$WORKTREE_REPORT_BIN" || fail "worktree.lifecycle.report missing target-root locality marker: $marker"
+done
+python3 - "$WORKTREE_REPORT_BIN" <<'PY'
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+report_bin = Path(sys.argv[1])
+
+def run(cmd, *, cwd, env=None):
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+with tempfile.TemporaryDirectory(prefix="d331-worktree-report-target.") as td:
+    tmp = Path(td)
+    repo = tmp / "repo"
+    other_repo = tmp / "other-repo"
+    state = tmp / "state"
+    worktree_root = tmp / "worktrees"
+    for path in (repo, other_repo, state, worktree_root):
+        path.mkdir(parents=True, exist_ok=True)
+    for target, label in ((repo, "repo"), (other_repo, "other")):
+        run(["git", "init", "-b", "main"], cwd=target)
+        (target / "README.md").write_text(label + "\n", encoding="utf-8")
+        run(["git", "add", "README.md"], cwd=target)
+        run(
+            ["git", "-c", "user.name=D331", "-c", "user.email=d331@example.invalid", "commit", "-m", "initial"],
+            cwd=target,
+        )
+
+    polluted_env = {
+        **os.environ,
+        "SPINE_TARGET_REPO": str(other_repo),
+        "SPINE_REPO": str(other_repo),
+        "SPINE_STATE": str(state),
+        "SPINE_TMP": str(tmp),
+        "SPINE_WORKTREE_LIFECYCLE_WORKTREE_ROOT": str(worktree_root),
+        "SPINE_WORKTREE_LIFECYCLE_MAIN_REF": "main",
+    }
+    default_proc = run([str(report_bin), "--json"], cwd=repo, env=polluted_env)
+    default_payload = json.loads(default_proc.stdout)
+    default_repo = (default_payload.get("summary") or {}).get("repo") or default_payload.get("repo")
+    if Path(str(default_repo)).resolve() != repo.resolve():
+        raise SystemExit(
+            "D331 FAIL: worktree.lifecycle.report must prefer current checkout over ambient "
+            f"SPINE_TARGET_REPO, got {default_repo}"
+        )
+
+    explicit_proc = run([str(report_bin), "--repo", str(other_repo), "--json"], cwd=repo, env=polluted_env)
+    explicit_payload = json.loads(explicit_proc.stdout)
+    explicit_repo = (explicit_payload.get("summary") or {}).get("repo") or explicit_payload.get("repo")
+    if Path(str(explicit_repo)).resolve() != other_repo.resolve():
+        raise SystemExit(
+            "D331 FAIL: worktree.lifecycle.report --repo must preserve explicit cross-repo "
+            f"inspection, got {explicit_repo}"
+        )
+PY
 for marker in \
   "explicit lane id (WAVE-... or PACKET-...)" \
   "PACKET-[A-Za-z0-9._-]+" \

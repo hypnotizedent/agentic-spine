@@ -2,24 +2,17 @@
 set -euo pipefail
 
 CONTROL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-TARGET_ROOT="${SPINE_TARGET_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "${SPINE_REPO:-$PWD}")}"
-export SPINE_CODE="${SPINE_CODE:-$CONTROL_ROOT}"
-export SPINE_REPO="$TARGET_ROOT"
-source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
-spine_runtime_resolve_paths
-
-CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
-RECONCILE_SCRIPT="$CONTROL_ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
 
 JSON_MODE=0
 BRIEF_MODE=0
+REQUESTED_REPO=""
 
 usage() {
   cat <<'USAGE'
 worktree-lifecycle-report
 
 Usage:
-  worktree-lifecycle-report [--json] [--brief]
+  worktree-lifecycle-report [--json] [--brief] [--repo PATH]
 
 Read-only lifecycle inspection for governed worktrees, temp clones, and stashes.
 This replaces using `worktree.lifecycle.cleanup -- --mode report-only` for
@@ -31,10 +24,39 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --json) JSON_MODE=1; shift ;;
     --brief) BRIEF_MODE=1; shift ;;
+    --repo)
+      [[ $# -ge 2 ]] || { echo "--repo requires a path" >&2; exit 2; }
+      REQUESTED_REPO="$2"
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+CWD_GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "$REQUESTED_REPO" ]]; then
+  TARGET_ROOT="$REQUESTED_REPO"
+elif [[ -n "$CWD_GIT_ROOT" ]]; then
+  # PACKET-1399: an inherited SPINE_TARGET_REPO may name a different sibling
+  # checkout. Routine lifecycle inspection follows the checkout the operator is
+  # standing in; cross-repo inspection must be explicit via --repo.
+  TARGET_ROOT="$CWD_GIT_ROOT"
+else
+  TARGET_ROOT="${SPINE_TARGET_REPO:-$(printf '%s\n' "${SPINE_REPO:-$PWD}")}"
+fi
+if [[ -d "$TARGET_ROOT" ]]; then
+  TARGET_ROOT="$(cd "$TARGET_ROOT" && pwd)"
+fi
+
+export SPINE_CODE="${SPINE_CODE:-$CONTROL_ROOT}"
+export SPINE_REPO="$CONTROL_ROOT"
+export SPINE_TARGET_REPO="$TARGET_ROOT"
+source "$CONTROL_ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+CONTRACT="$CONTROL_ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+RECONCILE_SCRIPT="$CONTROL_ROOT/ops/plugins/core/lifecycle/bin/worktree-lifecycle-reconcile"
 
 if [[ ! -x "$RECONCILE_SCRIPT" ]]; then
   echo "FAIL: reconcile classifier not found: $RECONCILE_SCRIPT" >&2
