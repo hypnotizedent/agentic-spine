@@ -444,6 +444,56 @@ if [[ -n "$ENTRY_COMPILE_STATE" ]] && ! machine_mode; then
     echo ""
 fi
 
+# ── Known friction context (best-effort, capped, non-blocking) ────────────
+# V2.1 Slice 3: agents see already-captured loop friction so they do not
+# rediscover and re-file the same spine bug in closing prose. This is a capped
+# context slice, not a broad queue dump.
+if ! machine_mode; then
+    FRICTION_CONTEXT_LOOP="${SPINE_LOOP_ID:-}"
+    if [[ -z "$FRICTION_CONTEXT_LOOP" && -n "${ENTRY_COMPILE_LOOP:-}" && "${ENTRY_COMPILE_LOOP}" != "<none>" && "${ENTRY_COMPILE_LOOP}" != "none" ]]; then
+        FRICTION_CONTEXT_LOOP="$ENTRY_COMPILE_LOOP"
+    fi
+    if [[ -n "$FRICTION_CONTEXT_LOOP" ]]; then
+        FRICTION_CONTEXT_CAP_OUT="$("$SPINE_ROOT/bin/ops" cap run friction.queue.status -- --json --for-loop "$FRICTION_CONTEXT_LOOP" --scope-limit 5 2>/dev/null || true)"
+        FRICTION_CONTEXT_JSON="$(extract_first_json_object <<< "$FRICTION_CONTEXT_CAP_OUT" 2>/dev/null || true)"
+        if [[ -n "$FRICTION_CONTEXT_JSON" ]]; then
+            eval "$(python3 -c "
+import json, shlex, sys
+d = json.loads(sys.stdin.read())
+scoped = d.get('scoped_friction') or {}
+items = scoped.get('items') or []
+print(f'FRICTION_CONTEXT_TOTAL={shlex.quote(str(scoped.get(\"total\") or 0))}')
+print(f'FRICTION_CONTEXT_OVERFLOW={shlex.quote(str(scoped.get(\"overflow\") or 0))}')
+for i, item in enumerate(items[:5]):
+    print(f'FRICTION_CONTEXT{i}_ID={shlex.quote(str(item.get(\"friction_id\") or \"\"))}')
+    print(f'FRICTION_CONTEXT{i}_CLASS={shlex.quote(str(item.get(\"class\") or \"\"))}')
+    print(f'FRICTION_CONTEXT{i}_HITS={shlex.quote(str(item.get(\"hit_count\") or 0))}')
+    print(f'FRICTION_CONTEXT{i}_DISPOSITION={shlex.quote(str(item.get(\"current_disposition\") or \"open\"))}')
+    print(f'FRICTION_CONTEXT{i}_LINE={shlex.quote(str(item.get(\"do_not_repeat\") or \"this concern has been captured; do not re-file unless new evidence\"))}')
+" <<< "$FRICTION_CONTEXT_JSON" 2>/dev/null)" || true
+            if [[ "${FRICTION_CONTEXT_TOTAL:-0}" -gt 0 ]]; then
+                echo "── known friction ──────────────────────────────────────────────"
+                echo "  loop:            ${FRICTION_CONTEXT_LOOP}"
+                echo "  captured:        ${FRICTION_CONTEXT_TOTAL} open row(s)"
+                max_rows=$(( FRICTION_CONTEXT_TOTAL < 5 ? FRICTION_CONTEXT_TOTAL : 5 ))
+                for i in $(seq 0 $((max_rows - 1))); do
+                    eval "_fid=\${FRICTION_CONTEXT${i}_ID:-}"
+                    eval "_class=\${FRICTION_CONTEXT${i}_CLASS:-}"
+                    eval "_hits=\${FRICTION_CONTEXT${i}_HITS:-0}"
+                    eval "_disp=\${FRICTION_CONTEXT${i}_DISPOSITION:-open}"
+                    eval "_line=\${FRICTION_CONTEXT${i}_LINE:-this concern has been captured; do not re-file unless new evidence}"
+                    echo "  - ${_fid}: ${_class} hits=${_hits} disposition=${_disp}"
+                    echo "    ${_line}"
+                done
+                if [[ "${FRICTION_CONTEXT_OVERFLOW:-0}" -gt 0 ]]; then
+                    echo "  more:            ${FRICTION_CONTEXT_OVERFLOW} hidden; run friction.queue.status --for-loop ${FRICTION_CONTEXT_LOOP}"
+                fi
+                echo ""
+            fi
+        fi
+    fi
+fi
+
 # ── Handoff continuity snapshot (best-effort, non-blocking) ───────────────
 CONTINUITY_VARS="$(
     HANDOFF_STATUS_JSON="$HANDOFF_STATUS_JSON" \
